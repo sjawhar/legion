@@ -448,7 +448,7 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
    whoever launched you writes from the daemon's own configuration, says
    `gates.design: root-issues`. Under `gates.design: off` nobody approves a design, so drop "and
    its design approval" (and "or its design approval") from the sentence. An unassigned root
-   still runs; the architect's asks wait in every Inbox's Unassigned band.
+   still runs; its architect's asks reach no default Inbox list, only the `Unassigned` filter.
 
 ## Backlog eligibility
 

@@ -1,39 +1,19 @@
 /**
- * Fragments the server cut out of a Markdown body before the client saw them: a search hit's
- * `ts_headline` snippet (24 words around the match) and a reply's `reply_body` (the parent's
- * first 160 runes). A cut can land inside a mark, and the half it leaves renders as its
- * characters. The balancer below drops exactly the delimiters that CommonMark would have paired
- * had the cut not happened and nothing else: a run the parser would read as literal text anyway
- * (`Use ** for bold`, `2 * 3`, `snake_case`) is the author's and stays, and nothing inside a
- * code span is ever a delimiter.
+ * A fragment the server cut out of a Markdown body before the client saw it: a search hit's
+ * `ts_headline` snippet, the 24 words around the match. A cut can land inside a mark, and the
+ * half it leaves renders as its characters. The balancer below drops exactly the delimiters
+ * that CommonMark would have paired had the cut not happened and nothing else: a run the parser
+ * would read as literal text anyway (`Use ** for bold`, `2 * 3`, `snake_case`) is the author's
+ * and stays, and nothing inside a code span is ever a delimiter.
  */
 
 import { classifyCharacter } from "micromark-util-classify-character";
 import { constants } from "micromark-util-symbol";
 
-/** How many runes of a parent's body a reply's event carries (`messageReplyPreview` in
- *  packages/envoy/internal/dispatch/api/messages.go: `HeadRunes(body, 160)`). A preview shorter
- *  than this is the whole body; one exactly this long is, or may be, cut. */
-const REPLY_PREVIEW_RUNES = 160;
-
 /** How many words a search hit's snippet holds when `ts_headline` cut the body to its window
  *  (`headlineOptions` in packages/envoy/internal/dispatch/api/search.go: `MaxWords=24`). A
  *  body that fits the window comes back whole and shorter. */
 const SEARCH_SNIPPET_WORDS = 24;
-
-/**
- * A reply's `reply_body` as a quote should render it: the whole parent when it was never cut
- * (under the limit, `HeadRunes` returns the body unchanged, and any delimiter in it is the
- * author's), and balanced when the server cut it (a body at the limit).
- */
-export function replyPreviewMarkdown(replyBody: string | undefined): string {
-  if (replyBody === undefined) {
-    return "";
-  }
-  return Array.from(replyBody).length >= REPLY_PREVIEW_RUNES
-    ? balanceCutMarkdown(replyBody)
-    : replyBody;
-}
 
 /** A search hit's snippet as the palette should render it: the whole body when it fit the
  *  headline window, balanced when the window cut it (a snippet exactly the window wide). */

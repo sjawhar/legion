@@ -14,9 +14,15 @@ import {
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
+import {
+  agentMessagesQuery,
+  inboxQuery,
+  userAgentStateQuery,
+  whoAmIQuery,
+} from "../../api/queries";
 import type {
   Agent,
+  InboxRow,
   Message,
   MessageDelivery,
   MessageDeliveryMode,
@@ -50,12 +56,18 @@ import {
   secondaryButtonText,
   textMutedHoverToSecondary,
   textMutedOnCanvas,
+  textMutedOnSurface,
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
 import type { ReplyTarget } from "../conversation/composer-model";
-import { capabilityLabel, MODE_LABELS } from "../conversation/delivery";
+import {
+  broadcastDelivery,
+  capabilityLabel,
+  MODE_LABELS,
+  plainDelivery,
+} from "../conversation/delivery";
 import { useHeldSends } from "../conversation/held-sends";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
@@ -88,10 +100,13 @@ import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpe
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
-/** The composer's one notice slot: the recipient limit or the exclusions, one at
- *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
- *  mode and Send on a narrow screen, adding no height, and the third and last row on a short one. */
-const composerLine = `mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1 ${dangerText}`;
+/** The composer's one notice slot: the recipient limit, the exclusions, or the mode the selection
+ *  sends in, one at a time. In the compact grid it is one line that scrolls sideways like the
+ *  chips: between the mode and Send on a narrow screen, adding no height, and the third and last
+ *  row on a short one. A refusal or an exclusion reads as a warning; the mode alone does not. */
+const composerLineLayout =
+  "mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1";
+const composerLine = `${composerLineLayout} ${dangerText}`;
 
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
@@ -100,6 +115,20 @@ function isInactive(agent: Agent, now: number): boolean {
 
 /** Open asks from each session whose turn is the viewer's, keyed by session ID. */
 export type NeedsYouBySession = ReadonlyMap<string, number>;
+
+/** Open asks a session authored, tallied by that session's id: the walk both card numbers make
+ *  over the one inbox query, each over the rows it counts (`keep`, every row by default). */
+function tallyBySession(
+  asks: readonly InboxRow[],
+  keep: (ask: InboxRow) => boolean = () => true
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const ask of asks) {
+    if (ask.author.kind !== "session" || !keep(ask)) continue;
+    counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
+  }
+  return counts;
+}
 
 /** Whether Dispatch has heard from the session at all: an event, or an open ask. */
 function hasDispatchSignal(agent: Agent, needsYou: NeedsYouBySession): boolean {
@@ -189,7 +218,10 @@ export function partitionAgents(
 }
 
 /** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
- *  most recent attempt across the root and every delivered reply. */
+ *  most recent attempt across the root and every delivered reply. Where that is a Send the agent
+ *  does not take, or there is none (a reply to the agent's own message), it is a Send where the
+ *  agent takes it, else a BTW where it takes that, else its plain mode - an Aside to a Claude Code
+ *  session, which takes neither. */
 function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
   let last: MessageDelivery | undefined;
   for (const attempt of [read.message, ...read.replies].flatMap((item) => item.deliveries)) {
@@ -198,11 +230,14 @@ function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTar
     }
   }
   const canSteer = agent.capabilities.includes("steer");
+  const fallback = canSteer
+    ? "steer"
+    : agent.capabilities.includes("btw")
+      ? "btw"
+      : plainDelivery([agent.capabilities]);
   return {
     delivery:
-      last?.delivery === "steer" && !canSteer
-        ? "btw"
-        : (last?.delivery ?? (canSteer ? "steer" : "btw")),
+      last === undefined || (last.delivery === "steer" && !canSteer) ? fallback : last.delivery,
     target: `session:${agent.session_id}`,
     title: sessionLabel(agent.session_id, agent.title),
   };
@@ -518,9 +553,15 @@ function AgentMessageList({
   );
 }
 
-/** A whose-turn pill: a non-zero ask count linking to the Inbox narrowed to this agent's asks. */
+/** A whose-turn pill: a non-zero ask count linking to the Inbox narrowed to this agent's asks.
+ *  `assignees` is the list's own filter: absent leaves the Inbox's default, the reader's own,
+ *  which is what the `Needs you` pill counts and, with `section`, exactly what it opens; an
+ *  empty array clears it, which is what the `Waiting on agent` pill needs, since the questions
+ *  it counts sit on anybody's issue - that list is this session's whole open list, both turns,
+ *  rather than the counted part alone. */
 function AskCountPill({
   agent,
+  assignees,
   count,
   section,
   selected = false,
@@ -528,6 +569,7 @@ function AskCountPill({
   wording,
 }: {
   agent: Agent;
+  assignees?: readonly string[];
   count: number;
   section?: "needs-you";
   selected?: boolean;
@@ -538,7 +580,7 @@ function AskCountPill({
     <Link
       className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
       title={title}
-      to={buildInboxPath({ agent: agent.session_id, section })}
+      to={buildInboxPath({ agent: agent.session_id, assignees, section })}
     >
       <LabelPill selected={selected}>
         {wording} {count}
@@ -560,24 +602,27 @@ function AgentRow({
   pinned,
   section,
   selected,
+  waitingOnAgent,
 }: {
   agent: Agent;
   /** A row in a closed fold, or one the filters exclude: still mounted, so a pin, a fold's toggle
    *  or a filter loses nothing it holds. */
   hidden: boolean;
   liveAgents: readonly Agent[];
+  /** This session's open questions that wait on the reader themselves: whose next move is a
+   *  person's, on an issue assigned to them, and not snoozed. */
   needsYou: number;
   onPin: () => void;
   onSelect: (selected: boolean) => void;
   pinned: boolean;
   section: AgentSection;
   selected: boolean;
+  /** This session's open questions whose next move is its own, counted in their own right
+   *  rather than as what is left of `open_asks`. */
+  waitingOnAgent: number;
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.host} · ${agent.dir}`;
-  // The inbox query and the agent list are polled separately, so the two counts can briefly
-  // disagree in either direction; a negative remainder renders nothing.
-  const waitingOnAgent = agent.open_asks - needsYou;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
@@ -694,9 +739,16 @@ function AgentRow({
               wording="Needs you"
             />
           )}
-          {waitingOnAgent <= 0 ? null : (
+          {waitingOnAgent === 0 ? null : (
             <AskCountPill
               agent={agent}
+              // These questions are on anybody's issue, while the Inbox opens on the reader's
+              // own, so the link clears the filter: left at the default it would hide the ones
+              // on issues the reader does not hold, and show none at all when no question of
+              // this session's sits on one of theirs. What it opens is this session's whole
+              // open list, both turns, of which this number is the agent-turn part; only the
+              // `Needs you` pill above has a `section` to narrow by.
+              assignees={[]}
               count={waitingOnAgent}
               title={`Open asks from ${label} whose next move is ${label}'s`}
               wording="Waiting on agent"
@@ -755,9 +807,15 @@ function AgentRowDetails({
       <div
         className={`mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${textMutedOnCanvas}`}
       >
-        {agent.capabilities.map((capability) => (
-          <span key={capability}>{capabilityLabel(capability)}</span>
-        ))}
+        {agent.capabilities.length === 0 ? (
+          // A session that advertises no mode refuses every message, the Claude Code session
+          // whose Envoy channel Claude Code did not load among them.
+          <span>Takes no messages</span>
+        ) : (
+          agent.capabilities.map((capability) => (
+            <span key={capability}>{capabilityLabel(capability)}</span>
+          ))
+        )}
         <span>
           Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
         </span>
@@ -951,6 +1009,7 @@ function BroadcastComposer({
   agents,
   body,
   composed,
+  defaulted,
   delivery,
   onBody,
   onDelivery,
@@ -961,6 +1020,8 @@ function BroadcastComposer({
   agents: readonly Agent[];
   body: string;
   composed: ComposedBroadcast;
+  /** Whether `delivery` is the selection's own mode rather than one the sender picked. */
+  defaulted: boolean;
   delivery: MessageDeliveryMode;
   onBody: (body: string) => void;
   onDelivery: (delivery: MessageDeliveryMode) => void;
@@ -970,6 +1031,17 @@ function BroadcastComposer({
 }): ReactNode {
   const { plan } = composed;
   const { excluded, recipients } = plan;
+  // The selection's own mode, named when it is not the broadcast's usual BTW, so the reader knows
+  // what their words become: an Aside, because a selected session takes Aside and not BTW.
+  const asideOnly =
+    defaulted && delivery === "aside"
+      ? agents.filter(
+          (agent) =>
+            selected.has(agent.session_id) &&
+            agent.capabilities.includes("aside") &&
+            !agent.capabilities.includes("btw")
+        )
+      : [];
   // The server counts the `session_ids` it is sent - these recipients - against the shared limit
   // and refuses a send over it; saying so before Send saves the round trip. The notice line is
   // Send's reason when it refuses for the limit or for nobody to reach; otherwise it still bears
@@ -1040,15 +1112,23 @@ function BroadcastComposer({
         rows={3}
         value={body}
       />
-      {sendState.notice === null ? null : (
+      {sendState.notice !== null ? (
         <p className={composerLine} id={noticeId}>
           {sendState.notice}
         </p>
-      )}
+      ) : asideOnly.length > 0 ? (
+        <p className={`${composerLineLayout} ${textMutedOnSurface}`}>
+          Sending as Aside:{" "}
+          {asideOnly.map((agent) => sessionLabel(agent.session_id, agent.title)).join(" and ")}{" "}
+          {asideOnly.length > 1 ? "do" : "does"} not advertise BTW.
+        </p>
+      ) : null}
       <RefusableButton
         className="mt-2 narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4"
         describedBy={sendState.notice === null || sendState.refusalOnNotice ? undefined : noticeId}
-        onPress={() => onSend({ input: composed.input, selected: [...selected] })}
+        onPress={() =>
+          onSend({ input: composed.input, selected: [...selected], picked: !defaulted })
+        }
         refusal={sendState.refusal}
         refusalShownBy={sendState.refusalOnNotice ? noticeId : undefined}
       >
@@ -1062,6 +1142,8 @@ export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
   const { agents, error, isError, isPending } = useAgents(true, true);
   const inbox = useQuery(inboxQuery());
+  // Until `/auth/whoami` answers, no question is counted as the reader's.
+  const viewer = useQuery(whoAmIQuery()).data?.login;
   const readPinned = useCallback((stored: string | null): readonly string[] => {
     try {
       const parsed: unknown = stored === null ? [] : JSON.parse(stored);
@@ -1075,14 +1157,23 @@ export function AgentsPage(): ReactNode {
   const [pinned, setPinned] = useUserPreference("agents.pinned", readPinned, (next) =>
     JSON.stringify(next)
   );
-  const needsYouBySession = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const ask of waitingOnYou(inbox.data ?? [])) {
-      if (ask.author.kind !== "session") continue;
-      counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
-    }
-    return counts;
-  }, [inbox.data]);
+  // The first card number: the reader's own work with this session - a question whose next move
+  // is a person's, on an issue assigned to them. One meaning for every count of what waits on
+  // the reader, wherever it is shown.
+  const needsYouBySession = useMemo(
+    () => tallyBySession(waitingOnYou(inbox.data ?? [], viewer)),
+    [inbox.data, viewer]
+  );
+  // The second card number, counted in its own right rather than as what is left of `open_asks`:
+  // questions whose next move is the session's, on anybody's issue, snoozes ignored. A snooze is
+  // the reader deferring a question, not a change of whose move it is, so a snoozed agent-turn
+  // question is counted here and the list this pill opens holds it folded under `Later`. What
+  // the subtraction this replaces got wrong is the other direction: it charged this session with
+  // every question of the reader's they had snoozed, and with every other person's.
+  const waitingOnAgentBySession = useMemo(
+    () => tallyBySession(inbox.data ?? [], (ask) => ask.waiting_on === "agent"),
+    [inbox.data]
+  );
   // Every issue key an OPEN ask by each session names (`sessionIssueKeys`), for the search box's
   // "issue key" field.
   const issueKeysBySession = useMemo(() => sessionIssueKeys(inbox.data ?? []), [inbox.data]);
@@ -1108,7 +1199,15 @@ export function AgentsPage(): ReactNode {
   // refuses rather than replace it - the same test the queue uses to hold off opening a broadcast
   // while another is begun.
   const composition = useBroadcastComposition();
-  const { delivery, draft, selected, setSelected } = composition;
+  const { draft, selected, setSelected } = composition;
+  // Until the sender picks a mode, the broadcast goes in the one its selection takes: BTW, or
+  // Aside when a selected session takes Aside and not BTW (a Claude Code session).
+  const defaultDelivery = broadcastDelivery(
+    agents.flatMap((agent) => (selected.has(agent.session_id) ? [agent.capabilities] : []))
+  );
+  // A restored request is re-sent word for word until an edit drops it, so its own mode is the one
+  // the page shows and sends while it is held.
+  const delivery = composition.restored?.delivery ?? composition.delivery ?? defaultDelivery;
   const composing = draft.trim() !== "" || selected.size > 0;
   const queue = useBroadcastQueue(composing);
   const restoreRefusal = composing
@@ -1214,6 +1313,7 @@ export function AgentsPage(): ReactNode {
       pinned={pinned.includes(agent.session_id)}
       section={section}
       selected={selected.has(agent.session_id)}
+      waitingOnAgent={waitingOnAgentBySession.get(agent.session_id) ?? 0}
     />
   );
   // One list, keyed by session, with each fold's toggle as an item between the rows - the Inbox's
@@ -1319,7 +1419,8 @@ export function AgentsPage(): ReactNode {
             <BroadcastComposer
               agents={agents}
               body={draft}
-              composed={composedBroadcast(composition, agents)}
+              composed={composedBroadcast({ ...composition, delivery }, agents)}
+              defaulted={composition.delivery === null}
               delivery={delivery}
               onBody={composition.setDraft}
               onDelivery={composition.setDelivery}

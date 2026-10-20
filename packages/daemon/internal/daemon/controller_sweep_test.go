@@ -20,9 +20,10 @@ import (
 )
 
 // liveTrees is a Sandbox runtime's store in which every tree's lifecycle is open, so the sweep
-// keeps every issue Sandbox it consults one for: the controller's Sandbox, when the sweep deletes
-// it, is deleted on its claim's account alone, never for want of a live tree.
-type liveTrees struct{}
+// keeps every issue Sandbox it consults one for, and in which unretired names the one claim stored
+// unretired, if any: the controller's Sandbox, when the sweep deletes it, is deleted on its claim's
+// account alone, never for want of a live tree.
+type liveTrees struct{ unretired claim.Token }
 
 func (liveTrees) IssueHasSessions(context.Context, string, string) (bool, error) { return false, nil }
 func (liveTrees) TreeLive(context.Context, string, string) (bool, error)         { return true, nil }
@@ -32,14 +33,17 @@ func (liveTrees) IssueRunsElsewhere(context.Context, string, string, string) (st
 func (liveTrees) IssueSandboxHome(context.Context, string, string) (string, error) {
 	return "", nil
 }
+func (s liveTrees) ClaimUnretired(_ context.Context, token claim.Token) (bool, error) {
+	return token != "" && token == s.unretired, nil
+}
 
 // The orphan sweep is told what knownClaims makes of the daemon's claims, and the Sandbox runtime
-// keeps the controller's Sandbox exactly while a known claim is the controller's. So the
-// controller's Sandbox, which holds its saved session, survives a sweep while the controller's
-// claim is suspended (known, with no locator) and goes once the claim is retired (unknown). This
-// runs the daemon's own knownClaims over the controller's claim in each state, as the store holds
-// it after the stop, and hands its answer to a real Sandbox runtime (sandbox.New) over an API that
-// holds the controller's Sandbox, at the periodic sweep's grace.
+// keeps the controller's Sandbox while a known claim is the controller's or the store holds that
+// claim unretired. So the controller's Sandbox, which holds its saved session, survives a sweep
+// while the controller's claim is suspended (known, with no locator) and goes once the claim is
+// retired (unknown). This runs the daemon's own knownClaims over the controller's claim in each
+// state, as the store holds it after the stop, and hands its answer to a real Sandbox runtime
+// (sandbox.New) over an API that holds the controller's Sandbox, at the periodic sweep's grace.
 func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t *testing.T) {
 	controller := claim.ControllerToken("legion")
 	for _, tc := range []struct {
@@ -64,8 +68,13 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 			})
 			server := httptest.NewServer(api)
 			t.Cleanup(func() { cancel(); server.Close() })
+			// The store holds the claim as knownClaims reads it: unretired while suspended.
+			trees := liveTrees{}
+			if tc.state != supervise.StateRetired {
+				trees.unretired = controller
+			}
 			rt, err := sandbox.New(ctx, &rest.Config{Host: server.URL}, sandbox.Options{
-				Namespace: "legion", Project: "legion", Store: liveTrees{}, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
+				Namespace: "legion", Project: "legion", Store: trees, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
 				StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
 				Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 				BootTimeout: time.Second, RegistrationIntervals: 3, BusyBackoff: time.Millisecond, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,

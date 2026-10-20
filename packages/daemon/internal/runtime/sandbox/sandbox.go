@@ -86,6 +86,7 @@ type Runtime struct {
 	agentSecrets                   *AgentSecrets
 	controllerSlackChannels        []string
 	agent                          []string
+	setup                          []string
 	bootTimeout                    time.Duration
 	registrationIntervals          int
 	busyBackoff                    time.Duration
@@ -287,7 +288,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		bootTimeout: opts.BootTimeout, registrationIntervals: opts.RegistrationIntervals,
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
-		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
+		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
 		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
@@ -810,18 +811,20 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // listed it can leave. A Sandbox of a tree whose lifecycle is open or releasing is its cleanup's
 // alone (CleanupTree), whatever claims are known: a launch passes its claim's lifecycle check
 // before it creates a Sandbox, so what this runtime launches is never swept. The project
-// controller's Sandbox is owned by the controller's claim: it is an orphan once no claim of known
-// is that claim. known is every claim the daemon has not retired, a suspended one included
+// controller's Sandbox is owned by the controller's claim: it is an orphan once that claim is
+// retired or gone. known is every claim the daemon has not retired, a suspended one included
 // (knownClaims), so a retired controller's Sandbox goes and a suspended one's, which holds its
-// session, stays. Every delete runs under the pod's launch turn, so a launch that begins meanwhile
-// waits for the delete and then creates the Sandbox afresh, and is fenced to the Sandbox as the
-// decision read it, its uid and resourceVersion (deleteFenced): an issue Sandbox's tree is read
-// again under the turn, and a Sandbox written since the informer's snapshot — relabelled for a new
-// tree by a re-admitted issue's launch (ensureSandbox), which keeps its uid, volume and sessions,
-// or set Running — is kept as a conflict for the next sweep to judge on what it holds then.
-// Every start writes the Sandbox its generation's address record
-// (recordAddresses), so a controller relaunched into it since makes the delete a conflict, and the
-// next sweep judges it on the claims known then. The image probe's Sandbox (labelled
+// session, stays; known was read before this listing, so a controller launched in between is
+// missing from it, and a Sandbox known does not name is kept while the store holds its claim
+// unretired, read again under the pod's launch turn (controllerOwned). Every delete runs under the
+// pod's launch turn, so a launch that begins meanwhile waits for the delete and then creates the
+// Sandbox afresh, and is fenced to the Sandbox as the decision read it, its uid and resourceVersion
+// (deleteFenced): an issue Sandbox's tree is read again under the turn, and a Sandbox written since
+// the informer's snapshot — relabelled for a new tree by a re-admitted issue's launch
+// (ensureSandbox), which keeps its uid, volume and sessions, or set Running — is kept as a conflict
+// for the next sweep to judge on what it holds then. Every start writes the Sandbox its
+// generation's address record (recordAddresses), so a controller relaunched into it since makes the
+// delete a conflict, and the next sweep judges it again. The image probe's Sandbox (labelled
 // legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
 // has the controller delete it otherwise (probe.go). A repository cache's Sandbox (labelled
 // legion.dev/cache) is no claim's either: the claim path passes over it, and sweepCaches keeps,
@@ -889,8 +892,9 @@ func (r *Runtime) warnImageDrift(u *unstructured.Unstructured) {
 
 // sweep deletes u, the Sandbox as the informer held it, unless something owns it
 // (ReconcileOrphans), by its kind (podKindOf): the controller's pod is kept while it is one of
-// controllers, the Sandboxes of the known controller claims; an issue pod while its tree's lifecycle
-// is live, or while its issue's Sandbox belongs to the tree it is labelled with
+// controllers, the Sandboxes of the known controller claims, or while the store holds its claim
+// unretired, read before the turn and again under it (controllerOwned); an issue pod while its
+// tree's lifecycle is live, or while its issue's Sandbox belongs to the tree it is labelled with
 // (Store.IssueSandboxHome): a carried child's Sandbox the old tree's cleanup handed over
 // (handOverSandbox), while the child waits for the admission that opens its tree or lingers after
 // its own close. One whose child left the line, or whose linger expired, belongs nowhere and is
@@ -913,11 +917,17 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 		if controllers[name] {
 			return nil
 		}
+		if owned, err := r.controllerOwned(ctx, name); err != nil || owned {
+			return err
+		}
 		release, err := r.lockPod(ctx, name)
 		if err != nil {
 			return err
 		}
 		defer release()
+		if owned, err := r.controllerOwned(ctx, name); err != nil || owned {
+			return err
+		}
 		version := u.GetResourceVersion()
 		fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
 		if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "role", claim.RoleController); err != nil {
@@ -960,6 +970,22 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 		return fmt.Errorf("reconcile orphans: %w", err)
 	}
 	return nil
+}
+
+// controllerOwned is whether the project's controller claim owns the controller Sandbox name as the
+// store holds the claim now: the Sandbox carries the claim's name and the claim is not retired. The
+// known set the sweep was handed was read before the sweep listed its Sandboxes, so a controller
+// launched in between, its last write to the Sandbox done, is missing from it; the store is not.
+func (r *Runtime) controllerOwned(ctx context.Context, name string) (bool, error) {
+	token := claim.ControllerToken(r.project)
+	if name != SandboxName(token) {
+		return false, nil
+	}
+	unretired, err := r.store.ClaimUnretired(ctx, token)
+	if err != nil {
+		return false, fmt.Errorf("reconcile orphans: %w", err)
+	}
+	return unretired, nil
 }
 
 // deleteFenced deletes the Sandbox name once, fenced by fence, and forgets its launchers'

@@ -254,6 +254,11 @@ What each part is for:
   projected ServiceAccount token for the broker's audience is mounted. The daemon logs in with that
   token at every start and keeps logging in; no person approves it, provided the broker's
   `BROKER_SERVICE_LOGINS` names the daemon's ServiceAccount.
+- **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role's container
+  runs before each start of its Oh My Pi, such as installing an Oh My Pi plugin from a marketplace
+  repository. It runs in the role's working directory with the role's environment, and its `git`
+  answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
+  only once it exits 0; a failure is a failed launch, and its output is in the role's log.
 - **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
   with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
   ([Start the controller](#start-the-controller)).

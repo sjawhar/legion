@@ -18,10 +18,7 @@ import {
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
   secondaryButtonText,
-  surfaceMutedBg,
-  surfaceMutedStrongBg,
   textMutedOnCanvas,
-  textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
@@ -30,16 +27,16 @@ import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
 import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
-import { buildInboxPath, type InboxRoute, type InboxView, parseInboxSearch } from "../refs/routes";
+import { buildInboxPath, type InboxRoute, parseInboxSearch } from "../refs/routes";
 import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
-import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
 import { InboxOwnerLink } from "./AskOwnerLink";
+import { AssigneeFilter } from "./AssigneeFilter";
 import { outsideAskCard } from "./ask-card";
 import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
-import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
+import { BlockedOnYou, waitingOnHuman } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
 import { crossBandCounts, groupRows } from "./grouping";
 import { bandGroupItems, useGroupJump } from "./InboxGroups";
@@ -50,11 +47,12 @@ import {
   COLLAPSED_SECTIONS,
   INBOX_SECTIONS,
   type InboxSection,
-  isMine,
+  inAssigneeFilter,
+  isOwnList,
   isTurnSection,
   isUnassigned,
-  SECTION_TITLES,
   sectionOf,
+  sectionTitles,
 } from "./sections";
 import { type AskSnoozeFailure, useAskSnoozeMany } from "./useAskSnooze";
 
@@ -85,11 +83,11 @@ function rowAround(node: Element | null): HTMLElement | null {
 }
 
 /** Takes an issue nobody holds for the viewer: one PATCH through the shared assignee write, so
- *  the row moves from the Unassigned band into Mine at once and rolls back if the server
- *  refuses. The row leaves the band optimistically while the save is in flight, so the control
- *  tells the Inbox when its write is live (pending or failed) and the Inbox keeps it mounted
- *  wherever the row sits until then: `Assigning…`, and on refusal the server's reason with Retry,
- *  are shown by this same instance rather than lost to a remount. */
+ *  the row is theirs at once and rolls back if the server refuses. Under the Unassigned filter
+ *  the row stops matching while the save is in flight, so the control tells the Inbox when its
+ *  write is live (pending or failed) and the Inbox keeps the row listed until then: `Assigning…`,
+ *  and on refusal the server's reason with Retry, are shown by this same instance rather than
+ *  lost to a remount. */
 function AssignToMe({
   askId,
   issueKey,
@@ -226,7 +224,7 @@ function InboxItem({
           {ask.issue_key === null ? null : (
             <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
           )}
-          {ask.issue_key !== null && (section === "unassigned" || assignLive) ? (
+          {ask.issue_key !== null && (isUnassigned(ask) || assignLive) ? (
             <AssignToMe
               askId={ask.id}
               issueKey={ask.issue_key}
@@ -281,9 +279,8 @@ function withHeld(
 
 /** The row to keep where the reader last saw it, if any. Dropped from the list: kept as last
  *  seen. Moved between the two turn sections: whose turn it is changed under the reader's hand,
- *  so the listed row is kept in the section they saw it in. A move into or out of the Unassigned
- *  band is an assignment and a move into or out of Later is a snooze - both the reader's own
- *  click, shown at once. */
+ *  so the listed row is kept in the section they saw it in. A move into or out of Later is a
+ *  snooze - the reader's own click, shown at once. */
 function heldRow(
   seen: PlacedRow | undefined,
   listed: InboxRow | undefined,
@@ -314,45 +311,51 @@ function refusalText(failed: readonly AskSnoozeFailure[], of: number): string | 
 /** What the Inbox says when no band has a row. An agent filter's line is about that agent's asks
  *  alone. Otherwise the credential requests above the bands wait on the viewer as much as an ask
  *  whose turn is theirs, so it says nothing until their list has come back empty: while the list
- *  loads, or after it fails, the Inbox cannot say that nothing needs them. */
+ *  loads, or after it fails, the Inbox cannot say that nothing needs them. The three filtered
+ *  lines differ because only the reader's own list is about them: a cleared filter is about
+ *  everyone, and any other selection is about whoever it names. */
 function emptyStateMessage({
   agent,
   agentTitle,
   credentials,
-  view,
+  selection,
+  viewer,
 }: {
   agent: string | undefined;
   agentTitle: string | undefined;
   credentials: CredentialRequests;
-  view: InboxView;
+  /** Who the list is filtered to, as `?assignee=` reads: empty is the cleared filter. */
+  selection: readonly string[];
+  viewer: string;
 }): string | undefined {
   if (agent !== undefined) return `No open asks from ${agentTitle}`;
   if (credentials.status !== "listed" || credentials.requests.length > 0) return undefined;
-  return view === "mine" ? "Nothing needs you" : "Nothing needs anyone";
+  if (isOwnList(selection, viewer)) return "Nothing needs you";
+  return selection.length === 0 ? "Nothing needs anyone" : "Nothing matches this filter";
 }
 
 /**
- * `filter`/`onViewChange`/`keymapScope` exist for `InboxDrawer` (LEGION-547): a peek embedded on
- * another route must not read or write the real URL for its Mine/Everyone choice (that would
- * navigate the page it sits over), and its Escape/j/k/etc. must resolve under the drawer's own
- * `dialog` scope - the modal scope a dialog anywhere on the stack exclusively consults - rather
- * than the standalone page's `inbox` scope, which a dialog's keydown handling never reaches.
- * `InboxPage`'s unmodified `<Inbox/>` call keeps today's URL-backed behaviour untouched.
+ * `filter`/`onAssigneesChange`/`keymapScope` exist for `InboxDrawer` (LEGION-547): a peek
+ * embedded on another route must not read or write the real URL for its assignee filter (that
+ * would navigate the page it sits over), and its Escape/j/k/etc. must resolve under the drawer's
+ * own `dialog` scope - the modal scope a dialog anywhere on the stack exclusively consults -
+ * rather than the standalone page's `inbox` scope, which a dialog's keydown handling never
+ * reaches. `InboxPage`'s unmodified `<Inbox/>` call keeps today's URL-backed behaviour untouched.
  */
 export function Inbox({
   filter: filterOverride,
   keymapScope = "inbox",
-  onViewChange,
+  onAssigneesChange,
 }: {
   filter?: InboxRoute;
   keymapScope?: KeymapScope;
-  onViewChange?: (view: InboxView) => void;
+  onAssigneesChange?: (assignees: readonly string[] | undefined) => void;
 } = {}): ReactNode {
   const { search } = useLocation();
   const navigate = useNavigate();
   const filter = filterOverride ?? parseInboxSearch(search);
   // One inbox query, shared with the nav badge, the sidebar, the agents page and the margin; the
-  // views below are client-side partitions of it, so an answered row leaves every surface at once.
+  // list below is a client-side partition of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
   const whoAmI = useQuery(whoAmIQuery());
   const listRef = useRef<HTMLElement>(null);
@@ -361,26 +364,27 @@ export function Inbox({
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
   // state all read this one answer.
   const credentials = useCredentialRequests();
-  // `/auth/whoami` names the person by lowercase email, the form issue assignees carry.
   const viewer = whoAmI.data?.login;
-  // The URL wins, then the viewer's remembered choice, then Mine (the first-time default).
-  const [rememberedView, setRememberedView] = useUserPreference<InboxView>(
-    "inbox.view",
-    (stored) => (stored === "everyone" ? "everyone" : "mine"),
-    (next) => next
-  );
-  const view = filter.view ?? rememberedView;
-  const selectView = (next: InboxView) => {
-    if (onViewChange) {
-      onViewChange(next);
+  // Who the list is for: what `?assignee=` carries, and the reader alone when it carries
+  // nothing. The address is the whole memory - a filter the reader can link, and nothing kept
+  // behind their back.
+  const selection = filter.assignees ?? (viewer === undefined ? [] : [viewer]);
+  // The popover's open state lives here because Escape has to know about it (see
+  // `clear-selection` below).
+  const [filterOpen, setFilterOpen] = useState(false);
+  const selectAssignees = (next: readonly string[]) => {
+    if (onAssigneesChange) {
+      onAssigneesChange(next);
     } else {
-      setRememberedView(next);
-      navigate(buildInboxPath({ ...filter, view: next }));
+      // Replace rather than push: a reader trying people out would otherwise have to walk Back
+      // through every pick, the rule every URL-backed filter here holds to
+      // (`lib/url-array-params.ts`).
+      navigate(buildInboxPath({ ...filter, assignees: next }), { replace: true });
     }
   };
-  const { titles } = useAgents(filter.agent !== undefined);
+  const { titles: agentTitles } = useAgents(filter.agent !== undefined);
   // Rows (by ask id) whose "Assign to me" write is in flight or failed: their control stays
-  // mounted through the optimistic move into Mine and the rollback out of it (see `AssignToMe`).
+  // mounted through the optimistic assignment and the rollback out of it (see `AssignToMe`).
   const [assigning, setAssigning] = useState<ReadonlySet<string>>(() => new Set());
   const onAssignLive = useCallback((askId: string, live: boolean) => {
     setAssigning((current) => {
@@ -440,8 +444,8 @@ export function Inbox({
         : new Set([...current].filter((id) => listed.has(id)))
     );
   }, [listedIds]);
-  // What this view lists, narrowed the same way the bands are, and computed here rather than
-  // after the early returns so the bindings below speak for exactly the rows on the page.
+  // What this list holds, and computed here rather than after the early returns so the bindings
+  // below speak for exactly the rows on the page.
   const agent = filter.agent;
   const fromAgent =
     agent === undefined
@@ -449,18 +453,20 @@ export function Inbox({
       : (adoptedInbox ?? []).filter(
           (ask) => ask.author.kind === "session" && ask.author.id === agent
         );
-  const inView = (rows: readonly InboxRow[]) =>
-    view === "everyone" || viewer === undefined
-      ? rows
-      : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
-  const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
+  // The filter decides what is listed, with one exception: a row whose "Assign to me" write is
+  // live stays. Taking a question under the Unassigned filter is exactly that case - the row
+  // stops matching the moment the optimistic assignment lands - and unmounting the control
+  // would take `Assigning…`, a refusal and its Retry off the screen with it.
+  const shown = (filter.section === "needs-you" ? waitingOnHuman(fromAgent) : fromAgent).filter(
+    (row) => inAssigneeFilter(row, selection) || assigning.has(row.id)
+  );
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
   const [laterOpen, setLaterOpen] = useState(false);
   const jumpToGroup = useGroupJump(listRef, () => setLaterOpen(true));
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn band
   // on the first render after its moment passes. Computed here, with the selection, rather than
   // after the early returns, because the bar's count and the bindings both read it.
-  const place = viewer === undefined ? undefined : { now: Date.now(), view, viewer };
+  const place = viewer === undefined ? undefined : Date.now();
   // A row in a band the reader has not opened is not on the page: the band renders its heading
   // and count and none of its rows, so there is no checkbox to untick, and the reader may well
   // have set that row's own moment since marking it - a pick that wrote it would overwrite what
@@ -509,8 +515,10 @@ export function Inbox({
   // afresh without it and takes its new place then. That covers the reader's own answer while it
   // is in flight (the card shows Answering…, or the error if the server refuses it); once the
   // server has recorded it the row is not held - their click was the end of that interaction -
-  // and it leaves with the refetch the success triggers. Assign to me is likewise not a hold:
-  // the row moving into Mine at once is the feedback for that click.
+  // and it leaves with the refetch the success triggers. Assign to me has no such exclusion: the
+  // one filter that offers it is `Unassigned`, which the settled assignment drops the row out of,
+  // so the row is held where the reader last saw it until their focus or pointer leaves it, like
+  // any other dropped row; `assigning` above keeps it listed only while the write is live.
   const viewport = useRef<ViewportAnchor>(null);
   const anchor = viewport.current?.interacted() ?? null;
   const presented = useRef<readonly PlacedRow[]>([]);
@@ -665,7 +673,9 @@ export function Inbox({
       label: "Clear the selection",
       palette: false,
       run: clearSelection,
-      when: () => focusedRow() === null && bulkBarShown,
+      // The popover takes Escape first: one press closes it, and dropping what the reader
+      // marked at the same time would be two undos for one key.
+      when: () => focusedRow() === null && bulkBarShown && !filterOpen,
     },
   ]);
 
@@ -683,26 +693,19 @@ export function Inbox({
   const listed = seen === undefined ? undefined : shown.find((ask) => ask.id === seen.ask.id);
   const now = listed === undefined ? undefined : sectionOf(listed, place);
   const held = heldRow(seen, listed, now);
-  const viewSwitch = (
-    <fieldset className={`inline-flex rounded-xl border p-1 ${borderDefault}`}>
-      <legend className="sr-only">Inbox view</legend>
-      {(["mine", "everyone"] as const).map((candidate) => (
-        <button
-          aria-pressed={view === candidate}
-          className={`min-h-11 rounded-lg px-3 text-sm font-medium md:min-h-9 md:px-2 ${
-            view === candidate ? surfaceMutedStrongBg : surfaceMutedBg
-          } ${textSecondaryOnCanvas}`}
-          key={candidate}
-          onClick={() => selectView(candidate)}
-          type="button"
-        >
-          {candidate === "mine" ? "Mine" : "Everyone"}
-        </button>
-      ))}
-    </fieldset>
+  // The bands as this list heads them: another person's question is not "Waiting on you".
+  const titles = sectionTitles(selection, viewer);
+  const assigneeFilter = (
+    <AssigneeFilter
+      onChange={selectAssignees}
+      onOpenChange={setFilterOpen}
+      open={filterOpen}
+      selected={selection}
+      viewer={viewer}
+    />
   );
   // The live agent's title when Envoy still lists it; otherwise the author label its asks carry.
-  const liveTitle = agent === undefined ? undefined : titles.get(agent)?.trim();
+  const liveTitle = agent === undefined ? undefined : agentTitles.get(agent)?.trim();
   const agentTitle =
     liveTitle !== undefined && liveTitle !== ""
       ? liveTitle
@@ -714,7 +717,7 @@ export function Inbox({
       <Link
         aria-label="Clear agent filter"
         className="inline-flex min-h-11 items-center rounded-full"
-        to={buildInboxPath()}
+        to={buildInboxPath({ assignees: filter.assignees })}
       >
         <LabelPill selected>
           Asks from {agentTitle}
@@ -742,17 +745,21 @@ export function Inbox({
   const header = (
     <>
       <CredentialRequestsSection credentials={credentials} />
-      {viewSwitch}
+      {assigneeFilter}
       {chip}
       {agent === undefined ? (
-        <BlockedOnYou asks={inView(adoptedInbox ?? [])} credentialRequests={credentials.requests} />
+        <BlockedOnYou
+          asks={adoptedInbox ?? []}
+          credentialRequests={credentials.requests}
+          viewer={viewer}
+        />
       ) : null}
       {bulkBar}
     </>
   );
 
   if (shown.length === 0 && held === undefined) {
-    const emptyMessage = emptyStateMessage({ agent, agentTitle, credentials, view });
+    const emptyMessage = emptyStateMessage({ agent, agentTitle, credentials, selection, viewer });
     return (
       <div className="space-y-6">
         {header}
@@ -810,12 +817,12 @@ export function Inbox({
               {COLLAPSED_SECTIONS[section] === true ? (
                 <DisclosureToggle
                   expanded={laterOpen}
-                  label={`${SECTION_TITLES[section]} (${rows.length})`}
+                  label={`${titles[section]} (${rows.length})`}
                   onToggle={() => setLaterOpen((open) => !open)}
                   textClassName={textMutedOnCanvas}
                 />
               ) : (
-                SECTION_TITLES[section]
+                titles[section]
               )}
             </h2>
           </li>,
@@ -843,6 +850,7 @@ export function Inbox({
               />
             ),
             section,
+            titles,
           }),
         ])}
       </ul>

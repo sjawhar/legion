@@ -476,7 +476,7 @@ ARG PI_CODEGRAPH_VERSION
 # bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
 # inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
 # util-linux (flock): the install Legion renders for an installing launch serialises on the issue's
-# shared bun install cache with /usr/bin/flock (installScript,
+# shared bun install cache with /usr/bin/flock (installBlock,
 # packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
 # fails every installing launch. The entry buys nothing today — Debian's priority:required set
 # already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch

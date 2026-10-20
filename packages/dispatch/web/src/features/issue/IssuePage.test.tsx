@@ -16,6 +16,7 @@ import type {
 } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/margin-context";
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
@@ -133,6 +134,10 @@ function stubIssuePage(
 ): () => void {
   const originalGetIssue = api.getIssue;
   const originalGetIssueEvents = api.getIssueEvents;
+  const originalListIssueAsks = api.listIssueAsks;
+  const originalListIssueAskThreads = api.listIssueAskThreads;
+  const originalListComments = api.listComments;
+  const originalListIssueMessages = api.listIssueMessages;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
   const originalListAgents = api.listAgents;
@@ -141,6 +146,12 @@ function stubIssuePage(
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
+  // The Conversation builds its list from the issue's own asks, comments and messages; it asks
+  // the ask list for each thread, where the margin reads the same route without one.
+  api.listIssueAsks = async () => [];
+  api.listIssueAskThreads = async () => [];
+  api.listComments = async () => [];
+  api.listIssueMessages = async () => [];
   api.listAgents = async () => agents;
   api.getIssueSubscribers = async () => subscribers;
   return () => {
@@ -148,6 +159,10 @@ function stubIssuePage(
     api.getInbox = originalGetInbox;
     api.getMyState = originalGetMyState;
     api.getIssueEvents = originalGetIssueEvents;
+    api.listIssueAsks = originalListIssueAsks;
+    api.listIssueAskThreads = originalListIssueAskThreads;
+    api.listComments = originalListComments;
+    api.listIssueMessages = originalListIssueMessages;
     api.listAgents = originalListAgents;
     api.getIssueSubscribers = originalGetIssueSubscribers;
   };
@@ -171,15 +186,19 @@ function renderIssuePage(
   const view = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
-        <DocumentRuntime.Provider value={runtime.runtime}>
-          <MarginProvider>
-            <CurrentRoute />
-            {navigateTo === undefined ? null : <Link to={navigateTo}>Navigate to test route</Link>}
-            <Routes>
-              <Route path="/issues/:key/*" element={<IssuePage />} />
-            </Routes>
-          </MarginProvider>
-        </DocumentRuntime.Provider>
+        <KeymapProvider>
+          <DocumentRuntime.Provider value={runtime.runtime}>
+            <MarginProvider>
+              <CurrentRoute />
+              {navigateTo === undefined ? null : (
+                <Link to={navigateTo}>Navigate to test route</Link>
+              )}
+              <Routes>
+                <Route path="/issues/:key/*" element={<IssuePage />} />
+              </Routes>
+            </MarginProvider>
+          </DocumentRuntime.Provider>
+        </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -748,7 +767,27 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
     await screen.findByRole("tab", { name: "Spec", selected: true });
     expect(screen.getByRole("tab", { name: "Conversation", selected: false })).toBeDefined();
     expect(screen.getByRole("tab", { name: "Children", selected: false })).toBeDefined();
+    expect(screen.getByRole("tab", { name: "Activity", selected: false })).toBeDefined();
     expect(screen.queryByLabelText("Issue board")).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+// `t a` is already Artifacts, so Activity's chord is `t v`; it reaches the same tablist button a
+// click does, and the route it lands on is the tab's own.
+test("IssuePage opens the Activity tab with the t v chord", async () => {
+  const restore = stubIssuePage(issue);
+  const view = renderIssuePage("/issues/CORE-1/spec");
+
+  try {
+    await screen.findByRole("tab", { name: "Spec", selected: true });
+    fireEvent.keyDown(document.body, { key: "t" });
+    fireEvent.keyDown(document.body, { key: "v" });
+
+    await screen.findByRole("tab", { name: "Activity", selected: true });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1/activity");
   } finally {
     view.unmount();
     restore();
@@ -1368,7 +1407,7 @@ test("IssuePage keeps version controls in the active Spec tab row", async () => 
     expect(within(tabs).getByRole("button", { name: "Name version" })).not.toBeNull();
     expect(screen.queryByTestId("spec-document-toolbar")).toBeNull();
 
-    for (const tab of ["Conversation", "Children", "Artifacts (1)"] as const) {
+    for (const tab of ["Conversation", "Children", "Artifacts (1)", "Activity"] as const) {
       fireEvent.click(screen.getByRole("tab", { name: tab }));
       await screen.findByRole("tab", { name: tab, selected: true });
       expect(screen.queryByRole("combobox", { name: "Version" })).toBeNull();

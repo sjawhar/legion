@@ -733,9 +733,9 @@ export interface Ask extends AnchorPosition {
   readonly referenced_by_count?: number;
   readonly issue?: Pick<Issue, "key" | "title" | "assignee">;
   readonly document?: InboxDocument;
-  /** Inbox rows and the issue detail's `open_asks`: the newest reply in the ask's thread, or
-   *  null when nobody has replied. Who spoke last; whose turn it is comes from `waiting_on`.
-   *  Absent on every other ask read. */
+  /** Inbox rows, the issue detail's `open_asks` and the issue ask list: the newest reply in the
+   *  ask's thread, or null when nobody has replied. Who spoke last; whose turn it is comes from
+   *  `waiting_on`. Absent on every other ask read. */
   readonly last_reply?: AskLastReply | null;
   /** Whose reply an open ask needs next. A moved approval request stays with its agent while
    *  `requested_version` is below `version`; a hand-back (`ask.handed_back`) returns it to the
@@ -757,12 +757,14 @@ export interface Ask extends AnchorPosition {
 export const ASK_TURNS = ["human", "agent"] as const;
 export type AskTurn = (typeof ASK_TURNS)[number];
 
-/** The complete data an Inbox card needs before its first targeted thread refresh. */
-export interface InboxThread {
+/** An ask's thread as a list row carries it: everything a card needs before its first targeted
+ *  thread refresh. */
+export interface AskThread {
   readonly replies: Comment[];
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
-  /** Every answer, oldest first; always empty on an Inbox row because the row is open. */
+  /** Every answer, oldest first: empty on an Inbox row, which is an open ask, and the answers of
+   *  an answered ask on `GET /api/v1/issues/{key}/asks?thread=1`. */
   readonly answers: AskAnswer[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
@@ -777,7 +779,25 @@ export interface InboxRow extends Ask {
    *  Inbox folds it into `Later` only while this moment is still ahead. */
   readonly snoozed_until: string | null;
   /** The card's initial thread; `["ask-thread", id]` remains its targeted live refresh. */
-  readonly thread: InboxThread;
+  readonly thread: AskThread;
+}
+
+/** One ask of `GET /api/v1/issues/{key}/asks`. The row is an `Ask` plus the one field a list
+ *  surface cannot compute for itself: `last_reply`, the sort key for ordering a page by its
+ *  newest reply. It carries no thread: the list is unpaged, and the readers that render the ask
+ *  alone - a document's decision blocks and the review margin - would pay for every reply body,
+ *  follower and answer on the issue to draw none of them. */
+export interface IssueAskRow extends Ask {
+  /** The newest reply in this ask's thread, or null when nobody has replied. */
+  readonly last_reply: AskLastReply | null;
+}
+
+/** One ask of `GET /api/v1/issues/{key}/asks?thread=1`: the row above, plus the thread that
+ *  renders the card whole without a fetch per ask. A reader asks for this shape by asking for
+ *  the thread, so the thread is always there. */
+export interface IssueAskThreadRow extends IssueAskRow {
+  /** The card's initial thread; `["ask-thread", id]` remains its targeted live refresh. */
+  readonly thread: AskThread;
 }
 
 /** What `PUT /api/v1/me/asks/{id}/snooze` answers: the stored moment the row returns. */

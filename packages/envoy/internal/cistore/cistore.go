@@ -447,6 +447,12 @@ func (s *Store) StopWatch() {
 	s.watcher.Stop()
 }
 
+// EndWatch ends the cache's watchers at shutdown, within ctx, while the connection still carries
+// requests (kvwatch.Watcher.End).
+func (s *Store) EndWatch(ctx context.Context) {
+	s.watcher.End(ctx)
+}
+
 // WaitForCacheReady blocks until the watcher has delivered every existing key, or until ctx is
 // done.
 func (s *Store) WaitForCacheReady(ctx context.Context) error {

@@ -152,21 +152,47 @@ func launchOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) launch {
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
 // unless closed says its cleanup confirmed, an issue recorded sessions only when sessions says
-// so, a claim of an issue runs a process only when running names it, in the tree it names, and an
-// issue's Sandbox belongs to a tree only when homes names it (to none otherwise). The store's own
-// rule for a Sandbox's home is held by its tests (store.IssueSandboxHome); here a test sets it.
+// so, a claim of an issue runs a process only when running names it, in the tree it names, an
+// issue's Sandbox belongs to a tree only when homes names it (to none otherwise), and a claim is
+// stored unretired only when unretired names it. The store's own rule for a Sandbox's home is held
+// by its tests (store.IssueSandboxHome); here a test sets it.
 type fakeStore struct {
 	mu               sync.Mutex
 	closed, sessions map[string]bool
 	running          map[string]runningClaim
 	homes            map[string]string
+	unretired        map[claim.Token]bool
 }
 
 // runningClaim is a claim of an issue that runs a process (token:state), in tree.
 type runningClaim struct{ tree, claim string }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{}}
+	return &fakeStore{
+		closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{},
+		unretired: map[claim.Token]bool{},
+	}
+}
+
+func (s *fakeStore) ClaimUnretired(_ context.Context, token claim.Token) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unretired[token], nil
+}
+
+// admit records token's claim as stored and unretired, as the supervisor writes it before its
+// launch begins (supervise.Machine.launchAfter).
+func (s *fakeStore) admit(token claim.Token) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unretired[token] = true
+}
+
+// retire records token's claim as retired.
+func (s *fakeStore) retire(token claim.Token) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.unretired, token)
 }
 
 func (s *fakeStore) IssueSandboxHome(_ context.Context, _, issue string) (string, error) {

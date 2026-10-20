@@ -73,6 +73,10 @@ type Store interface {
 	// lingers after its own close. The tree cleanup hands a Sandbox whose home is another tree over
 	// to it (CleanupTree), and the orphan sweep keeps one whose home is its label's tree (sweep).
 	IssueSandboxHome(ctx context.Context, project, issue string) (string, error)
+	// ClaimUnretired is whether the store holds token's claim in any state but retired: a claim the
+	// daemon's orphan sweep still knows, suspended and failed ones included. The sweep reads it under
+	// the controller's pod turn, since the known set it was handed was read before it listed.
+	ClaimUnretired(ctx context.Context, token claim.Token) (bool, error)
 }
 
 // Options is what a Runtime is built from. Every field without a stated default is required.
@@ -155,6 +159,11 @@ type Options struct {
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
+	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv every role's
+	// container runs before each start of its Oh My Pi — after a stale-plugin relaunch's install,
+	// in the container's working directory and with the environment Oh My Pi gets — through the
+	// start wrapper (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
+	Setup []string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).

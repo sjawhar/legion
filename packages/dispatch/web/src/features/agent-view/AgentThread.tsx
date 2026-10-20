@@ -27,6 +27,7 @@ import {
   primaryButtonBg,
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
+  primaryButtonHoverBg,
   selectedCardBg,
   selectedCardBorder,
   surfaceMutedBg,
@@ -39,7 +40,8 @@ import {
 } from "../../theme/classes";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
-import { readDispatchMarks } from "./dispatch-marks";
+import { readDispatchMarks, turnKey } from "./dispatch-marks";
+import { useLiveFollow } from "./use-live-follow";
 import { useFrameCoalesced } from "./useFrameCoalesced";
 
 /**
@@ -112,16 +114,27 @@ const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
   </div>
 );
 
+/**
+ * The key this turn keeps across a rebuild of the transcript, which every rendered turn carries in
+ * `data-message-id` so `useLiveFollow` can find the turn a reader was on. One selector returning
+ * the string, for the `Object.is` reason `AssistantMessage` documents below.
+ */
+function useTurnKey(): string {
+  return useAuiState((state) => turnKey(state.message.metadata.custom, state.message.id));
+}
+
 function UserMessage(): ReactNode {
   // A message someone other than the viewer sent the session, stored or taken as its own turn
   // (AgentRuntimeThread names them): it sits on the session's side of the thread with its author,
   // never styled as the viewer's own. Both are text a person or an agent wrote (a broadcast, a
   // targeted message, a reply), so both render as Markdown, as the session's own turns do.
   const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
+  const turn = useTurnKey();
   if (author !== undefined) {
     return (
       <div
         className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm ${borderDefault} ${textPrimaryOnCanvas}`}
+        data-message-id={turn}
         data-testid="agent-message-other"
       >
         <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>{author}</p>
@@ -130,7 +143,7 @@ function UserMessage(): ReactNode {
     );
   }
   return (
-    <div className="mt-4 flex justify-end" data-testid="agent-message-user">
+    <div className="mt-4 flex justify-end" data-message-id={turn} data-testid="agent-message-user">
       <div
         className={`max-w-[80%] rounded-xl px-3 py-2 text-sm ${surfaceMutedBg} ${textPrimaryOnCanvas}`}
       >
@@ -152,10 +165,12 @@ function AssistantMessage(): ReactNode {
   // The provider/model that produced this streamed turn (LEGION-548): absent for a reply sent
   // through Dispatch, and for a turn whose publishing host reported none.
   const model = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).model);
+  const turn = useTurnKey();
   if (fromDispatch) {
     return (
       <div
         className={`mt-4 rounded-xl border px-3 py-2 text-sm ${card} ${borderDefault} ${textPrimaryOnCanvas}`}
+        data-message-id={turn}
         data-testid="agent-dispatch-reply"
       >
         <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>Reply via Dispatch</p>
@@ -164,7 +179,11 @@ function AssistantMessage(): ReactNode {
     );
   }
   return (
-    <div className={`mt-4 text-sm ${textPrimaryOnCanvas}`} data-testid="agent-message-assistant">
+    <div
+      className={`mt-4 text-sm ${textPrimaryOnCanvas}`}
+      data-message-id={turn}
+      data-testid="agent-message-assistant"
+    >
       {model === undefined ? null : (
         <p
           className={`mb-1 truncate text-xs ${textMutedOnCanvas}`}
@@ -329,38 +348,93 @@ function SlashCommands({ commands }: { commands: readonly AgentStreamCommand[] }
  */
 export function AgentThread({
   commands,
+  contentIds,
   empty,
+  ownSendCount,
   placeholder,
+  replayCount,
   resetKey,
+  sessionId,
 }: {
   /** The slash commands the composer completes; none is offered while this is undefined or
    *  empty. */
   commands: readonly AgentStreamCommand[] | undefined;
+  /** Every turn of the transcript, in the order it is rendered, by the key each one carries in
+   *  `data-message-id`: what the follow hook counts as new and finds the reader's place in. */
+  contentIds: readonly string[];
   empty: string;
+  /** Bumped once per message this viewer sent that the session accepted. */
+  ownSendCount: number;
   placeholder: string;
+  /** Bumped once per rebuild of the whole transcript from the session's replay. */
+  replayCount: number;
   resetKey: string;
+  /** The session being read: moving to another one lands at its live end. */
+  sessionId: string;
 }): ReactNode {
+  // The element itself, not a ref held once: this viewport is inside the boundary below, which
+  // renders a fresh node once a reset clears the error it was holding, and the hook binds its
+  // listener and its observers to whichever node it is given.
+  const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
+  const follow = useLiveFollow({ contentIds, ownSendCount, replayCount, sessionId, viewport });
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
       <ErrorBoundary region="this conversation" resetKey={resetKey}>
-        {/* `mt-3`: the scroller clips a turn at its top edge, and without a gap that clipped
-            line sat against the page's note above it and read as overlapping text. `pl-1`
-            matches `pr-1` for the same reason on the left: a turn's numbered list hangs its
-            marker outside the list's content box, and the scroller clipped its first digit. */}
-        <ThreadPrimitive.Viewport
-          autoScroll
-          className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 pl-1"
-          data-testid="agent-thread"
-        >
-          <ThreadPrimitive.Empty>
-            {/* Why there is nothing here is the page's to say: a session that cannot stream never
-                fills this space, and "the next turn appears here" would be a promise. */}
-            <p className={`mt-6 text-sm ${textMutedOnCanvas}`} data-testid="agent-thread-empty">
-              {empty}
-            </p>
-          </ThreadPrimitive.Empty>
-          <ThreadPrimitive.Messages components={{ AssistantMessage, UserMessage }} />
-        </ThreadPrimitive.Viewport>
+        {/* `relative` for the control below, which is the viewport's sibling and out of flow, so
+            it changes neither `scrollHeight` nor `scrollTop`, the composer does not move, and it
+            can never cover the composer's controls. */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          {/* `mt-3`: the scroller clips a turn at its top edge, and without a gap that clipped
+              line sat against the page's note above it and read as overlapping text. `pl-1`
+              matches `pr-1` for the same reason on the left: a turn's numbered list hangs its
+              marker outside the list's content box, and the scroller clipped its first digit.
+
+              All four of assistant-ui's auto-scroll options are off and `useLiveFollow` does
+              every scroll this view makes: with them off the library plants no scroll intent and
+              performs none. Its own `thread.runStart` handler scrolls to the bottom without
+              asking where the reader is, which is this view's whole complaint; its scroll-up
+              detector requires `scrollHeight` to be unchanged, so it never notices a reader who
+              scrolls back while a turn streams; and the flag it would then keep is internal, so
+              nothing outside the library can clear it.
+
+              `[overflow-anchor:none]` (the sidebar's precedent in `app.tsx`) leaves the hook's
+              own compensation the only one there is: the browser's anchoring would adjust a
+              rebuild a frame after the hook already had, hiding that compensation and arriving
+              as a scroll event nothing can tell from the reader's own. */}
+          <ThreadPrimitive.Viewport
+            autoScroll={false}
+            className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 pl-1 [overflow-anchor:none]"
+            data-testid="agent-thread"
+            ref={setViewport}
+            scrollToBottomOnInitialize={false}
+            scrollToBottomOnRunStart={false}
+            scrollToBottomOnThreadSwitch={false}
+          >
+            {/* One wrapper around everything the viewport scrolls: the hook's `ResizeObserver`
+                measures the viewport's first element child as the transcript's height. */}
+            <div>
+              <ThreadPrimitive.Empty>
+                {/* Why there is nothing here is the page's to say: a session that cannot stream
+                    never fills this space, and "the next turn appears here" would be a
+                    promise. */}
+                <p className={`mt-6 text-sm ${textMutedOnCanvas}`} data-testid="agent-thread-empty">
+                  {empty}
+                </p>
+              </ThreadPrimitive.Empty>
+              <ThreadPrimitive.Messages components={{ AssistantMessage, UserMessage }} />
+            </div>
+          </ThreadPrimitive.Viewport>
+          {follow.atEnd ? null : (
+            <button
+              className={`absolute bottom-3 left-1/2 z-10 min-h-11 -translate-x-1/2 rounded-full px-4 text-sm font-semibold whitespace-nowrap shadow-lg ${primaryButtonBg} ${primaryButtonHoverBg}`}
+              data-testid="jump-to-latest"
+              onClick={follow.jumpToEnd}
+              type="button"
+            >
+              Jump to latest{follow.newCount === 0 ? "" : ` · ${follow.newCount} new`}
+            </button>
+          )}
+        </div>
       </ErrorBoundary>
       {/* The trigger root always wraps the composer, so commands arriving or going never
           remounts the input under the person's caret. */}

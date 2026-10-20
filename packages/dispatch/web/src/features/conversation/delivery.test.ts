@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 
 import {
+  broadcastDelivery,
   type DeliveryOutcome,
   duplicateText,
   isSafeRetry,
-  receiptAnsweredWithError,
+  plainDelivery,
   rowAnsweredWithError,
   safeRetryGuidance,
   strandedRetryGuidance,
@@ -69,19 +70,6 @@ test("a row reads as answered with an error only when a send that reached the li
   expect(rowAnsweredWithError({ state: "sent", envelope_id: "envelope-1" })).toBe(false);
 });
 
-// The session's error reply appends the receipt as that session. A receipt appended by whoever
-// sent the attempt, a person or another session, is Dispatch recording the send's own failure.
-test("a receipt reads as answered with an error only when the attempt's own session failed it", () => {
-  const receipt = (actor: { kind: string; id: string }, state = "failed") => ({
-    actor,
-    payload: { state, session_id: "s1" },
-  });
-  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }))).toBe(true);
-  expect(receiptAnsweredWithError(receipt({ kind: "user", id: "alice" }))).toBe(false);
-  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "sender" }))).toBe(false);
-  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }, "sent"))).toBe(false);
-});
-
 // The browser's clock is not the server's. `createdAt` is Postgres-stamped and `now` defaults to
 // Date.now(), so a client running behind the server sees a NEGATIVE age on an attempt that just
 // failed. Since this predicate gates whether the same-mode Retry renders at all, treating that
@@ -139,4 +127,32 @@ test("every single-delivery promise names the restart it does not survive", () =
   ]) {
     expect(promise).toContain("unless the session restarted since it was sent");
   }
+});
+
+test("a plain message is a Send unless every addressed session takes Aside and one refuses Send", () => {
+  const omp = ["aside", "btw", "steer"];
+  const claude = ["aside"];
+  expect(plainDelivery([])).toBe("steer");
+  expect(plainDelivery([omp])).toBe("steer");
+  expect(plainDelivery([claude])).toBe("aside");
+  expect(plainDelivery([omp, claude])).toBe("aside");
+  // BTW is never picked for the reader, and a session with no mode takes none, so it decides
+  // nothing for the rest; alone, it leaves Send to be warned about.
+  expect(plainDelivery([["btw"]])).toBe("steer");
+  expect(plainDelivery([claude, []])).toBe("aside");
+  expect(plainDelivery([[]])).toBe("steer");
+});
+
+test("a broadcast is a BTW unless every selected session takes Aside and one refuses BTW", () => {
+  const omp = ["aside", "btw", "steer"];
+  const claude = ["aside"];
+  expect(broadcastDelivery([])).toBe("btw");
+  expect(broadcastDelivery([omp])).toBe("btw");
+  expect(broadcastDelivery([claude])).toBe("aside");
+  expect(broadcastDelivery([omp, claude])).toBe("aside");
+  // A session with no mode decides nothing for the rest; one that takes neither leaves BTW, which
+  // the composer names as leaving it out.
+  expect(broadcastDelivery([claude, []])).toBe("aside");
+  expect(broadcastDelivery([[]])).toBe("btw");
+  expect(broadcastDelivery([claude, ["steer"]])).toBe("btw");
 });

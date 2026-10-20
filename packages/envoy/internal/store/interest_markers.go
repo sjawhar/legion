@@ -82,12 +82,19 @@ type interestPass struct {
 // context js answers at each pass: a replaced NATS connection reassigns it, so a cached one would
 // send the purge on a connection the scan did not read. The listener starts it after the interest
 // cache's first warm-up, so the first pass -- the one that streams every marker in the bucket -- is
-// off the readiness path.
-func (r *Registry) StartInterestMarkerCollector(js func() nats.JetStreamContext, interval time.Duration) {
-	go (&interestMarkerCollector{registry: r, interval: interval, log: r.logger()}).run(js)
+// off the readiness path. It runs until ctx ends, and the channel it returns is closed once it has
+// returned: a pass in flight when ctx ends finishes first, since its scan's watcher is a consumer
+// nats.go creates and deletes, and the listener's shutdown waits for it before it drains NATS.
+func (r *Registry) StartInterestMarkerCollector(ctx context.Context, js func() nats.JetStreamContext, interval time.Duration) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		(&interestMarkerCollector{registry: r, interval: interval, log: r.logger()}).run(ctx, js)
+	}()
+	return done
 }
 
-func (c *interestMarkerCollector) run(js func() nats.JetStreamContext) {
+func (c *interestMarkerCollector) run(ctx context.Context, js func() nats.JetStreamContext) {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 	for {
@@ -95,7 +102,15 @@ func (c *interestMarkerCollector) run(js func() nats.JetStreamContext) {
 		// keeps refusing, which says so once per process. A failed pass changes nothing, and the
 		// next tick reads the bucket again.
 		_, _ = c.pass(js(), nil)
-		<-ticker.C
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		// A tick and the end can both be ready, and select picks either.
+		if ctx.Err() != nil {
+			return
+		}
 	}
 }
 

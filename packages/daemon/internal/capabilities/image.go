@@ -244,7 +244,7 @@ func pluginEnabled(lock, name string) (string, bool) {
 // toolchain: the generic toolchain on PATH, and `go version` running, since Go is the one of them
 // whose own toolchain download or GOTOOLCHAIN setting can make a present binary fail to run. flock
 // is on the list because the install Legion renders for an installing launch serialises on the
-// issue's shared bun install cache with it (installScript,
+// issue's shared bun install cache with it (installBlock,
 // packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
 // fails every installing launch.
 func toolchain(ctx context.Context, img Image) (string, bool) {

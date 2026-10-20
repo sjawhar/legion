@@ -6,9 +6,8 @@ import { useLocation } from "react-router-dom";
 import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
-import type { UserState } from "../../api/types";
+import type { Ask, UserState } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
-import { isRetractedAsk } from "../conversation/conversation-model";
 import { useHeldSend, useHeldSends, useHeldSendsUnder } from "../conversation/held-sends";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { eventItemId, stateForIssue } from "../issue/pins";
@@ -40,6 +39,12 @@ import {
   useMarginOwner,
 } from "./useMarginItems";
 import { useMarginListeners } from "./useMarginListeners";
+
+/** A retracted ask was withdrawn by its asker: history, not a decision to read, so the margin
+ *  folds it away with the resolved threads until a reader asks for them. */
+function isRetractedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
+  return ask.state === "resolved" && ask.resolution?.kind === "retracted";
+}
 
 /** The margin item a focus request names, once the request's mark has an item. */
 function focusedItemFor(
@@ -158,12 +163,12 @@ export function useMarginSheet(): MarginSheetModel {
         : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug)
       : documentArtifact.data;
   const visibleArtifactId = visibleArtifact?.id;
-  const unpin = useCallback(
-    (eventId: number) => {
+  const removePin = useCallback(
+    (id: string) => {
       if (owner?.kind !== "issue") {
         return;
       }
-      const operation = { id: eventItemId({ id: eventId }), op: "unpin" as const };
+      const operation = { id, op: "unpin" as const };
       queryClient.setQueryData<UserState>(["user-state"], (current) => {
         const issueState = stateForIssue(current, owner.key);
         return {
@@ -191,6 +196,10 @@ export function useMarginSheet(): MarginSheetModel {
     },
     [owner, queryClient]
   );
+  const unpin = useCallback(
+    (eventId: number) => removePin(eventItemId({ id: eventId })),
+    [removePin]
+  );
   const {
     actionFailure,
     answeredAsksPending,
@@ -205,6 +214,7 @@ export function useMarginSheet(): MarginSheetModel {
     pendingActionIds,
     openAskCount,
     pinned,
+    pinnedConversations,
     pinnedIds,
     resolvedThreads,
     retryAnsweredAsk,
@@ -592,6 +602,7 @@ export function useMarginSheet(): MarginSheetModel {
       onComposerKindChange: retypeCompose,
       onEdit,
       onUnpin: unpin,
+      onUnpinConversation: removePin,
       onRetryAction: retryItem,
       onRetryAnsweredAsk: retryAnsweredAsk,
       onRetryComments: retryComments,
@@ -617,6 +628,7 @@ export function useMarginSheet(): MarginSheetModel {
       openAskCount,
       pendingActionIds,
       pinned,
+      pinnedConversations,
       pinnedIds,
       resolvedThreads,
       retractedAskCount,

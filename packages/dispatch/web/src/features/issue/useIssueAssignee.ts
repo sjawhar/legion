@@ -19,9 +19,9 @@ export interface IssueAssigneeWrite {
 /**
  * The one way the SPA writes an issue's assignee. The issue header's picker and the inbox's
  * "Assign to me" share this: the new login lands optimistically in the issue detail, every
- * project issue list and every inbox row that belongs to the issue (so the row moves between
- * the inbox's Mine and Unassigned partitions at once), rolls back on failure, and the lists
- * refetch once the server has answered (see `useIssueFieldWrite`).
+ * project issue list and every inbox row that belongs to the issue (so a row the Inbox's
+ * assignee filter judges by that login moves in or out of the list at once), rolls back on
+ * failure, and the lists refetch once the server has answered (see `useIssueFieldWrite`).
  */
 export function useIssueAssignee(issueKey: string): IssueAssigneeWrite {
   const queryClient = useQueryClient();

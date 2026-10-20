@@ -18,9 +18,10 @@ import (
 // after one is still ordered. A restart loses the server's ephemeral consumers, each KV watcher's
 // ordered consumer among them. nats.go replaces a lost ordered consumer only once it notices the
 // missed heartbeats, up to twenty seconds later, so a watcher the reconnect does not replace keeps
-// serving the cache it had while another listener's subscriptions go unseen, and a drain in that
-// window deletes a consumer the server no longer has, which the bus reports at WARN because the
-// consumer is gone either way (LEGION-278). Every ERROR line fails the test.
+// serving the cache it had while another listener's subscriptions go unseen, and a shutdown in
+// that window deletes a consumer the server no longer has, which the watcher's end reports at WARN
+// because the consumer is gone either way (kvwatch.Watcher.End, LEGION-278). Every ERROR line
+// fails the test.
 func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "restart-test")

@@ -610,3 +610,35 @@ func TestIssueRunsElsewhereNamesOnlyAClaimOfAnotherTreeThatHoldsAProcess(t *test
 		t.Fatalf("only another issue's claim runs: IssueRunsElsewhere = %q, want none", got)
 	}
 }
+
+// ClaimUnretired is true for a stored claim in every state but retired, the set the orphan sweep
+// is told of (the daemon's knownClaims), and false for a retired claim and for a token no claim
+// holds.
+func TestClaimUnretiredIsEveryStoredStateButRetired(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	controller := tmuxClaim(claim.ControllerToken("legion"))
+	controller.Tree, controller.Issue, controller.Role, controller.Locator = "", "", claim.RoleController, nil
+	unretired := func() bool {
+		t.Helper()
+		got, err := store.ClaimUnretired(ctx, controller.Token)
+		if err != nil {
+			t.Fatalf("ClaimUnretired(%s): %v", controller.Token, err)
+		}
+		return got
+	}
+	if unretired() {
+		t.Fatalf("ClaimUnretired(%s) with no claim stored = true, want false", controller.Token)
+	}
+	for _, state := range []supervise.ClaimState{supervise.StateQueued, supervise.StateLaunchUncertain, supervise.StateLaunching,
+		supervise.StateShimConnected, supervise.StateRegistered, supervise.StateReady, supervise.StateWorking, supervise.StateIdle,
+		supervise.StateSuspended, supervise.StateFailed, supervise.StateRetired} {
+		controller.State = state
+		if err := store.PutClaim(ctx, controller); err != nil {
+			t.Fatalf("put %s %s: %v", controller.Token, state, err)
+		}
+		if got, want := unretired(), state != supervise.StateRetired; got != want {
+			t.Errorf("ClaimUnretired of a %s claim = %t, want %t", state, got, want)
+		}
+	}
+}
