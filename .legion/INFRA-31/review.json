@@ -2,75 +2,65 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-20T14:38:00Z",
+  "completed": "2026-10-20T16:12:00Z",
   "decision": "changes_requested",
-  "round": 2,
+  "round": 3,
   "previousRound": {
-    "head": "06cb389aaec07bb74619ea4b64b0f565e5da54ca",
+    "head": "013c90e4fc3a6c43a9bec4c5d6d1af5f506e67d3",
     "decision": "changes_requested",
-    "findings": 5,
-    "outcome": "All five fixed at this head and each verified here, not taken from the reply. The EnsureScratch mutation was run: cutting podsafety.EnsureScratch(environ) from worker_shim.go:98-100 turns TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore red (`a pod: exit 8, want 7`, the message naming the state-home directory and .../a-pod/scratch/TMPDIR, the diagnostic listing all six told directories absent); restored, green, with jj status clean. The other four read at this head: operatorpod.go:135's row now names workspace-init; the issue_volume paragraph lists what the volume holds and carries the no-pruning and lost-alarm facts; xdgEnvironment's callers are named singly in all five places; the body carries ## Contract change census with both searches and three checks beyond what I handed over. My five threads each carry my own reply."
+    "findings": 6,
+    "outcome": "All six fixed at this head and every one verified here rather than taken from the replies. The fence mutation was run: with GOCACHE and GOMODCACHE removed from podsafety.ScratchVariables, TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes now fails naming both ('the runtime tells the role GOCACHE=\"/legion/go/build\" on the issue's volume; the shim makes [TMPDIR XDG_CACHE_HOME XDG_DATA_HOME BUN_INSTALL_CACHE_DIR] ...'), where the scratchRoot-keyed version passed; restored, green, jj status clean. The exemption list was checked for completeness rather than plausibility: a throwaway render printing every variable whose value is under /legion gives exactly ten — the six on the shim's list, XDG_STATE_HOME, and the three theirOwn names — so the fence is now exhaustive over the volume. The figures: grep for '297 MB|192 MB' over docs/ and packages/ is empty and both sites carry 751/375 with the scope stated. grep for 'forty-two' is empty; podsafety.go's thirty-two recomputes (5 x 6 + 2). The corrected bun premise is in all four places and grep for \"two roles' checkouts|share nothing but the pod\" is empty. names.go's sibling list checks out against the code. checkPodBaseline's TMPDIR is in want and compared by the sorted loop before the test -d, which is stronger than what it replaced. Each of my six threads carries my own reply."
   },
   "critical": 0,
-  "important": 3,
-  "minor": 3,
+  "important": 1,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:1197",
-      "description": "The Go cache figures in the sentence an operator sizes issue_volume from are wrong by about 2.5x, and the same document contradicts them 600 lines later. :1197 and :1819-1820 give the Go build cache as 297 MB and the module cache as 192 MB 'for this repository'; :1801, this branch's own recorded live proof, gives 751 MB and 375 MB. Measured by me at this head in this issue's reviewer container, into an empty pair at /legion/scratch/reviewer/goproof/{build,mod} with GOCACHE and GOMODCACHE exported there: `cd packages/daemon && go build ./...` exits 0 in 114 s and `du -sh` answers 752M build, 375M module. That is one Go module of two — packages/envoy is not in it — and no test has been run. The 297/192 pair came from a different repository. The sizing sentence exists to stop a full disk and the human's open ask 0983e1d7 is read from it, so the wrong figure is a defect of this change: the change is what put the sentence in its current form."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/names.go:39",
-      "description": "names.go, the canonical pod-paths comment for the issue volume's layout, still says each role's scratch holds 'its temporary directory, its cache, data and state homes, the two Go caches and bun's install cache (roleEnvironment)'. The push that moved the Go pair to /legion/go did not touch this file, so the one block a reader goes to for the volume's layout now contradicts manifest.go:719-731 and manifest_test.go on the only point this push changed, and /legion/go — a new top-level directory of that volume — is named nowhere in it. The same class, smaller: scripts/e2e/README.md's `pod-baseline` row enumerates what checkPodBaseline asserts and was updated for the new state-home path, but not for the TMPDIR assertion the same push added to that function (the file's only TMPDIR mention is at line 215, TMUX_TMPDIR in an unrelated row)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/manifest.go:701",
-      "description": "The two sentences a future reader uses to decide whether a new value goes per role or per issue are both false. roleScratch's doc says the split is 'one per role, since the role containers of an issue pod share nothing but the pod' — they share the workspace path, the in-memory config home, uv's cache and Pythons, and, as of this push, the Go pair. And manifest.go:788-790, repeated at manifest_test.go:612-614 and in docs/kubernetes.md, says bun's cache stays per role because 'one cache shared between two roles' checkouts is the cross-checkout corruption --backend=copyfile and the cache per role exist to bound (LEGION-198)': there are no two checkouts per issue. workspace.Location(stateDir, repository, issue) (internal/workspace/provision.go:151) has no role component and every role of an issue works one clone, so the per-role split bounds the number of caches, not the corruption — all six roles install into one node_modules. This is a wording finding, not a reopening of the human's open ask 964174d5: the decision is his, but its premise as written in the code is wrong, and the ask's own 'for that one role, on that one issue' rests on the same premise (reported to the architect, whose text that is)."
+      "file": "packages/daemon/internal/api/version.go:257",
+      "description": "This round corrected the measured Go cache pair everywhere but left the number derived from the old pair unchanged, in five places. 'Six copies of identical content would be about 5.5 GB of a 20 GiB volume' sits two sentences from the measurement that disproves it: the pair is 751 MB + 375 MB = 1.126 GB, so six copies are about 6.8 GB and 5.5 GB is the five redundant copies that sharing avoids. Four of the five sites state it as the size of six with no qualifier — api/version.go:257 (the shipped contract-33 entry), docs/kubernetes.md:1800, manifest_test.go:659 and packages/pi-legion/CHANGELOG.md:90 (published). The fifth, manifest.go:790, ends 'spent on nothing', which makes it the saving and so defensible. This is the only quantitative justification for making the Go caches issue-shared, and it is wrong against the figure printed beside it; two of the four carrying sites are permanent published records. The fix is 'five redundant copies, about 5.6 GB' (or 'six copies, about 6.8 GB') in the four."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/manifest_test.go:706",
-      "description": "The reformulated drift fence's opening sentence claims more than the test proves. 'Every directory the runtime tells a role to write in is one the shim makes, and every directory the shim makes is one the runtime names' — the reverse direction is keyed on scratchRoot (manifest_test.go:719), so an issue-shared directory added to roleEnvironment beside the Go pair and not to podsafety.ScratchVariables renders green, which is the shape this push itself introduced. I ran the other mutation to bound the claim: dropping GOCACHE and GOMODCACHE from ScratchVariables IS caught — TestEnsureScratchMakesEveryDirectoryTheRoleIsToldToWriteUnder fails while ./internal/runtime/sandbox/ and ./cmd/legion/ both stay green — so the fence has not regressed for the old axis, only failed to grow for the new one. Narrow the sentence to what the test proves, or key the reverse check on TreeRoot minus the paths the runtime names explicitly."
+      "file": "docs/kubernetes.md:1801",
+      "description": "The concurrency proof reads as a self-contradiction this round's own push created. ':1801-1803 says the live proof was two `go build ./...` at once against one empty shared pair, both exit 0 in 227 s, 'filling 751 MB of build cache and 375 MB of module cache'; :1803-1806 then says 'What those figures measure, here and in the sizing above, is one build: a cold `cd packages/daemon && go build ./...` into an empty pair'. Both are true of the same run and the reconciliation is the point the paragraph is making — two concurrent builds of one module leave one build's worth of content in the shared pair, which is what makes sharing safe and cheap — but the paragraph never says it, so a reader meets 'two builds at once' and 'is one build' in adjacent clauses with nothing joining them. One clause fixes it."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/live_operator_test.go:202",
-      "description": "checkPodBaseline's new TMPDIR assertion, the live half of my round-one finding, is weaker than the mechanism two lines above it. It reads agent[\"TMPDIR\"], refuses only when it is empty, and runs `test -d` on it; it never compares the value. The regression it exists to catch — the runtime no longer setting TMPDIR, so the agent falls back to the image's /tmp — passes both checks. The `want` map at :175-179 already pins XDG_STATE_HOME to roleStateHome(claim.RoleArchitect) and is compared by the loop at :185-190: `want[\"TMPDIR\"] = roleScratch(claim.RoleArchitect) + \"/tmp\"` is one line there and strictly stronger, leaving only the `test -d` existence check in the shape the profileDir block already uses."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/shim/socketpath_test.go:44",
-      "description": "Two stale statements the same push falsified. socketpath_test.go:44-45 says 'cmd/legion answers the same break with a socket directory rooted at /tmp (socketDir, worker_shim_test.go); this package's socketPath does not' — shim_test.go:395 now does exactly that, so a reader of internal/shim is told the package still binds under TMPDIR and will re-derive the sun_path analysis or fix it twice. And podsafety.go:209's rejected-alternative argument counts 'forty-two mount entries' for a subPath mount per directory, which was 7 x 6 roles before this push and is 5 per-role x 6 plus 2 shared = 32 now; the number is the whole weight of that paragraph."
+      "file": "packages/daemon/internal/api/version.go:257",
+      "description": "The pull request body's `Why:` line still motivates the change with 'Go build cache 297 MB, Go module cache 192 MB' — the pair this round removed from the tree. The tester's closing check was scoped `grep -rn '297 MB|192 MB' docs/ packages/`, which cannot see the body. The body is what the merger quotes and what the next reader of this change meets first, so it should not carry the figure the change itself disproved by 2.5x. A body edit changes no commit, so this one costs nothing and voids nothing; `Size:` wants refreshing with it. (My own two lines, `Look at first` and `Not proven / risk`, I have already brought up to this head.)"
     }
   ],
   "ci": {
     "verdict": "green at the code head",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "4a4c8d021c1dc7adb7d386c8029511c38b3b7fd6",
-    "read": "The branch's newest pull_request run is at 4a4c8d021c1d, and every required name there is completed and success, with every other lane success and attest/deploy skipped. gh api compare 4a4c8d021c1d...8b7c674f671c prints true for all paths under .legion/, so those checks stand for the code reviewed."
+    "ciHead": "59cdb2ae794c9aacb5bb1197f9be89c98199e783",
+    "read": "Read with per_page=100 and --paginate, since these commits carry 39 check runs and the default page of 30 drops some of them. At 59cdb2ae all four required names are completed and success, with every other lane success, attest and deploy skipped and the non-required `dispatch` lane in progress. gh api compare 59cdb2ae...a3e8a84b prints true for all paths under .legion/, so those checks stand for the code reviewed. The code commit 90ac258e4de0 has no run of its own because the code and the handoff were pushed together; the head that merges is the one that was judged."
   },
   "thermonuclear": {
-    "ranAt": "8b7c674f671c4b2ae5b9df0f0ac83a3e4eb10845",
-    "deepReview": "5 findings: the PVC-sizing High and the bun-hardlink Medium both already disclosed and both the human's open asks, plus three Low new to this push (the drift fence's narrowed reverse direction, roleScratch's false justification, socketpath_test's stale sentence). Explicitly clean on the question the architect set: no text anywhere in the diff claims Go documents the module cache as concurrency-safe — every occurrence scopes the `go help cache` quote to the build cache and argues the module cache from content-addressing and go help module-auth instead. Also clean: nothing that needs per-role isolation was pooled with the Go caches, the operator mount fence still covers /legion/go and /legion/scratch, no path collisions on the volume, the contract bump is consistent, tmux and probe-image are untouched, and the goldens are correctly byte-identical.",
-    "codeQuality": "12 findings. Carried: the names.go staleness, the manifest_test.go:706 overclaim, the live_operator_test weakness, the socketpath_test and podsafety.go:209 stale text, the e2e README row. Not carried: its two blockers. The first (manifest.go crossing 1000 lines, with an obvious scratch.go extraction) is real but structural and nothing in the repository sets that threshold — it is the round's one Fast-follow. The second claimed the whole suite stays green when GOCACHE/GOMODCACHE are dropped from ScratchVariables; I ran that mutation and it is false, podsafety_test catches it. Its test-shape findings (the generated check script's overloaded $4, roleTempDir's length arithmetic, the four socket helpers) are style within a defensible range and belong in the same fast-follow."
+    "ranAt": "a3e8a84ba9cd9c5461c58bbf52427657e21b6c28",
+    "deepReview": "Verified each of the six round-3 corrections against the code it describes and found all six true. Four findings, of which I carried two: the 5.5 GB arithmetic and the body's stale Why line. Not carried: that the sizing sentence uses the build-only pair while the human's decision block 0983e1d7 uses the build-and-test pair — that split is the architect's deliberate one and he owns the human-facing number, so it is reported to him and is not a defect of the diff; and that the fence's reverse walk renders one spec rather than every role, which has no gap today since no kind-specific value names a path under /legion (I enumerated them) and is fast-follow. Re-confirmed clean: no module-cache concurrency overclaim, nothing needing isolation pooled, the mount fence covering /legion/go and /legion/scratch, no path collisions, contract 33 consistent, tmux and probe-image unaffected, goldens correctly unchanged, shim ordering safe.",
+    "codeQuality": "Five findings, two carried (the docs paragraph's contradiction, and the 5.5 GB figure as part of the same documentation-of-record problem). Not carried: the bun reasoning now in four hand-maintained copies and the theirOwn triple written three times in manifest_test.go — both are duplication this round's corrections created, both are fast-follow with the scratch.go extraction that would give them one home; manifest.go at 1034 lines, already the agreed carried item; and live_operator_test.go's `tmp := want[\"TMPDIR\"]` reading back out of a map the operator's pod env overwrites, which is correct only because TMPDIR is in runtimeOwned — true, enforced, and a one-line legibility nit rather than a defect."
   },
   "threads": {
-    "roundOne": 5,
+    "roundTwo": 6,
     "allAnsweredAndResolvedByImplementer": true,
-    "reviewerRepliesPosted": [4326045378, 4326045624, 4326045875, 4326046103, 4326046435],
+    "reviewerRepliesPosted": [4327092268, 4327092580, 4327092928, 4327093194, 4327093428, 4327093689],
     "botThreads": 0,
-    "note": "Each of my five round-one threads carries my own disposition reply at this head: four accepted and closed, the issue_volume one accepted in structure with the figure reopened as a new finding. No bot opened a thread on this pull request, so there is none for me to adjudicate and none to name to the implementer for resolution."
+    "note": "All six round-2 threads carry my own disposition reply at this head: five accepted and closed, the docs/kubernetes.md one accepted for the figure with the derived arithmetic opened as a new finding. No bot has opened a thread on this pull request, so there is none to adjudicate and none to name to the implementer for resolution."
   },
-  "humanDecisionsRead": [
-    "dispatch://INFRA-31 ask 964174d5 — bun's hardlink. Read again at this head; still the human's, still not a finding against the diff. What I add is the blast radius: the roles share one checkout, so the per-role cache bounds the count and not the corruption. The architect owns the ask's text.",
-    "dispatch://INFRA-31 ask 0983e1d7 — the 20 GiB volume. Read; the architect has put the measured figures in it. I write no second set of numbers for the human: my measurement is in the finding above for the repository's documentation, which is the operator-facing copy."
+  "closingRound": {
+    "standard": "The architect set round three as a closing round: approve when the round-2 findings are answered and what remains is of the fast-follow class, and let a new finding earn the round only if it is a defect of this change — something incorrect, something the change broke, or a statement in the diff that is false.",
+    "applied": "The round-2 findings are all answered and verified. The 5.5 GB arithmetic is a statement in the diff that is false, by that bar as written, so it earns the round; it is four one-line edits and nothing in it touches behaviour. The two minors travel with it at no extra cost. Everything else I found is fast-follow and is named as such. The next head gets an approval on these three alone: there is nothing else outstanding, the mechanism has been checked three times and cleared three times, and I have told the architect so."
+  },
+  "fastFollow": [
+    "The scratch.go extraction from manifest.go (1034 lines), taking the three scratch tests with it and giving the corrected bun reasoning and the theirOwn exemption triple one home each instead of four and three copies.",
+    "One internal/testsock replacing the four short-socket helpers (cmd/legion socketDir, internal/shim socketPath, internal/daemon shortTempDir, internal/stream shortSocketPath), and internal/shimwire/writer_test.go:23, the third copy of the problem, measured at 103 bytes against sun_path's 107 and still ok at this head.",
+    "The drift fence's reverse walk over every role rather than one rendered spec: no gap today, since the enumeration shows no kind-specific value names a path under /legion, but the fence's promise is proven for one role."
   ],
   "verifiedOnGitHub": [
     "E2E (implementer) and E2E (tester) both present at this head",
-    "CI read from the forge in four reads, not from a handoff",
-    "Review threads and their replies read in gh api graphql and the comments API, not from the body's Threads section"
+    "CI read from the forge with per_page=100, not from a handoff",
+    "Review threads and replies read in gh api graphql and the comments API, not from the body's Threads section"
   ]
 }
