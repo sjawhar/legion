@@ -79,16 +79,22 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   - `request_backward_move` checks `to` (a backward target) and `reason` before it mints a grant,
     so a refused call mints none; a blank or non-string `to` is refused as `requires to`, and any
     other value outside the backward targets as `request_backward_move's to is one of …`.
-- Daemon API contract 33 (INFRA-31): under the Kubernetes runtime every role container of a pod,
-  a workflow role's and the project controller's, is told a scratch directory of its own on the
-  issue's volume, `/legion/scratch/<role>`, and the values naming where it writes what nothing
-  told it where to put now point onto that volume: `XDG_CACHE_HOME`, `XDG_DATA_HOME` and
-  `XDG_STATE_HOME` (whose `/home/legion/.local/state/<role>` contract 18 declared) move under the
-  role's own scratch, and `TMPDIR` and `BUN_INSTALL_CACHE_DIR` join them there, while `GOCACHE`
-  and `GOMODCACHE` are one pair shared by the issue's roles beside uv's cache, `/legion/go/build`
-  and `/legion/go/mod` — both hold content addressed by its hash, and a pair is 751 MiB of build
-  cache and 375 MiB of module cache for this repository, so the five redundant copies would be
-  about 5.5 GiB of a 20 GiB volume spent on nothing. The four new names are the runtime's own and
+- Daemon API contract 33 (INFRA-31): under the Kubernetes runtime the roles of an issue share one
+  scratch on the issue's volume, and every role container of a pod, a workflow role's and the
+  project controller's, is told the same four directories of it —
+  `TMPDIR=/legion/scratch/tmp`, `XDG_CACHE_HOME=/legion/scratch/cache`,
+  `XDG_DATA_HOME=/legion/scratch/data` and
+  `BUN_INSTALL_CACHE_DIR=/legion/scratch/bun/install/cache` — so the values naming where a role
+  writes what nothing told it where to put all point onto that volume rather than at the
+  container's own filesystem. `GOCACHE` and `GOMODCACHE` stay the issue's one pair beside uv's
+  cache, `/legion/go/build` and `/legion/go/mod`. `XDG_STATE_HOME` (whose
+  `/home/legion/.local/state/<role>` contract 18 declared) is the one per-role directory and is
+  now `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock from the state
+  root, the name is an abstract unix socket, and an abstract socket name is one name across every
+  container of a pod, so one state home would block every role's broker but the first. A shared
+  cache costs nothing the pod does not already share, and a pair of Go caches is 751 MiB of build
+  cache and 375 MiB of module cache for this repository, so six per-role copies would have been
+  five redundant ones, about 5.5 GiB. The four new names are the runtime's own and
   a spec or an operator's pod env is refused for setting them. `XDG_CONFIG_HOME` is
   unchanged, the pod's shared in-memory volume, and `workspace-init`, the one init container told
   any XDG home, keeps every value it had. A role container is admitted with about a gigabyte of

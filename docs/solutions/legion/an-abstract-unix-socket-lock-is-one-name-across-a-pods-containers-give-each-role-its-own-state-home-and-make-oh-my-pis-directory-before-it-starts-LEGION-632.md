@@ -28,7 +28,7 @@ related_issues:
   `broker.sock` sits unreachable on the first container's filesystem.
 - Isolate by changing what the name is derived from, not by separating filesystems: each role's
   agent is told a state home of its own, which was `XDG_STATE_HOME=/home/legion/.local/state/<role>`
-  here and is `/legion/scratch/<role>/state` since the per-role scratch moved onto the issue's
+  here and is `/legion/scratch/state/<role>` since the issue's scratch moved onto the issue's
   volume (`roleStateHome`, `packages/daemon/internal/runtime/sandbox/manifest.go`); either way it is
   carried in the launcher's start command rather than the pod template, so the pod spec and its
   goldens do not change per container.
@@ -49,12 +49,12 @@ related_issues:
   was the agents' state home when this was written, so a mount at, under or above it would have
   every role's shim refuse to start naming a directory it could not make, and `CheckPod` refuses
   it when the file is read (`internal/runtime/sandbox/operatorpod.go`), naming the path and why.
-  Since the per-role scratch moved onto the issue's volume the path is `workspace-init`'s state
+  Since the scratch moved onto the issue's volume the path is `workspace-init`'s state
   home alone, and the refusal names that owner instead; the fence itself is unchanged.
 - Keep the state home off the pod's in-memory state volume: Chromium's `browser-profiles` and Oh
   My Pi's logs live under it, and an `emptyDir` in memory would charge them to the pod's memory
   reservation. It was the container's own filesystem when this was written, and is the role's own
-  scratch on the issue's volume since.
+  directory under the issue's scratch on the issue's volume since.
 
 ## Evidence
 

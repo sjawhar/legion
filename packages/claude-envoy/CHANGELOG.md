@@ -51,11 +51,15 @@
 ### Changed
 
 - The plugin declares daemon API contract 33 in `package.json`'s `legion.daemonApiVersion`
-  (INFRA-31): under the Kubernetes runtime the daemon now tells every role container of a pod a
-  scratch directory of its own on the issue's volume, `/legion/scratch/<role>`, and names its
-  temporary directory, its cache, data and state homes and its bun install cache under it, with
-  the Go build and module caches one pair on that volume shared by the issue's roles, where
-  the container's own gigabyte of ephemeral storage no longer bounds them. Nothing this plugin
+  (INFRA-31): under the Kubernetes runtime the roles of an issue now share one scratch on the
+  issue's volume, and the daemon tells every role container of a pod the same temporary directory,
+  cache home, data home and bun install cache under it (`/legion/scratch/tmp`,
+  `/legion/scratch/cache`, `/legion/scratch/data` and `/legion/scratch/bun/install/cache`), with
+  the Go build and module caches the pair on that volume they already were, where
+  the container's own gigabyte of ephemeral storage no longer bounds them. The state home is the
+  one directory a role keeps to itself, `/legion/scratch/state/<role>`, since Oh My Pi's browser
+  broker lock is an abstract unix socket named from the state root and such a name is one across
+  every container of a pod. Nothing this plugin
   reads or writes moved; a session of it registers with a daemon at 33.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
   an Oh My Pi session keeps; Claude Code holds none, so the tools behave as before.

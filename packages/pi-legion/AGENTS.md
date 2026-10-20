@@ -89,11 +89,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 33's per-role scratch
-directories (INFRA-31: every role container of a Kubernetes pod, a workflow role's and the
-controller's, told a scratch directory of its own on the issue's volume, `/legion/scratch/<role>`,
-with `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` moved under it and `TMPDIR`, `GOCACHE`,
-`GOMODCACHE` and `BUN_INSTALL_CACHE_DIR` beside them), after contract 32's repository cache
+number is the one `DaemonAPIVersion` declares, last bumped by contract 33's shared issue scratch
+(INFRA-31: every role container of a Kubernetes pod, a workflow role's and the
+controller's, told the issue's own `/legion/scratch/{tmp,cache,data,bun/install/cache}` through
+`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR`, beside the issue's
+`GOCACHE` and `GOMODCACHE` pair, with `XDG_STATE_HOME=/legion/scratch/state/<role>` the one
+per-role directory), after contract 32's repository cache
 (sjawhar/legion#1986: `workspace-init cache`, the issue pods' `LEGION_REPOSITORY_CACHE_URL` and
 `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, and the state's `repositories[].cache` and `caches`), after
 contract 31's issue repository on
