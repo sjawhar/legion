@@ -38268,7 +38268,7 @@ function parseDispatchRef(ref) {
       artifact: artifact2
     };
   }
-  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
+  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
   if (!issueReference)
     return null;
   const [, issue2, spec, log, children, artifact, version2, ask, comment, message] = issueReference;
