@@ -1,0 +1,242 @@
+//go:build e2e
+
+// The Stage 4a harness's runtime.kubernetes.setup checks: the shared runtime starts every
+// role through a setup command, and a setup failure prevents the agent from starting. The rig is
+// live_test.go.
+package sandbox
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/stream"
+)
+
+// setup-ran: the shared runtime's setup command records its cwd, uid, parent pid and private
+// repository credential result before the root stub agent writes its own marker. The two records
+// share the issue-volume marker: their exact order is the setup-before-agent evidence, without
+// treating the shim's hello (which precedes child spawn) as an agent start.
+func (r *liveRig) checkSetupRan() error {
+	root := r.claim("root")
+	if err := r.ensureRunning(root); err != nil {
+		return err
+	}
+
+	out, err := r.exec(root, "cat", "--", root.marker)
+	if err != nil {
+		return err
+	}
+	setupLine, setupAt, agentAt := "", -1, -1
+	agentLine := string(root.role) + ":" + root.loc.Incarnation
+	for at, line := range strings.Split(out, "\n") {
+		if line == agentLine {
+			agentAt = at
+		}
+		if strings.HasPrefix(line, "setup:"+string(root.role)+":"+root.loc.Incarnation+" ") {
+			setupLine, setupAt = line, at
+		}
+	}
+	if setupAt < 0 {
+		return fmt.Errorf("%s has no setup record for %s: %q", root.marker, root.loc.Incarnation, out)
+	}
+	if agentAt < 0 {
+		return fmt.Errorf("%s has no agent record for %s after setup: %q", root.marker, root.loc.Incarnation, out)
+	}
+	if setupAt >= agentAt {
+		return fmt.Errorf("the setup record is line %d and the agent record is line %d in %s, want setup before agent: %q", setupAt, agentAt, root.marker, out)
+	}
+	setup, err := parseSetupMarker(setupLine)
+	if err != nil {
+		return err
+	}
+	if setup.role != string(root.role) || setup.incarnation != root.loc.Incarnation {
+		return fmt.Errorf("setup record %#v, want role %s at %s", setup, root.role, root.loc.Incarnation)
+	}
+	if setup.gitFrom != "/tmp" || setup.git != "ok" {
+		return fmt.Errorf("setup record lists the private repository from %q with git=%q, want /tmp and ok", setup.gitFrom, setup.git)
+	}
+
+	pid, err := r.agentPid(root)
+	if err != nil {
+		return err
+	}
+	if setup.ppid != pid {
+		return fmt.Errorf("setup record parent pid %s, want the agent pid %s: setup must finish before that wrapper execs into the agent", setup.ppid, pid)
+	}
+	cwd, err := r.exec(root, "readlink", "/proc/"+pid+"/cwd")
+	if err != nil {
+		return err
+	}
+	if setup.cwd != cwd {
+		return fmt.Errorf("setup recorded cwd %q, want the agent's starting cwd %q", setup.cwd, cwd)
+	}
+	uid, err := r.exec(root, "sh", "-c", `sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/status"`, "uid", pid)
+	if err != nil {
+		return err
+	}
+	pod, err := r.getPod(SandboxName(root.token))
+	if err != nil {
+		return err
+	}
+	wantUID, workingDir, err := roleContainerSettings(pod, root.role)
+	if err != nil {
+		return err
+	}
+	if setup.uid != wantUID || uid != wantUID {
+		return fmt.Errorf("setup uid %q and agent uid %q, want pod %s RunAsUser %q", setup.uid, uid, root.role, wantUID)
+	}
+	if workingDir != cwd {
+		return fmt.Errorf("the %s container WorkingDir is %q, want the agent cwd %q", root.role, workingDir, cwd)
+	}
+	note("operator", "setup marker before agent marker: cwd %s; uid %s; git ls-remote from %s succeeded; setup parent pid %s became the agent", setup.cwd, setup.uid, setup.gitFrom, setup.ppid)
+	return nil
+}
+
+// setup-negative: a second runtime from the run's Options replaces setup with an argv that exits
+// 7. Its launcher resolves through the shared listener only for this throwaway Sandbox, so the
+// primary runtime's live role connections stay with their own runtime. A shim hello precedes its
+// child spawn by design; the absence of the stub marker and the launcher-reported exit prove that
+// the agent itself never started.
+func (r *liveRig) checkSetupNegative() error {
+	if err := r.startRuntimeOnce(); err != nil {
+		return err
+	}
+	c := r.claim("setup-negative")
+	r.mapRepository(r.env.repo)
+	name := SandboxName(c.token)
+	if err := r.recordSandbox(name); err != nil {
+		return err
+	}
+	cleaned := false
+	defer func() {
+		if !cleaned {
+			_, _ = r.kubectl("delete", "sandbox", name, "--ignore-not-found", "--wait=false")
+		}
+	}()
+
+	ctx, stop := context.WithCancel(r.ctx)
+	defer stop()
+	opts := r.runtimeOptions(r.streamAddress(), r.ln)
+	opts.Setup = []string{"/bin/sh", "-c", "exit 7"}
+	rt, err := New(ctx, r.rc, opts)
+	if err != nil {
+		return fmt.Errorf("a second runtime whose setup exits 7: %w", err)
+	}
+	shared := r.rt.LauncherResolver()
+	second := rt.LauncherResolver()
+	r.ln.SetLauncherResolver(func(hello shimwire.LauncherHello) (stream.LauncherHandler, string) {
+		if hello.Sandbox == name {
+			return second(hello)
+		}
+		return shared(hello)
+	})
+	defer r.ln.SetLauncherResolver(shared)
+
+	c.bootToken, c.gen = r.reg.mint(c.token, true)
+	since := time.Now()
+	loc, err := rt.Spawn(ctx, r.spec(c, ""))
+	if err != nil {
+		return fmt.Errorf("Spawn(%s) on the failing-setup runtime: %w", c.token, err)
+	}
+	c.loc, c.last = &loc, &loc
+	reg, ok := r.reg.await(c.token, c.gen, since, liveBootTimeout)
+	if !ok {
+		pod, podErr := r.getPod(name)
+		if podErr != nil {
+			return fmt.Errorf("the failing-setup shim did not register at generation %d within %s, and the pod could not be read: %w", c.gen, liveBootTimeout, podErr)
+		}
+		return r.networkPathFailure(pod)
+	}
+	if reg.hash != tokenHash(c.bootToken) {
+		return fmt.Errorf("the failing-setup shim registered token hash %s, want %s", short(reg.hash), short(tokenHash(c.bootToken)))
+	}
+
+	var last runtime.Observation
+	if err := r.poll(liveBootTimeout, "failing setup generation "+loc.Incarnation+" to end", func() (bool, error) {
+		obs, err := rt.Probe(ctx, loc)
+		if err != nil {
+			return false, err
+		}
+		last = obs
+		switch obs.Kind {
+		case runtime.Alive, runtime.Uncertain:
+			return false, nil
+		case runtime.Gone:
+			if strings.Contains(obs.Detail, "code 7") {
+				return true, nil
+			}
+			return false, fmt.Errorf("the failing setup ended %s without code 7: %s", loc.Incarnation, obs.Detail)
+		default:
+			return false, fmt.Errorf("the failing setup observed %s for %s: %s", obs.Kind, loc.Incarnation, obs.Detail)
+		}
+	}); err != nil {
+		return err
+	}
+	note("runtime", "failing setup's shim registered generation %d, then %s — %s", reg.gen, last.Kind, oneLine(last.Detail))
+
+	line := "legion setup: runtime.kubernetes.setup exited 7; not starting Oh My Pi"
+	log, err := r.kubectl("logs", name, "-c", string(c.role))
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(log, line) {
+		return fmt.Errorf("%s container log lacks %q: %s", c.role, line, strings.TrimSpace(log))
+	}
+	note("operator", "logs %s -c %s: %s", name, c.role, line)
+
+	lines, err := r.markerLines(c)
+	if err != nil {
+		return err
+	}
+	if slices.Contains(lines, string(c.role)+":"+loc.Incarnation) {
+		return fmt.Errorf("the failing setup started the agent, whose marker %s:%s is in %v", c.role, loc.Incarnation, lines)
+	}
+	note("operator", "exec cat %s: no %s:%s marker; the stub agent never started", c.marker, c.role, loc.Incarnation)
+
+	if _, err := r.kubectl("delete", "sandbox", name, "--wait=true", "--timeout=5m"); err != nil {
+		return err
+	}
+	if _, err := r.kubectl("delete", "pvc", IssueClaimName(c.token), "--ignore-not-found", "--wait=true", "--timeout=5m"); err != nil {
+		return err
+	}
+	if pvcs, err := r.issuePVCs(c.issue); err != nil || len(pvcs) != 0 {
+		return fmt.Errorf("setup-negative PVCs after Sandbox deletion: %v (%v)", pvcs, err)
+	}
+	cleaned = true
+	c.loc, c.last, c.state = nil, nil, stateReleased
+	note("operator", "deleted throwaway Sandbox %s and its PVC", name)
+	return nil
+}
+
+func roleContainerSettings(pod *corev1.Pod, role claim.Role) (uid, workingDir string, err error) {
+	var container *corev1.Container
+	for i := range pod.Spec.Containers {
+		if pod.Spec.Containers[i].Name == string(role) {
+			container = &pod.Spec.Containers[i]
+			break
+		}
+	}
+	if container == nil {
+		return "", "", fmt.Errorf("pod %s has no %s container", pod.Name, role)
+	}
+	var user *int64
+	if pod.Spec.SecurityContext != nil {
+		user = pod.Spec.SecurityContext.RunAsUser
+	}
+	if container.SecurityContext != nil && container.SecurityContext.RunAsUser != nil {
+		user = container.SecurityContext.RunAsUser
+	}
+	if user == nil {
+		return "", "", fmt.Errorf("pod %s's %s container has no RunAsUser", pod.Name, role)
+	}
+	return strconv.FormatInt(*user, 10), container.WorkingDir, nil
+}

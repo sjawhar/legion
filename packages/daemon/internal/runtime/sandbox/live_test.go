@@ -18,7 +18,8 @@
 // This file is the rig: the run's inputs, the boot-token registry, the observation and log
 // records, the runtime's lifecycle, and the launches and reads every check shares. The checks
 // live beside it: live_install_test.go (identity and install), live_lifecycle_test.go (the claims'
-// lifecycle), and live_app_test.go (the implement App the provisioning token comes from).
+// lifecycle), live_setup_test.go (runtime.kubernetes.setup), and live_app_test.go (the implement
+// App the provisioning token comes from).
 package sandbox
 
 import (
@@ -79,7 +80,8 @@ var liveChecks = []liveCheck{
 	{"resources", (*liveRig).checkResources, nil},
 	{"operator-token", (*liveRig).checkOperatorToken, nil},
 	{"pod-baseline", (*liveRig).checkPodBaseline, nil},
-	{"provider-key", (*liveRig).checkProviderKey, nil},
+	{"setup-ran", (*liveRig).checkSetupRan, nil},
+	{"setup-negative", (*liveRig).checkSetupNegative, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
 	{"worker-shares-issue-pod", (*liveRig).checkWorkerSharesIssuePod, nil},
 	{"secrets-two-roles-enrolled", (*liveRig).checkSecretsTwoRolesEnrolled, secretsBlocked},
@@ -899,6 +901,9 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		{"cache-b", cacheIssue, cacheIssue, claim.RoleArchitect},
 		// second-owner is an issue pod on the repository of the run's other owner (second-owner).
 		{"second-owner", "S4A-7", "S4A-7", claim.RoleImplementer},
+		// setup-negative is the throwaway issue the setup-negative check launches on a second
+		// runtime whose setup exits 7, then deletes.
+		{"setup-negative", "S4A-8", "S4A-8", claim.RoleArchitect},
 	} {
 		token, err := claim.NewToken(env.claimProject, c.issue, c.role)
 		if err != nil {
@@ -930,8 +935,8 @@ func sameLocator(a, b runtime.Locator) bool {
 }
 
 // runtimeOptions are the Options every runtime of the run is built from, as a daemon boot builds
-// them: the operator's pod, the run's provider key, the stub agent, and the worker stream at
-// address, through ln.
+// them: the operator's pod, the run's provider key, the stub agent, the shared setup command, and
+// the worker stream at address, through ln.
 func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 	providerKeys := map[string]string{liveProviderKey: liveProvidersSecretKey}
 	if r.env.modelRoute == "key-file" {
@@ -951,11 +956,22 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		// Stage4a drives Runtime directly to prove Kubernetes mechanics; the daemon's store is the
 		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
 		Store: r.trees,
-		Pod:   r.pod, ProviderKeys: providerKeys,
-		Agent: stubAgent, BootTimeout: liveBootTimeout, BusyBackoff: 250 * time.Millisecond,
-		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
-		Tokens: r.tokens, GitHubCredential: r.tokens.Credential, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
-		RepositoryCache: liveRepositoryCache(), Mapped: r.mappedRepositories,
+		Pod:             r.pod,
+		ProviderKeys:    providerKeys,
+		Agent:           stubAgent,
+		Setup:           liveSetup(r.env.repo),
+		BootTimeout:     liveBootTimeout,
+		BusyBackoff:     250 * time.Millisecond,
+		TerminationGrace: liveGrace,
+		ProbeInterval:   liveProbeInterval,
+		AdoptTimeout:    liveAdoptTimeout,
+		Tokens:          r.tokens,
+		GitHubCredential: r.tokens.Credential,
+		Conns:            ln,
+		Log:              r.log,
+		SessionDSNKey:    r.sessionStore,
+		RepositoryCache:  liveRepositoryCache(),
+		Mapped:           r.mappedRepositories,
 	}
 	if r.env.agentSecretsURL != "" {
 		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}
