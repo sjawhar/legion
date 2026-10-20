@@ -46,8 +46,10 @@ Extends docs/solutions/daemon/launch-hold-serve-state-spawn-nothing-until-proven
   it so: a hello is dropped and a registration refused there, since neither came from a process
   the claim records (`TestAHelloOrRegistrationAtALaunchThatRecordsNoProcessPromotesNothing`). A
   row an earlier daemon wrote live with no locator is repaired at boot: `restore` puts every such
-  claim back to `launch_uncertain` and relaunches it
-  (`TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunched`).
+  claim back to `launch_uncertain`, clears the capability, stale suspension source and enrollment
+  that required its recorded process, revokes that enrollment, and relaunches it
+  (`TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunched`;
+  `TestRunBootRepairRevokesAStaleSecretBeforeItMintsAGrant`).
 - A trigger posted once at boot needs a periodic re-post, or a refusal (a tree cleanup reserved,
   a moved epoch, a transient store error) strands the claim in the state the trigger meant to
   leave: ride `reconcileOrphans`, the one periodic pass that already reads every claim, and let
