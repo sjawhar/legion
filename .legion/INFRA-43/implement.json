@@ -2,93 +2,71 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-43",
-  "completed": "2026-10-20T09:20:00Z",
+  "completed": "2026-10-20T12:40:00Z",
+  "round": 2,
   "proof": [
     {
-      "criterion": "Scrolled back, the reader's position in the transcript is unchanged when a turn starts and while text streams into the turn being written, including a scroll-back made during the streaming.",
-      "surface": "A real browser (Playwright chromium and iphone) driving the built SPA against the real Go Dispatch server (packages/dispatch/e2e/run-server.sh, DISPATCH_TEST_HOOKS=1) and a real Postgres 17 + pgvector, all on the issue volume (/legion/harness/setup.sh, /legion/harness/env.sh).",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium -g \"keeps their place\" (and --project=iphone)",
-      "observed": "Row \"a reader scrolled back into a live session's transcript keeps their place, and Jump to latest carries what arrived\" passes on both projects: threadScrollTop stays 1200 after a finished turn is published and after three streaming snapshots of a further turn, and stays 900 when the reader scrolls back during a streaming turn and two more snapshots of it arrive.",
-      "headSha": "35c894a35010",
-      "negativeControl": "The same scenario against this branch's base, as a throwaway probe row: `PROBE scrollTop before=1200 after=2073` - today's code takes the reader 873px down to the newest text the moment a turn starts (Expected: 1200, Received: 2073)."
-    },
-    {
-      "criterion": "The control carries the number of messages that arrived since the reader scrolled back, whoever wrote them, and carries no number before any arrive.",
-      "surface": "The same browser harness.",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium -g \"keeps their place\"",
-      "observed": "The control reads \"Jump to latest\" with nothing arrived, \"Jump to latest · 1 new\" after one published turn, \"· 2 new\" after a second turn delivered as three streaming snapshots (one turn, counted once), and \"· 3 new\" after another person's Dispatch message to the session (createAgentMessage, which reaches the page through the stored-message query the event stream invalidates).",
-      "headSha": "35c894a35010",
-      "negativeControl": "Before the fix the same assertion failed with `expect(locator).toHaveText(\"Jump to latest\") failed … element(s) not found`: no control existed at all."
-    },
-    {
-      "criterion": "Tapping the control, and scrolling to the end by hand, each put the newest turn in view, clear the count, remove the control and resume following; a folded tool call the reader expands does not move them.",
-      "surface": "The same browser harness.",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium -g \"keeps their place\"",
-      "observed": "After the click the newest turn's bottom is inside the thread and above the composer, jump-to-latest has count 0, and a further published turn is followed into view; scrolling to the bottom by hand gives the same result; expanding the tool call leaves the topmost turn in view at the same id and the same offset from the thread's top edge.",
-      "headSha": "35c894a35010",
-      "negativeControl": "The expand assertion fails by 232px (the result's own height) when the fold is opened in the middle of the screen rather than at its top - measured while writing the row - so it is reading a real geometry, not a tautology."
-    },
-    {
-      "criterion": "Sending a message from the composer takes the reader to the live end; a send the session refused leaves them where they are.",
-      "surface": "The same browser harness, with the fake Envoy refusing the delivery (e2e/sends.ts refusePosts).",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium -g \"refused send\"",
-      "observed": "The accepted send puts the reader's own message at the live end with no control; the refused send leaves threadScrollTop at 1200 with agent-send-error visible above the transcript.",
-      "headSha": "35c894a35010",
-      "negativeControl": "The refusal half is the negative control of the send half: the same gesture with a 503 from /api/v1/agents/<id>/messages moves the reader nowhere."
-    },
-    {
-      "criterion": "Opening a session, switching from one session to another, and reloading the page all land at the newest text, with no count carried over.",
-      "surface": "The same browser harness, two sessions with transcripts of their own.",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium -g \"land the reader at the newest text\"",
-      "observed": "Each of the three arrivals shows that session's own last turn in view above the composer with jump-to-latest at count 0, including a switch and a reload made while scrolled back to 1200.",
-      "headSha": "35c894a35010",
-      "negativeControl": "The row scrolls back to 1200 before the switch and before the reload, so a page that merely kept its offset would fail both halves."
-    },
-    {
-      "criterion": "A rebuild of the transcript keeps the reader on the turn they were reading when it survives, and lands them at the newest text when it is gone (spec v9's reconnect rule).",
-      "surface": "The same browser harness, with the page's own reconnect driven by the new agent-stream test hook (POST /api/v1/agents/<id>/stream/_test/publish?as=drop, DISPATCH_TEST_HOOKS only), which ends open viewer streams as a lost connection does.",
+      "criterion": "Review round 1, finding 1 (blocking): the reader's first scroll back after a rebuild is swallowed and they are snapped to the live end, because the settle's excuse is armed unconditionally and nothing consumes it when the settle moved nothing.",
+      "surface": "A real browser (Playwright chromium) driving the built SPA against the real Go Dispatch server (packages/dispatch/e2e/run-server.sh, DISPATCH_TEST_HOOKS=1) and a real Postgres 17 + pgvector, on the implementer's own lane of the shared harness (/legion/harness/env.sh: port 18787, database dispatch_impl_e2e, since a sibling role holds 18777 - docs/solutions/legion LEGION-695).",
       "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium -g \"rebuilt transcript\"",
-      "observed": "Surviving turn: the reconnect is answered with turns 8..39 plus two written while the viewer was away, Turn 7 is gone and threadScrollHeight has fallen, and the reader's turn is at the same id and the same offset within a pixel, still scrolled back, with \"Jump to latest · 2 new\". Gone turn: the reconnect is answered with Turn 20 on, Turn 12 is gone, and the reader is at the newest turn with no control.",
-      "headSha": "35c894a35010",
-      "negativeControl": "The surviving-turn row drops eight turns above the reader, so a run that held scrollTop alone lands eight turns further on - measured exactly that way while the deferred-settle defect was open (before {id:m12,top:-8} → after {id:m20,top:-8}), and the row failed."
+      "observed": "The new row `a rebuilt transcript leaves a reader who was at the live end at the live end, and still sees their next scroll back` passes: after a reconnect whose replay drops the eight oldest turns and carries two written while the connection was down, the newest turn is above the composer with no control and the next published turn is followed, and the reader's own scroll back to 1000 then shows `Jump to latest` with threadScrollTop exactly 1000. The excuse that swallowed that gesture is gone: `[overflow-anchor:none]` on the viewport means the browser makes no adjustment, so `settleHeight`, `settling`, `excused` and the blanket `shrank` excuse are deleted and `observe` reads one signal.",
+      "headSha": "c16a82b7c5da",
+      "negativeControl": "The reviewer's own probe is the control: at 25f206de the same gesture left `position 300 atEnd true` (PROBE A) where a scroll with no rebuild left `position 100 atEnd false` (PROBE B). It is now a unit row too - `a reader's scroll back after a rebuild that moved them nowhere is still theirs` in use-live-follow.test.tsx."
     },
     {
-      "criterion": "The control neither covers the composer nor changes how far the transcript scrolls, and the live view's existing browser checks still pass unchanged.",
-      "surface": "The same browser harness at 390x844 and 1280x800, plus the whole agent-view.e2e.ts file on both projects.",
-      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium (14 passed, 3 skipped) and --project=iphone (11 passed, 6 skipped)",
-      "observed": "At both viewports the control shares no point with the composer, threadScrollHeight is identical before the control appeared and while it shows, and expectViewportBound passes with it on screen; every pre-existing row passes unchanged, the phone keyboard row that asserts the reader's place across a raise and a lower among them.",
-      "headSha": "35c894a35010",
-      "negativeControl": "The slash-command half of the short-transcript row is the control's own negative: Playwright's actionability check fails the click if the control intercepts the command row, and the picked command lands in the composer."
+      "criterion": "Review round 1, finding 2 (blocking): the scroll listener and both observers bind the viewport once, so a node replaced under a mounted hook (the inner ErrorBoundary resetting) leaves the feature dead - the reader scrolled back while the hook believes it follows.",
+      "surface": "The committed unit harness (bun test, happy-dom) driving the hook with the viewport node replaced under it, plus the whole browser suite for the live path.",
+      "command": "cd packages/dispatch && bun test web/src/features/agent-view",
+      "observed": "The new row `a replaced viewport element still answers the reader's scroll` passes: with the node replaced under the mounted hook, a scroll back on the new node leaves atEnd false at the position scrolled to. `useLiveFollow` now takes `HTMLElement | null` rather than a RefObject, every effect carries it in its deps, and a layout effect keyed on the element re-baselines the fresh node (which arrives at scrollTop 0 carrying none of the old position) before any listener can read that 0 as a scroll back: following takes the live end, scrolled back has the remembered turn put back.",
+      "headSha": "c16a82b7c5da",
+      "negativeControl": "The reviewer's PROBE D at 25f206de: the same replacement left `atEnd true position 100` - the control shown nowhere and the next arrival yanking the reader to the bottom, this issue's original complaint."
+    },
+    {
+      "criterion": "Review round 1, finding 3 (blocking): spec v9's proof line \"A reader at the live end when a rebuild lands is still at the live end\" has no standing browser check, and the deferred rebuild path - the production one - is locked nowhere.",
+      "surface": "The same browser harness, with the page's own reconnect driven by the ?as=drop test hook, so the rebuild goes through assistant-ui's passive apply exactly as production does.",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium",
+      "observed": "15 passed, 3 skipped (the phone-only rows); --project=iphone gives 11 passed, 7 skipped. The eleventh spec proof line now has the row named above, and it drives the deferred path.",
+      "headSha": "c16a82b7c5da",
+      "negativeControl": "The row's rebuild drops eight turns above the reader and adds two below, so a view that held its scrollTop would sit short of the end with the newest text below the fold and fail the first half."
+    },
+    {
+      "criterion": "The reviewer's own acceptance: the rebuild browser rows must fail when settleRebuild's compensation is removed (at round 1 they passed, because Chromium's scroll anchoring held the turn, so the compensation was pinned only by two unit rows).",
+      "surface": "The same browser harness, with the compensation line deleted from use-live-follow.ts and the SPA rebuilt.",
+      "command": "cd packages/dispatch && (compensation line removed) && bun run build:web && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium -g \"rebuilt transcript\"",
+      "observed": "`a rebuilt transcript keeps a scrolled-back reader on the turn they were reading` FAILS with `Expected: \"m12\" Received: \"m20\"`; the other two rebuild rows pass, which is by construction (one jumps to the end, one was already there). Restored (md5 verified identical to the committed file), rebuilt, and all three pass again. With overflow-anchor:none the hook's compensation is the only adjustment there is, so the browser row is now a real lock on it.",
+      "headSha": "c16a82b7c5da",
+      "negativeControl": "The restored run is the control for the mutated one: same rows, same command, 3 passed."
+    },
+    {
+      "criterion": "Nothing of the delivered behaviour regressed while the anchoring, the viewport binding and the turn probe changed.",
+      "surface": "The whole agent-view browser suite on both local projects, the repository's unit, type, lint, build and Go gates, and CI's own lanes.",
+      "command": "cd packages/dispatch && bun test web/src; bunx tsc --noEmit; bunx biome check web/src e2e; bun run build:web && bun run check:classes; cd ../envoy && go build ./... && go vet ./internal/dispatch/...; then the Playwright runs above.",
+      "observed": "2251 unit tests pass (16 rows in use-live-follow.test.tsx), tsc clean, biome clean over 587 files, build:web succeeds with `[overflow-anchor:none]` present in the built CSS (grep of web/dist/assets/*.css), check:classes clean over 209 tokens, go build and go vet clean; chromium 15 passed/3 skipped and iphone 11 passed/7 skipped, every pre-existing row among them.",
+      "headSha": "c16a82b7c5da",
+      "negativeControl": "The compensation mutation above shows the suite is not vacuous at this head; `check:classes` is what would catch the new arbitrary-property class failing to reach the built CSS."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/agent-view/use-live-follow.ts (new): the live view's follow hook - the at-the-live-end predicate, the reader's scroll back, the unseen count, jumpToEnd, the own-send/session-switch jumps, and the rebuild settle that holds the remembered turn.",
-    "packages/dispatch/web/src/features/agent-view/use-live-follow.test.tsx (new): 15 rows locking that state machine, each mutation-checked.",
-    "packages/dispatch/web/src/features/agent-view/AgentThread.tsx: assistant-ui's four auto-scroll options off, a ref on the viewport, the content wrapper the resize observer measures, the Jump to latest control out of flow, and data-message-id on every rendered turn.",
-    "packages/dispatch/web/src/features/agent-view/AgentRuntimeThread.tsx: contentIds from the merged list, the turn key a streamed turn keeps from the stored message it took over, and the new props threaded down.",
-    "packages/dispatch/web/src/features/agent-view/AgentConversationPage.tsx: ownSendCount, bumped only after the session accepted the message.",
-    "packages/dispatch/web/src/features/agent-view/useAgentStream.ts: the replays counter, the one signal that the transcript was rebuilt.",
-    "packages/dispatch/web/src/features/agent-view/dispatch-marks.ts: the turn mark and the shared turnKey helper.",
-    "packages/dispatch/e2e/agent-view.e2e.ts: seven new browser rows and the topmostTurn probe.",
-    "packages/dispatch/e2e/layout.ts (new): expectUncovered, lifted out of phone-conversation.e2e.ts and shared.",
-    "packages/dispatch/e2e/api.ts: dropAgentStreamViewers, through the widened publishAgentStreamFrame.",
-    "packages/envoy/internal/dispatch/api/agent_stream.go and internal/dispatch/agentstream/memory.go: the ?as=drop test hook that ends a session's open viewer streams.",
-    "packages/dispatch/AGENTS.md and packages/envoy/cmd/dispatch/AGENTS.md: the live view's scrolling rules and the agent stream's test hook."
+    "packages/dispatch/web/src/features/agent-view/AgentThread.tsx: [overflow-anchor:none] on the viewport, and the viewport held as state through a callback ref.",
+    "packages/dispatch/web/src/features/agent-view/use-live-follow.ts: the settle fingerprint and the blanket shrink excuse deleted; the viewport taken as an element and every effect bound to it, with a re-baseline layout effect for a replaced node; rememberTurn turned into an elementFromPoint hit test; the take-the-end-back branch deleted.",
+    "packages/dispatch/web/src/features/agent-view/use-live-follow.test.tsx: 16 rows - the two written for the deleted mechanism rewritten or replaced, the reviewer's PROBE A and PROBE D added, the harness given a replaceable viewport node and a hit-test fake.",
+    "packages/dispatch/web/src/features/agent-view/dispatch-marks.ts: turnKey's id is `string`; new exported `KeyedMessage` type.",
+    "packages/dispatch/web/src/features/agent-view/conversation.ts and AgentRuntimeThread.tsx: the merged list typed KeyedMessage[], so the key needs no fallback anywhere.",
+    "packages/dispatch/web/src/features/agent-view/AgentThread.boundary.test.tsx and features/refs/markdown-surfaces.test.tsx: contentIds built through turnKey, not a second key expression.",
+    "packages/dispatch/e2e/agent-view.e2e.ts: the eighth new row, the live-end rebuild continuing into a scroll back.",
+    "packages/envoy/internal/dispatch/agentstream/agentstream.go: the nil-Frame reservation stated on the Frame contract.",
+    "packages/dispatch/AGENTS.md: the scroll-anchoring excuse replaced by overflow-anchor: none, and the viewport bound by identity."
   ],
   "trickyParts": [
-    "assistant-ui applies a rebuilt transcript in a passive effect, one commit after the render carrying the new ids, so a layout effect that compensates immediately measures the old DOM and moves the reader by nothing. The hook holds a rebuild and settles it in the commit the turns change in, watched with a MutationObserver that is connected only in that window.",
-    "Chromium's scroll anchoring answers a shorter rebuild by subtracting the dropped height a frame later. That arrives at the scroll listener as a fall in scrollTop with the new height already recorded, which read as the reader scrolling and undid the jump to the live end. The hook excuses exactly the one event whose scrollHeight equals the height its settle recorded.",
-    "assistant-ui's own scroll-up detector requires scrollHeight to be unchanged, so it never notices a reader scrolling back while a turn streams - this issue's own case - and its follow flag is internal. That is why all four of its auto-scroll options are off rather than scrollToBottomOnRunStart alone.",
-    "A turn shown as a streamed frame and the same turn shown as its stored Dispatch copy must be one turn across a rebuild, so both carry the key dispatch:<id>; the merged list and the DOM attribute derive it from one helper.",
-    "Nothing in the suite could make an already-connected live view take a second replay: ?as=replay only sets what the next connection is answered with, and Chromium's offline emulation does not end the agent stream's in-flight fetch (measured: the view stayed Live for 15s while the shell's own pill flipped). Hence the ?as=drop test hook, modelled on /api/v1/events/_test/disconnect."
+    "With the browser's anchoring off, the only fall in scrollTop no reader makes is a shrink's clamp, which by definition lands at the live end and is answered by the at-the-live-end branch before any excuse is needed - so the excuse branches are not merely simplified, they are unreachable, and each remaining branch was mutation-checked to confirm exactly one unit row pins it.",
+    "A replaced viewport node arrives at scrollTop 0 with none of the old position, which the scroll path would read as the reader scrolling back. The re-baseline layout effect keyed on the element identity runs before that can happen.",
+    "The harness's default lane (port 18777, database dispatch_e2e) is held by a sibling role on this issue; this round ran on 18787 with its own dispatch_impl_e2e database, as docs/solutions/legion's LEGION-695 note requires. /legion/harness/env.sh now sets that lane for LEGION_ROLE=implementer and leaves every other role's lane as it was."
   ],
   "deviations": [
-    "The plan's D4 (an unconditional jump to the newest text on every rebuild, with acceptance line A8) was replaced mid-phase by the architect with spec v9's rule, which Sami chose: keep the reader's place when the rebuilt transcript still carries the turn they were reading, the newest text otherwise. A8 is therefore two rows rather than one, and the rebuild compensates the remembered turn's offset rather than holding scrollTop.",
-    "The plan's A11 asserted an unchanged threadScrollTop when a folded tool call is expanded. A fold opened in the middle of the screen moves scrollTop by its own height through the browser's own scroll anchoring, which is what holds the reader still, so the row asserts the reader's turn and its offset instead - the thing the spec says must not move.",
-    "The plan did not foresee a server change. The ?as=drop test hook (gated by DISPATCH_TEST_HOOKS, as every other _test route is) was the only way to reach the rebuild path from a browser."
+    "The reviewer offered two routes for finding 1 and the engine half of finding 3; this round took the one it named as cheapest and preferred, [overflow-anchor:none], so the `webkit-iphone` grep in e2e/playwright.config.ts is left alone - there is no browser adjustment left for WebKit to lack. The alternative (keeping the height fingerprint and adding the rows to that grep) is recorded on the thread, with the note that WebKit cannot run in this pod (its system libraries need root), so that coverage would be CI's `dispatch` job alone."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The pod was replaced twice during this phase, taking /tmp and ~/.cache with it. The harness now lives on the issue volume (/legion/harness/setup.sh, env.sh: the Postgres build and data, the Playwright browsers, GOCACHE and GOMODCACHE), which is roughly 1.2G of scratch moved off the container filesystem - evidence for dispatch://INFRA-31's ephemeral-storage hypothesis, reported to the architect. The tester inherits that harness; re-run setup.sh, which is idempotent, and never stop a sibling's Postgres."
+    "The fast-follow the reviewer named - extracting the shared JumpToLatest pill from AgentThread.tsx and features/conversation/ConversationTab.tsx - is recorded on the PR body's Fast-follow line, not done here: the two pills share a label, a testid and a class list but not their placement, and the plan's D5 recorded the decision not to extract a shared abstraction for them."
   ]
 }
