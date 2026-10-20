@@ -515,8 +515,10 @@ export function Inbox({
   // afresh without it and takes its new place then. That covers the reader's own answer while it
   // is in flight (the card shows Answering…, or the error if the server refuses it); once the
   // server has recorded it the row is not held - their click was the end of that interaction -
-  // and it leaves with the refetch the success triggers. Assign to me is likewise not a hold:
-  // the row becoming the reader's at once is the feedback for that click.
+  // and it leaves with the refetch the success triggers. Assign to me has no such exclusion: the
+  // one filter that offers it is `Unassigned`, which the settled assignment drops the row out of,
+  // so the row is held where the reader last saw it until their focus or pointer leaves it, like
+  // any other dropped row; `assigning` above keeps it listed only while the write is live.
   const viewport = useRef<ViewportAnchor>(null);
   const anchor = viewport.current?.interacted() ?? null;
   const presented = useRef<readonly PlacedRow[]>([]);
