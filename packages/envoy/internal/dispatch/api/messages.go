@@ -539,6 +539,63 @@ func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageR
 	return messageRead{Message: message, Replies: replies[message.ID]}, nil
 }
 
+// listIssueMessages is every root message of one issue, oldest first, each with its deliveries
+// and every message replying to it: one row per thread, the list a dashboard shows one card
+// from. It is unpaged, as an issue's comments are - the threads on an issue are the whole
+// conversation held there. A targeted message is an ordinary root and is listed like any
+// other.
+func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		select `+messageColumns+`
+		from messages
+		where issue_key = $1 and in_reply_to is null
+		order by created_at, id
+	`, r.PathValue("key"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer rows.Close()
+	roots := []model.Message{}
+	for rows.Next() {
+		root, err := scanMessage(rows)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		roots = append(roots, root)
+	}
+	if err := rows.Err(); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	rows.Close()
+	// Both side tables are read once over every root, never once per root.
+	rootIDs := make([]string, len(roots))
+	for index, root := range roots {
+		rootIDs[index] = root.ID
+	}
+	deliveries, err := s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, rootIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	replies, err := s.loadMessageReplyChains(r.Context(), s.deps.Store.Pool, rootIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	result := make([]messageRead, 0, len(roots))
+	for _, root := range roots {
+		root.Deliveries = deliveries[root.ID]
+		result = append(result, messageRead{Message: root, Replies: replies[root.ID]})
+	}
+	WriteJSON(w, http.StatusOK, result)
+}
+
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
