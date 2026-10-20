@@ -255,11 +255,12 @@ package api
 // pair per role — `/legion/go/build` and `/legion/go/mod`, as `UV_CACHE_DIR` already was — since
 // both hold content addressed by its hash and the roles of one issue may fill them at once, and
 // six copies of identical content would be about 5.5 GB of a 20 GiB volume. `XDG_CONFIG_HOME` is
-// unchanged, the pod's shared in-memory volume the setup container writes the agents' jj
-// configuration in, and the `workspace-init` containers keep every value they had. These
-// directories are on the volume rather than the gigabyte of ephemeral storage the container is
-// admitted with, which the tools' caches overran: GKE Autopilot evicted the pod. The pane and pod
-// environment is the surface this contract names, and four of these names are the runtime's alone
-// (`runtimeOwned`), which a spec or an operator's pod env is now refused for setting, so the boot
-// gate and `legion probe-image` hold the daemon and the plugin to the same list.
+// unchanged, the pod's shared in-memory volume `workspace-init` writes the agents' jj
+// configuration in, and the issue pod's `workspace-init`, the one init container told any XDG
+// home, keeps every value it had. These directories are on the volume rather than the gigabyte of
+// ephemeral storage the container is admitted with, which the tools' caches overran: GKE
+// Autopilot evicted the pod. The pane and pod environment is the surface this contract names, and
+// four of these names are the runtime's alone (`runtimeOwned`), which a spec or an operator's pod
+// env is now refused for setting, so the boot gate and `legion probe-image` hold the daemon and
+// the plugin to the same list.
 const DaemonAPIVersion = 33

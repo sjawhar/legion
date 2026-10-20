@@ -661,14 +661,15 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 	return env
 }
 
-// The XDG base directories, at the standard offsets from the image's HOME: the two setup
-// containers' own (xdgEnvironment), the state home xdgStateHome itself there. A role container is
-// told none of the three home-directory ones: its cache, data and state homes are under its own
-// scratch directory on the issue's volume (roleEnvironment), and the config home alone is shared
-// with the setup containers. The config home is the pod's shared in-memory volume: jj keeps a
-// repository's `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init
-// sets there (git.abandon-unreachable-commits false, no repository identity) is what the agent's
-// jj reads. It starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
+// The XDG base directories, at the standard offsets from the image's HOME: what the issue pod's
+// workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role
+// container is told none of the three home-directory ones: its cache, data and state homes are
+// under its own scratch directory on the issue's volume (roleEnvironment), and the config home
+// alone is shared with workspace-init. The config home is the pod's shared in-memory volume: jj
+// keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what
+// workspace-init sets there (git.abandon-unreachable-commits false, no repository identity) is
+// what the agent's jj reads. It starts empty in every pod, so nothing an agent wrote reaches
+// workspace-init's jj.
 const (
 	xdgConfigHome = podHome + "/.config"
 	xdgCacheHome  = podHome + "/.cache"
@@ -676,9 +677,12 @@ const (
 	xdgStateHome  = podHome + "/.local/state"
 )
 
-// xdgEnvironment is the four XDG base directories on the image's HOME: what the setup containers
-// are told (initEnvironment). A role container is told none of them but the config home; its
-// cache, data and state homes are under its own scratch (roleEnvironment).
+// xdgEnvironment is the four XDG base directories on the image's HOME: what the issue pod's
+// workspace-init is told (initEnvironment), the one container of a pod told any of them besides
+// the role containers — workspace-fetch is told none (fetchEnvironment), and neither is the
+// controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role container is
+// told none of them but the config home; its cache, data and state homes are under its own
+// scratch (roleEnvironment).
 func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},

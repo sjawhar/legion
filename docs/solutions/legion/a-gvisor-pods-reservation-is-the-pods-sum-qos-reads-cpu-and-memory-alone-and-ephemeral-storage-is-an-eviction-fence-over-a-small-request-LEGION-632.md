@@ -33,7 +33,8 @@ related_issues:
   request at or below its limit). Ephemeral storage is a limit over a smaller request either way.
 - Ephemeral storage is the node's disk a container's root filesystem writes to (`$HOME`, and, when
   this was written, the state home with its browser profiles and logs and the Go and Bun caches a
-  build fills, which have since moved onto the issue's volume under the role's own scratch); nothing
+  build fills, which have since moved onto the issue's volume — the state home and bun's cache
+  under the role's own scratch, the two Go caches one pair shared by the issue's roles); nothing
   else bounds it once pods of unrelated trees share a node. The limit is the eviction fence: a
   container past it has its own pod evicted, where node-wide `DiskPressure` evicts by the kubelet's
   ranking and can take another tree's pod. The request is what the scheduler counts against the

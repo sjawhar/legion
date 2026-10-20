@@ -1188,18 +1188,34 @@ until LEGION-632, could leave the daemon unable to boot on a pool with no room f
 large ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The bound").
 
 At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, its ephemeral-storage limits to 80Gi
-and its requests to 6Gi. `issue_volume` sizes each issue's own volume, the clone, the workspace,
-uv's Pythons and packages, and the roles' sessions on it; the controller's pod owns one of the same
-size, holding its sessions alone. Ephemeral storage is what a role container writes outside every
-volume: its root filesystem, the node's disk — the role's `$HOME`, with the image's own content
-under it, and whatever a recipe writes elsewhere under the home directory (a role container mounts
-no `/tmp`; its private and state directories and the config home are in-memory `emptyDir`s, whose
-pages the bound does not count, and its temporary directory, its cache, data and state homes and
-its Go and bun caches are on the issue's volume, under the role's own scratch, which the bound does
-not count either). Pods of unrelated trees share a node, so one role filling the node's disk
-would put every pod on it under `DiskPressure`; the limit has the kubelet evict the pod of the
-container that passed it, the offending issue's alone, and the request is what the scheduler fits
-to the node's allocatable ephemeral storage, its root volume. The request is small by default so
+and its requests to 6Gi. `issue_volume` sizes each issue's own volume: the clone, the workspace,
+uv's Pythons and packages, the roles' sessions, and everything a role container writes without
+being told where to put it. Five of those directories are the role's own, under
+`/legion/scratch/<role>` — its temporary directory, its cache, data and state homes and bun's
+install cache, whose cold fill for this repository is 1.4 GB, with a Playwright Chromium under
+the state home about 400 MB — and one pair is shared by the issue's roles, the Go build and
+module caches at `/legion/go/build` and `/legion/go/mod`, 297 MB and 192 MB for this repository
+(below). An operator's arithmetic is therefore five directories per role the issue runs plus one
+Go pair for the issue, not seven directories per role. The controller's pod owns a volume of the
+same size, holding its sessions alone. Nothing prunes `/legion/scratch`: it grows for the life of
+the issue, across every pod of it, and this change leaves `issue_volume`'s default where it was,
+`20Gi` (`defaultIssueVolume`, `packages/daemon/internal/config/kubernetes.go`). Size it knowing
+that moving these writes onto the volume removes the alarm they used to ring: an
+ephemeral-storage overrun was a kubelet eviction with a pod event naming the container, where
+ENOSPC on the PVC is no event at all and surfaces as unexplained failures in jj, in the session
+transcripts, in `workspace-init` and in the CodeGraph build — and nothing in this repository
+reads a PVC's usage.
+
+Ephemeral storage is what a role container writes outside every volume: its root filesystem, the
+node's disk — the role's `$HOME`, with the image's own content under it, and whatever a recipe
+writes elsewhere under the home directory (a role container mounts no `/tmp`; its private and
+state directories and the config home are in-memory `emptyDir`s, whose pages the bound does not
+count, and its temporary directory, its cache, data and state homes, its bun install cache and
+the issue's shared Go caches are on the issue's volume, which the bound does not count either).
+Pods of unrelated trees share a node, so one role filling the node's disk would put every pod on
+it under `DiskPressure`; the limit has the kubelet evict the pod of the container that passed it,
+the offending issue's alone, and the request is what the scheduler fits to the node's allocatable
+ephemeral storage, its root volume. The request is small by default so
 that scheduling binds to almost nothing; an operator
 who knows the root volume raises `ephemeral_storage_request` so the scheduler reserves disk
 ([Issue sizing](#issue-sizing-one-reservation-per-pod)).
@@ -1711,8 +1727,9 @@ and the XDG config home are in-memory, one set per role so no role's launcher or
 with a sibling's; a role container mounts no `/tmp` (the `tmp` memory volume is `workspace-fetch`'s
 alone, `podkind.go`), so the `/tmp` directory itself and its `$HOME` are its root filesystem, the
 node's disk, under the role's ephemeral-storage limit. What it writes without being told where is
-not: its temporary directory, its cache, data and state homes and its Go and bun caches are each
-under a scratch directory of its own on the issue's volume (below). Each role's agent is told a
+not: its temporary directory, its cache, data and state homes and bun's install cache are each
+under a scratch directory of its own on the issue's volume, and the two Go caches are one pair on
+that volume shared by the issue's roles (below). Each role's agent is told a
 state home of its own, `XDG_STATE_HOME=/legion/scratch/<role>/state` (`roleStateHome`,
 `manifest.go`), under that scratch, and its shim makes Oh My Pi's profile directory under it,
 `omp/profiles/legion`, before Oh My Pi starts (`podsafety.EnsureStateHome`; Oh My Pi reads the
@@ -1722,8 +1739,9 @@ Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket n
 path under its state root — with one state root that name would be the same in every container, the
 first role's lock would block every other role's broker, and their `browser.open` would fail
 (`Shared browser daemon unavailable`) while `broker.sock` sat on the first container's own
-filesystem. The two init containers, each of which runs alone, keep the plain
-`/home/legion/.local/state` and the image's own cache and data homes.
+filesystem. `workspace-init`, which runs alone, keeps the plain `/home/legion/.local/state` and
+the image's own cache and data homes; `workspace-fetch` is told no XDG home at all, only a
+`TMPDIR` of its own on the pod's `tmp` memory volume.
 
 Every container carries a reservation, a cpu and memory limit with a request no greater than it,
 and an ephemeral-storage limit over a smaller request: each role container its role's
@@ -1766,18 +1784,33 @@ write the read-only directory, and `gh auth status` reports the account as `x-ac
 
 Every role container is told a scratch directory of its own on the issue's volume,
 `/legion/scratch/<role>` (`roleScratch`, `manifest.go`), and every value that says where it writes
-what it is not told where to put names a path under that directory:
-`XDG_CACHE_HOME=/legion/scratch/<role>/cache`, `XDG_DATA_HOME=/legion/scratch/<role>/data`,
-`XDG_STATE_HOME=/legion/scratch/<role>/state` (the state home above),
-`TMPDIR=/legion/scratch/<role>/tmp`, `GOCACHE=/legion/scratch/<role>/go/build`,
-`GOMODCACHE=/legion/scratch/<role>/go/mod` and
+what it is not told where to put names a path on that volume. Five of them name a path under the
+role's own scratch: `XDG_CACHE_HOME=/legion/scratch/<role>/cache`,
+`XDG_DATA_HOME=/legion/scratch/<role>/data`, `XDG_STATE_HOME=/legion/scratch/<role>/state` (the
+state home above), `TMPDIR=/legion/scratch/<role>/tmp` and
 `BUN_INSTALL_CACHE_DIR=/legion/scratch/<role>/bun/install/cache` (`roleEnvironment`,
-`manifest.go`). `XDG_CONFIG_HOME` alone is unchanged, the pod's shared in-memory volume holding the
-jj configuration `workspace-init` writes, and the two init containers keep every value they had.
+`manifest.go`). The two Go caches are the issue's rather than the role's, one pair every role of
+the issue is told: `GOCACHE=/legion/go/build` and `GOMODCACHE=/legion/go/mod` (`goBuildCache` and
+`goModCache`, `manifest.go`), on the same volume beside uv's cache. Both hold content addressed
+by its hash, and the roles of one issue may fill them at once: of the build cache `go help cache`
+says "The cache is safe for concurrent invocations of the go command", and what reaches the
+module cache is a module zip or `go.mod` the go command has verified against a known hash
+(`go help module-auth`) into a directory it then makes read-only, which only
+`go build -modcacherw` leaves writable. Six copies of identical content would be about 5.5 GB of
+a 20 GiB volume. It was proven live in an issue pod: two `go build ./...` at once against one
+empty shared pair both exited 0 in 227 s, filling 751 MB of build cache and 375 MB of module
+cache, and the cache that race left rebuilt and tested clean. Neither bun's install cache nor the
+state home joins them: bun hardlinks out of its install cache into whatever it installs for, so
+one cache shared between two roles' checkouts is the cross-checkout corruption
+`--backend=copyfile` and the cache per role exist to bound (LEGION-198), and one state home
+would block every role's browser broker but the first (above). `XDG_CONFIG_HOME` alone is
+unchanged, the pod's shared in-memory volume holding the jj configuration `workspace-init`
+writes, and `workspace-init` keeps every value it had.
 Every one of those paths is under the issue volume's own whole-volume mount at `/legion`: the
 scratch adds no volume and no mount, and no directory of it is a `sub_path` mount of its own. No
-two roles share a directory, each scratch being named for its role, and the role's shim makes six
-of them — all but the state home, which `podsafety.EnsureStateHome` makes — before Oh My Pi starts
+two roles share a scratch, each being named for its role, and the role's shim makes six
+directories — the four under the scratch that are not the state home, which
+`podsafety.EnsureStateHome` makes, plus the shared Go pair — before Oh My Pi starts
 (`podsafety.EnsureScratch`), since a role told a temporary directory nothing created cannot run.
 What puts them off the container's own filesystem is the ephemeral-storage bound: on GKE Autopilot
 a role container is admitted with about a gigabyte (Warden refuses a pod whose containers' summed
@@ -2337,7 +2370,8 @@ reason; a boot whose probe pod scheduled at its first attempt reads it `present`
 **The node-disk bound.** Pods of unrelated trees share a node, and what a role writes outside every
 volume — its root filesystem: `$HOME`, with the image's own content under it, and whatever a recipe
 writes elsewhere under the home directory (the role's temporary directory, its cache, data and
-state homes and its Go and bun caches are on the issue's volume, under its own scratch) — is the
+state homes and bun's install cache are under its own scratch on the issue's volume, and the two
+Go caches are one pair on that volume shared by the issue's roles) — is the
 node's disk, the node's allocatable ephemeral storage
 (its root volume; read it with `kubectl get node <n> -o
 jsonpath='{.status.allocatable.ephemeral-storage}'`). That disk must hold the sum of the pods'
@@ -3014,7 +3048,7 @@ issue's pod (every role container of it alike) and the image probe's.
   ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
-  Legion mounts, the image owns, or a tool runs from, or the init containers' state home
+  Legion mounts, the image owns, or a tool runs from, or `workspace-init`'s state home
   (`/home/legion/.local/state`, where `workspace-init` keeps the XDG state it provisions the issue
   under: no role's agent keeps its Oh My Pi state there any more — every role's state home is under
   its own scratch on the issue's volume, which the `/legion` mount fence already covers — but a

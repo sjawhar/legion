@@ -45,13 +45,16 @@ related_issues:
   and asserts where the log landed and that the port answers the same root
   (`TestThePinnedOhMyPiRootsItsStateUnderTheStateHomeOnlyWhereTheShimMadeTheProfileDirectory`,
   `internal/podsafety/podsafety_test.go`, `LEGION_TEST_OMP=<pinned omp>`).
-- Fence the agents' state home against operator mounts at `--check-config`, not at launch: a mount
-  at, under or above `/home/legion/.local/state` would have every role's shim refuse to start
-  naming a directory it could not make, so `CheckPod` refuses it when the file is read
-  (`internal/runtime/sandbox/operatorpod.go`), naming the path and why.
-- Keep the state home on the container's own filesystem, not the pod's in-memory state volume:
-  Chromium's `browser-profiles` and Oh My Pi's logs live under it, and an `emptyDir` in memory
-  would charge them to the pod's memory reservation.
+- Fence `/home/legion/.local/state` against operator mounts at `--check-config`, not at launch: it
+  was the agents' state home when this was written, so a mount at, under or above it would have
+  every role's shim refuse to start naming a directory it could not make, and `CheckPod` refuses
+  it when the file is read (`internal/runtime/sandbox/operatorpod.go`), naming the path and why.
+  Since the per-role scratch moved onto the issue's volume the path is `workspace-init`'s state
+  home alone, and the refusal names that owner instead; the fence itself is unchanged.
+- Keep the state home off the pod's in-memory state volume: Chromium's `browser-profiles` and Oh
+  My Pi's logs live under it, and an `emptyDir` in memory would charge them to the pod's memory
+  reservation. It was the container's own filesystem when this was written, and is the role's own
+  scratch on the issue's volume since.
 
 ## Evidence
 

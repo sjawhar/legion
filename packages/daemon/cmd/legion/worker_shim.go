@@ -79,12 +79,13 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 // podSafeEnvironment is environ on the pod's baseline: the turn-scoping overlay written to the
 // pod's state directory, which the runtime names as LEGION_STATE_DIR, and named first in
 // PI_CONFIG_FILES, and PI_CONFIG_DIR and OMP_SESSION_STORAGE set where environ leaves them unset;
-// then the directories environ's TMPDIR, cache and data homes and Go and bun caches name, each on
-// the role's own scratch, which nothing else makes — a role told a temporary directory nothing
-// created cannot run — and Oh My Pi's profile directory under the XDG_STATE_HOME the runtime hands
-// this role, without which Oh My Pi would not read the variable and its browser broker's lock
-// would be the name every role of the pod takes. A directory that cannot be made is a refusal to
-// start, naming it, as a providers key that cannot be read is.
+// then the directories environ's TMPDIR, cache and data homes and Go and bun caches name, on the
+// role's own scratch but the two Go caches, which the issue's roles share, none of which anything
+// else makes — a role told a temporary directory nothing created cannot run — and Oh My Pi's
+// profile directory under the XDG_STATE_HOME the runtime hands this role, without which Oh My Pi
+// would not read the variable and its browser broker's lock would be the name every role of the
+// pod takes. A directory that cannot be made is a refusal to start, naming it, as a providers key
+// that cannot be read is.
 func podSafeEnvironment(environ []string) ([]string, error) {
 	state := os.Getenv("LEGION_STATE_DIR")
 	if state == "" {

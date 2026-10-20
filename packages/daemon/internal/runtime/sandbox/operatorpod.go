@@ -81,7 +81,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // would move them off the store Legion resumes them from; a volume name would be in the pod twice;
 // a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
 // runs from hides it or is hidden by it; and a mount at, under, or above xdgStateHome
-// (/home/legion/.local/state), which is the two setup containers' state home: no role's agent
+// (/home/legion/.local/state), the state home of the issue pod's workspace-init: no role's agent
 // keeps its Oh My Pi state there any more — every role's state home is its own, under its scratch
 // on the issue's volume (roleStateHome), which legionMountPaths() already fences through TreeRoot
 // — but an operator's mount there would still put its volume where workspace-init keeps the XDG
@@ -132,7 +132,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	}{
 		{legionMountPaths(), "Legion mounts in every pod", "one of Legion's"},
 		{imageOwned, "the worker image owns", "one of the image's"},
-		{[]string{xdgStateHome}, "every role's agent keeps its Oh My Pi state under", "the agents' state home"},
+		{[]string{xdgStateHome}, "workspace-init keeps the XDG state it provisions the issue under", "workspace-init's state home"},
 	}
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {

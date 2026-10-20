@@ -53,7 +53,8 @@
 - The plugin declares daemon API contract 33 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-31): under the Kubernetes runtime the daemon now tells every role container of a pod a
   scratch directory of its own on the issue's volume, `/legion/scratch/<role>`, and names its
-  temporary directory, its cache, data and state homes and its Go and bun caches under it, where
+  temporary directory, its cache, data and state homes and its bun install cache under it, with
+  the Go build and module caches one pair on that volume shared by the issue's roles, where
   the container's own gigabyte of ephemeral storage no longer bounds them. Nothing this plugin
   reads or writes moved; a session of it registers with a daemon at 33.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
