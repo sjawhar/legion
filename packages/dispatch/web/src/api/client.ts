@@ -49,6 +49,7 @@ import type {
   GraphReferences,
   InboxRow,
   Issue,
+  IssueAskRow,
   IssueDetails,
   IssueReferences,
   IssueSummary,
@@ -460,8 +461,10 @@ export class DispatchApiClient {
     return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input);
   }
 
-  listIssueAsks(key: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
-    return this.json<Ask[]>(pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state }));
+  listIssueAsks(key: string, state: "all" | "open" | "answered" = "all"): Promise<IssueAskRow[]> {
+    return this.json<IssueAskRow[]>(
+      pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state })
+    );
   }
 
   answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
@@ -582,6 +585,12 @@ export class DispatchApiClient {
 
   getMessage(key: string, id: string): Promise<MessageRead> {
     return this.json<MessageRead>(`/api/v1/issues/${pathSegment(key)}/messages/${pathSegment(id)}`);
+  }
+
+  /** `GET /api/v1/issues/{key}/messages`: every root message of the issue, oldest first, each
+   *  with its deliveries and its replies. */
+  listIssueMessages(key: string): Promise<MessageRead[]> {
+    return this.json<MessageRead[]>(`/api/v1/issues/${pathSegment(key)}/messages`);
   }
 
   listArtifacts(key: string): Promise<Artifact[]> {

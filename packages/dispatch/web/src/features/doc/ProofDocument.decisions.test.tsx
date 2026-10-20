@@ -9,7 +9,7 @@ import {
   renderProofDocument,
 } from "../../__tests__/proof-document";
 import { api } from "../../api/client";
-import type { Ask } from "../../api/types";
+import type { Ask, IssueAskRow } from "../../api/types";
 
 answerTextReadsWithTheSeededText();
 
@@ -147,7 +147,13 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
 
 test("after Ask back on a decision block, the hosted card's turn label follows the refetched issue asks to the agent's turn", async () => {
   const openAsk: Ask = { ...blockAsk, waiting_on: "human" };
-  const handedOver: Ask = { ...blockAsk, waiting_on: "agent" };
+  // The list route answers rows: the ask plus its newest reply and its thread.
+  const handedOver: IssueAskRow = {
+    ...blockAsk,
+    last_reply: null,
+    thread: { answers: [], edits: [], followers: [], replies: [] },
+    waiting_on: "agent",
+  };
   const queryClient = createQueryClient();
   queryClient.setQueryData(["asks", "CORE-1"], [openAsk]);
   // The owner's list is what the block reads; after the clarification the server says the

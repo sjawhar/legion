@@ -72,7 +72,7 @@
   `GET /legion/v1/state` gains an optional `capabilities` (`measuredAt`, `incarnation`, `ok`,
   `open[{name, detail}]`), the claim's latest report as the daemon shows it — daemon API contract
   21 (LEGION-663).
-- Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
+- Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `AskThread.answers`,
   `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
   `previous_answer` names the answer a human changed (LEGION-622).
 - `images` on `dispatch_message`, `dispatch_comment` and `dispatch_ask`, and `DISPATCH_BODY_MAX`;
@@ -96,6 +96,10 @@
   stores, which Dispatch now answers on every document version it lists or reads, read from the
   stored row without rendering the document (LEGION-481). It stays optional, absent on a document
   version from a server that predates it.
+- `IssueAskRow`, one element of `GET /api/v1/issues/{key}/asks`: an `Ask` plus `last_reply`, the
+  sort key a page ordered by its newest reply needs, and `thread`, which renders the card without
+  a fetch per ask. `Ask.last_reply` now names that list beside the Inbox rows and the issue
+  detail's `open_asks` (INFRA-44).
 
 ### Changed
 
@@ -103,6 +107,9 @@
   `production_job_name` with `production_job_names` and `production_apply_step_name`. A run's
   production result can be `skipped` when its configured apply step did not succeed, and
   `DeliveryDeployJobTiming.job` joins every followed job name with `or`.
+
+- `InboxThread` is now `AskThread`: an issue's ask list carries the same thread object an Inbox
+  row does, so the type is no longer the Inbox's alone (INFRA-44).
 
 - `live` is removed from the capability row's `status` enum on `GET /legion/v1/state`: a live row
   is `present`, `open` or `unchecked` from the sessions' reports, and a row no session has reported
