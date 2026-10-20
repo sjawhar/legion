@@ -554,8 +554,11 @@ function AgentMessageList({
 }
 
 /** A whose-turn pill: a non-zero ask count linking to the Inbox narrowed to this agent's asks.
- *  `assignees` is the list's own filter, so each pill opens exactly the questions it counted:
- *  absent leaves the Inbox's default, the reader's own; an empty array clears the filter. */
+ *  `assignees` is the list's own filter: absent leaves the Inbox's default, the reader's own,
+ *  which is what the `Needs you` pill counts and, with `section`, exactly what it opens; an
+ *  empty array clears it, which is what the `Waiting on agent` pill needs, since the questions
+ *  it counts sit on anybody's issue - that list is this session's whole open list, both turns,
+ *  rather than the counted part alone. */
 function AskCountPill({
   agent,
   assignees,
@@ -739,8 +742,12 @@ function AgentRow({
           {waitingOnAgent === 0 ? null : (
             <AskCountPill
               agent={agent}
-              // The Inbox opens on the reader's own; these questions are on anybody's issue, so
-              // the link clears the filter and the list holds exactly what the pill counted.
+              // These questions are on anybody's issue, while the Inbox opens on the reader's
+              // own, so the link clears the filter: left at the default it would hide the ones
+              // on issues the reader does not hold, and show none at all when no question of
+              // this session's sits on one of theirs. What it opens is this session's whole
+              // open list, both turns, of which this number is the agent-turn part; only the
+              // `Needs you` pill above has a `section` to narrow by.
               assignees={[]}
               count={waitingOnAgent}
               title={`Open asks from ${label} whose next move is ${label}'s`}

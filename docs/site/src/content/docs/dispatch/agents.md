@@ -19,7 +19,8 @@ Each row is one agent session. It shows:
 - **Needs you N** when it has asks waiting on your answer — the ones on issues assigned to you —
   which opens your Inbox filtered to them,
 - **Waiting on agent N** when it has asks whose next move is its own, on anybody's issue; it
-  opens the Inbox with the assignee filter cleared, so the list holds exactly what it counted,
+  opens the Inbox with the assignee filter cleared — that session's whole open list, both
+  sides of the turn, so nothing it counted is hidden by who holds the issue,
 - a count of its replies you have not read,
 - **Open**, which opens the [live view](#the-live-view),
 - a pin, and a checkbox for [broadcasts](#broadcasts).
