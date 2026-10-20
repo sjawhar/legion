@@ -261,7 +261,8 @@ func launchBurstableLiveRoot(ctx context.Context, t *testing.T, cfg config.Confi
 }
 
 // firstLaunchStore answers the runtime as the daemon's store does for an issue's first launch:
-// no session recorded, its tree live, no other tree running it, and its Sandbox its own tree's.
+// no session recorded, its tree live, no other tree running it, its Sandbox its own tree's, and no
+// controller claim stored.
 type firstLaunchStore struct{}
 
 func (firstLaunchStore) IssueHasSessions(context.Context, string, string) (bool, error) {
@@ -277,6 +278,8 @@ func (firstLaunchStore) IssueRunsElsewhere(context.Context, string, string, stri
 func (firstLaunchStore) IssueSandboxHome(_ context.Context, _, issue string) (string, error) {
 	return issue, nil
 }
+
+func (firstLaunchStore) ClaimUnretired(context.Context, claim.Token) (bool, error) { return false, nil }
 
 // publicCloneTokens is the provisioning token for a public repository, which GitHub never asks
 // git for.

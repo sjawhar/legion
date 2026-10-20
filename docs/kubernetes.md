@@ -3505,15 +3505,17 @@ pool cannot place leaves the probe, and the boot, unaffected
 
 The Sandbox is the claim's alone, where an issue's is its tree's. A release of the claim (a switch
 back, or `legion claims stop`) deletes it, and its role Secret and volume with it. The orphan sweep
-keeps it while the daemon knows the claim, running or suspended, so a suspended controller's
-session survives, and deletes it once the claim is retired. Either delete runs under the pod's
-launch turn and only at the version of the Sandbox it was decided on: a controller relaunched into
-the Sandbox since has written it, so the delete is refused, the daemon logs `sandbox runtime: kept a
-sandbox written since its delete was decided; the orphan sweep decides it again` naming it, and the
-next sweep decides again on the claims known then. The controller Sandbox a daemon made before the
-controller ran in a launcher pod (`role=controller`, one `worker` container), and the one a daemon
-of the tree-volume layout made (a claim template named `tree`), are refused at boot like every
-Sandbox of a layout before this one, each named: remove it before enabling issue pods
+keeps it while the controller's claim is not retired, running or suspended, so a suspended
+controller's session survives, and deletes it once the claim is retired. The sweep reads the claim
+from the store again under the pod's launch turn, so a controller launched after the sweep read the
+daemon's claims keeps its Sandbox. Either delete runs under the pod's launch turn and only at the
+version of the Sandbox it was decided on: a controller relaunched into the Sandbox since has written
+it, so the delete is refused, the daemon logs `sandbox runtime: kept a sandbox written since its
+delete was decided; the orphan sweep decides it again` naming it, and the next sweep decides again.
+The controller Sandbox a daemon made before the controller ran in a launcher pod (`role=controller`,
+one `worker` container), and the one a daemon of the tree-volume layout made (a claim template named
+`tree`), are refused at boot like every Sandbox of a layout before this one, each named: remove it
+before enabling issue pods
 ([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees), step 3).
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
