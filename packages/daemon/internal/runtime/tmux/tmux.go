@@ -1,13 +1,16 @@
 // Package tmux is the runtime that runs every agent as a pane on the daemon's private tmux server:
-// `legion worker-shim` in the pane, dialing the daemon's worker stream listener, with Oh My Pi
-// under it.
+// `legion worker-shim` in the pane, dialing the daemon's worker stream listener, with the agent's
+// harness under it — Oh My Pi, or another the role's backend names, each run by its Launcher.
 //
 // One window per issue: the issue's first process opens a window named for it, and a later one
 // splits into it while a pane recorded there still verifies as its recorded process. A pane is
 // never known by its id alone — a recreated server reissues ids from %0, and the kernel reissues
 // pids — so every locator records the pane's root pid and that process's /proc start ticks at
 // launch (its incarnation), and nothing is reported alive, killed, or shared until pid, start
-// ticks, and the OMP command line all check out again.
+// ticks, and a command line naming a configured harness all check out again.
+//
+// The tmux runtime launches nothing but its Launchers: a third harness is an entry in
+// runtime.Backends, a Launcher here, and a boot resolver in the daemon.
 //
 // The behaviour was ported from the TypeScript runtime LEGION-223 removed; a `tmux.ts:N` or
 // `runtime-tmux.ts:N` citation at a rule names that runtime's source in this repository's history.
@@ -97,10 +100,10 @@ type Options struct {
 	// launch's owner it never saw, and never reads that from the pane's gh directory, which the
 	// pane's own user can write. Required with GitHubCredential.
 	RepositoryOwner func(ctx context.Context, token claim.Token) (string, error)
-	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
-	// configured argv prepended to it.
-	OmpInvocation   string
-	OmpLaunchPrefix []string
+	// Launchers are how a pane runs each harness the daemon resolved at boot (Launcher), by backend:
+	// a spec whose backend (runtime.Of) has none is refused. At least one, and only backends the
+	// tmux runtime launches (runtime.Backends).
+	Launchers map[runtime.Backend]Launcher
 	// StopGrace is how long Suspend and Release wait for a process to end itself after its
 	// shutdown frame, and how long Resume waits for a previous incarnation to be gone
 	// (worker_stop_timeout_seconds).
@@ -143,8 +146,9 @@ type Runtime struct {
 	gitHubCredential runtime.GitHubCredential
 	gh               string
 	repositoryOwner  func(ctx context.Context, token claim.Token) (string, error)
-	ompInvocation    string
-	ompPrefix        []string
+	launchers        map[runtime.Backend]Launcher
+	markers          []string
+	agents           string
 	stopGrace        time.Duration
 	probeInterval    time.Duration
 	adoptTimeout     time.Duration
@@ -203,8 +207,8 @@ func New(opts Options) (*Runtime, error) {
 		return nil, errors.New("tmux runtime: no daemon URL")
 	case opts.EnvoyURL == "":
 		return nil, errors.New("tmux runtime: no Envoy URL")
-	case opts.OmpInvocation == "":
-		return nil, errors.New("tmux runtime: no OMP invocation")
+	case len(opts.Launchers) == 0:
+		return nil, errors.New("tmux runtime: no launcher")
 	case opts.StopGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return nil, errors.New("tmux runtime: the stop grace, probe interval, and adoption timeout must be positive")
 	case opts.Conns == nil:
@@ -241,6 +245,12 @@ func New(opts Options) (*Runtime, error) {
 	if !ok {
 		return nil, fmt.Errorf("tmux runtime: tmux is not on the daemon's PATH (%s)", paneEnv["PATH"])
 	}
+	for backend := range opts.Launchers {
+		if !runtime.Backends[backend].LaunchedBy(runtime.RuntimeTmux) {
+			return nil, fmt.Errorf("tmux runtime: a launcher for %q, which the tmux runtime does not launch", backend)
+		}
+	}
+	markers, agents := agentMarkers(opts.Launchers)
 	r := &Runtime{
 		socket:           "legion-" + opts.Project,
 		stateDir:         opts.StateDir,
@@ -253,8 +263,9 @@ func New(opts Options) (*Runtime, error) {
 		gitHubCredential: opts.GitHubCredential,
 		gh:               opts.GH,
 		repositoryOwner:  opts.RepositoryOwner,
-		ompInvocation:    opts.OmpInvocation,
-		ompPrefix:        opts.OmpLaunchPrefix,
+		launchers:        opts.Launchers,
+		markers:          markers,
+		agents:           agents,
 		stopGrace:        opts.StopGrace,
 		probeInterval:    opts.ProbeInterval,
 		adoptTimeout:     opts.AdoptTimeout,

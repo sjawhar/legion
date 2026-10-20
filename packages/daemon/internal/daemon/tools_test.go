@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
 func executable(t *testing.T, dir, name string) string {
@@ -68,6 +71,54 @@ func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	env["LEGION_JJ_PATH"] = "jj"
 	if _, err := resolveTools(lookup); err == nil || !strings.Contains(err.Error(), "LEGION_JJ_PATH") {
 		t.Fatalf("resolveTools with a relative override = %v, want it refused", err)
+	}
+}
+
+// A configuration that puts a role on claude needs Claude Code, bun for its MCP server, and the
+// built claude-envoy plugin: boot names every gap in one refusal, and takes each tool's override
+// before PATH.
+func TestResolveClaudeNamesEveryGap(t *testing.T) {
+	onPath, plugin := t.TempDir(), t.TempDir()
+	env := map[string]string{"PATH": onPath}
+	lookup := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
+	resolve := func() (launchReads, error) { return resolveClaude(config.Config{}, lookup, nil) }
+	_, err := resolve()
+	want := "worker_backends runs a role on claude, and boot is missing bun (set LEGION_BUN_PATH to an absolute executable path), " +
+		"claude (set LEGION_CLAUDE_PATH to an absolute executable path), the claude-envoy plugin (set LEGION_CLAUDE_PLUGIN_DIR to its package directory)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("resolveClaude with nothing = %v\nwant %s", err, want)
+	}
+	executable(t, onPath, "bun")
+	pinned := executable(t, t.TempDir(), "claude")
+	env["LEGION_CLAUDE_PATH"], env["LEGION_CLAUDE_PLUGIN_DIR"] = pinned, plugin
+	if _, err := resolve(); err == nil || !strings.Contains(err.Error(), "holds no dist/envoy-channel.js: build the plugin") {
+		t.Fatalf("resolveClaude with an unbuilt plugin = %v", err)
+	}
+	for _, file := range []string{"dist/envoy-channel.js", "legion/.claude-plugin/plugin.json"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(plugin, file)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(plugin, file), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read, err := resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged strings.Builder
+	read.log(slog.New(slog.NewTextHandler(&logged, nil)))
+	for _, want := range []string{"claude=" + pinned, "bun=" + filepath.Join(onPath, "bun"), "plugin=" + plugin} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("resolveClaude logged %q, want %s", logged.String(), want)
+		}
+	}
+	if read.launcher.Marker() != " claude-bridge -- " || read.invocation != "" {
+		t.Errorf("resolveClaude = marker %q, invocation %q", read.launcher.Marker(), read.invocation)
+	}
+	env["LEGION_CLAUDE_PLUGIN_DIR"] = "relative"
+	if _, err := resolve(); err == nil || !strings.Contains(err.Error(), "LEGION_CLAUDE_PLUGIN_DIR is not an absolute path") {
+		t.Errorf("a relative plugin dir = %v", err)
 	}
 }
 

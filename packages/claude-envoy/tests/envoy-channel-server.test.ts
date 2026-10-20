@@ -297,6 +297,34 @@ test("retains only the latest fifty inbound envelope summaries", async () => {
   })
 })
 
+test("registers no delivery mode for a session whose channel Claude Code did not load", async () => {
+  const stateDirectory = await scratchState()
+  const subscribes: unknown[] = []
+  const client: FakeClient = recordingClient([], {
+    subscribe: async (input) => {
+      subscribes.push(input)
+      return noInterest()
+    },
+  })
+
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      client,
+      capabilities: [],
+    }),
+  )
+
+  try {
+    expect(subscribes).toEqual([
+      expect.objectContaining({ sessionID: "ses_claude", capabilities: [] }),
+    ])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+    await Bun.sleep(5)
+  }
+})
+
 test("registers aside capability and soft-reclaims the role persisted for a resumed session id", async () => {
   const stateDirectory = await scratchState()
   const roleFile = roleStateFile(stateDirectory, "ses_claude")

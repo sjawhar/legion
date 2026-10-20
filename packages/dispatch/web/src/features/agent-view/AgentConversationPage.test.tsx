@@ -366,6 +366,32 @@ test("the live view sends as Send by default where the session takes it, and as 
   ).toEqual(["Aside"]);
 });
 
+// A Claude Code session whose Envoy channel Claude Code did not load advertises no mode: the
+// live view says a message sent here records a failed attempt, before the person sends one.
+test("the live view says a session advertising no delivery mode takes no messages", async () => {
+  renderLiveView({
+    agentState: {},
+    capabilities: [],
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+
+  expect((await screen.findByTestId("agent-takes-no-messages")).textContent).toContain(
+    "advertises no delivery mode"
+  );
+
+  cleanup();
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  renderLiveView({
+    agentState: {},
+    capabilities: ["aside"],
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  await screen.findByRole("combobox", { name: "Delivery mode" });
+  expect(screen.queryByTestId("agent-takes-no-messages")).toBeNull();
+});
+
 /** An assistant message the session streamed, optionally naming the model that produced it
  *  (LEGION-548). */
 function assistantFrame(seq: number, at: number, text: string, model?: string) {

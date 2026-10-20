@@ -823,6 +823,7 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		"provisioning secret": {func(s *runtime.SpawnSpec) { s.Secrets[provisionTokenKey] = "x" }, "a key the runtime writes itself"},
 		"dispatch secret":     {func(s *runtime.SpawnSpec) { s.Secrets[dispatchTokenKey] = "x" }, "DISPATCH_TOKEN_FILE is a variable the runtime sets itself"},
 		"prompt too large":    {func(s *runtime.SpawnSpec) { s.Prompt.Addressing = strings.Repeat("x", maxArgBytes) }, "the value of --append-system-prompt"},
+		"claude backend":      {func(s *runtime.SpawnSpec) { s.Backend = runtime.BackendClaude }, "its role runs on claude, which the worker image does not carry"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := workerSpec(t)

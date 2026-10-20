@@ -97,10 +97,11 @@ const (
 	reasonPidMismatch
 	reasonStatUnreadable
 	reasonStartMismatch
-	reasonNotOmp
+	reasonNotAgent
 )
 
-// verdict is verifyPane's answer: verified, or why not, with what the pane showed instead.
+// verdict is verifyPane's answer: verified, or why not, with what the pane showed instead. For
+// reasonNotAgent, detail is the harnesses the pane was checked for (Runtime.agents).
 type verdict struct {
 	reason        verdictReason
 	observedPid   int
@@ -125,17 +126,18 @@ func describeVerdict(pane string, recorded incarnation, v verdict) string {
 		return fmt.Sprintf("pane %s pid %d has no readable /proc stat (%s)", pane, v.observedPid, identity)
 	case reasonStartMismatch:
 		return fmt.Sprintf("pane %s runs pid %d started at %d (%s)", pane, v.observedPid, v.observedTicks, identity)
-	case reasonNotOmp:
-		return fmt.Sprintf("pane %s pid %d is not running OMP (%s)", pane, v.observedPid, identity)
+	case reasonNotAgent:
+		return fmt.Sprintf("pane %s pid %d is not running %s (%s)", pane, v.observedPid, v.detail, identity)
 	default:
 		return fmt.Sprintf("pane %s runs its recorded process", pane)
 	}
 }
 
 // verifyPane asks whether pane still runs the recorded process: its current pid equals the
-// recorded pid, that pid's start ticks equal the recorded ones, and its command line names OMP —
-// the three tiers, in that order (runtime-tmux.ts:729-770). It is the one chokepoint Probe, a stop's
-// kill gate, and a spawn's window choice all go through. The error is the runtime's own failure
+// recorded pid, that pid's start ticks equal the recorded ones, and its command line names a
+// harness the daemon launches (runsAgent) — the three tiers, in that order
+// (runtime-tmux.ts:729-770). It is the one chokepoint Probe, a stop's kill gate, and a spawn's
+// window choice all go through. The error is the runtime's own failure
 // (tmux could not be run, /proc could not be read for a reason other than the process being
 // gone); a listing that failed is a verdict, reasonListingFailed.
 func (r *Runtime) verifyPane(ctx context.Context, pane string, recorded incarnation) (verdict, error) {
@@ -163,12 +165,12 @@ func (r *Runtime) verifyPane(ctx context.Context, pane string, recorded incarnat
 	if ticks != recorded.ticks {
 		return verdict{reason: reasonStartMismatch, observedPid: lookup.pid, observedTicks: ticks}, nil
 	}
-	omp, err := r.runsOmp(lookup.pid)
+	agent, err := r.runsAgent(lookup.pid)
 	if err != nil {
 		return verdict{}, err
 	}
-	if !omp {
-		return verdict{reason: reasonNotOmp, observedPid: lookup.pid}, nil
+	if !agent {
+		return verdict{reason: reasonNotAgent, observedPid: lookup.pid, detail: r.agents}, nil
 	}
 	return verdict{reason: reasonVerified}, nil
 }
@@ -226,10 +228,12 @@ func (r *Runtime) serverFork(pid int) (bool, error) {
 	return comm == parentComm, nil
 }
 
-// runsOmp is whether pid's command line names OMP. It is asked only just after pid's stat was
-// read, so a command line that has vanished since means the process exited in between — not OMP
-// any more (runtime-tmux.ts:859-873).
-func (r *Runtime) runsOmp(pid int) (bool, error) {
+// runsAgent is whether pid's command line holds the marker of a harness the daemon launches
+// (Launcher.Marker, one per configured launcher). The pid is the pane's root process, `sh -c` on the
+// pane's whole shell command (paneCommand), which names the shim's inner command and so the
+// harness. It is asked only just after pid's stat was read, so a command line that has vanished
+// since means the process exited in between — no agent any more (runtime-tmux.ts:859-873).
+func (r *Runtime) runsAgent(pid int) (bool, error) {
 	cmdline, err := r.readProc(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		if processGone(err) {
@@ -237,7 +241,12 @@ func (r *Runtime) runsOmp(pid int) (bool, error) {
 		}
 		return false, err
 	}
-	return strings.Contains(string(cmdline), "omp"), nil
+	for _, marker := range r.markers {
+		if strings.Contains(string(cmdline), marker) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // parseProcStatCommAndParent is a /proc/<pid>/stat line's comm (field 2, between the first `(` and

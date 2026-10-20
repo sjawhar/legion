@@ -166,7 +166,7 @@ on the same repositories.
   - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
   - `secrets`: create, delete, update, get (never list);
   - `pods`: get, list, watch; `pods/log`: get;
-  - `services`: get, list, watch, so a launch checks its repository cache's Service is the cache's
+  - `services`: list, watch, so a launch checks its repository cache's Service is the cache's
     own before an issue pod is told its address;
   - `events`: list;
   - and a cluster-scoped get on the CRD `sandboxes.agents.x-k8s.io` and a get on the Deployment
@@ -255,6 +255,16 @@ What each part is for:
 - Workflow limits, all optional: `linger_hours` (72), `review_round_cap` (3), `max_fix_attempts`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+- **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
+  `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
+  default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
+  `reviewer`, `merger`) and only under `runtime: tmux`, since the worker image carries no Claude
+  Code; the loader refuses `claude` for the architect and under Kubernetes, naming why, and refuses
+  any other value. The controller always runs on Oh My Pi. A tmux daemon running a Claude Code role
+  resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP server runs on from
+  `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
+  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
+  `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
@@ -427,7 +437,8 @@ the complete shape (rendered in the [configuration reference](/legion/legion/ref
    legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370
    ```
 
-The command checks the file and the plugins, fetches a fresh controller credential from the daemon
+The command checks the file and the plugins, reads the project's repositories from the daemon (the
+controller is told them), fetches a fresh controller credential from the daemon
 with your operator token, then fetches the review App's token for the controller's `gh` and keeps
 it refreshed while the session runs (against a daemon with no GitHub App, it says so and the
 controller's `gh` acts as nobody), and starts Oh My Pi in the foreground; its first turn runs the

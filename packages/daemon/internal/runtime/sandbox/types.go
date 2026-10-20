@@ -73,6 +73,10 @@ type Store interface {
 	// lingers after its own close. The tree cleanup hands a Sandbox whose home is another tree over
 	// to it (CleanupTree), and the orphan sweep keeps one whose home is its label's tree (sweep).
 	IssueSandboxHome(ctx context.Context, project, issue string) (string, error)
+	// ClaimUnretired is whether the store holds token's claim in any state but retired: a claim the
+	// daemon's orphan sweep still knows, suspended and failed ones included. The sweep reads it under
+	// the controller's pod turn, since the known set it was handed was read before it listed.
+	ClaimUnretired(ctx context.Context, token claim.Token) (bool, error)
 }
 
 // Options is what a Runtime is built from. Every field without a stated default is required.

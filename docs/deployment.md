@@ -165,6 +165,75 @@ install path (`mise which gh` or `asdf which gh` prints it). The check reads scr
 shim is compiled and passes, and where mise has no gh for the directory it runs the next `gh` on
 `PATH`, which in a pane is the pane's own `legion gh`, so a shims directory is no real gh either.
 
+## Phase workers on Claude Code
+
+`worker_backends` in `legion.yaml` runs a role on another agent harness than Oh My Pi:
+
+```yaml
+worker_backends:
+  implementer: claude
+```
+
+Each key is an issue role (`architect`, `planner`, `implementer`, `tester`, `reviewer`, `merger`)
+and each value `omp` or `claude`; a role left out runs on Oh My Pi. What each harness may run is
+one table, `runtime.Backends` (`packages/daemon/internal/runtime/backend.go`): Claude Code runs the
+phase workers alone, since an architect is woken by notices on its Envoy role topic and Claude
+Code's print mode delivers no channel notification, and only under `runtime: tmux`, since the
+worker image carries no Claude Code. The loader refuses a role on a harness that does not run it,
+naming both, a role named twice, any other value, and `claude` under `runtime: kubernetes`. The
+controller always runs on Oh My Pi.
+
+For such a role the pane's shim runs `legion claude-bridge -- claude -p --input-format stream-json
+--output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config …`.
+The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is the pane's
+`CLAUDE_CONFIG_DIR`: it holds the transcript, the MCP configuration the daemon writes (one server,
+`legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and the bridge's phase-stall state,
+and it outlives every launch of the claim. A fresh launch passes `--session-id <new id>`; a
+relaunch passes `--resume <id>`, read from the transcript the claim registered, so a killed pane
+comes back as the same Claude Code session. A role moved to Claude Code since its session was
+recorded is refused rather than resumed, naming the Oh My Pi session file. A role moved back to Oh
+My Pi gets its recorded Claude Code transcript passed to `omp --resume`, as every recorded session
+file is; the pinned Oh My Pi refuses it, exiting 1 with `Cannot resume session "<file>": the
+session header is missing or malformed. The file was not modified.`, and leaves its bytes as they
+were, so the launch fails loudly rather than starting a fresh agent
+(`packages/daemon/internal/runtime/tmux/resume_omp_test.go` holds the real binary to this).
+
+Boot resolves three things from the daemon's environment, and `legion start --check-config` makes
+the same refusals:
+
+- `LEGION_CLAUDE_PATH`, the `claude` executable, else the first `claude` on `PATH`;
+- `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
+- `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
+  `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`
+  (`bun run build` in that package writes both).
+
+A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
+Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example
+`ANTHROPIC_API_KEY: <secretsd key>`) is exported by the shim into `legion claude-bridge`'s
+environment, which Claude Code inherits, and into every Oh My Pi pane's as well. A key meant for the
+Claude Code roles alone goes in the claim's directory instead, before the claim first launches: a
+`settings.json` there whose `apiKeyHelper` prints the key, as `scripts/e2e/claude-backend-tmux.sh`,
+the live proof, writes it.
+
+### How a harness plugs in
+
+Every harness runs behind `legion worker-shim`, which speaks Oh My Pi's RPC frames to it
+(`legion claude-bridge` translates them for Claude Code), so the worker stream and supervision do
+not know which harness a pane runs. A harness is three pieces in the daemon:
+
+- its row in `runtime.Backends`: the roles it runs, the runtimes that launch it, the daemon prompt
+  part its launches are told after their role's parts (Claude Code's is
+  `internal/prompts/go/claude-mechanics.md`);
+- a `Launcher` in `internal/runtime/tmux`: the command the shim runs, the extra `-e` pairs of its
+  pane, and the marker its pane's command line holds;
+- a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host.
+
+Boot resolves a launch for each harness `worker_backends` uses (`legion start --check-config` makes
+the same refusals), and the tmux runtime refuses a launch on a harness it has no launcher for. A
+pane is its recorded process only while its root process's command line, `sh -c` on the whole pane
+command, holds a configured harness's marker: `omp` for Oh My Pi, ` claude-bridge -- ` for Claude
+Code. A daemon with no `worker_backends` has Oh My Pi's launcher alone and checks for `omp` alone.
+
 ## Rotating the App keys
 
 When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless

@@ -108,9 +108,15 @@ func main() {
 	// Secrets Manager's fields), Secrets Manager under the AWS SDK's credential chain, or Secret
 	// Manager under Application Default Credentials.
 	var secretStore secrets.Store
+	// mintToken mints a minted secret's value. Only the GCP store mints (config.Load refuses
+	// BROKER_MINT_TARGETS under any other), and without targets no minted secret is served.
+	var mintToken func(context.Context, string, time.Duration) (string, error)
 	var credentials string
 	switch {
 	case fakeSecrets != "":
+		if len(cfg.MintTargets) > 0 {
+			fatal(fmt.Errorf("BROKER_MINT_TARGETS needs Secret Manager itself, not BROKER_FAKE_SECRETS_FILE, since only it mints"))
+		}
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
 		// The file's kms_key_id names the agent-secrets key as the selected store configures it.
@@ -123,12 +129,16 @@ func main() {
 		fatal(err)
 		defer client.Close()
 		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
+		if len(cfg.MintTargets) > 0 {
+			mintToken, err = secrets.NewGCPTokenMinter(ctx)
+			fatal(err)
+		}
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts)), MintTargets: cfg.MintTargets}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
@@ -172,6 +182,7 @@ func main() {
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
+	reqMachine.MintToken = mintToken
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,

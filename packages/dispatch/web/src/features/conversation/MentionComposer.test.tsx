@@ -801,34 +801,24 @@ test("reply mode shows the quote, sends reply_to, and cancels by chip or Escape"
   }
 });
 
-test("a direct-session reply warns before sending when the target does not advertise the inherited delivery", () => {
+test("a direct message to a session that advertises no mode warns that it takes none", () => {
   const { view } = renderComposer({ agents: [worker], owner: { kind: "session", sessionId: "B" } });
 
   try {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
-    expect(screen.getByText(/Worker does not advertise Send/)).toBeTruthy();
+    const warning = screen.getByText(/Worker advertises no delivery mode, so sending it records/);
+    expect(warning.textContent).toContain("started with its Envoy channel");
+    expect(warning.textContent).not.toContain("Prefix with");
   } finally {
     view.unmount();
   }
 });
 
-// The warning's way out names only a mode the session takes: a Claude Code session advertises
-// Aside alone, so offering it /btw would suggest a send that fails the same way.
-for (const [name, capabilities, suggestion] of [
-  [
-    "an aside-only session is offered /aside",
-    ["aside"],
-    "Prefix with /aside to send it as an Aside instead.",
-  ],
-  ["a BTW-only session is offered /btw", ["btw"], "Prefix with /btw to send it as a BTW instead."],
-  [
-    "a session taking both is offered both",
-    ["aside", "btw"],
-    "Prefix with /btw or /aside to send it as a BTW or an Aside instead.",
-  ],
-  ["a session taking neither is offered nothing", [], undefined],
-] as const) {
-  test(`when a session does not advertise Send, ${name}`, () => {
+// A session that refuses Send but takes Aside - a Claude Code session - gets a plain message as
+// an Aside, and the composer says so instead of warning that the Send would fail.
+for (const capabilities of [["aside"], ["aside", "btw"]]) {
+  test(`a plain message to a session advertising ${capabilities.join(" and ")} goes as an Aside`, async () => {
+    const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
     const session: Agent = { ...worker, capabilities: [...capabilities] };
     const { view } = renderComposer({
       agents: [session],
@@ -837,14 +827,87 @@ for (const [name, capabilities, suggestion] of [
 
     try {
       fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
-      const warning = screen.getByText(/Worker does not advertise Send, so sending it records/);
-      if (suggestion === undefined) expect(warning.textContent).not.toContain("Prefix with");
-      else expect(warning.textContent).toContain(suggestion);
+      expect(screen.getByText("Sending as Aside: Worker does not advertise Send.")).toBeTruthy();
+      expect(screen.queryByText(/so sending it records a failed attempt/)).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() =>
+        expect(createAgentMessage).toHaveBeenCalledWith("B", {
+          body: "Ship it.",
+          delivery: "aside",
+        })
+      );
     } finally {
       view.unmount();
+      createAgentMessage.mockRestore();
     }
   });
 }
+
+// BTW is never picked for the reader: a session that takes only BTW is still warned, and the
+// warning's way out names only a mode the session takes.
+test("when a session takes only BTW, a plain message warns and offers /btw", () => {
+  const session: Agent = { ...worker, capabilities: ["btw"] };
+  const { view } = renderComposer({
+    agents: [session],
+    owner: { kind: "session", sessionId: "B" },
+  });
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
+    expect(
+      screen.getByText(/Worker does not advertise Send, so sending it records/).textContent
+    ).toContain("Prefix with /btw to send it as a BTW instead.");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a mention of a session that takes only Aside goes as an Aside", async () => {
+  const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
+  const session: Agent = { ...planner, capabilities: ["aside"] };
+  const { view } = renderComposer({
+    agents: [session],
+    seedMentions: [{ target: "session:A", title: "Planner" }],
+  });
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "@Planner hello" } });
+    expect(screen.getByText("Sending as Aside: Planner does not advertise Send.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        expect.objectContaining({ delivery: "aside", mentions: [{ target: "session:A" }] })
+      )
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
+test("the Sending as Aside line leaves out a mentioned session that takes no messages", () => {
+  const aside: Agent = { ...planner, capabilities: ["aside"] };
+  const deaf: Agent = { ...worker, capabilities: [] };
+  const { view } = renderComposer({
+    agents: [aside, deaf],
+    seedMentions: [
+      { target: "session:A", title: "Planner" },
+      { target: "session:B", title: "Worker" },
+    ],
+  });
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), {
+      target: { value: "@Planner @Worker hello" },
+    });
+    // The session that takes none gets its own warning, not the Aside line.
+    expect(screen.getByText("Sending as Aside: Planner does not advertise Send.")).toBeTruthy();
+    expect(screen.getByText(/Worker advertises no delivery mode/)).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
 
 test("mentioning two targets that both lack the outbound mode names both in the warning", async () => {
   const { view } = renderComposer({ agents: [planner, worker] });

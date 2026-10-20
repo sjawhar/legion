@@ -43,6 +43,8 @@ test("a hangup from the Claude process group deregisters the session before the 
       ENVOY_URL: `http://127.0.0.1:${listener.port}`,
       CLAUDE_CODE_SESSION_ID: "ses_hangup",
       CLAUDE_PLUGIN_DATA: stateDirectory,
+      // The gate reads the parent's command line; this test's parent is bun, not claude.
+      ENVOY_CHANNEL_LOADED: "1",
     },
     stdin: "pipe",
     stdout: "pipe",

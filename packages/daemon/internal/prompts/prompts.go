@@ -120,6 +120,12 @@ func (c *Composer) ControllerPromptPaths(headless bool) ([]string, error) {
 	return []string{filepath.Join(c.sharedDir, "controller-root.md"), filepath.Join(c.goDir, launch)}, nil
 }
 
+// Part is the daemon's prompt part name, as boot snapshotted it: what a backend's launch is told
+// after its role's parts (runtime.BackendInfo.PromptPart).
+func (c *Composer) Part(name string) string {
+	return filepath.Join(c.goDir, name)
+}
+
 // Compose returns the shared role parts followed by this daemon's parts: the role's own, then the
 // text every architect (architect-common.md) or every phase worker (worker-common.md) shares. The
 // runtime appends addressing and deployment instructions after these paths.
