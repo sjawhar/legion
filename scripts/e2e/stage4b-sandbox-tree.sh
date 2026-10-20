@@ -648,7 +648,12 @@ pod_commands() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
   pod_exec "$1" "$2" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " <"$f" 2>/dev/null; echo; done'
 }
-pod_runs() { pod_commands "$1" "$2" | grep -qF -- "$3"; }
+# pod_runs POD ROLE COMMAND: a process whose command line contains COMMAND runs in ROLE's
+# container. The list is captured whole and the variable judged: a `grep -q` downstream of the
+# live kubectl would exit at its match and hand kubectl SIGPIPE while it still writes the rest of
+# /proc, which pipefail reports as 141, a running command read as absent (lib/rig.sh). A list that
+# could not be read is neither running nor stopped: the read fails, as the caller's wait expects.
+pod_runs() { local out; out=$(pod_commands "$1" "$2") || return 1; grep -qF -- "$3" <<<"$out"; }
 pod_file() { pod_exec "$1" "$2" test -s "$3"; }
 # takeover_lines ROW TESTER prints the daemon log's lines of a CI-red takeover, one JSON object a
 # line: the implementer's start held and going on, and the tester's claim TESTER interrupted for
@@ -4214,7 +4219,10 @@ fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b 
 note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness command ran"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 900
 on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
-! pod_runs "$tester_pod" tester "/usr/bin/sleep 1207" || fail "the tester's witness command still runs after its turn was interrupted"
+# The witness is asserted gone from a list read whole: `! pod_runs` would take a list that could
+# not be read for one with no witness on it.
+witness_commands=$(pod_commands "$tester_pod" tester) || fail "the tester's container's process list could not be read after its turn was interrupted"
+! grep -qF -- "/usr/bin/sleep 1207" <<<"$witness_commands" || fail "the tester's witness command still runs after its turn was interrupted"
 ! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
 # The row that held the implementer's start: the tester's own "the interrupted turn is over"
 # (takeover_over), logged whenever a start was genuinely held for this claim's turn, not the
@@ -5670,7 +5678,7 @@ until [ -n "$planner_killed" ]; do
 done
 note "killed $tree4's planner mid-turn (process $planner_killed in pod $ended_pod_uid)"
 interrupted_needle="Your previous turn on this task was interrupted when your process died."
-planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
+planner_resent() { session_contains "$tree4" planner "$interrupted_needle"; }
 on_tree "$tree4" until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 on_tree "$tree4" wait_for_phase "$tree4" implementing "$plan_seconds"
