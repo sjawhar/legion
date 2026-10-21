@@ -433,5 +433,5 @@ which hands both plugin entries to the Oh My Pi child by path.
 
 ## Checks
 
-`bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
+`bun run typecheck`, `bun test`, `bun run lint` (this package's recipe is `biome lint extensions/ src/`), each from this directory;
 `LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` for the real binary.

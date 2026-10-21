@@ -49,10 +49,14 @@ Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`)
 
 ```bash
 bun install                   # Setup
-bunx biome check <package>/   # Lint (the root pins @biomejs/biome so bunx resolves the real Biome; CI's required `lint` job runs `bunx biome check .`, and a package's `bun run lint` checks only the paths its recipe names)
-bunx tsc --noEmit             # Type check
+bun run lint <package>/       # Lint (the recipe reaches this repository's pinned Biome through `scripts/repo-tool.sh`, which resolves `node_modules/.bin` and never PATH or the registry, so an uninstalled workspace fails naming the missing tool instead of passing. CI's required `lint` job runs `bun run lint .` over the whole tree, and a package's `bun run lint` checks only the paths its recipe names)
+bun run typecheck             # Type check (the pinned tsc, through the same wrapper)
 bun test                      # Test
 ```
+
+In a Legion role container the packages are installed into the issue workspace by Legion before
+the agent's first turn (`scripts/legion-setup.sh`), and an install that failed arrives as a notice
+in that first turn — so a check that cannot run is visible rather than silently green.
 
 ```bash
 legion start [--config <legion.yaml>] [--check-config]  # Run the daemon in the foreground for the project that file names (./legion.yaml by default); --check-config also prints the configuration's open capability gaps after its OK line (exit 0), and under `runtime: kubernetes` the repository cache each mapped repository gets (docs/kubernetes.md "The repository cache") and the plugin pair a stale-plugin relaunch would install or the gap that leaves it relaunching none (docs/kubernetes.md "Contract discipline")
