@@ -543,11 +543,16 @@ func githubAppEnv(t *testing.T, apiBase string) map[string]string {
 // leaves the machine. It answers an empty list to everything, and holds the first webhook
 // delivery listing - the webhook redelivery sweep's own first request, made at boot - until
 // release is closed, which is how a row makes one process hold that sweep's lease long enough
-// for the other to find it held.
+// for the other to find it held. It counts those listings too: the listing is the call the
+// webhook-redelivery lease exists to make once however many processes sweep, so a row about
+// that lease reads the count rather than the log alone.
 type githubFake struct {
 	server  *httptest.Server
 	release chan struct{}
 	once    sync.Once
+
+	mu     sync.Mutex
+	listed int
 }
 
 // startGitHubFake serves on loopback until the test ends.
@@ -556,6 +561,7 @@ func startGitHubFake(t *testing.T) *githubFake {
 	fake := &githubFake{release: make(chan struct{})}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/hook/deliveries") {
+			fake.countDeliveryListing()
 			fake.holdFirstDeliveryListing(r.Context())
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -581,6 +587,20 @@ func (f *githubFake) holdFirstDeliveryListing(ctx context.Context) {
 	case <-ctx.Done():
 	case <-time.After(githubHoldCap):
 	}
+}
+
+// countDeliveryListing records one webhook delivery listing, whichever process made it.
+func (f *githubFake) countDeliveryListing() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listed++
+}
+
+// deliveryListings is how many webhook delivery listings the processes have made between them.
+func (f *githubFake) deliveryListings() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listed
 }
 
 // githubHoldCap bounds the hold whatever the test does, well inside githubapp.RequestTimeout (20
@@ -828,6 +848,56 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 			continue
 		}
 		t.Logf("%s was not observed: %s", unobserved.lease, unobserved.why)
+	}
+}
+
+// A rolling update starts the second process minutes after the first, and at a steady two
+// replicas each process keeps a ticker of its own: two ticks of one leased loop almost never
+// overlap, because a pass is seconds and its interval is minutes. This row is that shape - the
+// second process is started only after the first has finished a pass and given the lease back -
+// and it is where "runs once overall" has to hold, not only while a pass is in flight.
+//
+// The webhook redelivery sweep is the loop driven here because its cost is countable from
+// outside: every pass lists the App webhook's failed deliveries from GitHub before it writes
+// anything, and its lease exists for exactly that reason ("N processes sweeping is N times those
+// list calls for one result", redeliver/sweep.go). So the GitHub fake's count of those listings
+// is what one sweep window cost the installation's rate limit, whichever process paid it.
+func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
+	pair := newPair(t)
+	fake := startGitHubFake(t)
+	// Nothing is held here: this row is about two passes that never meet, so the first one must
+	// finish and give the lease back before the second process exists.
+	fake.Release()
+	env := githubAppEnv(t, fake.URL())
+
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Env: env,
+	})
+	pair.a.waitHealthy(t)
+	pair.a.waitForLog(t, 60*time.Second, leaseRan, "lease=webhook-redelivery")
+	listedByA := fake.deliveryListings()
+	if listedByA == 0 {
+		t.Fatalf("the first process's sweep listed no webhook deliveries, so this row would measure nothing:\n%s",
+			pair.a.Output.String())
+	}
+
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, Env: env,
+	})
+	pair.b.waitHealthy(t)
+	deadline := time.Now().Add(60 * time.Second)
+	for countLease(pair.b, leaseRan, "webhook-redelivery")+countLease(pair.b, leaseSkipped, "webhook-redelivery") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the second process reported no webhook-redelivery pass within a minute:\n%s",
+				pair.b.Output.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	requireLeasedOnce(t, pair, "webhook-redelivery")
+	if listed := fake.deliveryListings(); listed != listedByA {
+		t.Errorf("the two processes listed the webhook's deliveries %d times for one sweep window; the first alone listed them %d times, and the lease is what keeps N processes from being N times those list calls",
+			listed, listedByA)
 	}
 }
 
