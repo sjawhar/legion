@@ -27,13 +27,25 @@ That document says to build the harness on `/legion` and to move `GOCACHE`, `GOM
 `PLAYWRIGHT_BROWSERS_PATH` with it. The deltas are the mechanism that makes it mandatory, the set
 of paths that mechanism charges, and a fourth variable — all learned by paying for them.
 
-**The mechanism, once.** Each container of an issue pod is held to 1 GiB of local ephemeral
-storage on this deployment. When one container passes *its own* limit the kubelet evicts the
-**whole pod** — every other role's turn and session with it. That is why the death carries no
-disk message: no write inside the container fails and no quota is reported; the process is killed
-and the container filesystem comes back reset. Everything below follows from that one sentence.
+**The mechanism, once.** Each container of an issue pod is held to its own limit of local ephemeral
+storage. When one container passes *its own* limit the kubelet evicts the **whole pod** — every
+other role's turn and session with it. That is why the death carries no disk message: no write
+inside the container fails and no quota is reported; the process is killed and the container
+filesystem comes back reset. Everything below follows from that one sentence.
 
-## What the 1 GiB charges
+**Every figure in this note is this pod's.** This pod was created before both of the evening's
+ephemeral-storage changes, so it carries 1 GiB for every role, which is the state
+dispatch://INFRA-51/comment/bf8035e7-9c34-4dcd-b3d7-4b787f815a1a records. That deployment has
+changed its ephemeral-storage limits at least twice on 2026-10-20: the implementer's request and
+limit went to 4Gi at 22:30Z (that comment, which also records that a raise applies only to pods
+created after the apply), and every role's were rebalanced at 22:50Z
+(dispatch://INFRA-51/comment/a9f52454-8972-41ef-aa39-a161af45f020). A pod keeps the values it was
+created with, so a note's figure ages the moment an operator applies. Read your own container's
+limits rather than any number here: from inside, only the sandbox's counter is readable,
+`/sys/fs/cgroup/memory/memory.limit_in_bytes` (why it is the sandbox's is below), and the
+per-container limits are in the pod spec, which a role container cannot read.
+
+## What the limit charges
 
 Charged — one container filesystem, and all of these share a device:
 
@@ -69,15 +81,21 @@ What this pod cannot show is whose budget that memory spends. The sandbox is cgr
 `/sys/fs/cgroup/memory/memory.usage_in_bytes`. That counter is the sandbox's, not the container's:
 `memory.limit_in_bytes` reads 20,401,094,656 bytes, equal to `free -k`'s total of 19,922,944 KiB,
 and matches no role's own limit. Each role container has a memory limit of its own and they
-differ — request equal to limit, 1Gi for the architect, the planner and the merger, 4Gi for the
-reviewer, 6Gi for the implementer and the tester — which is the pod spec's, not something the
-container can read (`defaultResources`, `packages/daemon/internal/config/kubernetes.go`, and the
-recorded pod shape `packages/daemon/internal/runtime/sandbox/testdata/golden/root.json`).
+differ. Legion's repository defaults are request equal to limit, 1Gi for the architect, the planner
+and the merger, 4Gi for the reviewer, 6Gi for the implementer and the tester (`defaultResources`,
+`packages/daemon/internal/config/kubernetes.go`, and the recorded pod shape
+`packages/daemon/internal/runtime/sandbox/testdata/golden/root.json`) — defaults, not a promise
+about a reader's container: an operator's `runtime.kubernetes.resources` sets what a pod actually
+carries. On this deployment they are also what a pod carries, because its stack sets no memory at
+all; a live issue pod created after the evening's applies was read with exactly those six values
+(dispatch://INFRA-51/comment/12ce8e6b-0e14-4ff4-9cb2-b48306b15906). Either way the limits are the
+pod spec's, not something the container can read.
 The rule is Kubernetes' own, not verified from inside this sandbox, which can see no
 per-container counter: for a memory-backed `emptyDir`,
 "files you write count against the memory limit of the container that wrote them"
 (https://kubernetes.io/docs/concepts/storage/volumes/#emptydir). So treat the write as spending
-the role's own memory budget; on a 1Gi role that is a smaller budget than the disk it was avoiding.
+the role's own memory budget; the smallest role's memory budget may be well under a gigabyte, and a
+cache moved onto a tmpfs can exceed it.
 
 **`/tmp` is not the exception a reader expects.** A role container mounts no `/tmp`: the
 memory-backed `tmp` volume belongs to the `workspace-fetch` init container alone, as that
@@ -89,12 +107,12 @@ directory, `/home/legion/.config` and four `/var/run/legion/*` directories, and 
 `docs/kubernetes.md` states it in prose. A habit of "put the big download in /tmp" gets the pod
 evicted here; nothing about `/tmp` in a role container is free.
 
-**1 GiB is not the number the configuration shows.** Every role's default reservation asks for a
-much larger ephemeral-storage limit over a 1 GiB request — 20 GiB for the implementer and tester,
-10 GiB for every other role (`defaultResources`,
+**The admitted limit is not the number the configuration shows.** Every role's default reservation
+asks for a much larger ephemeral-storage limit over a 1 GiB request — 20 GiB for the implementer
+and tester, 10 GiB for every other role (`defaultResources`,
 `packages/daemon/internal/config/kubernetes.go`), and an operator's
 `runtime.kubernetes.resources` may raise them further. This GKE Autopilot cluster admits a
-container's limit equal to its 1 GiB request and discards the configured one:
+container's limit equal to its request and discards the configured one:
 `gkeEphemeralStorageClamped` in
 `packages/daemon/internal/runtime/sandbox/live_lifecycle_test.go`, whose doc comment records it
 confirmed live on 2026-10-17 against every role container of a real production issue pod. On a
