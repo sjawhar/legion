@@ -57,6 +57,10 @@ type State struct {
 	// — each open deployment row with the legion.yaml line that records a decision. Never null; a
 	// gap is reported here, never refused (contract 16).
 	Capabilities []CapabilityState `json:"capabilities"`
+	// Settings is the daemon's resolved legion.yaml with every credential, credential source and
+	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
+	// inside: every collection in it is emitted non-nil (contract 30).
+	Settings Settings `json:"settings"`
 }
 
 // CapabilityState is one row of that report. Status is "present", "unchecked", "withheld",

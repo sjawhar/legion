@@ -208,4 +208,10 @@ package api
 // which cites the controller skill's Slack reference. A plugin from before 29 subscribes to no
 // channel and ships neither `slack_post` nor the reference, so the boot gate and
 // `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
-const DaemonAPIVersion = 29
+//
+// 30: LEGION-791 -- api.State gains `settings`, the daemon's resolved legion.yaml with every
+// credential, credential source and credential file path left out, keyed as the file is. Required,
+// so a plugin built before it refuses the state and the bump is why the two never meet; the plugin
+// parses it loosely (two typed keys, the rest unknown), so a later legion.yaml key changes no
+// strictly parsed shape and bumps nothing.
+const DaemonAPIVersion = 30
