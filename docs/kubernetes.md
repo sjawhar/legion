@@ -1239,12 +1239,14 @@ creates, either on its delete list or in the two exemptions below it:
 `/legion/scratch/bun/install/cache`, `/legion/go` and `/legion/uv`, which the issue's roles share.
 Two paths this layout creates are deliberately not in that list. The per-role
 `/legion/scratch/state/<role>` is Oh My Pi's logs, Chromium's profiles and the installed plugin
-generation rather than a cache, and is small. `/legion/scratch/data` is the shared
-`XDG_DATA_HOME`, and it is the one path here that a rebuild cannot restore: Oh My Pi puts its
-whole profile root under `$XDG_DATA_HOME/omp` where that directory exists, so deleting it costs
-a role its stored state and frees whatever that state happened to weigh, where every other path
-on the list is re-derived by the next build or install. Measure it before you touch it, and
-delete it only when it is the reason the volume is full. Do not leave `/legion/scratch/tmp`
+generation rather than a cache, and is small — Oh My Pi's state-class directories (`run/daemons`,
+`logs`, `browser-profiles`, `reports`, `terminal-sessions`) hang under `$XDG_STATE_HOME/omp`, so
+they are that per-role path's and not the shared data home's. `/legion/scratch/data` is the
+shared `XDG_DATA_HOME`, the data-class directory of every tool a role runs, and it is exempt
+because nothing re-derives it: a cache, a temporary directory and an install cache are rebuilt by
+the next build or install, where what a tool stores in its data home is gone when it is deleted.
+Measure it before you touch it, and delete it only when it is the reason the volume is full.
+Do not leave `/legion/scratch/tmp`
 out of that list because a temporary directory sounds transient: it is this layout's own new
 failure mode, since a role at the merge base is told no `TMPDIR` at all and its temporaries died
 with the container, where here a killed build's residue lives as long as the issue does — one
