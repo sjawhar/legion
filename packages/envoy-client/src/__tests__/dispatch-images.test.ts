@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
 import { DispatchClient } from "../dispatch-http";
 import {
@@ -171,7 +172,7 @@ describe("sending pictures", () => {
     const server = dispatch();
     const shot = file("shot.png", PNG);
     const line = "![shot.png](dispatch://DSP-41/artifact/shot-png@v1)";
-    const body = "x".repeat(2000 - 2 - line.length + 1);
+    const body = "x".repeat(DISPATCH_BODY_MAX - 2 - line.length + 1);
 
     const failure = await refusal(
       run("dispatch_message", { issue: "DSP-41", body, images: [shot] }, server.fetchImpl)
@@ -179,7 +180,7 @@ describe("sending pictures", () => {
 
     expect(failure).toBeInstanceOf(ToolInputError);
     expect((failure as ToolInputError).problems).toEqual([
-      "body plus 1 picture is 1 characters over the 2000-character limit (2001/2000); shorten the body or send fewer pictures",
+      `body plus 1 picture is 1 characters over the ${DISPATCH_BODY_MAX}-character limit (${DISPATCH_BODY_MAX + 1}/${DISPATCH_BODY_MAX}); shorten the body or send fewer pictures`,
     ]);
     expect(server.uploads).toEqual([]);
     expect(server.posted).toEqual([]);
@@ -255,7 +256,7 @@ describe("sending pictures", () => {
   test("a body that fits the cap exactly with a non-ASCII file name's picture is posted", async () => {
     const server = dispatch();
     const line = "![café.png](dispatch://DSP-41/artifact/caf-png@v1)";
-    const body = "x".repeat(2000 - 2 - line.length);
+    const body = "x".repeat(DISPATCH_BODY_MAX - 2 - line.length);
 
     await run(
       "dispatch_message",
@@ -409,7 +410,7 @@ describe("sending pictures", () => {
         : undefined
     );
     const line = "![shot.png](dispatch://DSP-41/artifact/shot-png@v1)";
-    const body = "x".repeat(2000 - 2 - line.length);
+    const body = "x".repeat(DISPATCH_BODY_MAX - 2 - line.length);
 
     const failure = await refusal(
       run(
@@ -420,7 +421,7 @@ describe("sending pictures", () => {
     );
 
     expect(failure.message).toBe(
-      "body plus 1 picture is 1 characters over the 2000-character limit (2001/2000) with the " +
+      `body plus 1 picture is 1 characters over the ${DISPATCH_BODY_MAX}-character limit (${DISPATCH_BODY_MAX + 1}/${DISPATCH_BODY_MAX}) with the ` +
         "addresses Dispatch gave the uploads (dispatch://DSP-41/artifact/shot-png@v12), so " +
         "nothing was posted; shorten the body or send fewer pictures."
     );

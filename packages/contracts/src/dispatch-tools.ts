@@ -356,9 +356,9 @@ export const dispatchToolSpecs = [
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
       reason: z
-        .string({ max: 2000 })
+        .string({ max: DISPATCH_BODY_MAX })
         .describe(
-          "Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes."
+          `Required with status done, and only with it: why the issue is closing, at most ${DISPATCH_BODY_MAX} characters. Posted on the issue as a message before it closes.`
         )
         .optional(),
       title: z
@@ -700,7 +700,7 @@ export const dispatchToolSpecs = [
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
+      `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -716,7 +716,7 @@ export const dispatchToolSpecs = [
         .optional(),
       body: z
         .string({ max: DISPATCH_BODY_MAX })
-        .describe("Review comment, at most 2,000 characters."),
+        .describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
       reply_to: z
         .string()
         .describe(
@@ -743,7 +743,7 @@ export const dispatchToolSpecs = [
       images: imagesArgument(
         z,
         "the issue (or the project document's project)",
-        "the 2,000-character body limit"
+        `the ${DISPATCH_BODY_MAX}-character body limit`
       ),
     }),
     validation: commentValidation,
@@ -758,7 +758,7 @@ export const dispatchToolSpecs = [
     },
     description:
       "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " +
-      `dispatch comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
+      `dispatch comment instead. Optional explanation is at most ${DISPATCH_BODY_MAX} characters. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -776,8 +776,8 @@ export const dispatchToolSpecs = [
           "Replacement text; a CR LF or a lone carriage return in it is written as a line feed."
         ),
       body: z
-        .string({ max: 2000 })
-        .describe("Optional rationale, at most 2,000 characters.")
+        .string({ max: DISPATCH_BODY_MAX })
+        .describe(`Optional rationale, at most ${DISPATCH_BODY_MAX} characters.`)
         .optional(),
       occurrence: z
         .number({ int: true, min: 0 })
@@ -797,7 +797,7 @@ export const dispatchToolSpecs = [
       "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
       "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " +
       "that conversation back. Every other message names its issue. " +
-      `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+      `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z
         .string()
@@ -805,7 +805,9 @@ export const dispatchToolSpecs = [
           `${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`
         )
         .optional(),
-      body: z.string({ max: DISPATCH_BODY_MAX }).describe("Update text, at most 2,000 characters."),
+      body: z
+        .string({ max: DISPATCH_BODY_MAX })
+        .describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
       in_reply_to: z
         .string()
         .describe(
@@ -819,7 +821,7 @@ export const dispatchToolSpecs = [
       images: imagesArgument(
         z,
         "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)",
-        "the 2,000-character body limit"
+        `the ${DISPATCH_BODY_MAX}-character body limit`
       ),
     }),
     validation: messageValidation,
