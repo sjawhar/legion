@@ -2,49 +2,55 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T00:05:00Z",
+  "completed": "2026-10-21T01:20:00Z",
   "decision": "changes_requested",
-  "round": 8,
-  "previousRound": {
-    "head": "d9c78a0bcac3bdd9c79c184b6a9313379aba527a",
-    "decision": "changes_requested",
-    "findings": 2,
-    "outcome": "Both answered, and I ran the two mutations I announced rather than reading the table. `installLockWait` replaced by `return 1`: three cases red, twice each — the hand-computed want and the queue clause ('is 1s, want 120s: the 6m0s deadline's third, floored at a second' and 'less than the 5s the queue this lock creates needs'). Divisor moved to four: the same three cases red once each, on the hand arithmetic alone, the queue clause silent in every one, because a quarter still covers five serialised installs. That pairing is the result rather than the redness: the first mutation is caught as unsafe, the second as not-the-stated-derivation, and had divisor four fired the queue clause the second kind would have been reading the derivation after all. The tiny case staying silent under `return 1` is right rather than a gap, since its hand-computed want is 1. The form's own failure mode, which I warned about, is answered: each case carries its arithmetic in its own comment, so a future paste that does not match its stated sum is visible in the diff, and `queuedInstalls`/`installBudget` appear nowhere outside plugins_test.go, so nothing in installLockWait computes them. The second finding is fixed in all three places using the test comment's own sentence, with docs/kubernetes.md:1879 also scoping the five-serialised-installs claim to above the floor — the sentence I had named only in passing."
-  },
+  "round": 9,
+  "note": "A new round rather than a continuation: the conflict merge f714cec148b6 changed the fingerprint, which I had pre-committed to treating as a new round whichever way it came out. The head also moved under me while the round was open — my task named adae6dc7c4ca and the implementer pushed 0e21bab7d988 and 29e65d8f33b7 during it — so this review is of 29e65d8f33b7, the head as it stands, not the head I was handed.",
   "critical": 0,
   "important": 1,
-  "minor": 0,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "pull request #2085",
-      "description": "BLOCKING, and nothing to do with the code: the pull request conflicts with its base. GitHub reports `mergeable: false`, `mergeable_state: dirty`, read twice ten seconds apart so it is a settled computation rather than one in flight. `main` has moved 18 commits ahead of the merge base 61552da1b1b7 since this branch was cut, and among the files it changed are docs/kubernetes.md, deploy/kubernetes/daemon/legion.yaml.example and packages/claude-envoy — all of which this branch also edits heavily. I cannot approve a head that cannot merge, and approving it would be worse than useless: a conflict merge pushed above an approved head brings the base's paths above it, so READY would be refused READY_UNREVIEWED_CHANGE and the work would come back here anyway (skill://legion-worker/references/merge-gate.md). While the pull request is CONFLICTING, GitHub runs no workflow triggered `on: pull_request` for any of its activity, so no later push gets CI until the conflict is cured. The procedure is the implementer's and is in skill://legion-worker/references/conflicts-and-rewrites.md: record the fingerprint at the current tip, forward-merge the base into the issue branch in one new commit (`jj new legion/INFRA-31 \"main\"@origin`, from the bookmark and never from `@`, never `jj rebase`), resolve in that one commit, push it as a code push with no skip-checks line, and post the `rebase <old> → <new>; fingerprint <before> → <after>` comment. Then I compare the fingerprint at the `commit_id` of my last submitted review with the new head: equal, and because my last review was a request for changes, this round continues against the new head rather than restarting."
+      "file": "docs/kubernetes.md:1221",
+      "description": "The sentence that tells an operator what this change needs applied is false for the deployments this repository tells them to build, and it is false in the direction that matters: it says no deployment edit is needed. 'this change raises issue_volume's default from 20Gi to 50Gi — a default every project takes rather than a line of one deployment, so the apply this change needs is the image digest alone, with no deployment edit.' The default reaches only a file that sets nothing: config/kubernetes.go:428 is `block := &Kubernetes{IssueVolume: defaultIssueVolume}`, overridden by any explicit value. This repository's own example writes the line — deploy/kubernetes/daemon/legion.yaml.example:69 is `issue_volume: 50Gi` with the comment '50Gi is the default', and docs/kubernetes.md:1135 shows it written too — so a deployment stood up from either carries its own line, which today says 20Gi, and takes no new default at all. Separately, the size rides in the Sandbox's VolumeClaimTemplates and is evaluated when the Sandbox is created, and an issue's Sandbox outlives its pods, so every issue already running keeps the volume it was created with whatever the configuration says. The consequence is the one this issue exists to stop, arriving quietly: the digest is pinned, the caches move onto a 20Gi volume, nothing prunes /legion/scratch, and the kubelet eviction that used to name the offending container is gone — the same paragraph says so four lines later. This is not the 50Gi number, which is the human's and out of scope; it is whether the mitigation reaches production, and the doc actively tells the operator not to look. One sentence fixes it: a deployment that sets runtime.kubernetes.issue_volume keeps its own value and must raise it before the digest is pinned, and a volume already created for a running issue keeps its size. The operator check belongs beside the pod.env check the architect already ran."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/capabilities/image.go:251",
+      "description": "flock is declared on PATH and required at an absolute path, so the declaration does not cover the failure it was added to prevent. The rendered install runs /usr/bin/flock by absolute path (plugins.go:211), while the toolchain row asserts onPath(img, …, 'flock') — presence anywhere on PATH — and the Dockerfile's build-time probe is `flock --version`, also a PATH lookup. An image whose base ships flock somewhere other than /usr/bin passes the apt line, the build probe, the toolchain capability and the probe Sandbox, and then fails every installing launch with the shell's 'not found': the exact fleet-wide outcome the declaration exists to catch, which image.go:245-250 and worker.Dockerfile:478-484 both say in as many words. Latent rather than live, since Debian's util-linux puts it at /usr/bin today, which is also why it is minor. Either assert the absolute path the script uses, or render the script with the path the capability found."
     }
   ],
-  "codeVerdict": "Nothing about the code stands. Both round-7 findings are answered and verified by my own mutations; every earlier round's findings remain answered; CI's four required names are green at the code head f52a00d3b7ba with only .legion/ above it. If the forward merge leaves the branch's diff unchanged, this round continues against the merged head and the approval follows there with nothing new to check but the merge itself.",
+  "fixedThisRound": {
+    "subshellFailurePath": "The one thing I said the merge raised that nobody had asked is now pinned, and the pin is real. I had already run the rendered shape myself on sh, dash and bash before the test existed: a failed install exits 1, the setup block does not run and the agent is never exec'd, so `set -e` does propagate the subshell's exit. TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent (plugins_test.go:669) now holds it, with the succeeding case as a control in the same test so the absent markers cannot prove nothing. I ran the mutation the architect specified rather than reading it: with `exit 1` deleted from the install's failure branch the test fails four ways at once — 'the wrapper exited 0, want 1', 'the setup command ran after a failed install: the install's subshell exit did not end the wrapper', the same for the agent, and 'the wrapper wrote \"agent-stdout\" to stdout, the shim's frame stream'. Restored, workspace unchanged.",
+    "mergeIntegrity": "Both sides survived, checked by name rather than by count: this branch's requireFlock, bunInstallArgs's pinned cache under t.TempDir(), TestTwoRenderedInstallsSerialiseOnTheSharedBunCache with its lockless control and five-attempt Fatalf, TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline with its hand-computed cases and queue clause, queuedInstalls and installBudget, and the non-test pieces — the flock line with its derived -w, the cache read with no default, the mkdir -p before the lock; and main's setup-command tests and its startScript/startArgv shape. The lock wait reaches the rendered script: it threads startArgv -> startScript -> installBlock and renders as `-w %d`."
+  },
   "ci": {
-    "verdict": "every required check green at the code head, but no further CI will run while the pull request conflicts",
+    "verdict": "three of four required checks green at the code head; `test` still running, which a request for changes does not wait on",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "f52a00d3b7ba",
-    "read": "Read with per_page=100 and --paginate: lint, typecheck, test and pr-title all completed and success. gh api compare f52a00d3b7ba...8d9417d556a3 prints true for all paths under .legion/. The runs at 31e2e73673ea are cancelled because that commit was replaced sixteen minutes later by f52a00d3b7ba; a superseded run leaves no verdict rather than a red one."
+    "ciHead": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
+    "read": "Read with per_page=100 and --paginate: lint, typecheck and pr-title completed and success; test in_progress at the time of writing. gh api compare 0e21bab7d988...29e65d8f33b7 prints true for all paths under .legion/. A request for changes stands whatever CI says at the handoff head, so I did not hold the round for it; an approval would have had to wait."
+  },
+  "thermonuclear": {
+    "ranAt": "adae6dc7c4ca3a732e316978e698efcbfaecb0d5, the head my task named, before the implementer's push moved it",
+    "deepReview": "Judged the merge clean and raised both of my findings, which I then verified myself from the files rather than carrying. Its reads worth keeping: the union took both structures without dropping a hunk on either side, and every correction this branch made over six rounds survives at this head — the MiB/GiB figures, the /tmp and home-directory charging premise, Playwright under the shared cache home, the floor exception, the five-redundant-copies saving.",
+    "codeQuality": "Approve, nothing earning a round. Its one note is that bunInstallArgs and runStart are two harnesses doing the same stubbing — but both predate this pull request at the merge base, so the duplication is main's rather than the merge's, and it belongs with the carried scratch.go fast-follow. It confirms no comment in plugins.go still names installScript, which no longer exists, and that installLockWait's and installBlock's blocks were both rewritten for the new shape."
   },
   "verifiedByRunning": [
-    "Mutation A, installLockWait -> `return 1`: three cases red, twice each, the hand-computed want and the queue clause.",
-    "Mutation B, divisor 4: the same three cases red once each, on the arithmetic alone, the queue clause silent — the distinction the round existed to establish.",
-    "The baseline between them: the property green at the head, workspace unchanged after both.",
-    "The conflict itself, read twice from GitHub rather than inferred from the diff."
+    "The rendered wrapper's failure path on sh, dash and bash before the test existed: outer exit 1, setup block not reached, agent not exec'd.",
+    "The new test's mutation: `exit 1` deleted from the install's failure branch, four distinct failures. Restored, workspace clean.",
+    "The 50Gi reachability, read from config/kubernetes.go:428 and the two places the example writes the line, rather than taken from a report.",
+    "The flock declaration's shape, read from image.go:251 against plugins.go:211."
   ],
   "threads": {
-    "roundSeven": 2,
-    "allAnsweredAndResolvedByImplementer": true,
-    "reviewerRepliesPosted": [4331590768, 4331590906],
-    "botThreads": 0
+    "roundEight": 0,
+    "note": "Round 8's review carried no inline comments — its single finding was the conflict, which is a property of the pull request rather than of a line — so there was no thread to answer. No bot has opened one."
   },
   "fastFollow": [
-    "The scratch.go extraction from manifest.go, which should collapse the rationale now restated across about fifteen sites rather than relocate it, and fold the state home's regained mount assertions into one helper with the sibling test's copy.",
+    "The scratch.go extraction from manifest.go, which should collapse the rationale now restated across about fifteen sites rather than relocate it, and fold the state home's regained mount assertions into one helper with the sibling test's copy; bunInstallArgs and runStart's shared stubbing belongs in the same pass.",
     "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
     "The drift fence's reverse walk over every role rather than one rendered spec: no gap today, since every variable the runtime sets under /legion enumerates to exactly ten and none is kind-specific.",
-    "A test for configure's refusal of a non-positive RegistrationIntervals, in TestNewRefusesOptionsNoPodCouldRun's existing table slot. Safe to defer because two backstops stand behind it — the loader refuses a non-positive value for that key, and installLockWait's floor renders -w 1 rather than -w 0 at a zero deadline — so removing the refusal reaches no behaviour. Unsafe the day either goes."
+    "A test for configure's refusal of a non-positive RegistrationIntervals, safe to defer only while the loader's positive-count key and installLockWait's one-second floor both stand."
   ],
   "forTheMerger": {
     "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the review body.",
@@ -52,8 +58,8 @@
       "The default check-runs page is 30 and these commits carry 25 to 39; read with per_page=100 and --paginate or required names fall off it.",
       "A push that carries code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
       "A required workflow can have many runs on one head, because pr-title fires on every pull-request edit; the newest decides, and a run cancelled because a later one superseded it leaves no verdict rather than a red one.",
-      "The non-required `dispatch` lane has rarely settled on this branch, and envoy-smoke was red at one earlier head on a live envoy-infra listener step this diff cannot reach, green at every head since.",
-      "While the pull request is CONFLICTING, GitHub runs no `on: pull_request` workflow for any of its activity, so a body edit or a push gets no CI until the conflict is cured."
+      "While a pull request is CONFLICTING, GitHub runs no `on: pull_request` workflow for any of its activity, so nothing gets CI until the conflict is cured — which is what the forward merge at f714cec148b6 cured.",
+      "The non-required `dispatch` lane has rarely settled on this branch, and envoy-smoke was red at one earlier head on a live envoy-infra listener step this diff cannot reach."
     ]
   }
 }
