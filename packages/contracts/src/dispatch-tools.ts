@@ -1093,8 +1093,18 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
-      artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
-      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      artifact: z
+        .string()
+        .describe(
+          "Project document artifact id, slug, or filename, with project only; an issue's documents are dispatch doc-read's."
+        )
+        .optional(),
+      ref: z
+        .string()
+        .describe(
+          "Optional dispatch:// reference to an issue, its log or children, an ask, comment, or message, or a project document; an ask or comment on a document may be addressed through it (dispatch://KEY/artifact/<slug>/comment/<id>)."
+        )
+        .optional(),
       message: z
         .string()
         .describe(

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- The `dispatch` command (`dist/dispatch.js`) refuses `dispatch read` of an issue's document
+  (`--artifact` without `--project`, or a `--ref` to `dispatch://KEY/spec` or
+  `dispatch://KEY/artifact/<slug>`), naming the `dispatch doc-read` call that reads it; it used to
+  print the issue's summary in its place. `dispatch read --ref
+  dispatch://KEY/artifact/<slug>/comment/<id>` (and `/ask/<id>`) reads that comment or ask, where it
+  was refused with a second, wrong `issue is required` line.
 - The `dispatch` command (`dist/dispatch.js`) ends a write with `(not subscribed to KEY; …)` only
   when none of the session's Envoy subscriptions, as the listener records them, receives every
   event on the issue or document; it used to end every write that way. An ask or an ask reply

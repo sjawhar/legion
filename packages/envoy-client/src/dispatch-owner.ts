@@ -60,7 +60,8 @@ export interface ParsedDispatchRef {
   readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment" | "message";
   readonly id: string;
   readonly version?: number;
-  /** The document slug a project-owned ask or comment ref names. */
+  /** The document slug an ask or comment ref names it through: always for a project-owned one,
+   *  and for an issue-owned one written `dispatch://KEY/artifact/<slug>/(ask|comment)/<id>`. */
   readonly artifact?: string;
 }
 
@@ -97,17 +98,36 @@ export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   }
 
   // `activity` is the Activity tab's spelling of the same event list `log` has always named, so
-  // both read the issue's events; it is no kind of its own.
+  // both read the issue's events; it is no kind of its own. An ask or comment on one of the
+  // issue's documents is `KEY/ask/<id>` or `KEY/comment/<id>`, and may be written through its
+  // document as a project document's is, `KEY/artifact/<slug>/comment/<id>`.
   const issueReference = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
+    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
   );
   if (!issueReference) return null;
-  const [, issue, spec, log, children, artifact, version, ask, comment, message] = issueReference;
+  const [
+    ,
+    issue,
+    spec,
+    log,
+    children,
+    artifact,
+    version,
+    documentItemKind,
+    documentItemID,
+    ask,
+    comment,
+    message,
+  ] = issueReference;
   if (!issue || (version !== undefined && Number(version) < 1)) return null;
   const owner: Owner = { kind: "issue", issue };
   if (spec) return { owner, kind: "spec", id: spec };
   if (log) return { owner, kind: "log", id: log };
   if (children) return { owner, kind: "children", id: children };
+  if (artifact && (documentItemKind === "ask" || documentItemKind === "comment")) {
+    if (!documentItemID) return null;
+    return { owner, kind: documentItemKind, id: documentItemID, artifact };
+  }
   if (artifact) {
     return {
       owner,
