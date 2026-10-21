@@ -472,19 +472,25 @@ func (in *Intake) bind(ctx context.Context, handle func(context.Context, string)
 func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Leases, throttle *bindThrottle, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bindOutcome) {
 	name, subject := wanted.Durable, wanted.FilterSubject
 	if throttle.reconcileDue() {
-		// True when the pass does not run -- the lease is held elsewhere, or could not be taken: a
-		// reconciliation that never ran failed nothing, and the subscribe below says what this
-		// process's own state is.
+		// reconciled is true when the pass does not run -- the lease is held elsewhere, or could
+		// not be taken: a reconciliation that never ran failed nothing, and the subscribe below
+		// says what this process's own state is.
 		reconciled := true
-		duty.Exclusive(ctx, leases, deliveryConsumerLease, func(context.Context) {
+		ran := duty.Exclusive(ctx, leases, deliveryConsumerLease, func(context.Context) {
 			reconciled = reconcileDurableConsumer(client.JS(), wanted)
 		})
 		if !reconciled {
 			return nil, bindFailed
 		}
-		// Recorded past that failure alone, so a pass that ran and failed is made again on the
-		// next poll rather than skipped for the window.
-		throttle.recordReconcile()
+		// Recorded for a pass that ran and succeeded alone: one the lease refused reconciled
+		// nothing, and the window is how long this durable's configuration is taken as settled.
+		// Recording a skip would hold the two intakes of one process, which share the lease, for
+		// settingsPollInterval before either could create the durable the other's pass did not
+		// (TestBothIntakesKeepTheirSubscriptions), and a pass that ran and failed is made again
+		// on the next poll rather than skipped for the window.
+		if ran {
+			throttle.recordReconcile()
+		}
 	}
 	// The subject must be the consumer's own filter subject: nats.go checks a bound
 	// subscription's subject against it, and refuses an empty one ("subject does not match
