@@ -66,7 +66,9 @@ const startedAt = new Date().toISOString();
  * the lifecycle rows held behind their issues' running ones and `repositories` the project's
  * mapping, each of which the strict reader requires; the rig has no deployment to report on, its
  * one claim runs and it has no outbox, so the first three are the empty lists the daemon's
- * MarshalJSON emits when there is none. */
+ * MarshalJSON emits when there is none. `settings` is the daemon's resolved legion.yaml with no
+ * credential in it, also required; the rig has no file, so it carries the two keys the reader
+ * types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [] },
@@ -91,6 +93,7 @@ const STATE = LegionStateResponse.parse({
     refused: [],
     caches: [],
   },
+  settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
 });
 
 interface LogLine {

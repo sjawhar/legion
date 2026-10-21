@@ -431,6 +431,43 @@ func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
 	}
 }
 
+// The state carries the daemon's resolved settings (api.State.Settings, contract 35): the values
+// its configuration runs on, and nothing of its credentials. The configuration carries both Apps
+// with a PEM and no Dispatch, so no workflow opens and no token is minted (openWorkflow); the body
+// shows the Apps' ids and neither the key nor the store's DSN.
+func TestTheStateCarriesTheDaemonsSettingsAndNoSecret(t *testing.T) {
+	const privateKey = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
+	cfg := testConfig(t)
+	cfg.MaxFixAttempts = 5
+	cfg.GitHubApps = config.GitHubApps{
+		Implement: config.GitHubApp{AppID: "1001", PrivateKey: privateKey, Installations: map[string]string{"sjawhar": "2001"}},
+		Review:    config.GitHubApp{AppID: "1002", PrivateKey: privateKey, Installations: map[string]string{"sjawhar": "2002"}},
+	}
+	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
+
+	status, body := d.request(http.MethodGet, "/legion/v1/state", nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET the state = %d; body %s", status, body)
+	}
+	var state api.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatalf("decode the state %s: %v", body, err)
+	}
+	settings := state.Settings
+	if settings.MaxFixAttempts != 5 || settings.WorkerBootTimeoutSeconds != 120 || settings.Runtime.Name != "tmux" {
+		t.Errorf("settings max_fix_attempts %d, worker_boot_timeout_seconds %d, runtime.name %q; want the configured 5, 120, tmux",
+			settings.MaxFixAttempts, settings.WorkerBootTimeoutSeconds, settings.Runtime.Name)
+	}
+	if settings.GitHubApps == nil || settings.GitHubApps.Implement.AppID != "1001" || settings.GitHubApps.Review.AppID != "1002" {
+		t.Errorf("settings.github_apps = %+v, want both configured Apps by id", settings.GitHubApps)
+	}
+	for _, secret := range []string{"BEGIN", "postgres://", cfg.PostgresDSN} {
+		if bytes.Contains(body, []byte(secret)) {
+			t.Errorf("the state carries %q: %s", secret, body)
+		}
+	}
+}
+
 // A due lifecycle row held behind its issue's running one is on the state the daemon serves
 // (api.State.HeldOutboxRows, contract 28). The architect's accepted retry_or_escalate of a held
 // phase enqueues the implementer's start while the issue's lifecycle lane is still running an
