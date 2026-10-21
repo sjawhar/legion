@@ -455,7 +455,7 @@
         },
         "plugins": {
           "pi_legion": "10.4.0",
-          "pi_envoy": "10.4.0"
+          "pi_envoy": "https://xxxxx@plugins.internal.example/pi-envoy-10.4.0.tgz"
         },
         "setup": [
           "/bin/sh",

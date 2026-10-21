@@ -68,9 +68,9 @@
 
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
-  every credential, credential source and credential file path left out, required, so the MCP
-  server's strict state reader admits the field and nothing this plugin reads or writes moved; a
-  session of it registers with a daemon at 35.
+  every credential, credential source and credential file path left out and a URL's userinfo masked
+  as `xxxxx@`, required, so the MCP server's strict state reader admits the field and nothing this
+  plugin reads or writes moved; a session of it registers with a daemon at 35.
 - The plugin declares daemon API contract 34 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-31): under the Kubernetes runtime the roles of an issue now share one scratch on the
   issue's volume, and the daemon tells every role container of a pod the same temporary directory,

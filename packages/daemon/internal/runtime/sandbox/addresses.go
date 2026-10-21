@@ -313,7 +313,9 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 // loader no longer accepts it. It names "(unset)" for none; otherwise it constructs the name from
 // exactly the scheme, host and port it accepts to show, adding xxxxx@ when the URL carries userinfo.
 // Path, query and fragment never enter it. An endpoint that cannot yield a scheme and host is xxxxx
-// whole, so unexpected input cannot make the name a credential reader.
+// whole, so unexpected input cannot make the name a credential reader. api.endpointOf is the same
+// mask as the state renders it, which keeps the path: there the value is a setting its reader acts
+// on, where this one is only a name.
 func namedURL(address string) string {
 	if address == "" {
 		return "(unset)"

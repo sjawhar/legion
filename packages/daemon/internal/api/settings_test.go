@@ -201,6 +201,7 @@ var settingsFixturePlanted = []string{
 	"BEGIN", "PRIVATE KEY",
 	"postgres://", "fixture-dsn-password",
 	"legion:fixture-", "fixture-envoy-password", "fixture-nats-password",
+	"legion:fixture-plugin-", "fixture-plugin-password", "fixture-plugin-token",
 	"/var/run/legion/OPERATOR_TOKEN", "/var/run/legion/ENVOY_TOKEN", "/var/run/legion/NATS_NKEY_SEED",
 	"/var/run/legion/NATS_DAEMON_NKEY_SEED", "/var/run/legion/DISPATCH_TOKEN", "/var/run/secrets/agent-secrets/token",
 	"/etc/legion/kubeconfig", "legion-daemon@fixture-cluster",
@@ -331,6 +332,12 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	if want := []string{"nats://xxxxx@nats.internal.example:4222", "nats://nats-2.internal.example:4222"}; !slices.Equal(settings.NatsURLs, want) {
 		t.Errorf("nats_urls = %q, want %q: the first entry's userinfo masked, the second unchanged", settings.NatsURLs, want)
 	}
+	// The plugin source in URL form rides with its userinfo masked and its query dropped; the one in
+	// version form rides as written.
+	want := PluginsSettings{PiLegion: "10.4.0", PiEnvoy: "https://xxxxx@plugins.internal.example/pi-envoy-10.4.0.tgz"}
+	if plugins := settings.Runtime.Kubernetes.Plugins; plugins == nil || *plugins != want {
+		t.Errorf("runtime.kubernetes.plugins = %+v, want %+v", plugins, want)
+	}
 }
 
 // endpointOf keeps an address's scheme, host and path and masks its userinfo, a user alone or a
@@ -350,6 +357,22 @@ func TestEndpointOfMasksUserinfoAndKeepsThePath(t *testing.T) {
 	} {
 		if got := endpointOf(tc.address); got != tc.want {
 			t.Errorf("endpointOf(%q) = %q, want %q", tc.address, got, tc.want)
+		}
+	}
+}
+
+// pluginSourceOf leaves a version and an absolute tarball path as written and rides the URL form
+// through endpointOf, masking its userinfo as xxxxx@ and dropping its query and fragment.
+func TestPluginSourceOfMasksOnlyTheURLForm(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{"10.4.0", "10.4.0"},
+		{"/opt/plugins/pi-legion-10.4.0.tgz", "/opt/plugins/pi-legion-10.4.0.tgz"},
+		{"https://plugins.internal.example/pi-legion-10.4.0.tgz", "https://plugins.internal.example/pi-legion-10.4.0.tgz"},
+		{"https://legion:secret@plugins.internal.example/pi-legion-10.4.0.tgz?X-Amz-Signature=abc#frag", "https://xxxxx@plugins.internal.example/pi-legion-10.4.0.tgz"},
+		{"http://plugins.internal.example/x.tgz?token=t", "http://plugins.internal.example/x.tgz"},
+	} {
+		if got := pluginSourceOf(tc.source); got != tc.want {
+			t.Errorf("pluginSourceOf(%q) = %q, want %q", tc.source, got, tc.want)
 		}
 	}
 }

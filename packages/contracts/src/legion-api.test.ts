@@ -679,6 +679,7 @@ test("the state golden carries the daemon's settings with no credential, and the
   const text = readFileSync(path.join(fixtureDir, "state.json"), "utf8");
   expect(text).not.toMatch(/BEGIN .*PRIVATE KEY/);
   expect(text).not.toMatch(/postgres:\/\//);
+  expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
 });
 
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is

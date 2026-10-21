@@ -13,11 +13,15 @@ import (
 // answers 3), keyed as the file is. The route is unauthenticated, so the audience is every pod of
 // the deployment and anything else that reaches the daemon's API port; the block therefore leaves
 // out every credential, every source of one (a secretsd or Secret key, a key command) and every
-// path of a file holding one, masks the userinfo of the four address keys (`daemon_url`,
-// `envoy_url`, `nats_urls`, `dispatch_url`) as `xxxxx@`, and carries only what every pod may
-// already know. SettingsOf is an allowlist: it names each field it emits, and a `config.Config`
-// field added without a place in settings_test.go's emitted or excluded table fails
-// TestSettingsOfClassifiesEveryConfigField.
+// path of a file holding one, and carries only what every pod may already know. Of the strings it
+// carries, the four address keys (`daemon_url`, `envoy_url`, `nats_urls`, `dispatch_url`) ride
+// endpointOf, which masks their userinfo as `xxxxx@`; a `runtime.kubernetes.plugins` source in
+// URL form rides it too (pluginSourceOf), losing its userinfo, query and fragment; and
+// `runtime.kubernetes.agent_secrets.url` rides as written, since the loader refuses userinfo, a
+// path, a query and a fragment on it. Every other string is a name, a path, a quantity or a
+// version, never a URL. SettingsOf is an allowlist: it names each field it emits, and a
+// `config.Config` field added without a place in settings_test.go's emitted or excluded table
+// fails TestSettingsOfClassifiesEveryConfigField.
 type Settings struct {
 	Project string `json:"project"`
 	Port    int    `json:"port"`
@@ -189,8 +193,11 @@ type CapabilitiesSettings struct {
 
 // SettingsOf is cfg as the state shows it: every setting of the resolved file the audience of an
 // unauthenticated route may read, and no credential, credential source or credential file path
-// (Settings); each address it emits is endpointOf its value. Every slice and map it emits is
-// non-nil, so the state marshals no `null` inside it.
+// (Settings). Of the URLs it emits, the four address keys ride endpointOf and a plugin source in
+// URL form rides pluginSourceOf, so no userinfo reaches the wire; `agent_secrets.url` is the one
+// URL that rides as written, which the loader has made safe by refusing userinfo, a path, a query
+// and a fragment on it (internal/config/kubernetes.go, readAgentSecrets). Every slice and map it
+// emits is non-nil, so the state marshals no `null` inside it.
 func SettingsOf(cfg config.Config) Settings {
 	settings := Settings{
 		Project:                                 cfg.Project,
@@ -298,7 +305,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 		settings.AgentSecrets = &AgentSecretsSettings{URL: broker.URL, Audience: broker.Audience, TokenExpirySeconds: broker.TokenExpirySeconds}
 	}
 	if plugins := block.Plugins; plugins != nil {
-		settings.Plugins = &PluginsSettings{PiLegion: plugins.PiLegion, PiEnvoy: plugins.PiEnvoy}
+		settings.Plugins = &PluginsSettings{PiLegion: pluginSourceOf(plugins.PiLegion), PiEnvoy: pluginSourceOf(plugins.PiEnvoy)}
 	}
 	return settings
 }
@@ -332,8 +339,12 @@ func stringsOf(values []string) []string {
 // endpointOf is one address key's value as the state shows it: the scheme, the host and the path,
 // with the userinfo, where the loader has NATS and Envoy credentials live (`use URL userinfo or a
 // secret for credentials`), masked as `xxxxx@`. "" stays "" (`dispatch_url` may be unset); an
-// address that yields no scheme and host is `xxxxx` whole, never the raw string. The loader has
-// refused a query and a fragment on every one of the four keys, so nothing else of the URL is left.
+// address that yields no scheme and host is `xxxxx` whole, never the raw string. The result is
+// composed from the parsed scheme, the userinfo mark, the host and EscapedPath, so a query or a
+// fragment never reaches the wire either: the loader refuses one on each of the four address keys,
+// and a plugin URL's pre-signed query (pluginSourceOf) is dropped here. runtime/sandbox's namedURL
+// is the same mask for a log line and keeps the host alone; this one keeps the path because a
+// setting is a value its reader acts on, where namedURL's result is only a name.
 func endpointOf(address string) string {
 	if address == "" {
 		return ""
@@ -347,4 +358,17 @@ func endpointOf(address string) string {
 		endpoint += "xxxxx@"
 	}
 	return endpoint + u.Host + u.EscapedPath()
+}
+
+// pluginSourceOf is one `runtime.kubernetes.plugins` source as the state shows it. The loader
+// (internal/config/kubernetes.go, readPluginSource) admits an exact version, an absolute tarball
+// path, or an http(s) URL stored whole, so a private or pre-signed tarball URL carries its
+// credential in userinfo or in a query (`X-Amz-Signature`): the URL form, told by the loader's own
+// shape test, rides endpointOf, which masks the userinfo and drops the query and fragment; a
+// version and a path carry no credential and pass through unchanged, never `xxxxx`.
+func pluginSourceOf(source string) string {
+	if u, err := url.Parse(source); err == nil && u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") {
+		return endpointOf(source)
+	}
+	return source
 }

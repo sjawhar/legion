@@ -587,7 +587,8 @@ Closing the terminal leaves the project without one, and the daemon logs
   with each left-out repository's `reason`),
   `settings` (the daemon's resolved `legion.yaml` — `max_fix_attempts`, `worker_boot_timeout_seconds`
   and the rest as the daemon runs them — with every credential, credential source and credential
-  file path left out), and `agentSecretsLogin` when the broker is configured:
+  file path left out, and a URL's userinfo masked as `xxxxx@`), and `agentSecretsLogin` when the
+  broker is configured:
 
   ```sh
   legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate}'

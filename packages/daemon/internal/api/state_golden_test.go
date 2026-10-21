@@ -31,10 +31,12 @@ func goldenPath(name string) string {
 // share: every key the loader models is set, and every value a credential, its source or its file
 // could be is a planted fixture a test can look for in the wire bytes (a PEM that is no key, a DSN
 // password that opens nothing, `*_file` paths, the kubeconfig, the session DSN secret's key, each
-// provider key's store key, the pod's env values, volume, Secret and ServiceAccount names, and
-// userinfo on `envoy_url` and the first `nats_urls` entry, which the settings mask). Every path the
-// settings emit (`state_dir`, `instructions`) is a fixed absolute literal, so the golden does not
-// churn with the temporary directory the file is written under. Hosts are placeholders.
+// provider key's store key, the pod's env values, volume, Secret and ServiceAccount names, userinfo
+// on `envoy_url` and the first `nats_urls` entry, which the settings mask, and userinfo and a query
+// on `plugins.pi_envoy`'s tarball URL, which the settings mask and drop while `pi_legion` pins the
+// version form). Every path the settings emit (`state_dir`, `instructions`) is a fixed absolute
+// literal, so the golden does not churn with the temporary directory the file is written under.
+// Hosts are placeholders.
 const settingsFixtureFile = `project: LEGION
 port: 13370
 bind: 0.0.0.0
@@ -132,7 +134,7 @@ runtime:
       token_expiry_seconds: 1800
     plugins:
       pi_legion: 10.4.0
-      pi_envoy: 10.4.0
+      pi_envoy: https://legion:fixture-plugin-password@plugins.internal.example/pi-envoy-10.4.0.tgz?token=fixture-plugin-token
     setup: [/bin/sh, -c, 'echo fixture-setup']
     repository_cache:
       volume: 40Gi
