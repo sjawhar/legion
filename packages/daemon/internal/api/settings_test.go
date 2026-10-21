@@ -12,28 +12,38 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
-// settingsClassifiedTypes are config.Config and every type reachable from it: each exported field
-// of each is in settingsEmitted or settingsExcluded, so a field added to any of them is classified
-// before the build is green, and a type added here is read field by field.
-var settingsClassifiedTypes = []reflect.Type{
-	reflect.TypeFor[config.Config](),
-	reflect.TypeFor[config.Runtime](),
-	reflect.TypeFor[config.Kubernetes](),
-	reflect.TypeFor[config.Scheduling](),
-	reflect.TypeFor[config.Toleration](),
-	reflect.TypeFor[config.RoleResources](),
-	reflect.TypeFor[config.PodConfig](),
-	reflect.TypeFor[config.AgentSecretsConfig](),
-	reflect.TypeFor[config.PluginsConfig](),
-	reflect.TypeFor[config.ProviderKey](),
-	reflect.TypeFor[config.Project](),
-	reflect.TypeFor[config.MergeRules](),
-	reflect.TypeFor[config.PathPattern](),
-	reflect.TypeFor[config.Gates](),
-	reflect.TypeFor[config.GitHubApps](),
-	reflect.TypeFor[config.GitHubApp](),
-	reflect.TypeFor[config.Capabilities](),
-	reflect.TypeFor[config.RepositoryCacheConfig](),
+// settingsConfigTypes is config.Config and every struct type of its package reachable from it
+// through exported fields, pointers, slices, arrays and map keys and elements, each once: the
+// types whose exported fields TestSettingsOfClassifiesEveryConfigField holds to settingsEmitted and
+// settingsExcluded. Because the set is derived, a nested struct a new field introduces is read
+// field by field before the build is green, with no list to extend. A type of another package (a
+// Kubernetes API type, time.Duration, a role, a backend, a compiled regexp) is a leaf: its fields
+// are no legion.yaml keys.
+func settingsConfigTypes() []reflect.Type {
+	root := reflect.TypeFor[config.Config]()
+	var types []reflect.Type
+	var walk func(typ reflect.Type)
+	walk = func(typ reflect.Type) {
+		switch typ.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array:
+			walk(typ.Elem())
+		case reflect.Map:
+			walk(typ.Key())
+			walk(typ.Elem())
+		case reflect.Struct:
+			if typ.PkgPath() != root.PkgPath() || slices.Contains(types, typ) {
+				return
+			}
+			types = append(types, typ)
+			for i := range typ.NumField() {
+				if field := typ.Field(i); field.IsExported() {
+					walk(field.Type)
+				}
+			}
+		}
+	}
+	walk(root)
+	return types
 }
 
 // settingsEmitted is every config field SettingsOf emits, by `<Type>.<Field>`, and the settings
@@ -151,12 +161,13 @@ var settingsExcluded = map[string]string{
 	"PathPattern.Regexp":            "compiled from Expression, not a setting",
 }
 
-// Every exported field of config.Config and the types under it is named in exactly one of the two
-// tables, and every table row names a field that exists: a new field fails here until someone
-// decides whether an unauthenticated route may carry it.
+// Every exported field of every struct the walk reaches (settingsConfigTypes) is named in exactly
+// one of the two tables, and every table row names a field the walk reaches: a new field, on a
+// type the walk already reads or on a nested type the field itself introduces, fails here until
+// someone decides whether an unauthenticated route may carry it.
 func TestSettingsOfClassifiesEveryConfigField(t *testing.T) {
 	seen := map[string]bool{}
-	for _, typ := range settingsClassifiedTypes {
+	for _, typ := range settingsConfigTypes() {
 		for i := range typ.NumField() {
 			field := typ.Field(i)
 			if !field.IsExported() {
@@ -177,18 +188,19 @@ func TestSettingsOfClassifiesEveryConfigField(t *testing.T) {
 	for name, table := range map[string]map[string]string{"settingsEmitted": settingsEmitted, "settingsExcluded": settingsExcluded} {
 		for path := range table {
 			if !seen[path] {
-				t.Errorf("%s names %s, which is no exported field of a classified type", name, path)
+				t.Errorf("%s names %s, which is no exported field of a struct reachable from config.Config", name, path)
 			}
 		}
 	}
 }
 
 // settingsFixturePlanted is every value of settingsFixtureFile that is a credential, the source of
-// one, the path of a file holding one, or an operator pod piece: each is in the file (so the list
-// cannot go stale) and none is in the settings' bytes.
+// one, the path of a file holding one, the userinfo of an address, or an operator pod piece: each
+// is in the file (so the list cannot go stale) and none is in the settings' bytes.
 var settingsFixturePlanted = []string{
 	"BEGIN", "PRIVATE KEY",
 	"postgres://", "fixture-dsn-password",
+	"legion:fixture-", "fixture-envoy-password", "fixture-nats-password",
 	"/var/run/legion/OPERATOR_TOKEN", "/var/run/legion/ENVOY_TOKEN", "/var/run/legion/NATS_NKEY_SEED",
 	"/var/run/legion/NATS_DAEMON_NKEY_SEED", "/var/run/legion/DISPATCH_TOKEN", "/var/run/secrets/agent-secrets/token",
 	"/etc/legion/kubeconfig", "legion-daemon@fixture-cluster",
@@ -311,6 +323,34 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := map[string]string{"pool-capacity": "the pool is sized by hand for the admission cap"}; !maps.Equal(settings.Capabilities.Decided, want) {
 		t.Errorf("capabilities.decided = %q, want %q", settings.Capabilities.Decided, want)
+	}
+	// The two addresses the file gives userinfo ride masked; the one it gives none rides as written.
+	if want := "http://xxxxx@envoy-listener.internal.example:9020"; settings.EnvoyURL != want {
+		t.Errorf("envoy_url = %q, want %q", settings.EnvoyURL, want)
+	}
+	if want := []string{"nats://xxxxx@nats.internal.example:4222", "nats://nats-2.internal.example:4222"}; !slices.Equal(settings.NatsURLs, want) {
+		t.Errorf("nats_urls = %q, want %q: the first entry's userinfo masked, the second unchanged", settings.NatsURLs, want)
+	}
+}
+
+// endpointOf keeps an address's scheme, host and path and masks its userinfo, a user alone or a
+// user and password, as xxxxx@; "" stays "", and an address that yields no scheme and host is xxxxx
+// whole.
+func TestEndpointOfMasksUserinfoAndKeepsThePath(t *testing.T) {
+	for _, tc := range []struct{ address, want string }{
+		{"http://envoy-listener.internal.example:9020", "http://envoy-listener.internal.example:9020"},
+		{"http://legion@envoy-listener.internal.example:9020", "http://xxxxx@envoy-listener.internal.example:9020"},
+		{"http://legion:fixture-envoy-password@envoy-listener.internal.example:9020", "http://xxxxx@envoy-listener.internal.example:9020"},
+		{"https://dispatch.internal.example/legion", "https://dispatch.internal.example/legion"},
+		{"https://legion:fixture-dispatch-password@dispatch.internal.example/legion", "https://xxxxx@dispatch.internal.example/legion"},
+		{"nats://legion:fixture-nats-password@nats.internal.example:4222", "nats://xxxxx@nats.internal.example:4222"},
+		{"", ""},
+		{"not a url", "xxxxx"},
+		{"//host-only", "xxxxx"},
+	} {
+		if got := endpointOf(tc.address); got != tc.want {
+			t.Errorf("endpointOf(%q) = %q, want %q", tc.address, got, tc.want)
+		}
 	}
 }
 

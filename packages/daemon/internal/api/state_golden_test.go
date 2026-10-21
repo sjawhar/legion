@@ -31,9 +31,10 @@ func goldenPath(name string) string {
 // share: every key the loader models is set, and every value a credential, its source or its file
 // could be is a planted fixture a test can look for in the wire bytes (a PEM that is no key, a DSN
 // password that opens nothing, `*_file` paths, the kubeconfig, the session DSN secret's key, each
-// provider key's store key, the pod's env values, volume, Secret and ServiceAccount names). Every
-// path the settings emit (`state_dir`, `instructions`) is a fixed absolute literal, so the golden
-// does not churn with the temporary directory the file is written under. Hosts are placeholders.
+// provider key's store key, the pod's env values, volume, Secret and ServiceAccount names, and
+// userinfo on `envoy_url` and the first `nats_urls` entry, which the settings mask). Every path the
+// settings emit (`state_dir`, `instructions`) is a fixed absolute literal, so the golden does not
+// churn with the temporary directory the file is written under. Hosts are placeholders.
 const settingsFixtureFile = `project: LEGION
 port: 13370
 bind: 0.0.0.0
@@ -57,8 +58,8 @@ launch_failure_limit: 4
 prompt_failure_limit: 5
 prompt_retire_limit: 3
 operator_token_file: /var/run/legion/OPERATOR_TOKEN
-envoy_url: http://envoy-listener.internal.example:9020
-nats_urls: [nats://nats.internal.example:4222, nats://nats-2.internal.example:4222]
+envoy_url: http://legion:fixture-envoy-password@envoy-listener.internal.example:9020
+nats_urls: [nats://legion:fixture-nats-password@nats.internal.example:4222, nats://nats-2.internal.example:4222]
 envoy_token_file: /var/run/legion/ENVOY_TOKEN
 nats_nkey_seed_file: /var/run/legion/NATS_NKEY_SEED
 nats_daemon_nkey_seed_file: /var/run/legion/NATS_DAEMON_NKEY_SEED

@@ -497,9 +497,9 @@
     "launch_failure_limit": 4,
     "prompt_failure_limit": 5,
     "prompt_retire_limit": 3,
-    "envoy_url": "http://envoy-listener.internal.example:9020",
+    "envoy_url": "http://xxxxx@envoy-listener.internal.example:9020",
     "nats_urls": [
-      "nats://nats.internal.example:4222",
+      "nats://xxxxx@nats.internal.example:4222",
       "nats://nats-2.internal.example:4222"
     ],
     "dispatch_url": "https://dispatch.internal.example",

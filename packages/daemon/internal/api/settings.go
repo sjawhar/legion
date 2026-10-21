@@ -2,6 +2,7 @@ package api
 
 import (
 	"maps"
+	"net/url"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -12,9 +13,11 @@ import (
 // answers 3), keyed as the file is. The route is unauthenticated, so the audience is every pod of
 // the deployment and anything else that reaches the daemon's API port; the block therefore leaves
 // out every credential, every source of one (a secretsd or Secret key, a key command) and every
-// path of a file holding one, and carries only what every pod may already know. SettingsOf is an
-// allowlist: it names each field it emits, and a `config.Config` field added without a place in
-// settings_test.go's emitted or excluded table fails TestSettingsOfClassifiesEveryConfigField.
+// path of a file holding one, masks the userinfo of the four address keys (`daemon_url`,
+// `envoy_url`, `nats_urls`, `dispatch_url`) as `xxxxx@`, and carries only what every pod may
+// already know. SettingsOf is an allowlist: it names each field it emits, and a `config.Config`
+// field added without a place in settings_test.go's emitted or excluded table fails
+// TestSettingsOfClassifiesEveryConfigField.
 type Settings struct {
 	Project string `json:"project"`
 	Port    int    `json:"port"`
@@ -23,7 +26,7 @@ type Settings struct {
 	AdvertiseHost string          `json:"advertise_host,omitempty"`
 	StateDir      string          `json:"state_dir"`
 	Runtime       RuntimeSettings `json:"runtime"`
-	// AdmissionCap is the file's cap; `admission.cap` beside it is the live one.
+	// AdmissionCap is the cap; `admission.cap` carries the same value, read from the same configuration.
 	AdmissionCap     int    `json:"admission_cap"`
 	DaemonURL        string `json:"daemon_url"`
 	WorkerStreamPort int    `json:"worker_stream_port"`
@@ -186,7 +189,8 @@ type CapabilitiesSettings struct {
 
 // SettingsOf is cfg as the state shows it: every setting of the resolved file the audience of an
 // unauthenticated route may read, and no credential, credential source or credential file path
-// (Settings). Every slice and map it emits is non-nil, so the state marshals no `null` inside it.
+// (Settings); each address it emits is endpointOf its value. Every slice and map it emits is
+// non-nil, so the state marshals no `null` inside it.
 func SettingsOf(cfg config.Config) Settings {
 	settings := Settings{
 		Project:                                 cfg.Project,
@@ -196,7 +200,7 @@ func SettingsOf(cfg config.Config) Settings {
 		StateDir:                                cfg.StateDir,
 		Runtime:                                 RuntimeSettings{Name: cfg.Runtime.Name, Kubernetes: kubernetesSettingsOf(cfg.Runtime.Kubernetes)},
 		AdmissionCap:                            cfg.AdmissionCap,
-		DaemonURL:                               cfg.DaemonURL,
+		DaemonURL:                               endpointOf(cfg.DaemonURL),
 		WorkerStreamPort:                        cfg.WorkerStreamPort,
 		OmpInvocation:                           cfg.OmpInvocation,
 		OmpLaunchPrefix:                         stringsOf(cfg.OmpLaunchPrefix),
@@ -213,9 +217,9 @@ func SettingsOf(cfg config.Config) Settings {
 		LaunchFailureLimit:                      cfg.LaunchFailureLimit,
 		PromptFailureLimit:                      cfg.PromptFailureLimit,
 		PromptRetireLimit:                       cfg.PromptRetireLimit,
-		EnvoyURL:                                cfg.EnvoyURL,
-		NatsURLs:                                stringsOf(cfg.NatsURLs),
-		DispatchURL:                             cfg.DispatchURL,
+		EnvoyURL:                                endpointOf(cfg.EnvoyURL),
+		NatsURLs:                                make([]string, len(cfg.NatsURLs)),
+		DispatchURL:                             endpointOf(cfg.DispatchURL),
 		Projects:                                make(map[string]ProjectSettings, len(cfg.Projects)),
 		Gates:                                   GatesSettings{Design: cfg.Gates.Design},
 		LingerHours:                             cfg.Linger.Hours(),
@@ -228,6 +232,9 @@ func SettingsOf(cfg config.Config) Settings {
 	}
 	for i, key := range cfg.ProviderKeys {
 		settings.ProviderKeys[i] = key.Env
+	}
+	for i, raw := range cfg.NatsURLs {
+		settings.NatsURLs[i] = endpointOf(raw)
 	}
 	for key, project := range cfg.Projects {
 		entry := ProjectSettings{
@@ -320,4 +327,24 @@ func seconds(d time.Duration) int {
 // stringsOf is a copy of values that is `[]` on the wire when values is nil.
 func stringsOf(values []string) []string {
 	return append([]string{}, values...)
+}
+
+// endpointOf is one address key's value as the state shows it: the scheme, the host and the path,
+// with the userinfo, where the loader has NATS and Envoy credentials live (`use URL userinfo or a
+// secret for credentials`), masked as `xxxxx@`. "" stays "" (`dispatch_url` may be unset); an
+// address that yields no scheme and host is `xxxxx` whole, never the raw string. The loader has
+// refused a query and a fragment on every one of the four keys, so nothing else of the URL is left.
+func endpointOf(address string) string {
+	if address == "" {
+		return ""
+	}
+	u, err := url.Parse(address)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "xxxxx"
+	}
+	endpoint := u.Scheme + "://"
+	if u.User != nil {
+		endpoint += "xxxxx@"
+	}
+	return endpoint + u.Host + u.EscapedPath()
 }
