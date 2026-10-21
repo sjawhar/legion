@@ -17,9 +17,9 @@ func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
 	requireTmux(t)
 	rt, err := New(Options{
 		Project: "omp", StateDir: t.TempDir(), StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
-		EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
+		EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=" + os.Getenv("PATH")},
-		Executable: func() (string, error) { return "/opt/legion", nil }, GitHubCredential: staticCredential,
+		Executable: func() (string, error) { return "/opt/legion", nil }, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
 	})
 	if err != nil {
 		t.Fatal(err)

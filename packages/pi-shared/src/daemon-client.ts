@@ -1,0 +1,327 @@
+import {
+  LegionChildRequest,
+  LegionControllerGrantRequest,
+  LegionControllerRegisterResponse,
+  type LegionControllerRegistration,
+  LegionEmptyResponse,
+  LegionErrorResponse,
+  LegionGateRegisterRequest,
+  LegionGrantRequest,
+  LegionGrantResponse,
+  LegionHandoffCompleteRequest,
+  LegionHandoffCompleteResponse,
+  LegionIssueStatusRequest,
+  LegionPhaseBackwardRequest,
+  LegionPhaseRetryRequest,
+  type LegionReadyRequest,
+  LegionRegisterResponse,
+  type LegionRegistration,
+  LegionRootCloseRequest,
+  LegionSignOffRequest,
+  type LegionState,
+  LegionStateResponse,
+  LegionWaveReleaseRequest,
+  LegionWaveReleaseResponse,
+} from "@legion/contracts/legion-api";
+import { messageFor } from "@legion/envoy-client/errors";
+import type { z } from "zod";
+
+/**
+ * The plugin's client for the daemon (`packages/daemon`), the one `extensions/legion.ts` boots
+ * every Legion session through.
+ *
+ * Every response is read through the strict schemas of `@legion/contracts/legion-api`, which the
+ * daemon's golden tests hold to its own types; the requests are the claim wire of
+ * `packages/daemon/internal/claim/wire.go`, which refuses a member it does not read. There is no
+ * secret recovery: the daemon persists a registration's capability before it answers, so a
+ * restart forgets no secret.
+ */
+
+/** `claim.RegisterRequest`: the pane's boot token and the session this agent became.
+ * `pluginContract` is this build's `legion.daemonApiVersion`. */
+export interface RegisterInput {
+  readonly bootToken: string;
+  readonly sessionId: string;
+  readonly ompSessionFile: string;
+  readonly agentId: string;
+  readonly pluginContract: number;
+}
+
+/** `claim.ReadyRequest`: the claim the registration issued, authenticated by its secret, and the
+ * session's report of the six live capability rows (`src/capability-report.ts`, contract 21); the
+ * controller's ready carries none. */
+export type ReadyInput = z.input<typeof LegionReadyRequest>;
+
+/** `claim.ExitRequest`: the agent reporting its own end, and why. */
+export interface ExitInput {
+  readonly claimToken: string;
+  readonly sessionId: string;
+  readonly secret: string;
+  readonly generation: number;
+  readonly reason: string;
+}
+
+export interface LegionDaemonClient {
+  readonly state: () => Promise<LegionState>;
+  readonly register: (input: RegisterInput) => Promise<LegionRegistration>;
+  /** The same route, for the operator-launched controller: `bootToken` is the capability `legion
+   * controller start` fetched, and the answer is the controller's registration. */
+  readonly registerController: (input: RegisterInput) => Promise<LegionControllerRegistration>;
+  readonly ready: (input: ReadyInput) => Promise<void>;
+  readonly exit: (input: ExitInput) => Promise<void>;
+  readonly grant: (
+    input: z.input<typeof LegionGrantRequest>
+  ) => Promise<z.output<typeof LegionGrantResponse>>;
+  readonly controllerGrant: (
+    input: z.input<typeof LegionControllerGrantRequest>
+  ) => Promise<z.output<typeof LegionGrantResponse>>;
+  readonly handoffComplete: (
+    input: z.input<typeof LegionHandoffCompleteRequest>
+  ) => Promise<z.output<typeof LegionHandoffCompleteResponse>>;
+  readonly issueStatus: (
+    input: z.input<typeof LegionIssueStatusRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  readonly gateRegister: (
+    input: z.input<typeof LegionGateRegisterRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  readonly waveRelease: (
+    input: z.input<typeof LegionWaveReleaseRequest>
+  ) => Promise<z.output<typeof LegionWaveReleaseResponse>>;
+  readonly phaseBackward: (
+    input: z.input<typeof LegionPhaseBackwardRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  readonly phaseRetry: (
+    input: z.input<typeof LegionPhaseRetryRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  readonly signOff: (
+    input: z.input<typeof LegionSignOffRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  readonly rootClose: (
+    input: z.input<typeof LegionRootCloseRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  readonly childPark: (
+    input: z.input<typeof LegionChildRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  readonly childRerun: (
+    input: z.input<typeof LegionChildRequest>
+  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+}
+
+/** The daemon answered with a status that is not success. `detail` is the sentence it put
+ * under `error`; workflow refusals also carry their stable `code`. */
+export class LegionDaemonApiError extends Error {
+  constructor(
+    readonly method: string,
+    readonly path: string,
+    readonly status: number,
+    readonly code: string | undefined,
+    readonly detail: string
+  ) {
+    super(
+      `${method} ${path} failed with ${status}${code === undefined ? "" : ` ${code}`}: ${detail}`
+    );
+    this.name = "LegionDaemonApiError";
+  }
+}
+
+/** A success the daemon API contract does not describe. The body is never quoted: a
+ * registration's carries the claim's secret. */
+export class LegionDaemonContractError extends Error {
+  constructor(
+    readonly method: string,
+    readonly path: string,
+    readonly status: number,
+    problem: string
+  ) {
+    super(
+      `${method} ${path} answered ${status} with a body the daemon API contract does not describe: ${problem}`
+    );
+    this.name = "LegionDaemonContractError";
+  }
+}
+
+// Bounds retries of the transient `claims/ready` request.
+const READY_RETRY_ATTEMPTS = 3;
+const READY_RETRY_DELAY_MS = 1_000;
+
+function isNetworkOrTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
+
+  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return (
+    code === "ConnectionRefused" ||
+    code === "ConnectionTimeout" ||
+    code === "EAI_AGAIN" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "ENOTFOUND" ||
+    code === "ETIMEDOUT" ||
+    (error instanceof TypeError &&
+      (error.message === "Failed to fetch" || error.message === "fetch failed"))
+  );
+}
+
+/** Runs a ready request, retrying only one that can pass on its own: a 5xx or a network failure.
+ * Each Legion host's claim (pi-legion's claim session, claude-envoy's Legion claim) sends its
+ * `claims/ready` through it, at boot and after each role regain. */
+export async function callReadyWithRetry(label: string, call: () => Promise<void>): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await call();
+      return;
+    } catch (error) {
+      const retryable =
+        error instanceof LegionDaemonApiError
+          ? error.status >= 500 && error.status < 600
+          : isNetworkOrTimeoutError(error);
+      if (!retryable) throw error;
+      if (attempt === READY_RETRY_ATTEMPTS) {
+        console.error(`[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`);
+        throw error;
+      }
+      console.error(
+        `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
+      );
+      const retryDelay = Promise.withResolvers<void>();
+      setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
+      await retryDelay.promise;
+    }
+  }
+}
+
+/** `body` read through `schema`, or the reason it is not what the schema describes. */
+function parseStrictly<T>(
+  schema: z.ZodType<T>,
+  body: string
+): { readonly value: T } | { readonly problem: string } {
+  let json: unknown;
+  try {
+    json = JSON.parse(body);
+  } catch (error) {
+    return { problem: `not JSON (${messageFor(error)})` };
+  }
+  const parsed = schema.safeParse(json);
+  if (parsed.success) return { value: parsed.data };
+  return {
+    problem: parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; "),
+  };
+}
+
+export function createLegionDaemonClient(
+  baseUrl: string,
+  fetchFn: typeof fetch = fetch
+): LegionDaemonClient {
+  const endpoint = baseUrl.replace(/\/+$/, "");
+
+  /** The response's status and body once the daemon answered success; a refusal throws. */
+  const call = async (
+    method: "GET" | "POST",
+    path: string,
+    body?: object
+  ): Promise<{ readonly status: number; readonly text: string }> => {
+    const response = await fetchFn(
+      `${endpoint}${path}`,
+      body === undefined
+        ? undefined
+        : {
+            method,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }
+    );
+    const text = await response.text();
+    if (response.ok) return { status: response.status, text };
+    const refusal = parseStrictly(LegionErrorResponse, text);
+    if ("value" in refusal) {
+      const code =
+        "code" in refusal.value && typeof refusal.value.code === "string"
+          ? refusal.value.code
+          : undefined;
+      throw new LegionDaemonApiError(method, path, response.status, code, refusal.value.error);
+    }
+    throw new LegionDaemonApiError(
+      method,
+      path,
+      response.status,
+      undefined,
+      `${JSON.stringify(text)} is not the daemon's refusal shape (${refusal.problem})`
+    );
+  };
+
+  const read = async <T>(
+    method: "GET" | "POST",
+    path: string,
+    schema: z.ZodType<T>,
+    body?: object
+  ): Promise<T> => {
+    const { status, text } = await call(method, path, body);
+    const parsed = parseStrictly(schema, text);
+    if ("problem" in parsed) {
+      throw new LegionDaemonContractError(method, path, status, parsed.problem);
+    }
+    return parsed.value;
+  };
+
+  /** Parses the request before it leaves the pane, then parses the route's strict success body. */
+  const post = <Input, Output>(
+    path: string,
+    request: z.ZodType<Input>,
+    response: z.ZodType<Output>,
+    body: Input
+  ): Promise<Output> => read("POST", path, response, request.parse(body) as object);
+
+  /** The claim routes that answer 204 and nothing else. */
+  const acknowledge = async (path: string, body: object): Promise<void> => {
+    const { status, text } = await call("POST", path, body);
+    if (status !== 204 || text !== "") {
+      throw new LegionDaemonContractError(
+        "POST",
+        path,
+        status,
+        "the route answers 204 with no body"
+      );
+    }
+  };
+
+  return {
+    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
+    registerController: (input) =>
+      read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
+    ready: (input) => acknowledge("/legion/v1/claims/ready", input),
+    exit: (input) => acknowledge("/legion/v1/claims/exit", input),
+    grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
+    controllerGrant: (input) =>
+      post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),
+    handoffComplete: (input) =>
+      post(
+        "/legion/v1/handoff/complete",
+        LegionHandoffCompleteRequest,
+        LegionHandoffCompleteResponse,
+        input
+      ),
+    issueStatus: (input) =>
+      post("/legion/v1/issues/status", LegionIssueStatusRequest, LegionEmptyResponse, input),
+    gateRegister: (input) =>
+      post("/legion/v1/gates/register", LegionGateRegisterRequest, LegionEmptyResponse, input),
+    waveRelease: (input) =>
+      post("/legion/v1/waves/release", LegionWaveReleaseRequest, LegionWaveReleaseResponse, input),
+    phaseBackward: (input) =>
+      post("/legion/v1/phase/backward", LegionPhaseBackwardRequest, LegionEmptyResponse, input),
+    phaseRetry: (input) =>
+      post("/legion/v1/phase/retry", LegionPhaseRetryRequest, LegionEmptyResponse, input),
+    signOff: (input) =>
+      post("/legion/v1/signoff", LegionSignOffRequest, LegionEmptyResponse, input),
+    rootClose: (input) =>
+      post("/legion/v1/roots/close", LegionRootCloseRequest, LegionEmptyResponse, input),
+    childPark: (input) =>
+      post("/legion/v1/children/park", LegionChildRequest, LegionEmptyResponse, input),
+    childRerun: (input) =>
+      post("/legion/v1/children/rerun", LegionChildRequest, LegionEmptyResponse, input),
+  };
+}

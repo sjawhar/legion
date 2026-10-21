@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -72,6 +73,10 @@ type Store interface {
 	// lingers after its own close. The tree cleanup hands a Sandbox whose home is another tree over
 	// to it (CleanupTree), and the orphan sweep keeps one whose home is its label's tree (sweep).
 	IssueSandboxHome(ctx context.Context, project, issue string) (string, error)
+	// ClaimUnretired is whether the store holds token's claim in any state but retired: a claim the
+	// daemon's orphan sweep still knows, suspended and failed ones included. The sweep reads it under
+	// the controller's pod turn, since the known set it was handed was read before it listed.
+	ClaimUnretired(ctx context.Context, token claim.Token) (bool, error)
 }
 
 // Options is what a Runtime is built from. Every field without a stated default is required.
@@ -86,7 +91,7 @@ type Options struct {
 	// StorageClass is the issue volumes' class. Required: production has no default class.
 	StorageClass string
 	// IssueVolume is each issue volume's size, positive; the daemon's configuration supplies its
-	// default (runtime.kubernetes.issue_volume, 20Gi).
+	// default (runtime.kubernetes.issue_volume, config.defaultIssueVolume when the file sets none).
 	IssueVolume resource.Quantity
 	Scheduling  Scheduling
 	// Resources are each role's container requirements, the controller's included: the daemon
@@ -154,10 +159,19 @@ type Options struct {
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
+	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv every role's
+	// container runs before each start of its Oh My Pi — after a stale-plugin relaunch's install,
+	// in the container's working directory and with the environment Oh My Pi gets — through the
+	// start wrapper (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
+	Setup []string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
+	// RegistrationIntervals is worker_boot_registration_deadline_intervals: BootTimeout times it is
+	// the registration deadline the daemon retires an unregistered role at, and the bound the
+	// runtime sizes the plugin install lock's wait against (installLockWait, plugins.go).
+	RegistrationIntervals int
 	// BusyBackoff is the first wait before a launch's request the API server answered overloaded is
 	// sent again, doubled for each such answer after it up to 32 times (resend, backoff.Wait), which
 	// BootTimeout bounds.
@@ -182,6 +196,14 @@ type Options struct {
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.
 	Conns runtime.Conns
+	// RepositoryCache is how the runtime makes each repository's cache (runtime.kubernetes
+	// .repository_cache, whose defaults the daemon's configuration supplies): required for
+	// supervision, which sweeps and refreshes caches.
+	RepositoryCache RepositoryCache
+	// Mapped is the repositories the project's mapping names now, read at every orphan sweep: the
+	// sweep makes or repairs each one's cache (EnsureRepositoryCache), and retires the cache of a
+	// repository it no longer names once that cache's retention passes. Required for supervision.
+	Mapped func() []ghrepo.Repository
 	// Now stamps observations and ages pods and orphans; time.Now when nil.
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
@@ -238,6 +260,9 @@ type sandboxSpec struct {
 	PodTemplate          podTemplate           `json:"podTemplate"`
 	VolumeClaimTemplates []volumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 	OperatingMode        string                `json:"operatingMode,omitempty"`
+	// Service has the Agent Sandbox controller make a headless Service of the Sandbox's name, whose
+	// DNS name resolves to the pod while it is Ready: what a repository cache sets.
+	Service *bool `json:"service,omitempty"`
 }
 
 // podTemplate is upstream's PodTemplate: labels and annotations, and a core PodSpec.

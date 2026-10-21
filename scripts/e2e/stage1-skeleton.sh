@@ -133,10 +133,11 @@ pane_home=(env -u OMP_PROFILE -u PI_PROFILE HOME="$work/home")
 # (LEGION-791): a max_fix_attempts the default would not answer, and a github_apps block whose
 # inline PEM fixture is the App key the state must never print. The loader takes github_apps as
 # the workflow configured and then wants projects too (resolveStage3: `projects must declare at
-# least one project`, `github_apps is required`), so the two come together. The one project is
-# not this daemon's own, so boot resolves no host git, jj or clone credential for it (readTmux
-# reads tools only for cfg.Projects[cfg.Project]), and with no dispatch_url there is no workflow
-# and no App token mint (openWorkflow): the proof still launches nothing and needs nothing new.
+# least one project`, `github_apps is required`), so the two come together; a project's
+# repositories are Dispatch's mapping, so its entry is empty. The one project is not this daemon's
+# own, so boot resolves no host git, jj or clone credential for it (readTmux reads tools only for
+# cfg.Projects[cfg.Project]), and with no dispatch_url there is no workflow and no App token mint
+# (openWorkflow): the proof still launches nothing and needs nothing new.
 cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port
@@ -145,8 +146,7 @@ state_dir: $work/state
 operator_token_file: $work/operator-token
 max_fix_attempts: 5
 projects:
-  FIXTURE:
-    repo: example/fixture
+  FIXTURE: {}
 github_apps:
   implement:
     app_id: "1001"
@@ -218,7 +218,7 @@ jq -e '(.capabilities | length) == 20
   echo "the state does not carry the 20-row capability report with resource-limits and pool-capacity's source under tmux"
   exit 1
 }
-# The daemon's resolved settings ride the same document (LEGION-791, contract 30): the value the
+# The daemon's resolved settings ride the same document (LEGION-791, contract 35): the value the
 # fixture set over its default, a default the fixture left alone, the runtime, and none of what the
 # fixture planted as a credential, a credential file or an App key — the App rides as its id and
 # installations alone, and nothing anywhere in the document reads as a PEM or a DSN.

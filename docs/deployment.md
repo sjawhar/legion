@@ -105,22 +105,134 @@ daemon resolves its `mise` environment); under a login shell on the shared box t
 
 ## What a pane's `gh`, `git` and `jj` are
 
-A tmux pane's `PATH` is the daemon's own with the state directory's `bin/` (the `legion`
-launcher) put first, and nothing else of Legion's: the daemon installs no `gh` shim and pins no
-tool path on the pane, so the `gh`, `git` and `jj` a pane runs are whatever the daemon's `PATH`
-resolves. The daemon starts under a `PATH` that heads with the real `gh` and a jj of 0.38 or later
-— the jj bound the daemon itself refuses to boot below (`resolveTools`, naming `LEGION_JJ_PATH`,
-its own override for the jj it runs), and the `gh` because a pane's GitHub identity is a file that
-binary reads: the daemon writes gh's own `hosts.yml` (the role's App installation token, user
-`x-access-token`) and `config.yml` under `<state_dir>/secrets/<claim>-gh` (0700, files 0600) when
-it opens the pane, names the directory on the pane as `GH_CONFIG_DIR` with `GH_TOKEN`,
-`GITHUB_TOKEN` and `GH_HOST` set empty so nothing outranks the file, and rewrites `hosts.yml` in
-place every minute from its cached lease (the log lines `tmux runtime: github credential written`
-and `github credential refreshed`, with the claim, role, App and `expiresAt`). The shared clone's
-`credential.helper` is `!gh auth git-credential`, so a pane's `git` and `jj git push` read the same
-file through whichever `gh` the pane's `PATH` resolves. A box whose login `PATH` heads with a `gh`
-wrapper of its own, as the devbox's does, needs the real `gh` ahead of it in the shell that starts
-the daemon, or every pane's `gh` and push act as whoever the wrapper routes to.
+A tmux pane's `PATH` is the daemon's own with the state directory's `bin/` put first: its `legion`
+launcher and its `gh`, a script that runs `legion gh`. Nothing else of Legion's is on it, so the
+`git` and `jj` a pane runs are whatever the daemon's `PATH` resolves. The daemon resolves at boot a
+jj of 0.38 or later — the jj bound it refuses to boot below (`resolveTools`, naming
+`LEGION_JJ_PATH`, its own override for the jj it runs) — and the real `gh` (`LEGION_GH_PATH`, or the
+first `gh` on its `PATH`, refused when that is a script), which every pane is told as `LEGION_GH_PATH`. A pane's GitHub identity is
+a set of files that binary reads, one directory per GitHub owner of the project: the daemon writes
+gh's own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
+`<state_dir>/secrets/<claim>-gh/<owner>` (0700, files 0600) when it opens the pane — the role's App
+token for the issue's repository's owner, and that App's token narrowed to reading contents, pull
+requests and metadata for every other owner — names the issue owner's directory as `GH_CONFIG_DIR`
+and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
+empty so nothing outranks the files, and rewrites each owner's `hosts.yml` in place every minute
+from its cached leases (the log lines `tmux runtime: github credential written` and `github
+credential refreshed`, with the claim, role, App, `expiresAt` and the owners written); a pane it
+adopted after a restart is refreshed for the owner the daemon records for its claim, never one read
+from the pane's directory. `legion gh` runs the real gh with `GH_CONFIG_DIR` at the directory of the
+owner the command targets, read as gh reads it, with pflag's rules, from the real gh's own help of
+each command down to its leaf (`-R`/`--repo` before or after the command, a repository or owner
+argument, before `--` or as a clone's or fork's first after it, a `github.com` URL argument — for a
+`pr` command or `agent-task view` only a pull request's, since gh reads any other as a branch of
+the command's own repository — every one of a slot gh's usage takes several of, `agent-task view`'s
+`OWNER/REPO#N`, a `repos/<owner>/…` endpoint of `gh api` or a search endpoint's `q`, a search
+query's plain `repo:`/`owner:`, the options naming a repository, an owner, a team or an issue by
+URL). The command's own repository counts too whenever gh resolves it, because no argument names
+it, and for `repo set-default`, which reads every remote's network, whatever names it: `GH_REPO`
+for a command that reads it (`gh api`'s `{owner}` and `:owner` placeholders among them), and
+otherwise every `github.com` remote and `gh-resolved` setting of the working directory, read with
+gh's own URL parser, whatever the scheme. A command naming no owner, in a directory whose remotes
+name none, runs at the issue owner's. A command whose last `--help` is true, and `gh --version`
+alone, only print. It fails closed: a command it cannot read for certain (an option the leaf's
+help does not list or names a repository with in a way it does not know, a subcommand gh does not
+know, a first word gh's own help does not list, anything before the command but `-R` and
+`--help`, an argument the leaf's usage has no place for or names in a way it does not know, a
+search qualifier gh or GitHub could read otherwise, a gh alias or an extension, run or named as
+`gh help`'s target, whose help it never reads since reading it runs them, `gh copilot` and `gh
+extension exec`), one naming two owners (an option or a second repository naming one owner while
+gh acts on another's, or a workspace whose remotes name two), one naming an owner the bundle
+holds no directory for, every command where `PATH`'s first `gh` is not Legion's wrapper (a script
+that execs `legion gh` by its absolute path), and every command under a `GH_HOST` other than
+`github.com` or a set `GH_TOKEN` or `GITHUB_TOKEN` are refused with exit 2, naming the argument,
+and send nothing. The real gh runs with `GH_PATH`
+naming the pane's wrapper, so the git gh runs itself (a clone, the fetch of a fork's parent, `pr
+checkout`) authenticates through the helper gh names after it, `legion gh auth git-credential`,
+which answers as `legion git-credential` does, with `credential.useHttpPath` on for `github.com`;
+and with gh's update check and prompts off. The saved help its tests read is the image's gh's,
+with that gh's whole command reference, every argument and every repository-naming option of
+which the wrapper's tables know (`packages/daemon/cmd/legion/testdata`, with the script that
+regenerates it when that pin moves; `.github/scripts/check-gh-version.sh` fails the build until
+the saved help is the pin's).
+The shared clone's `credential.helper` is `!legion git-credential` with `credential.useHttpPath`
+on, so a pane's `git` and `jj git push` read the hosts.yml of the owner in the path git asks about
+and nothing else. The real gh is a compiled program, so when the first `gh` on the daemon's `PATH`
+is a script (a `gh` wrapper of the box's own, as the devbox's login `PATH` heads with, or asdf's
+shim), boot refuses it, naming it and `LEGION_GH_PATH` (`RefuseScriptGH`): run as the real gh, a
+wrapper would answer in place of the owner's App token. Set `LEGION_GH_PATH` to the real gh's
+install path (`mise which gh` or `asdf which gh` prints it). The check reads scripts only: mise's
+shim is compiled and passes, and where mise has no gh for the directory it runs the next `gh` on
+`PATH`, which in a pane is the pane's own `legion gh`, so a shims directory is no real gh either.
+
+## Phase workers on Claude Code
+
+`worker_backends` in `legion.yaml` runs a role on another agent harness than Oh My Pi:
+
+```yaml
+worker_backends:
+  implementer: claude
+```
+
+Each key is an issue role (`architect`, `planner`, `implementer`, `tester`, `reviewer`, `merger`)
+and each value `omp` or `claude`; a role left out runs on Oh My Pi. What each harness may run is
+one table, `runtime.Backends` (`packages/daemon/internal/runtime/backend.go`): Claude Code runs the
+phase workers alone, since an architect is woken by notices on its Envoy role topic and Claude
+Code's print mode delivers no channel notification, and only under `runtime: tmux`, since the
+worker image carries no Claude Code. The loader refuses a role on a harness that does not run it,
+naming both, a role named twice, any other value, and `claude` under `runtime: kubernetes`. The
+controller always runs on Oh My Pi.
+
+For such a role the pane's shim runs `legion claude-bridge -- claude -p --input-format stream-json
+--output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config …`.
+The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is the pane's
+`CLAUDE_CONFIG_DIR`: it holds the transcript, the MCP configuration the daemon writes (one server,
+`legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and the bridge's phase-stall state,
+and it outlives every launch of the claim. A fresh launch passes `--session-id <new id>`; a
+relaunch passes `--resume <id>`, read from the transcript the claim registered, so a killed pane
+comes back as the same Claude Code session. A role moved to Claude Code since its session was
+recorded is refused rather than resumed, naming the Oh My Pi session file. A role moved back to Oh
+My Pi gets its recorded Claude Code transcript passed to `omp --resume`, as every recorded session
+file is; the pinned Oh My Pi refuses it, exiting 1 with `Cannot resume session "<file>": the
+session header is missing or malformed. The file was not modified.`, and leaves its bytes as they
+were, so the launch fails loudly rather than starting a fresh agent
+(`packages/daemon/internal/runtime/tmux/resume_omp_test.go` holds the real binary to this).
+
+Boot resolves three things from the daemon's environment, and `legion start --check-config` makes
+the same refusals:
+
+- `LEGION_CLAUDE_PATH`, the `claude` executable, else the first `claude` on `PATH`;
+- `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
+- `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
+  `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`
+  (`bun run build` in that package writes both).
+
+A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
+Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example
+`ANTHROPIC_API_KEY: <secretsd key>`) is exported by the shim into `legion claude-bridge`'s
+environment, which Claude Code inherits, and into every Oh My Pi pane's as well. A key meant for the
+Claude Code roles alone goes in the claim's directory instead, before the claim first launches: a
+`settings.json` there whose `apiKeyHelper` prints the key, as `scripts/e2e/claude-backend-tmux.sh`,
+the live proof, writes it.
+
+### How a harness plugs in
+
+Every harness runs behind `legion worker-shim`, which speaks Oh My Pi's RPC frames to it
+(`legion claude-bridge` translates them for Claude Code), so the worker stream and supervision do
+not know which harness a pane runs. A harness is three pieces in the daemon:
+
+- its row in `runtime.Backends`: the roles it runs, the runtimes that launch it, the daemon prompt
+  part its launches are told after their role's parts (Claude Code's is
+  `internal/prompts/go/claude-mechanics.md`);
+- a `Launcher` in `internal/runtime/tmux`: the command the shim runs, the extra `-e` pairs of its
+  pane, and the marker its pane's command line holds;
+- a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host.
+
+Boot resolves a launch for each harness `worker_backends` uses (`legion start --check-config` makes
+the same refusals), and the tmux runtime refuses a launch on a harness it has no launcher for. A
+pane is its recorded process only while its root process's command line, `sh -c` on the whole pane
+command, holds a configured harness's marker: `omp` for Oh My Pi, ` claude-bridge -- ` for Claude
+Code. A daemon with no `worker_backends` has Oh My Pi's launcher alone and checks for `omp` alone.
 
 ## Rotating the App keys
 

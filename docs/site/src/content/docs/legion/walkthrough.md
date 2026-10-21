@@ -1,6 +1,6 @@
 ---
 title: Walkthrough
-description: One issue going through Legion from handover to production check, as you see it in Dispatch, and an example Legion daemon in the operator's terminal.
+description: One issue going through Legion from handover to the merge that closes it and the production check after it, as you see it in Dispatch, and an example Legion daemon in the operator's terminal.
 sidebar:
   order: 6
 ---
@@ -43,33 +43,44 @@ reaches the assignee's Inbox. Once every block is answered, it asks for approval
 
 After approval the daemon starts the planner, then the implementer, which opens the pull request,
 then the tester and the reviewer. The issue's status follows: `in_progress`, `testing`,
-`needs_review`, then `retro` once the reviewer approves.
+`needs_review`, then `retro` once the reviewer has approved and the architect has accepted.
 
-![The issue after the phases ran: Retro in its header beside the pull request link, #42, and its activity newest first: three updates from the Legion daemon's session, one from the implementer, and alice's approval of the spec.](/legion/media/legion/status-events.png)
+![The issue after the phases ran: Retro in its header beside the pull request link, #42, and its activity newest first: the Legion daemon's status updates, the architect's acceptance, one update from the implementer, and alice's approval of the spec.](/legion/media/legion/status-events.png)
 
 ## 5. The pull request
 
 The pull request's body follows Legion's template: the outcome, why, the change, how it was
-proven, what is not proven, and later the production check. Legion's reviewer approves it as the
-review App. In Dispatch, the issue's header links the pull request.
+proven, what is not proven, and after the merge the production check. Legion's reviewer approves it
+as the review App. In Dispatch, the issue's header links the pull request.
 
 ![The issue header with the pull request Legion opened, linked as #42.](/legion/media/legion/pull-request.png)
 
-## 6. READY, and the merge
+## 6. The acceptance
+
+When the reviewer approves, the architect reads the evidence (the tester's handoff, the pull
+request's two `E2E` lines, the approval of the head) and accepts the change with a comment on the
+issue, which moves it to `retro`; a change that falls short goes back to the implementer or the
+tester instead. Retro runs next.
+
+## 7. READY, and the merge
 
 The merger sends `READY`; the daemon checks the head against the approved one and the required
 checks, posts it on the Dispatch issue, and submits its merge, which lands under the repository's
-rules.
+rules. The merge closes the issue: it moves to `done` the moment GitHub reports the pull request
+merged.
 
 ![The READY message on the issue: the pull request, its head and the approved commit, then the outcome and the risk.](/legion/media/legion/ready.png)
 
-## 7. The production check and sign-off
+![The issue closed as Done at the merge, with the architect's acceptance and the READY message.](/legion/media/legion/signed-off.png)
 
-After the merge the implementer checks the change in production and records it on the pull request
-and the issue. The architect signs off with a comment summarizing the evidence, and the issue moves
-to `done`.
+## 8. The production check
 
-![The issue closed as Done, with the implementer's production record and the architect's sign-off.](/legion/media/legion/signed-off.png)
+After the close the implementer gets the production check in its live session. It asks your deploy
+role to carry the merge and waits for no reply; when production does not carry the merge yet it
+reports `pending`, its pod goes, and the daemon wakes it when Dispatch reports the pull request
+deployed. The look that finds the merge in production drives the change and records it on the pull
+request's `Production:` line, naming the merge commit and what woke the look. A closed issue takes
+no comment, so the record is on the pull request.
 
 ## The operator's view
 

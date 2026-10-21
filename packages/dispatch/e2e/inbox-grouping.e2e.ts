@@ -82,7 +82,9 @@ test("groups an issue and document's asks while rows remain the flat keyboard li
 
   try {
     const page = await alice.newPage();
-    await page.goto("/?view=everyone");
+    // The cleared filter, so the document's asks - which nobody holds - are listed beside the
+    // issues' and the grouping is read over every row the server returned.
+    await page.goto("/?assignee=everyone");
     await expect(page.locator("[data-inbox-row]")).toHaveCount(8);
 
     const issueHeader = page.locator('[data-inbox-group-header="issue:CORE-2"]');
@@ -159,7 +161,7 @@ test("a grouped header crosses bands to a singleton target without making it a g
 
   try {
     const page = await alice.newPage();
-    await page.goto("/?view=everyone");
+    await page.goto("/?assignee=everyone");
     const header = page.locator('[data-inbox-group-header="issue:CORE-2"]');
     await expect(header).toContainText("3 asks");
 
@@ -193,7 +195,7 @@ test("a grouped header opens Later and focuses its snoozed target", async ({ bro
 
   try {
     const page = await alice.newPage();
-    await page.goto("/?view=everyone");
+    await page.goto("/?assignee=everyone");
     const header = page.locator('[data-inbox-group-header="issue:CORE-2"]');
     const jump = header.getByRole("button", { name: "Jump to CORE-2's asks Later" });
     await expect(jump).toHaveText("1 more later");

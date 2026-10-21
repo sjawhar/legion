@@ -17,12 +17,30 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
+// socketDir answers a directory short enough to hold a unix socket path: Linux's sun_path is 107
+// bytes, and t.TempDir() sits under TMPDIR, which is no longer short anywhere — a Legion role
+// container's TMPDIR is the issue's shared scratch on its volume (/legion/scratch/tmp), and a
+// developer's macOS TMPDIR is a ~49-byte path under /var/folders. Under either, t.TempDir()'s own
+// per-test name pushes the socket past sun_path and the listen fails with "bind: invalid argument"
+// before the test does anything. /tmp is the shortest base every machine has, so the socket's
+// directory is made there and removed with the test; every other file a test writes stays under
+// t.TempDir().
+func socketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "legion-shim")
+	if err != nil {
+		t.Fatalf("socket directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // Every refusal the shipped command makes before it dials or spawns (worker-shim.ts:630-676,
 // 590-620), each naming the flag or path at fault: the daemon's pane has nothing to show but
 // this line, and a shim that dialled first would register a pane that can never start OMP.
 func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -101,7 +119,7 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 // pane, and the runtime watching it, see.
 func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -170,7 +188,7 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 // ends with the agent (the test below), and the shim returns the moment both are done.
 func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -227,7 +245,7 @@ func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing
 // lease must be gone.
 func TestWorkerShimLetsAnInFlightWarmUpReleaseItsLeaseBeforeItExits(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -280,13 +298,16 @@ esac
 // With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
 // the pod's baseline: the turn-scoping overlay written under LEGION_STATE_DIR and named first in
 // PI_CONFIG_FILES, ahead of the operator's, the two session-placing variables where the pod
-// leaves them unset, and Oh My Pi's profile directory made under the role's XDG_STATE_HOME.
-// Without it the agent starts on the environment it always had, and nothing is made under its
-// state home. With --pod-safety and no state directory, or a state home whose profile directory
-// cannot be made, the shim refuses naming it, before anything is dialled or spawned.
+// leaves them unset, Oh My Pi's profile directory made under the role's XDG_STATE_HOME, and every
+// directory the role is told to scratch in (podsafety.ScratchVariables) made on the role's own
+// scratch — its TMPDIR above all, which no tool makes for itself and whose absence fails a role's
+// first mktemp. Without it the agent starts on the environment it always had, and nothing is made:
+// not under its state home, not on its scratch. With --pod-safety and no state directory, or a
+// state home whose profile directory cannot be made, the shim refuses naming it, before anything
+// is dialled or spawned.
 func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -305,15 +326,28 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 	t.Setenv("LEGION_STATE_DIR", "")
 	t.Setenv("OMP_PROFILE", "legion")
 	marker := filepath.Join(dir, "spawned")
+	// told is every scratch directory the role was told of, as the child reads it: the shim's own
+	// list, so a variable the runtime starts naming is one this test holds the shim to making.
+	told := ""
+	for _, name := range podsafety.ScratchVariables {
+		told += ` "$` + name + `"`
+	}
 	// $3 is the directory the pod's shim made under the state home, or "" for a pane, whose state
-	// home must then hold nothing.
-	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OMP_SESSION_STORAGE-unset}" = "$2" ] && case "$3" in "") [ ! -e "$XDG_STATE_HOME/omp" ];; *) [ -d "$3" ];; esac && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OMP_SESSION_STORAGE=${OMP_SESSION_STORAGE-unset} under XDG_STATE_HOME=$XDG_STATE_HOME: $(ls -R "$XDG_STATE_HOME" 2>&1)" >&2; exit 8`
-	shim := func(podSafety bool, overlays, sessions, stateDir string) []string {
+	// home must then hold nothing. $4 is the temporary directory the pod's shim made on the role's
+	// scratch, or "" for a pane, which must find none of the scratch it was told of made at all.
+	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OMP_SESSION_STORAGE-unset}" = "$2" ]` +
+		` && case "$3" in "") [ ! -e "$XDG_STATE_HOME/omp" ];; *) [ -d "$3" ];; esac` +
+		` && case "$4" in "") [ -n "$TMPDIR" ];; *) [ "$TMPDIR" = "$4" ] && [ -d "$4" ];; esac` +
+		` && for d in` + told + `; do case "$4" in "") [ ! -e "$d" ] || exit 8;; *) [ -d "$d" ] || exit 8;; esac; done` +
+		` && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OMP_SESSION_STORAGE=${OMP_SESSION_STORAGE-unset}` +
+		` under XDG_STATE_HOME=$XDG_STATE_HOME: $(ls -R "$XDG_STATE_HOME" 2>&1); told TMPDIR=$TMPDIR:` +
+		` $(ls -Rd` + told + ` 2>&1)" >&2; exit 8`
+	shim := func(podSafety bool, overlays, sessions, stateDir, scratch string) []string {
 		args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token}
 		if podSafety {
 			args = append(args, "--pod-safety")
 		}
-		return append(args, "--", "sh", "-c", check, marker, overlays, sessions, stateDir)
+		return append(args, "--", "sh", "-c", check, marker, overlays, sessions, stateDir, scratch)
 	}
 	refuses := func(args []string, naming string) {
 		t.Helper()
@@ -333,7 +367,7 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 	}
 
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state", "tester"))
-	refuses(shim(true, "", "", ""), "LEGION_STATE_DIR")
+	refuses(shim(true, "", "", "", ""), "LEGION_STATE_DIR")
 
 	t.Setenv("LEGION_STATE_DIR", state)
 	blocked := filepath.Join(dir, "blocked")
@@ -341,27 +375,42 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_STATE_HOME", filepath.Join(blocked, "tester"))
-	refuses(shim(true, "", "", ""), filepath.Join(blocked, "tester", "omp", "profiles", "legion"))
+	refuses(shim(true, "", "", "", ""), filepath.Join(blocked, "tester", "omp", "profiles", "legion"))
 
 	for name, tc := range map[string]struct {
 		podSafety          bool
 		overlays, sessions string
-		// makes is the profile directory the shim makes under the state home, "" for none.
-		makes string
+		// makes is the profile directory the shim makes under the state home, "" for none, and
+		// scratches whether it makes the directories the role is told to scratch in: a pod gets
+		// both, a pane neither.
+		makes     string
+		scratches bool
 	}{
-		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file", "omp/profiles/legion"},
-		"a pane": {false, "/etc/operator.yml", "unset", ""},
+		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file", "omp/profiles/legion", true},
+		"a pane": {false, "/etc/operator.yml", "unset", "", false},
 	} {
-		stateHome := filepath.Join(t.TempDir(), "tester")
+		// Under dir rather than t.TempDir: this row points TMPDIR at a directory nothing has made,
+		// and t.TempDir makes the next row's under it.
+		home := filepath.Join(dir, strings.ReplaceAll(name, " ", "-"))
+		stateHome := filepath.Join(home, "tester")
 		t.Setenv("XDG_STATE_HOME", stateHome)
-		made := ""
+		// The scratch the runtime hands a role container, named after the variable that tells it,
+		// under a root nothing has made: every assertion below is about the shim making them.
+		scratch := filepath.Join(home, "scratch")
+		for _, variable := range podsafety.ScratchVariables {
+			t.Setenv(variable, filepath.Join(scratch, variable))
+		}
+		made, tmp := "", ""
 		if tc.makes != "" {
 			made = filepath.Join(stateHome, tc.makes)
 		}
+		if tc.scratches {
+			tmp = filepath.Join(scratch, "TMPDIR")
+		}
 		daemon := acknowledgeHello(ln)
 		var stdout, stderr bytes.Buffer
-		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.sessions, made), &stdout, &stderr); code != 7 {
-			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q, OMP_SESSION_STORAGE %q and %q made; stderr: %s", name, code, tc.overlays, tc.sessions, made, stderr.String())
+		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.sessions, made, tmp), &stdout, &stderr); code != 7 {
+			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q, OMP_SESSION_STORAGE %q, %q made under the state home and %q on the scratch; stderr: %s", name, code, tc.overlays, tc.sessions, made, tmp, stderr.String())
 		}
 		if err := <-daemon; err != nil {
 			t.Fatalf("%s: the daemon side: %v", name, err)

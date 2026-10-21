@@ -8,12 +8,14 @@ import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
+import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
 import { shortSessionId } from "./actor";
 
 export type IssueRoute =
   | { key: string; kind: "issue" }
   | { key: string; kind: "spec" }
   | { key: string; kind: "conversation" }
+  | { key: string; kind: "activity" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
   | { key: string; kind: "artifact"; slug: string; version?: number }
@@ -49,16 +51,16 @@ export type AgentArtifactRoute = {
 };
 export type DispatchReferenceRoute = IssueRoute | ProjectDocumentRoute | AgentArtifactRoute;
 /** The Inbox at `/`, optionally narrowed to one agent's asks (`?agent=<session id>`); with
- *  `section=needs-you` only the asks waiting on the viewer are shown. `view` picks the
- *  partition: `mine` (the viewer's issues plus an Unassigned band) or `everyone`; absent, the
- *  viewer's remembered choice applies. */
-export type InboxView = "mine" | "everyone";
+ *  `section=needs-you` only the asks waiting on the viewer are shown. */
 export interface InboxRoute {
   agent?: string;
   section?: "needs-you";
-  view?: InboxView;
+  /** Who the listed asks are for. Absent is the page's default, the reader's own work; an empty
+   *  array is the cleared filter, every question; a value is a person's lowercase email or the
+   *  literal `unassigned`. */
+  assignees?: readonly string[];
 }
-export type IssueTab = "spec" | "conversation" | "children" | "artifacts";
+export type IssueTab = "spec" | "conversation" | "children" | "artifacts" | "activity";
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
@@ -115,6 +117,9 @@ export function issueTabForRoute(
   }
   if (route.kind === "conversation") {
     return "conversation";
+  }
+  if (route.kind === "activity") {
+    return "activity";
   }
   if (route.kind === "artifacts") {
     return "artifacts";
@@ -214,6 +219,9 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   if (legacyLogReferencePattern.test(target) || target === "conversation") {
     return { key, kind: "conversation" };
   }
+  if (target === "activity") {
+    return { key, kind: "activity" };
+  }
   if (target === "children") {
     return { key, kind: "children" };
   }
@@ -296,6 +304,9 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   }
   if (target === "conversation") {
     return { key, kind: "conversation" };
+  }
+  if (target === "activity") {
+    return { key, kind: "activity" };
   }
   if (target === "children") {
     return { key, kind: "children" };
@@ -536,8 +547,13 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
+  // The conversation keeps the `log` spelling every reference written before the Activity tab
+  // existed used; activity, newer, is spelled as its own path is.
   if (route.kind === "conversation") {
     return `${issue}/log`;
+  }
+  if (route.kind === "activity") {
+    return `${issue}/activity`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;
@@ -683,8 +699,9 @@ export function documentItemPath(
 }
 
 /** What a reference resolves to for display: the record whose title, excerpt, or author the
- * reader is shown. An issue's spec/log/children/artifacts tabs all resolve to the issue itself;
- * an ask or comment nested under a project document resolves to that item, not the document. */
+ * reader is shown. An issue's spec/log/activity/children/artifacts tabs all resolve to the issue
+ * itself; an ask or comment nested under a project document resolves to that item, not the
+ * document. */
 export type ReferenceTargetKind = "issue" | "document" | "ask" | "comment" | "message";
 
 export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTargetKind {
@@ -723,6 +740,8 @@ export function shortForm(route: DispatchReferenceRoute): string {
       return `${route.key} spec`;
     case "conversation":
       return `${route.key} log`;
+    case "activity":
+      return `${route.key} activity`;
     case "children":
       return `${route.key} children`;
     case "artifacts":
@@ -757,6 +776,9 @@ export function buildIssuePath(route: IssueRoute): string {
   }
   if (route.kind === "conversation") {
     return `${issue}/conversation`;
+  }
+  if (route.kind === "activity") {
+    return `${issue}/activity`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;
@@ -793,6 +815,13 @@ export function buildProjectPath(route: ProjectRoute): string {
   return search === "" ? document : `${document}?${search}`;
 }
 
+/**
+ * The page's `?assignee=` deliberately spells its default the opposite way round from the
+ * server's own `?assignee=` on `GET /api/v1/inbox`
+ * (`packages/envoy/internal/dispatch/api/inbox.go`), where an absent parameter means everybody:
+ * here absent means the reader alone and `assignee=everyone` means everybody, so the same name
+ * now means different things on the two sides and neither reads the other's URL.
+ */
 export function parseInboxSearch(search: string): InboxRoute {
   const params = new URLSearchParams(search);
   const agent = params.get("agent");
@@ -803,9 +832,21 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (params.get("section") === "needs-you") {
     route.section = "needs-you";
   }
-  const view = params.get("view");
-  if (view === "mine" || view === "everyone") {
-    route.view = view;
+  // Nothing refuses an email the page has never heard of: the filter is a client-side split of
+  // one inbox response, so an unlisted or misspelled person simply matches no row.
+  const assignees: string[] = [];
+  let everyone = false;
+  for (const raw of params.getAll("assignee")) {
+    const value = raw.trim().toLowerCase();
+    if (value === "") continue;
+    if (value === EVERYONE_FILTER_VALUE) {
+      everyone = true;
+      continue;
+    }
+    if (!assignees.includes(value)) assignees.push(value);
+  }
+  if (assignees.length > 0 || everyone) {
+    route.assignees = assignees;
   }
   return route;
 }
@@ -818,8 +859,13 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   if (route.section !== undefined) {
     query.set("section", route.section);
   }
-  if (route.view !== undefined) {
-    query.set("view", route.view);
+  if (route.assignees !== undefined) {
+    if (route.assignees.length === 0) {
+      query.append("assignee", EVERYONE_FILTER_VALUE);
+    }
+    for (const assignee of route.assignees) {
+      query.append("assignee", assignee);
+    }
   }
   const search = query.toString();
   return search === "" ? "/" : `/?${search}`;

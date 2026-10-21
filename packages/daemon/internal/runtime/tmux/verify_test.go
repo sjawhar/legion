@@ -104,7 +104,8 @@ func TestDescribeVerdict(t *testing.T) {
 		{verdict{reason: reasonPidMismatch, observedPid: 5151}, "pane %41 now runs pid 5151 (recorded pid 4242 start 1234567)"},
 		{verdict{reason: reasonStatUnreadable, observedPid: 4242}, "pane %41 pid 4242 has no readable /proc stat (recorded pid 4242 start 1234567)"},
 		{verdict{reason: reasonStartMismatch, observedPid: 4242, observedTicks: 99}, "pane %41 runs pid 4242 started at 99 (recorded pid 4242 start 1234567)"},
-		{verdict{reason: reasonNotOmp, observedPid: 4242}, "pane %41 pid 4242 is not running OMP (recorded pid 4242 start 1234567)"},
+		{verdict{reason: reasonNotAgent, observedPid: 4242, detail: "OMP"}, "pane %41 pid 4242 is not running OMP (recorded pid 4242 start 1234567)"},
+		{verdict{reason: reasonNotAgent, observedPid: 4242, detail: "Claude Code or OMP"}, "pane %41 pid 4242 is not running Claude Code or OMP (recorded pid 4242 start 1234567)"},
 	} {
 		if got := describeVerdict("%41", recorded, tc.verdict); got != tc.want {
 			t.Errorf("describeVerdict(%v) = %q, want %q", tc.verdict.reason, got, tc.want)

@@ -348,7 +348,7 @@ func TestASwitchedBackDaemonWhoseStopFailsLeavesItsControllerRegistered(t *testi
 	cfg.ControllerLaunch = config.ControllerLaunchOperator
 	refused := errors.New("the cluster refused the Sandbox delete")
 	rt.FailReleaseOf(token, refused)
-	err = run(context.Background(), cfg, quietLogger(), o)
+	err = run(context.Background(), cfg, Build{}, quietLogger(), o)
 	if err == nil || !strings.Contains(err.Error(), "stop "+string(token)) || !strings.Contains(err.Error(), refused.Error()) {
 		t.Fatalf("the operator's daemon whose stop of the controller failed booted with %v, want a refusal naming the stop of %s", err, token)
 	}

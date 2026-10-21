@@ -145,6 +145,22 @@ func (s *Store) IssueHasSessions(ctx context.Context, project, issue string) (bo
 	return exists, nil
 }
 
+// ClaimIssue is the issue the claim of token is on, from the daemon's own claims and nothing a pane
+// can write: what a tmux pane adopted after a restart is told its write owner by (the daemon's
+// claimRepositoryOwner), since a token spells its issue lowercased. A token no claim holds is
+// refused.
+func (s *Store) ClaimIssue(ctx context.Context, token claim.Token) (string, error) {
+	var issue string
+	err := s.pool.QueryRow(ctx, `select issue from claims where token = $1`, string(token)).Scan(&issue)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("no claim holds token %s", token)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the issue of claim %s: %w", token, err)
+	}
+	return issue, nil
+}
+
 // claimMayRun is the stored claim that may still hold a process: one in a state that runs, or one
 // that still records a locator.
 const claimMayRun = `(state not in ('suspended', 'failed', 'retired') or locator is not null)`
@@ -160,6 +176,19 @@ func (s *Store) StoredClaimMayRun(ctx context.Context, token claim.Token, row in
 		return false, fmt.Errorf("read stored claim %s: %w", token, err)
 	}
 	return may, nil
+}
+
+// ClaimUnretired is whether the store holds token's claim in any state but retired: the claims the
+// daemon's orphan sweep knows (knownClaims), read at the moment the runtime decides rather than when
+// the sweep read its claims. A token no claim holds is not unretired.
+func (s *Store) ClaimUnretired(ctx context.Context, token claim.Token) (bool, error) {
+	var unretired bool
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where token = $1 and state <> $2)`,
+		string(token), string(supervise.StateRetired)).Scan(&unretired)
+	if err != nil {
+		return false, fmt.Errorf("read whether claim %s is retired: %w", token, err)
+	}
+	return unretired, nil
 }
 
 // runsNothingStates is supervise's runs-nothing set (supervise.RunsNothingStates), as the text

@@ -246,7 +246,6 @@ interface TargetedMessageCardProps {
   readonly deliveries: readonly TargetedMessageAttempt[];
   readonly header: ReactNode;
   readonly isClosed: boolean;
-  readonly lastSeq?: number;
   readonly onReply?: () => void;
   readonly onRetry?: (delivery: MessageDeliveryMode) => void;
   /** Holds the Reply button while the composer it would address is busy with a send. */
@@ -270,7 +269,6 @@ export function TargetedMessageCard({
   deliveries,
   header,
   isClosed,
-  lastSeq,
   onReply,
   onRetry,
   register,
@@ -287,7 +285,6 @@ export function TargetedMessageCard({
     <li
       aria-current={current ? "true" : undefined}
       className={`my-2 rounded-lg border p-3 ${surfaceMutedHoverBg} ${secondaryButtonBorder}`}
-      data-event-seq={lastSeq}
       data-turn={turnID}
       ref={register}
     >

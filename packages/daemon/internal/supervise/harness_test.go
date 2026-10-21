@@ -326,18 +326,19 @@ func (b *logBuffer) lines(fragments ...string) []string {
 }
 
 type harness struct {
-	t     *testing.T
-	ctx   context.Context
-	token claim.Token
-	rt    *fake.Runtime
-	conns *fake.Conns
-	conn  *fake.Conn
-	store *memStore
-	clock *fakeClock
-	specs *testSpecs
-	logs  *logBuffer
-	deps  Deps
-	m     *Machine
+	t      *testing.T
+	ctx    context.Context
+	cancel context.CancelFunc
+	token  claim.Token
+	rt     *fake.Runtime
+	conns  *fake.Conns
+	conn   *fake.Conn
+	store  *memStore
+	clock  *fakeClock
+	specs  *testSpecs
+	logs   *logBuffer
+	deps   Deps
+	m      *Machine
 }
 
 func testLimits() Limits { return Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2} }
@@ -400,16 +401,17 @@ func newBareHarness(t *testing.T) *harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	h := &harness{
-		t:     t,
-		ctx:   ctx,
-		token: testToken,
-		rt:    fake.NewRuntime(),
-		conns: fake.NewConns(),
-		conn:  fake.NewConn(),
-		store: newMemStore(),
-		clock: newFakeClock(),
-		specs: &testSpecs{},
-		logs:  &logBuffer{},
+		t:      t,
+		ctx:    ctx,
+		cancel: cancel,
+		token:  testToken,
+		rt:     fake.NewRuntime(),
+		conns:  fake.NewConns(),
+		conn:   fake.NewConn(),
+		store:  newMemStore(),
+		clock:  newFakeClock(),
+		specs:  &testSpecs{},
+		logs:   &logBuffer{},
 	}
 	h.rt.Now = h.clock.Now
 	h.deps = Deps{
@@ -428,6 +430,12 @@ func newBareHarness(t *testing.T) *harness {
 	}
 	return h
 }
+
+// shutdown cancels the machine's own context, as a stopping daemon does: every internally-armed
+// timer's callback (arm, machine.go) calls Handle with this same context (NewMachine stores it as
+// m.ctx), so a timer that fires after shutdown sees it already canceled, exactly as the real
+// daemon's stop does.
+func (h *harness) shutdown() { h.cancel() }
 
 // start builds the machine over c, as a daemon does for a claim it created or loaded.
 func (h *harness) start(c Claim) {
@@ -459,6 +467,18 @@ func (h *harness) must(ev Event) {
 	if err := h.handle(ev); err != nil {
 		h.t.Fatalf("handle %T: %v", ev, err)
 	}
+}
+
+// handleWithoutPanic is handle, failing the test where ev panics the machine instead of ending the
+// whole run.
+func (h *harness) handleWithoutPanic(ev Event) error {
+	h.t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			h.t.Fatalf("%T panicked the machine: %v", ev, r)
+		}
+	}()
+	return h.handle(ev)
 }
 
 func (h *harness) advance(d time.Duration) {

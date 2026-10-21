@@ -15,6 +15,7 @@ import {
   actionBar,
   barAction,
   connectedDot,
+  conversationFilter,
   deleteEditorText,
   documentEditor,
   documentTransport,
@@ -380,11 +381,13 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       alicePage
         .locator(`[data-turn="comment:${accepted.id}"]`)
         .getByTestId(`margin-comment-${accepted.id}`)
+        .getByRole("button", { name: "Accept suggestion" })
     ).toHaveCount(0);
-    await alicePage
-      .getByRole("tabpanel", { name: "Conversation" })
-      .getByRole("button", { name: "Resolved (1)" })
-      .click();
+    // An accepted suggestion closes its thread: the card leaves Open and is listed under Closed,
+    // where a terminal suggestion still offers no Reopen.
+    await conversationFilter(alicePage, "Open").click();
+    await expect(alicePage.locator(`[data-turn="comment:${accepted.id}"]`)).toHaveCount(0);
+    await conversationFilter(alicePage, "Closed").click();
     await expect(
       alicePage
         .locator(`[data-turn="comment:${accepted.id}"]`)

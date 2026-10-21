@@ -113,6 +113,12 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
 }
 
+func (r *statusRecorder) BuildCommit(context.Context) (string, error) { return "", nil }
+
+func (r *statusRecorder) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
+
 var _ dispatch.Client = (*statusRecorder)(nil)
 
 func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder, *statusRecorder) {
@@ -142,14 +148,14 @@ func seedTree(t *testing.T, h *harness, root string, children ...string) {
 	records := record.NewStore()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		if err := records.PutIssue(context.Background(), tx, record.Issue{
-			Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Status: "in_progress",
+			Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Status: "in_progress",
 		}); err != nil {
 			return err
 		}
 		for _, child := range children {
 			parent := root
 			if err := records.PutIssue(context.Background(), tx, record.Issue{
-				Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent,
+				Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent,
 				Phase: phase.Planning, Status: "in_progress",
 			}); err != nil {
 				return err
@@ -369,8 +375,11 @@ func TestArchitectRoutesRefuseWrongRoleAndForeignTree(t *testing.T) {
 
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/phase/backward", map[string]any{
-		"grantId": architect.grant(t), "to": "planning", "reason": "architect cannot move a phase",
-	}, nil), http.StatusForbidden, "PHASE_WORKER_REQUIRED")
+		"grantId": architect.grant(t), "to": "planning", "reason": "architect names no issue",
+	}, nil), http.StatusBadRequest, "MISSING_FIELD")
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/phase/backward", map[string]any{
+		"grantId": worker.grant(t), "to": "planning", "reason": "a worker names another issue", "issue": "LEGION-209",
+	}, nil), http.StatusBadRequest, "ISSUE_NOT_GRANTS")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("refused calls applied facts %#v", got)
 	}
@@ -420,10 +429,61 @@ func TestSignOffAndRetryAreTheOwningArchitects(t *testing.T) {
 	}
 }
 
+// The architect's send-back from accepting takes the backward route with the issue named: its
+// grant serves the whole tree, so the request says which issue, and the fact carries that issue
+// with the architect as its requester. Ownership is sign_off's: a sub-architect moves its own
+// issue, not the root or a sibling. A phase worker's grant keeps its own issue whether or not the
+// request names it.
+func TestTheArchitectsBackwardMoveNamesItsIssue(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209", "LEGION-210")
+	root := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	body := func(grant, issue string) map[string]any {
+		return map[string]any{"grantId": grant, "to": "implementing", "reason": "the evidence does not cover the migration", "issue": issue}
+	}
+	for _, issue := range []string{"LEGION-208", "LEGION-210"} {
+		refusal := h.request(http.MethodPost, "/legion/v1/phase/backward", body(subArchitect.grant(t), issue), nil)
+		if want := "request_backward_move of " + issue; !strings.Contains(refusal.Body.String(), want) {
+			t.Fatalf("refusal %s does not name %q", refusal.Body, want)
+		}
+		assertFailure(t, refusal, http.StatusForbidden, "ISSUE_NOT_OWNED")
+	}
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/phase/backward", body(root.grant(t), "not-a-key"), nil), http.StatusBadRequest, "INVALID_ISSUE")
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("refused calls applied facts %#v", got)
+	}
+	for _, allowed := range []struct {
+		grant liveClaim
+		issue string
+	}{{subArchitect, "LEGION-209"}, {root, "LEGION-208"}, {root, "LEGION-210"}} {
+		if got := h.request(http.MethodPost, "/legion/v1/phase/backward", body(allowed.grant.grant(t), allowed.issue), nil); got.Code != http.StatusOK {
+			t.Fatalf("backward move by the architect of %s on %s = %d: %s", allowed.grant.issue, allowed.issue, got.Code, got.Body)
+		}
+	}
+	worker := newLiveClaim(t, h, "LEGION-210", claim.RoleTester)
+	if got := h.request(http.MethodPost, "/legion/v1/phase/backward", body(worker.grant(t), "LEGION-210"), nil); got.Code != http.StatusOK {
+		t.Fatalf("backward move by the tester naming its own issue = %d: %s", got.Code, got.Body)
+	}
+	got := facts.recorded()
+	if len(got) != 4 {
+		t.Fatalf("facts = %#v, want four", got)
+	}
+	for i, want := range []struct {
+		issue     string
+		requester claim.Role
+	}{{"LEGION-209", claim.RoleArchitect}, {"LEGION-208", claim.RoleArchitect}, {"LEGION-210", claim.RoleArchitect}, {"LEGION-210", claim.RoleTester}} {
+		fact, ok := got[i].(intake.BackwardMove)
+		if !ok || fact.Issue != want.issue || fact.Requester != want.requester || fact.To != phase.Implementing || fact.Reason != "the evidence does not cover the migration" {
+			t.Fatalf("backward fact %d = %#v, want the %s's move of %s to implementing with its reason", i, got[i], want.requester, want.issue)
+		}
+	}
+}
+
 // A child whose parent chain leaves the tree before reaching an architect's issue - no parent, or a
 // parent not recorded, as one human re-parent in Dispatch leaves it - is the tree root's, as the
-// notice router decides (owningArchitect): the root architect the production_check notice reaches
-// may sign it off and retry it, and a sub-architect still may not.
+// notice router decides (owningArchitect): the root architect the reviewer's phase-finished notice
+// reaches may accept it and retry it, and a sub-architect still may not.
 func TestABrokenParentChainIsTheTreeRootArchitects(t *testing.T) {
 	h, facts, _ := newArchitectHarness(t, nil, nil)
 	seedTree(t, h, "LEGION-208", "LEGION-209")
@@ -431,8 +491,8 @@ func TestABrokenParentChainIsTheTreeRootArchitects(t *testing.T) {
 	records := record.NewStore()
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		for _, child := range []record.Issue{
-			{Key: "LEGION-211", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.ProductionCheck, Status: "in_progress"},
-			{Key: "LEGION-212", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.ProductionCheck, Status: "in_progress"},
+			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.Accepting, Status: "needs_review"},
+			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.Accepting, Status: "needs_review"},
 		} {
 			if err := records.PutIssue(context.Background(), tx, child); err != nil {
 				return err
@@ -511,11 +571,11 @@ func TestWaveReleaseReleasesUnreleasedChildrenOfTheTreeOverTheDispatchGraph(t *t
 	seedTree(t, h, "LEGION-208")
 	root, child := "LEGION-208", "LEGION-209"
 	statuses.issues = map[string]dispatch.Issue{
-		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
-		"LEGION-209": {Key: "LEGION-209", Status: "backlog", Parent: &root},
-		"LEGION-210": {Key: "LEGION-210", Status: "triage", Parent: &child},
-		"LEGION-211": {Key: "LEGION-211", Status: "in_progress", Parent: &root},
-		"LEGION-212": {Key: "LEGION-212", Status: "backlog"},
+		"LEGION-208": {Key: "LEGION-208", ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root},
+		"LEGION-210": {Key: "LEGION-210", ResolvedRepo: "acme/widgets", Status: "triage", Parent: &child},
+		"LEGION-211": {Key: "LEGION-211", ResolvedRepo: "acme/widgets", Status: "in_progress", Parent: &root},
+		"LEGION-212": {Key: "LEGION-212", ResolvedRepo: "acme/widgets", Status: "backlog"},
 	}
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
@@ -565,9 +625,9 @@ func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing
 	seedTree(t, h, "LEGION-208", "LEGION-209") // the first attempt's todo event recorded LEGION-209
 	root := "LEGION-208"
 	statuses.issues = map[string]dispatch.Issue{
-		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
-		"LEGION-209": {Key: "LEGION-209", Status: "todo", Parent: &root},    // the first attempt released it
-		"LEGION-210": {Key: "LEGION-210", Status: "backlog", Parent: &root}, // its write is the one that failed
+		"LEGION-208": {Key: "LEGION-208", ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", ResolvedRepo: "acme/widgets", Status: "todo", Parent: &root},    // the first attempt released it
+		"LEGION-210": {Key: "LEGION-210", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root}, // its write is the one that failed
 	}
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 

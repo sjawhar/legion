@@ -45,11 +45,15 @@ type WaveReleaseResponse struct {
 	Released []string `json:"released"`
 }
 
-// PhaseBackwardRequest asks a phase worker to return its own issue to an earlier phase.
+// PhaseBackwardRequest asks a phase worker to return its own issue to an earlier phase, or the
+// tree's architect to return an issue it owns from accepting. An architect's grant serves its
+// whole tree, so it names the issue; a phase worker's names its own, so issue may be left out and,
+// when given, must be the grant's.
 type PhaseBackwardRequest struct {
 	GrantID string      `json:"grantId"`
 	To      phase.Phase `json:"to"`
 	Reason  string      `json:"reason"`
+	Issue   string      `json:"issue,omitempty"`
 }
 
 // PhaseBackwardResponse confirms the phase-backward fact committed.
@@ -65,7 +69,7 @@ type PhaseRetryRequest struct {
 // PhaseRetryResponse confirms the retry-or-escalate fact committed.
 type PhaseRetryResponse struct{}
 
-// SignOffRequest records the owning architect's post-production-check sign-off.
+// SignOffRequest records the owning architect's acceptance of an issue in accepting.
 type SignOffRequest struct {
 	GrantID string `json:"grantId"`
 	Issue   string `json:"issue"`
@@ -283,21 +287,8 @@ func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, k
 	return dispatch.Issue{}, false, false
 }
 
-// enterTodoChild records a released child Dispatch already shows todo that the daemon has no
-// record of. The workflow records a child from an observation of it in todo while its tree is live
-// (workflow's recordChildUnderLiveTree), and a child set todo before its tree was live, by a person
-// or another session, has none: the release writes it nothing, and Dispatch would make no event for
-// a status the issue already has. So the release applies Dispatch's view of the child, as just read,
-// as that observation, at the child's own Dispatch sequence: the child takes the path its todo event
-// would, recorded under the live tree and started once its gate is open, and a live event of it
-// from before the read stops at the sequence fence. A child already recorded, which the earlier
-// attempt of a wave this call retries released, has had that observation.
-//
-// The workflow records a child only under a recorded parent, and a parent this same wave released
-// is recorded only once its own todo event arrives. A child the observation did not record is
-// answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
-// retry applies the observation again once the parent is recorded, and the engine's and admission's
-// sequence fences make an observation the record already holds change nothing.
+// maxChildReleaseAttempts and childReleaseBackoff bound release_children's retries of a todo child
+// whose parent is not yet recorded (scheduleChildReleaseRetry).
 const (
 	maxChildReleaseAttempts = 3
 	childReleaseBackoff     = time.Second
@@ -308,11 +299,19 @@ const (
 // (workflow's recordChildUnderLiveTree), and a child set todo before its tree was live, by a person
 // or another session, has none: the release writes it nothing, and Dispatch would make no event for
 // a status the issue already has. So the release applies Dispatch's view of the child, as just read,
-// as that observation, at the child's own Dispatch sequence.
+// as that observation, at the child's own Dispatch sequence: the child takes the path its todo event
+// would, recorded under the live tree and started once its gate is open, and a live event of it
+// from before the read stops at the sequence fence. The view applies only while the child stays
+// unrecorded (intake.DispatchIssue.Observed): an event that recorded it meanwhile has the record
+// carried on by the child's own events, each with its actor. A child already recorded, which the
+// earlier attempt of a wave this call retries released, has had that observation.
 //
-// A child whose parent this wave released may reach here before that parent's todo event reaches
-// intake. Its durable retry record bounds attempts with exponential backoff; after the limit, it
-// queues one notice to the tree architect instead of asking an architect to retry forever.
+// The workflow records a child only under a recorded parent, and a parent this same wave released
+// is recorded only once its own todo event arrives. A child the observation did not record is
+// answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
+// retry applies the observation again once the parent is recorded. Its durable retry record bounds
+// attempts with exponential backoff; after the limit, it queues one notice to the tree architect
+// instead of asking an architect to retry forever.
 func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree string, child dispatch.Issue) bool {
 	recorded, err := s.recordedIssue(r.Context(), child.Key)
 	if err != nil {
@@ -322,12 +321,19 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	if recorded != nil {
 		return s.clearChildReleaseRetry(w, r, child.Key)
 	}
-	parent := ""
-	if child.Parent != nil {
-		parent = *child.Parent
-	}
-	observed := intake.DispatchIssue{
-		Key: child.Key, Seq: child.LastSeq, Status: child.Status, Title: child.Title, Parent: parent, Rank: child.Rank, HandedOver: child.HandedOver,
+	observed := intake.ObservedIssue(child)
+	if s.prepare != nil {
+		prepared, err := s.prepare(r.Context(), observed)
+		var later *intake.RetryLater
+		switch {
+		case errors.As(err, &later):
+			writeFailure(w, http.StatusConflict, "CHILD_RELEASE_BACKOFF", fmt.Sprintf("%s: %v; retry after %s", child.Key, err, later.After))
+			return false
+		case err != nil:
+			writeFailure(w, http.StatusBadGateway, "REPOSITORY_READ_FAILED", fmt.Sprintf("could not read the repository of %s: %v; retry release_children", child.Key, err))
+			return false
+		}
+		observed = prepared
 	}
 	if _, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("waves/release"), observed, s.handlers...); err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("could not record %s", child.Key))
@@ -340,7 +346,7 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	if recorded != nil {
 		return s.clearChildReleaseRetry(w, r, child.Key)
 	}
-	return s.scheduleChildReleaseRetry(w, r, tree, child, parent)
+	return s.scheduleChildReleaseRetry(w, r, tree, child, intake.ObservedIssue(child).Parent)
 }
 
 func (s *server) clearChildReleaseRetry(w http.ResponseWriter, r *http.Request, issue string) bool {
@@ -498,6 +504,9 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, WaveReleaseResponse{Released: req.Issues})
 }
 
+// phaseBackward applies a backward move: a phase worker's on its own issue (the grant's), or the
+// tree architect's on an issue it owns (architectOwns, as sign_off), named by the request, from
+// accepting. The workflow decides whether the requester runs the phase (BACKWARD_REFUSED).
 func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 	var req PhaseBackwardRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w,
@@ -511,8 +520,32 @@ func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_PHASE", "to is not a phase")
 		return
 	}
-	grant, ok := s.phaseWorkerGrant(w, r, req.GrantID)
+	if req.Issue != "" && !claim.IsIssueKey(req.Issue) {
+		writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issue is not an issue key")
+		return
+	}
+	grant, ok := s.redeem(w, r, req.GrantID)
 	if !ok {
+		return
+	}
+	if !grant.Controller && grant.Role == claim.RoleArchitect {
+		if !requireFailureFields(w, field{"issue", req.Issue}) {
+			return
+		}
+		architect, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+		if !ok || !s.architectOwns(w, r, architect, recorded, "request_backward_move") {
+			return
+		}
+		s.applyFact(w, r, requestFactID("phase/backward"),
+			intake.BackwardMove{Issue: req.Issue, Requester: claim.RoleArchitect, To: req.To, Reason: req.Reason}, PhaseBackwardResponse{})
+		return
+	}
+	grant, ok = s.phaseWorkerGrant(w, r, req.GrantID)
+	if !ok {
+		return
+	}
+	if req.Issue != "" && req.Issue != grant.Issue {
+		writeFailure(w, http.StatusBadRequest, "ISSUE_NOT_GRANTS", fmt.Sprintf("a phase worker moves only its own issue %s, not %s", grant.Issue, req.Issue))
 		return
 	}
 	s.applyFact(w, r, requestFactID("phase/backward"),
@@ -641,9 +674,9 @@ func (s *server) architectOwns(w http.ResponseWriter, r *http.Request, grant cre
 // recorded or recorded in another tree, a cycle) ends at the tree root, whose architect owns the
 // issue: a human's re-parent in Dispatch leaves an issue's tree as it was (admit's
 // recordObservation), and the notice router ends the same walk at the same place
-// (owningArchitect, internal/daemon/notice_routing.go), so the architect a production_check notice
-// reaches is the one that may sign the issue off. The walk reads every parent in one read-only
-// transaction, opened only when it has a parent to read.
+// (owningArchitect, internal/daemon/notice_routing.go), so the architect the reviewer's
+// phase-finished notice reaches is the one that may accept the issue. The walk reads every parent
+// in one read-only transaction, opened only when it has a parent to read.
 func (s *server) owns(ctx context.Context, grant credential.Grant, recorded record.Issue) (bool, error) {
 	var tx pgx.Tx
 	defer func() {

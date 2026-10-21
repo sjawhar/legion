@@ -112,6 +112,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -206,6 +212,12 @@
                 "mountPath": "/var/run/legion/gh",
                 "name": "gh-planner",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -304,6 +316,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -398,6 +416,12 @@
                 "mountPath": "/var/run/legion/gh",
                 "name": "gh-tester",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -496,6 +520,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -592,6 +622,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -614,7 +650,7 @@
               "--repo",
               "sjawhar/legion-smoke",
               "--feed",
-              "/var/run/legion/feed"
+              "/legion/feed"
             ],
             "env": [
               {
@@ -628,6 +664,14 @@
               {
                 "name": "LEGION_PROVISION_TOKEN_FILE",
                 "value": "/var/run/legion/provision/LEGION_PROVISION_TOKEN"
+              },
+              {
+                "name": "LEGION_REPOSITORY_CACHE_URL",
+                "value": "http://legion-legion-cache-sjawhar-legion-smoke-6687cbae.legion.svc:8418"
+              },
+              {
+                "name": "LEGION_REPOSITORY_CACHE_TOKEN_FILE",
+                "value": "/var/run/legion/provision/LEGION_REPOSITORY_CACHE_TOKEN"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
@@ -666,11 +710,12 @@
                 "name": "tmp"
               },
               {
-                "mountPath": "/var/run/legion/feed",
-                "name": "feed"
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "subPath": "feed"
               }
             ],
-            "workingDir": "/var/run/legion/feed"
+            "workingDir": "/legion/feed"
           },
           {
             "command": [
@@ -686,9 +731,9 @@
               "--root",
               "/legion",
               "--credential-helper",
-              "!gh auth git-credential",
+              "!legion git-credential",
               "--feed",
-              "/var/run/legion/feed"
+              "/legion/feed"
             ],
             "env": [
               {
@@ -743,9 +788,10 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/var/run/legion/feed",
-                "name": "feed",
-                "readOnly": true
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
               },
               {
                 "mountPath": "/home/legion/.config",
@@ -791,14 +837,14 @@
                 {
                   "key": "LEGION_PROVISION_TOKEN",
                   "path": "LEGION_PROVISION_TOKEN"
+                },
+                {
+                  "key": "LEGION_REPOSITORY_CACHE_TOKEN",
+                  "path": "LEGION_REPOSITORY_CACHE_TOKEN"
                 }
               ],
               "secretName": "legion-legion-legion-208-boot"
             }
-          },
-          {
-            "emptyDir": {},
-            "name": "feed"
           },
           {
             "emptyDir": {
@@ -843,12 +889,20 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "github-hosts",
-                  "path": "hosts.yml"
+                  "key": "github-hosts-acme",
+                  "path": "acme/hosts.yml"
                 },
                 {
-                  "key": "github-config",
-                  "path": "config.yml"
+                  "key": "github-config-acme",
+                  "path": "acme/config.yml"
+                },
+                {
+                  "key": "github-hosts-sjawhar",
+                  "path": "sjawhar/hosts.yml"
+                },
+                {
+                  "key": "github-config-sjawhar",
+                  "path": "sjawhar/config.yml"
                 }
               ],
               "secretName": "legion-legion-legion-208-architect-boot"
@@ -885,12 +939,20 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "github-hosts",
-                  "path": "hosts.yml"
+                  "key": "github-hosts-acme",
+                  "path": "acme/hosts.yml"
                 },
                 {
-                  "key": "github-config",
-                  "path": "config.yml"
+                  "key": "github-config-acme",
+                  "path": "acme/config.yml"
+                },
+                {
+                  "key": "github-hosts-sjawhar",
+                  "path": "sjawhar/hosts.yml"
+                },
+                {
+                  "key": "github-config-sjawhar",
+                  "path": "sjawhar/config.yml"
                 }
               ],
               "secretName": "legion-legion-legion-208-planner-boot"
@@ -927,12 +989,20 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "github-hosts",
-                  "path": "hosts.yml"
+                  "key": "github-hosts-acme",
+                  "path": "acme/hosts.yml"
                 },
                 {
-                  "key": "github-config",
-                  "path": "config.yml"
+                  "key": "github-config-acme",
+                  "path": "acme/config.yml"
+                },
+                {
+                  "key": "github-hosts-sjawhar",
+                  "path": "sjawhar/hosts.yml"
+                },
+                {
+                  "key": "github-config-sjawhar",
+                  "path": "sjawhar/config.yml"
                 }
               ],
               "secretName": "legion-legion-legion-208-implementer-boot"
@@ -969,12 +1039,20 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "github-hosts",
-                  "path": "hosts.yml"
+                  "key": "github-hosts-acme",
+                  "path": "acme/hosts.yml"
                 },
                 {
-                  "key": "github-config",
-                  "path": "config.yml"
+                  "key": "github-config-acme",
+                  "path": "acme/config.yml"
+                },
+                {
+                  "key": "github-hosts-sjawhar",
+                  "path": "sjawhar/hosts.yml"
+                },
+                {
+                  "key": "github-config-sjawhar",
+                  "path": "sjawhar/config.yml"
                 }
               ],
               "secretName": "legion-legion-legion-208-tester-boot"
@@ -1011,12 +1089,20 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "github-hosts",
-                  "path": "hosts.yml"
+                  "key": "github-hosts-acme",
+                  "path": "acme/hosts.yml"
                 },
                 {
-                  "key": "github-config",
-                  "path": "config.yml"
+                  "key": "github-config-acme",
+                  "path": "acme/config.yml"
+                },
+                {
+                  "key": "github-hosts-sjawhar",
+                  "path": "sjawhar/hosts.yml"
+                },
+                {
+                  "key": "github-config-sjawhar",
+                  "path": "sjawhar/config.yml"
                 }
               ],
               "secretName": "legion-legion-legion-208-reviewer-boot"
@@ -1053,12 +1139,20 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "github-hosts",
-                  "path": "hosts.yml"
+                  "key": "github-hosts-acme",
+                  "path": "acme/hosts.yml"
                 },
                 {
-                  "key": "github-config",
-                  "path": "config.yml"
+                  "key": "github-config-acme",
+                  "path": "acme/config.yml"
+                },
+                {
+                  "key": "github-hosts-sjawhar",
+                  "path": "sjawhar/hosts.yml"
+                },
+                {
+                  "key": "github-config-sjawhar",
+                  "path": "sjawhar/config.yml"
                 }
               ],
               "secretName": "legion-legion-legion-208-merger-boot"

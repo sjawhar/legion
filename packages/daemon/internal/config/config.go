@@ -33,6 +33,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
@@ -143,9 +144,12 @@ type Config struct {
 	Gates             Gates
 	GitHubApps        GitHubApps
 	// Linger is how long a finished tree keeps its workspace before it closes (`linger_hours`).
-	Linger         time.Duration
-	ReviewRoundCap int
-	MaxFixAttempts int
+	Linger time.Duration
+	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
+	// after the close before its last look (`production_check_hours`, 14 days by default).
+	ProductionCheckBound time.Duration
+	ReviewRoundCap       int
+	MaxFixAttempts       int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
@@ -155,6 +159,9 @@ type Config struct {
 	ControllerLaunch ControllerLaunch
 	// Capabilities is the `capabilities` block; the zero value with none.
 	Capabilities Capabilities
+	// WorkerBackends is `worker_backends`: the phase-worker roles that run on a backend other than
+	// Oh My Pi, by role; a role it leaves out runs on Oh My Pi (BackendFor).
+	WorkerBackends map[claim.Role]runtime.Backend
 }
 
 const (
@@ -257,12 +264,14 @@ type fileConfig struct {
 	Gates                  *Gates
 	GitHubApps             *GitHubApps
 	Linger                 *time.Duration
+	ProductionCheckBound   *time.Duration
 	ReviewRoundCap         *int
 	MaxFixAttempts         *int
 	Controller             *string
 	Capabilities           *Capabilities
 	Durations              map[string]int
 	Counts                 map[string]int
+	WorkerBackends         map[claim.Role]runtime.Backend
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -385,7 +394,9 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "github_apps":
 			file.GitHubApps, err = readGitHubApps(value, key)
 		case "linger_hours":
-			file.Linger, err = readLingerHours(value, key)
+			file.Linger, err = readHours(value, key)
+		case "production_check_hours":
+			file.ProductionCheckBound, err = readHours(value, key)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
@@ -394,6 +405,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Controller, err = readString(value, key)
 		case "capabilities":
 			file.Capabilities, err = readCapabilities(value, key)
+		case "worker_backends":
+			file.WorkerBackends, err = readWorkerBackends(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -660,14 +673,16 @@ type ProviderKey struct {
 const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
 
 // paneGitHubEnv are the gh variables the daemon sets on every pane and pod (tmux's panePairs, the
-// sandbox runtime's issuePod.agentEnv): GH_CONFIG_DIR, the role's gh files rendered from its App
-// token, and GH_TOKEN, GITHUB_TOKEN and GH_HOST set to the empty string so nothing outranks them.
-// Each runtime's runtimeOwned holds the four and refuses a provider key named for one — tmux at its
-// construction, after boot has read every provider key from secretsd, kubernetes in CheckPod — so
-// the loader refuses it first, where `legion start --check-config` sees it: the shim refuses to
-// start over a provider key its own environment already names, an empty value included
-// (shim.ReadProviderEnv, LEGION-186), so such a key would stop every pane.
-var paneGitHubEnv = []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"}
+// sandbox runtime's ghAgentEnv): LEGION_GH_OWNERS_DIR, the role's gh bundle (one directory of gh
+// files per owner of the project), GH_CONFIG_DIR, its issue's owner's directory, LEGION_GH_PATH,
+// the real gh the `legion gh` wrapper runs, and GH_TOKEN, GITHUB_TOKEN and GH_HOST set to the
+// empty string so nothing outranks the files. Each runtime's runtimeOwned holds the six and refuses
+// a provider key named for one — tmux at its construction, after boot has read every provider key
+// from secretsd, kubernetes in CheckPod — so the loader refuses it first, where `legion start
+// --check-config` sees it: the shim refuses to start over a provider key its own environment
+// already names, an empty value included (shim.ReadProviderEnv, LEGION-186), so such a key would
+// stop every pane.
+var paneGitHubEnv = []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH"}
 
 // readProviderKeys is `provider_keys`: a mapping of the variable OMP reads to the key that holds
 // it, both sides environment variable names, in file order. A variable named twice is refused
@@ -691,7 +706,7 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 			return nil, fmt.Errorf("%s names %s: an AGENT_SECRETS_* variable is the runtime's (AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR) or the daemon's own agent-secrets machine login, and is never exported into an agent's environment", key, env)
 		}
 		if slices.Contains(paneGitHubEnv, env) {
-			return nil, fmt.Errorf("%s names %s, which the daemon sets on every pane and pod (the role's GitHub App token is the gh files under GH_CONFIG_DIR; GH_TOKEN, GITHUB_TOKEN and GH_HOST are emptied so nothing outranks them), so a provider key may not use that name", key, env)
+			return nil, fmt.Errorf("%s names %s, which the daemon sets on every pane and pod (the role's GitHub App tokens are the gh files under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's owner's and LEGION_GH_PATH the real gh `legion gh` runs; GH_TOKEN, GITHUB_TOKEN and GH_HOST are emptied so nothing outranks them), so a provider key may not use that name", key, env)
 		}
 		if seen[env] {
 			return nil, fmt.Errorf("%s names %s twice", key, env)
@@ -720,12 +735,12 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 	return &read, nil
 }
 
-// readLingerHours is `linger_hours`: a positive number of hours, a decimal among them (0.3 is 18
-// minutes), bounded as the shipped key is, by the timer bound in whole hours (config.ts
-// MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read as zero: the
-// engine arms the deadline it is given, so a zero would close a finished tree at once and take
-// its workspace with it.
-func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
+// readHours is a key in hours (`linger_hours`, `production_check_hours`): a positive number of
+// hours, a decimal among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer
+// bound in whole hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is
+// refused, never read as zero: the engine arms the deadline it is given, so a zero would close a
+// finished tree at once and take its workspace with it, or bound a check before its first look.
+func readHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
 	}
@@ -739,11 +754,11 @@ func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if hours > maxTimerSeconds/3600 {
 		return nil, fmt.Errorf("%s must be at most %d", key, maxTimerSeconds/3600)
 	}
-	linger := time.Duration(math.Round(hours * float64(time.Hour)))
-	if linger <= 0 {
+	duration := time.Duration(math.Round(hours * float64(time.Hour)))
+	if duration <= 0 {
 		return nil, fmt.Errorf("%s must be a positive number", key)
 	}
-	return &linger, nil
+	return &duration, nil
 }
 
 // validURL is the shipped `validateUrl` (config.ts) for the URLs this daemon dials or
@@ -811,15 +826,16 @@ func underConfig(path, configDir string) string {
 // path in it is relative to the file, never to the cwd a command was launched from.
 func resolve(file fileConfig, env func(string) string, configDir string) (Config, error) {
 	cfg := Config{
-		Port:           defaultPort,
-		Bind:           defaultBind,
-		Runtime:        Runtime{Name: defaultRuntimeName},
-		AdmissionCap:   defaultAdmissionCap,
-		EnvoyURL:       defaultEnvoyURL,
-		Gates:          Gates{Design: DesignGateRootIssues},
-		Linger:         72 * time.Hour,
-		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
+		Port:                 defaultPort,
+		Bind:                 defaultBind,
+		Runtime:              Runtime{Name: defaultRuntimeName},
+		AdmissionCap:         defaultAdmissionCap,
+		EnvoyURL:             defaultEnvoyURL,
+		Gates:                Gates{Design: DesignGateRootIssues},
+		Linger:               72 * time.Hour,
+		ProductionCheckBound: 336 * time.Hour,
+		ReviewRoundCap:       3,
+		MaxFixAttempts:       3,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")
@@ -893,6 +909,10 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if file.Capabilities != nil {
 		cfg.Capabilities = *file.Capabilities
+	}
+	cfg.WorkerBackends = file.WorkerBackends
+	if err := checkWorkerBackends(cfg); err != nil {
+		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {

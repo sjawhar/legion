@@ -16,6 +16,7 @@ import (
 	"time"
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -38,19 +39,35 @@ type volumeLostError string
 
 func (e volumeLostError) Error() string { return string(e) }
 
+// secretFileFromEnv is the secret file the environment variable name points at, once it reads
+// (config.ReadSecretPointer); an error when name is not set or its file does not read.
+func secretFileFromEnv(name string) (string, error) {
+	file, set := os.LookupEnv(name)
+	if !set {
+		return "", errors.New(name + " is not set")
+	}
+	if _, err := config.ReadSecretPointer(name, file); err != nil {
+		return "", err
+	}
+	return file, nil
+}
+
 // workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's init containers, which
-// prepare a pod's persistent volume before the main container's worker-shim starts, and the one
-// list of them `legion workspace-init --help` names. An issue pod runs two, which prepare the
-// issue's clone and jj workspace on the issue's own volume: `fetch` is the first, the one process of
-// the pod that holds the provisioning token, in a container that mounts nothing an agent of the
-// issue can write; `provision` is the second, all the volume's work, in a container the provisioning
-// Secret is not mounted in. The controller's pod (`controller: daemon`) runs `controller` alone, on
-// the volume its own Sandbox owns. Each one's log lines go to stdout and its refusals and failures
-// to stderr — together the init log the runtime quotes — with exit 1, or 3 for a lost volume.
+// prepare a pod's persistent volume before the main container's worker-shim starts, and the
+// repository cache's process, and the one list of them `legion workspace-init --help` names. An
+// issue pod runs two, which prepare the issue's clone and jj workspace on the issue's own volume:
+// `fetch` is the first, the one process of the pod that holds the provisioning token, in a
+// container that mounts nothing an agent of the issue can write; `provision` is the second, all the
+// volume's work, in a container the provisioning Secret is not mounted in. The controller's pod
+// (`controller: daemon`) runs `controller` alone, on the volume its own Sandbox owns. A repository
+// cache's pod runs `cache` as its one container, on its own volume, until it is stopped. Each one's
+// log lines go to stdout and its refusals and failures to stderr — together the init log the
+// runtime quotes — with exit 1, or 3 for a lost volume.
 var workspaceInitCommands = map[string]command{
 	"fetch":      runWorkspaceFetch,
 	"provision":  runWorkspaceProvision,
 	"controller": runWorkspaceController,
+	"cache":      runWorkspaceCache,
 }
 
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -61,10 +78,11 @@ func runWorkspaceFetch(ctx context.Context, args []string, stdout, stderr io.Wri
 	flags := newFlags("workspace-init fetch", "usage: "+workspaceFetchUsage, stderr)
 	repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
 	feed := flags.String("feed", "", "the pod's feed directory, the container's own (required)")
+	cacheURL := flags.String("cache-url", os.Getenv(cacheURLEnv), "the repository cache to fill the feed from before GitHub (default $"+cacheURLEnv+", set by the runtime while the cache is ready)")
 	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
 		return code
 	}
-	return workspaceInitExit(flags, workspaceFetch(ctx, *repo, *feed, stdout), stderr)
+	return workspaceInitExit(flags, workspaceFetch(ctx, *repo, *feed, *cacheURL, stdout), stderr)
 }
 
 func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io.Writer) int {

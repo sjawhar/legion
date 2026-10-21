@@ -9,6 +9,8 @@ import {
 } from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
 import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
+import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import { findHandoffCommit } from "@legion/pi-shared/handoff-commit";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -28,8 +30,6 @@ import {
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
-import { createLegionDaemonClient, type LegionDaemonClient } from "../src/daemon-client";
-import { findHandoffCommit } from "../src/handoff-commit";
 import {
   assistantText,
   inboundKind,
@@ -311,7 +311,9 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   // The run is about to settle with nothing left for the host to continue: a phase still open
-  // gets its one follow-up, which the host sends as the next turn of this same session.
+  // gets its follow-up, one a stall, or two when the follow-up to a tool call written as text is
+  // answered with another (src/phase-stall.ts), which the host sends as the next turn of this same
+  // session.
   pi.on("session_stop", async (event, context) => {
     if (event.signal.aborted || !phaseWorkerSession(context)) return undefined;
     const followUp = advancePhaseStall({
@@ -346,17 +348,10 @@ export default function legionExtension(pi: PiApi): void {
           const sessionID = context.sessionManager.getSessionId();
           const active = claimSession.capability(sessionID);
           if (active !== undefined) {
-            return {
-              kind: active.role === "architect" ? "architect" : "phase-worker",
-              role: active.role,
-              sessionId: active.sessionID,
-              tree: active.tree,
-              issue: active.issue,
-              secret: active.secret,
-            };
+            return { kind: active.role === "architect" ? "architect" : "phase-worker", ...active };
           }
           if (controllerSession.isClaimedSession(sessionID)) {
-            return { kind: "controller", sessionId: sessionID };
+            return { kind: "controller", sessionID };
           }
           throw new Error("legion is available only to this session's registered claim");
         },

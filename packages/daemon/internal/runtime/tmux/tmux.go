@@ -1,13 +1,16 @@
 // Package tmux is the runtime that runs every agent as a pane on the daemon's private tmux server:
-// `legion worker-shim` in the pane, dialing the daemon's worker stream listener, with Oh My Pi
-// under it.
+// `legion worker-shim` in the pane, dialing the daemon's worker stream listener, with the agent's
+// harness under it — Oh My Pi, or another the role's backend names, each run by its Launcher.
 //
 // One window per issue: the issue's first process opens a window named for it, and a later one
 // splits into it while a pane recorded there still verifies as its recorded process. A pane is
 // never known by its id alone — a recreated server reissues ids from %0, and the kernel reissues
 // pids — so every locator records the pane's root pid and that process's /proc start ticks at
 // launch (its incarnation), and nothing is reported alive, killed, or shared until pid, start
-// ticks, and the OMP command line all check out again.
+// ticks, and a command line naming a configured harness all check out again.
+//
+// The tmux runtime launches nothing but its Launchers: a third harness is an entry in
+// runtime.Backends, a Launcher here, and a boot resolver in the daemon.
 //
 // The behaviour was ported from the TypeScript runtime LEGION-223 removed; a `tmux.ts:N` or
 // `runtime-tmux.ts:N` citation at a rule names that runtime's source in this repository's history.
@@ -75,19 +78,32 @@ type Options struct {
 	// dispatch_url is set.
 	DispatchURL       string
 	DispatchTokenFile string
-	// GitHubCredential is the daemon's function for a role's gh files (runtime.GitHubCredential):
-	// hosts.yml and config.yml rendered from the role's App token. A launch calls it for the pane's
-	// claim and writes the two files under the claim's directory (runtime.GHConfigDir), the pane's
-	// GH_CONFIG_DIR, and the refresher started by Observe (refreshGitHubCredentials) calls it again
-	// for every tracked pane and rewrites hosts.yml when the render changed; the controller's pane
-	// is one like any other's, since it acts as the review App (appauth.AppRoleFor). Nil is a
-	// daemon with no GitHub Apps (Stage 2's, which configures no workflow): its panes are told no
-	// GH_CONFIG_DIR, hold no gh files, and the refresher does nothing.
+	// GitHubCredential is the daemon's function for a role's gh bundle (runtime.GitHubCredential):
+	// one directory of gh files per GitHub owner of the project. A launch calls it for the pane's
+	// role and its repository's owner and writes the bundle under the claim's root
+	// (runtime.GHConfigDir), the pane's LEGION_GH_OWNERS_DIR, whose default owner's directory is the
+	// pane's GH_CONFIG_DIR, and the refresher started by Observe (refreshGitHubCredentials) calls it
+	// again for every tracked pane's default and rewrites each owner's hosts.yml when its render
+	// changed; the controller's pane is one like any other's, since it acts as the review App
+	// (appauth.AppRoleFor). Nil is a daemon with no GitHub Apps (Stage 2's, which configures no
+	// workflow): its panes are told no gh variable, hold no gh files, and the refresher does
+	// nothing.
 	GitHubCredential runtime.GitHubCredential
-	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
-	// configured argv prepended to it.
-	OmpInvocation   string
-	OmpLaunchPrefix []string
+	// GH is the real gh's absolute path, which the daemon resolves at boot and every pane is told
+	// as LEGION_GH_PATH: the `legion gh` wrapper first on the pane's PATH runs it with the gh
+	// directory of the owner a command names. Required with GitHubCredential.
+	GH string
+	// RepositoryOwner is the owner of the repository a claim's issue works, from the daemon's own
+	// state (its claims, then the issue's record, or the project's default repository for an issue
+	// the workflow does not record): the owner whose directory of a pane's gh bundle holds the
+	// write token. The refresher asks it for a tree pane the runtime adopted after a restart, whose
+	// launch's owner it never saw, and never reads that from the pane's gh directory, which the
+	// pane's own user can write. Required with GitHubCredential.
+	RepositoryOwner func(ctx context.Context, token claim.Token) (string, error)
+	// Launchers are how a pane runs each harness the daemon resolved at boot (Launcher), by backend:
+	// a spec whose backend (runtime.Of) has none is refused. At least one, and only backends the
+	// tmux runtime launches (runtime.Backends).
+	Launchers map[runtime.Backend]Launcher
 	// StopGrace is how long Suspend and Release wait for a process to end itself after its
 	// shutdown frame, and how long Resume waits for a previous incarnation to be gone
 	// (worker_stop_timeout_seconds).
@@ -128,8 +144,11 @@ type Runtime struct {
 	dispatchURL      string
 	dispatchToken    string
 	gitHubCredential runtime.GitHubCredential
-	ompInvocation    string
-	ompPrefix        []string
+	gh               string
+	repositoryOwner  func(ctx context.Context, token claim.Token) (string, error)
+	launchers        map[runtime.Backend]Launcher
+	markers          []string
+	agents           string
 	stopGrace        time.Duration
 	probeInterval    time.Duration
 	adoptTimeout     time.Duration
@@ -162,11 +181,16 @@ type Runtime struct {
 	tracked map[string]*trackedProcess
 }
 
-// trackedProcess is one watched process: its locator, and the issue it works on when the runtime
-// opened it (empty for one it adopted, whose window is then not offered to later panes).
+// trackedProcess is one watched process: its locator, the issue it works on when the runtime
+// opened it (empty for one it adopted, whose window is then not offered to later panes), and
+// ghWriter, the owner its launch minted the gh bundle's write token for, lowercased: its
+// repository's owner, or empty for a launch on no repository and for the controller, whose bundle
+// is read-only for every owner. An adopted tree pane's write owner is the daemon's record of its
+// claim (Options.RepositoryOwner).
 type trackedProcess struct {
-	locator runtime.Locator
-	issue   string
+	locator  runtime.Locator
+	issue    string
+	ghWriter string
 }
 
 // New builds a runtime from opts, resolving the tmux and legion binaries now so a daemon that
@@ -183,8 +207,8 @@ func New(opts Options) (*Runtime, error) {
 		return nil, errors.New("tmux runtime: no daemon URL")
 	case opts.EnvoyURL == "":
 		return nil, errors.New("tmux runtime: no Envoy URL")
-	case opts.OmpInvocation == "":
-		return nil, errors.New("tmux runtime: no OMP invocation")
+	case len(opts.Launchers) == 0:
+		return nil, errors.New("tmux runtime: no launcher")
 	case opts.StopGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return nil, errors.New("tmux runtime: the stop grace, probe interval, and adoption timeout must be positive")
 	case opts.Conns == nil:
@@ -193,6 +217,10 @@ func New(opts Options) (*Runtime, error) {
 		return nil, errors.New("tmux runtime: the Dispatch URL and token file must be configured together")
 	case opts.DispatchTokenFile != "" && !filepath.IsAbs(opts.DispatchTokenFile):
 		return nil, fmt.Errorf("tmux runtime: Dispatch token file %q is not an absolute path", opts.DispatchTokenFile)
+	case opts.GitHubCredential != nil && !filepath.IsAbs(opts.GH):
+		return nil, fmt.Errorf("tmux runtime: the real gh a pane's `legion gh` runs is %q, not an absolute path", opts.GH)
+	case opts.GitHubCredential != nil && opts.RepositoryOwner == nil:
+		return nil, errors.New("tmux runtime: a GitHub credential function needs the daemon's record of each claim's repository owner (RepositoryOwner)")
 	}
 	environ := opts.Environ
 	if environ == nil {
@@ -217,6 +245,12 @@ func New(opts Options) (*Runtime, error) {
 	if !ok {
 		return nil, fmt.Errorf("tmux runtime: tmux is not on the daemon's PATH (%s)", paneEnv["PATH"])
 	}
+	for backend := range opts.Launchers {
+		if !runtime.Backends[backend].LaunchedBy(runtime.RuntimeTmux) {
+			return nil, fmt.Errorf("tmux runtime: a launcher for %q, which the tmux runtime does not launch", backend)
+		}
+	}
+	markers, agents := agentMarkers(opts.Launchers)
 	r := &Runtime{
 		socket:           "legion-" + opts.Project,
 		stateDir:         opts.StateDir,
@@ -227,8 +261,11 @@ func New(opts Options) (*Runtime, error) {
 		dispatchURL:      opts.DispatchURL,
 		dispatchToken:    opts.DispatchTokenFile,
 		gitHubCredential: opts.GitHubCredential,
-		ompInvocation:    opts.OmpInvocation,
-		ompPrefix:        opts.OmpLaunchPrefix,
+		gh:               opts.GH,
+		repositoryOwner:  opts.RepositoryOwner,
+		launchers:        opts.Launchers,
+		markers:          markers,
+		agents:           agents,
 		stopGrace:        opts.StopGrace,
 		probeInterval:    opts.ProbeInterval,
 		adoptTimeout:     opts.AdoptTimeout,
@@ -377,13 +414,13 @@ func paneOf(loc runtime.Locator) (string, incarnation, error) {
 	return loc.Tmux.Pane, inc, nil
 }
 
-func (r *Runtime) track(loc runtime.Locator, issue string) {
+func (r *Runtime) track(loc runtime.Locator, issue, ghWriter string) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
 	if existing, ok := r.tracked[loc.Incarnation]; ok && existing.issue != "" {
-		issue = existing.issue
+		issue, ghWriter = existing.issue, existing.ghWriter
 	}
-	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue}
+	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue, ghWriter: ghWriter}
 }
 
 func (r *Runtime) untrack(loc runtime.Locator) {
@@ -411,11 +448,11 @@ func (r *Runtime) adoptExactly(located []runtime.Locator) {
 		}
 	}
 	for _, loc := range located {
-		issue := ""
+		entry := &trackedProcess{locator: loc}
 		if existing, ok := r.tracked[loc.Incarnation]; ok {
-			issue = existing.issue
+			entry.issue, entry.ghWriter = existing.issue, existing.ghWriter
 		}
-		r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue}
+		r.tracked[loc.Incarnation] = entry
 	}
 }
 

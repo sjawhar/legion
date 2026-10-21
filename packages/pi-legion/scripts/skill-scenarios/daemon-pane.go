@@ -6,21 +6,25 @@
 //
 //	phase <role>             prints the phase the role's worker runs in: the first phase
 //	                         workflow.RoleFor gives to the role
-//	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh files
-//	                         under its GH_CONFIG_DIR, and prints its paneResponse (JSON)
+//	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh bundle
+//	                         under its LEGION_GH_OWNERS_DIR, and prints its paneResponse (JSON)
 package main
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -76,13 +80,19 @@ type paneRequest struct {
 	// BootTokenFile is the rig's boot token file, the one its stand-in daemon checks.
 	BootTokenFile string `json:"bootTokenFile"`
 	// GHToken is the GitHub token the rig stands in for the claim's App token: it is rendered
-	// into the claim's gh files (hosts.yml and config.yml under runtime.GHConfigDir), which the
-	// pane's GH_CONFIG_DIR names, as the daemon's tmux runtime writes them at spawn. "" is a
-	// daemon with no GitHub credential: no files, and no gh variable on the pane.
+	// into the claim's gh bundle (runtime.GHConfigDir), the one directory of rigOwner, which the
+	// pane's GH_CONFIG_DIR names, as the daemon's tmux runtime writes it at spawn; the pane's
+	// LEGION_GH_PATH is realGH's: GHPath when the rig names one, else the first gh on Path,
+	// refused when that is a script, as the daemon resolves it at boot. "" is a daemon
+	// with no GitHub credential: no files, and no gh variable on the pane.
 	GHToken string `json:"ghToken"`
 	// Path is the PATH the daemon would start under; the pane's PATH is it behind the pane's
 	// launcher directory (workerbin.Path).
 	Path string `json:"path"`
+	// GHPath is the real gh the rig names for the pane, as an operator names one with
+	// LEGION_GH_PATH: its recording stand-in. "" is the daemon's own resolution, the first gh on
+	// Path, refused when that is a script.
+	GHPath string `json:"ghPath"`
 	// SystemPrompt asks for the pane's system prompt, composed from the role prompts the daemon
 	// module embeds.
 	SystemPrompt bool `json:"systemPrompt"`
@@ -108,19 +118,23 @@ func pane() error {
 	if err != nil {
 		return err
 	}
-	ghConfigDir := ""
+	ghRoot, gh := "", ""
 	if req.GHToken != "" {
-		// ghconfig's one writer of a role's gh directory, so the rig's directory is the daemon's layout;
+		// ghconfig's one writer of a role's gh bundle, so the rig's directory is the daemon's layout;
 		// the App label and expiry only feed the runtime's log lines, which the rig does not write.
-		ghConfigDir = runtime.GHConfigDir(req.StateDir, token)
-		if _, err := ghconfig.Write(ghConfigDir, ghconfig.Render(req.GHToken, "", time.Time{})); err != nil {
+		ghRoot = runtime.GHConfigDir(req.StateDir, token)
+		bundle := ghconfig.Bundle{Default: rigOwner, Owners: map[string]ghconfig.Rendered{rigOwner: ghconfig.Render(req.GHToken, "", time.Time{})}}
+		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
 			return fmt.Errorf("write the claim's gh files: %w", err)
+		}
+		if gh, err = realGH(req.GHPath, req.Path); err != nil {
+			return err
 		}
 	}
 	spec := runtime.SpawnSpec{Claim: token, Project: req.Project, Tree: req.Issue, Issue: req.Issue, Role: role, Generation: 1}
 	variables, err := tmux.PaneVariables(spec, tmux.PaneInputs{
 		StateDir: req.StateDir, Workspace: req.Workspace, DaemonURL: req.DaemonURL, EnvoyURL: req.EnvoyURL,
-		NATSURLs: req.NATSURLs, GHConfigDir: ghConfigDir,
+		NATSURLs: req.NATSURLs, GHOwnersDir: ghRoot, GHDefault: rigOwner, GH: gh,
 	}, []runtime.SecretFile{{Variable: "LEGION_BOOT_TOKEN", Path: req.BootTokenFile}})
 	if err != nil {
 		return err
@@ -138,6 +152,61 @@ func pane() error {
 	return json.NewEncoder(os.Stdout).Encode(res)
 }
 
+// rigOwner is the one GitHub owner of the rig's project, a placeholder whose directory of the gh
+// bundle holds the rig's token.
+const rigOwner = "skills-rig"
+
+// rigRepository and rigDefaultBranch are the repository and default branch a rig worker's
+// addressing names, as a real pane's does for its issue; the branch is not `main`, since the skills
+// tell a worker never to assume one.
+const (
+	rigRepository    = rigOwner + "/project"
+	rigDefaultBranch = "trunk"
+)
+
+// realGH is the real gh the pane is told as LEGION_GH_PATH: named, the gh the rig names (its
+// stand-in, as an operator's LEGION_GH_PATH is taken as given), else the daemon's resolution at
+// boot, the first executable gh on path, refused when it is a script (daemon.RefuseScriptGH's
+// rule). It is this program's own copy, since the rig runs it against each label's checkout of the
+// daemon module, an older one among them.
+func realGH(named, path string) (string, error) {
+	if named != "" {
+		if info, err := os.Stat(named); err != nil || !filepath.IsAbs(named) || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			return "", fmt.Errorf("the rig's gh %q is not an absolute executable path", named)
+		}
+		return named, nil
+	}
+	for _, dir := range filepath.SplitList(path) {
+		gh := filepath.Join(dir, "gh")
+		if info, err := os.Stat(gh); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			head, err := firstBytes(gh, 2)
+			if err != nil {
+				return "", fmt.Errorf("read %s, the first gh on the daemon's PATH: %w", gh, err)
+			}
+			if string(head) == "#!" {
+				return "", fmt.Errorf("the first gh on the daemon's PATH, %s, is a script, not the real gh, which the daemon refuses to boot on", gh)
+			}
+			return gh, nil
+		}
+	}
+	return "", fmt.Errorf("no gh on the daemon's PATH %q: the daemon resolves the real gh every pane's `legion gh` runs at boot", path)
+}
+
+// firstBytes is up to n bytes from the start of path.
+func firstBytes(path string, n int) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	head := make([]byte, n)
+	read, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return head[:read], nil
+}
+
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the
 // role prompts snapshotted under the state directory, the role's parts, then its addressing.
 func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
@@ -153,8 +222,14 @@ func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	repository, err := ghrepo.Parse("the rig's repository", rigRepository)
+	if err != nil {
+		return "", err
+	}
 	addressing, err := daemon.AddressingFragment(req.Project, supervise.Claim{
 		Token: token, Project: req.Project, Tree: req.Issue, Issue: req.Issue, Role: role, Generation: 1,
+	}, repository, rigDefaultBranch, api.RepositoriesView{
+		Mapped: []api.MappedRepositoryView{{Repo: rigRepository, Default: true}},
 	})
 	if err != nil {
 		return "", err

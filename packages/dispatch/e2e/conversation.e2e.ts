@@ -8,6 +8,7 @@ import {
 } from "./agents";
 import {
   answerAsk,
+  claimIssue,
   createAsk,
   createComment,
   createIssue,
@@ -16,13 +17,16 @@ import {
   createProject,
   editAsk,
   getAsk,
-  getIssueEvents,
+  getIssue,
   getMessage,
   patchIssue,
   putIssueState,
   replyToMessageDelivery,
+  resolveAsk,
+  resolveComment,
 } from "./api";
-import { resetDatabase, setEventCreatedAt } from "./seed";
+import { conversationFilter } from "./editor";
+import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const agent = {
@@ -64,7 +68,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Conversation owns the route, groups chronological Markdown turns, and resolves live agent names", async ({
+test("Conversation owns the route, lists one card per message newest first, and resolves live agent names", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -79,18 +83,6 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
     { actor: { id: "ghost-session-0000", kind: "session" }, as: "agent" }
   );
 
-  const events = await getIssueEvents(issue.key, { limit: 20 });
-  const first = events.find(
-    (event) => event.type === "message.created" && event.payload.body === "First **bold** line"
-  );
-  const code = events.find(
-    (event) => event.type === "message.created" && event.payload.body.includes("const x = 1")
-  );
-  if (first === undefined || code === undefined) {
-    throw new Error("seeded conversation messages were not recorded as events");
-  }
-  await setEventCreatedAt(first.id, new Date(Date.now() - 20 * 60 * 1_000).toISOString());
-  await setEventCreatedAt(code.id, new Date(Date.now() - 10 * 60 * 1_000).toISOString());
   await Promise.all([
     setLiveSessions([{ session_id: "e2e-conv-agent", title: "Planner (e2e)" }]),
     setInterests([
@@ -122,6 +114,7 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
       "Conversation",
       "Children",
       "Artifacts1",
+      "Activity",
     ]);
 
     await page.goto(`/issues/${issue.key}/conversation`);
@@ -130,10 +123,14 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
       "true"
     );
 
-    await expect(turn(page, "First bold line")).toHaveAttribute("data-continued", "false");
-    await expect(turn(page, "const x = 1;")).toHaveAttribute("data-continued", "false");
-    await expect(turn(page, "From bob")).toHaveAttribute("data-continued", "true");
-    await expect(turn(page, "Another from bob")).toHaveAttribute("data-continued", "false");
+    // One card per root message, newest activity first: five messages, five cards, no event row
+    // between them.
+    const cards = page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(":scope > li[data-turn]");
+    await expect(cards).toHaveCount(5);
+    await expect(cards.first()).toContainText("From a disconnected agent");
+    await expect(cards.last()).toContainText("First bold line");
     await expect(turn(page, "First bold line").locator("strong")).toHaveText("bold");
     await expect(turn(page, "const x = 1;").locator("pre code")).toContainText("const x = 1;");
     await expect(turn(page, "First bold line")).toContainText("Planner (e2e)");
@@ -151,6 +148,25 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
     await expect(firstTurn.getByRole("button", { name: "Unpin" })).toHaveAttribute(
       "aria-pressed",
       "true"
+    );
+
+    // A pinned conversation is the review margin's to show and to unpin: the Pinned tab carries
+    // the card's own body, and its Unpin releases the pin the Conversation made.
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: /Open review panel/ }).click();
+    }
+    const margin = page.getByTestId("margin-sheet");
+    await margin.getByRole("tab", { name: "Pinned" }).click();
+    const pinnedCard = margin.getByRole("article").filter({ hasText: "First bold line" });
+    await expect(pinnedCard).toHaveCount(1);
+    await pinnedCard.getByRole("button", { name: "Unpin" }).click();
+    await expect(margin.getByText("No pinned items.")).toBeVisible();
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: /Close review panel/ }).click();
+    }
+    await expect(firstTurn.getByRole("button", { name: "Pin" })).toHaveAttribute(
+      "aria-pressed",
+      "false"
     );
 
     const screenshot = testInfo.outputPath(
@@ -194,14 +210,24 @@ test("Conversation updates an open ask in place after an agent edit and preserve
     await expect(card).toContainText("Which transport should we implement?");
     await expect(card).toContainText(/Edited /);
     await expect(page.locator(`[data-turn="ask:${ask.id}"]`)).toHaveCount(1);
+    // The edit itself is an Activity line, not a row in the Conversation.
     await expect(
-      page.locator('[data-kind="activity"]', { hasText: 'edited the question "Which transport' })
-    ).toBeVisible();
+      conversation.getByText('edited the question "Which transport', { exact: false })
+    ).toHaveCount(0);
     await card.getByText("Show 1 previous version").click();
     await expect(card.getByText("Which implementation?")).toBeVisible();
     await expect(card.getByText(/Reworded by /)).toBeVisible();
     await expect(card.getByRole("list", { name: "Options" })).toContainText("REST");
     await expect(card.getByRole("list", { name: "Options" })).toContainText("gRPC");
+
+    await page.getByRole("tab", { name: "Activity" }).click();
+    await expect(
+      page
+        .getByRole("list", { name: "Issue activity" })
+        .getByRole("listitem")
+        .filter({ hasText: 'edited the question "Which transport' })
+    ).toHaveCount(1);
+    await page.getByRole("tab", { name: "Conversation" }).click();
 
     await page.goto("/");
     const inboxCard = page.getByTestId(`ask-${ask.id}`);
@@ -433,7 +459,7 @@ test("a compact answered ask's Write a reply opens its composer as the next keyb
   }
 });
 
-test("Conversation coalesces answered asks and toggles activity without remounting turns", async ({
+test("Conversation answers an ask in place, draws no event row, and keeps its cards mounted across the filter", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -473,7 +499,7 @@ test("Conversation coalesces answered asks and toggles activity without remounti
     const card = conversation.getByTestId(`ask-${ask.id}`);
     await expect(card.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(card.getByRole("radio", { name: "Hold" })).toBeVisible();
-    // The timeline carries the compact density (the margin shows this same ask in full), so
+    // The list carries the compact density (the margin shows this same ask in full), so
     // Answer appears with the choice rather than above an always-open composer.
     await card.getByRole("radio", { name: "Ship" }).check();
     await expect(card.getByRole("button", { exact: true, name: "Answer" })).toBeVisible();
@@ -492,21 +518,27 @@ test("Conversation coalesces answered asks and toggles activity without remounti
         replies: [expect.objectContaining({ body: "Thanks" })],
       });
 
-    await expect(
-      page.locator('[data-kind="activity"]', { hasText: "updated the issue" })
-    ).toBeVisible();
-    await expect(
-      page.getByRole("list", { name: "Conversation turns" }).getByText("Review comment")
-    ).toBeVisible();
-    await expect(
-      page.locator('[data-kind="activity"]', { hasText: `moved ${child.key} from` })
-    ).toBeVisible();
+    // The issue rename and the child's status move are the issue's events: the Conversation
+    // draws neither, and the Activity tab draws both.
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(turns.getByText("Review comment")).toBeVisible();
+    await expect(turns.getByText("updated the issue")).toHaveCount(0);
+    await expect(turns.getByText(`moved ${child.key} from`)).toHaveCount(0);
+    await expect(conversation.locator('[data-kind="activity"]')).toHaveCount(0);
 
-    await page.getByRole("checkbox", { name: "Show activity" }).uncheck();
-    await expect(page.locator('[data-kind="activity"]')).toHaveCount(0);
+    // Switching bucket and back hides the answered ask and leaves the message card mounted.
+    await conversationFilter(page, "Open").click();
+    await expect(page.locator(`[data-turn="ask:${ask.id}"]`)).toHaveCount(0);
+    await conversationFilter(page, "All").click();
+    await expect(page.locator(`[data-turn="ask:${ask.id}"]`)).toHaveCount(1);
     expect(await handle.evaluate((element) => element.isConnected)).toBe(true);
-    await page.reload();
-    await expect(page.getByRole("checkbox", { name: "Show activity" })).not.toBeChecked();
+
+    await page.getByRole("tab", { name: "Activity" }).click();
+    const activity = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
+    await expect(activity.filter({ hasText: "updated the issue" })).not.toHaveCount(0);
+    await expect(activity.filter({ hasText: `moved ${child.key} from` })).toHaveCount(1);
+
+    await page.goto(`/issues/${issue.key}/conversation`);
     const refreshedTurn = page
       .getByRole("region", { name: "Conversation" })
       .locator(`[data-turn="ask:${ask.id}"]`);
@@ -523,37 +555,19 @@ test("Conversation coalesces answered asks and toggles activity without remounti
   }
 });
 
-test("Conversation divides unread turns by day, sends with Ctrl+Enter, and jumps to newer turns", async ({
+test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Dividers and follow" });
-  await createMessage(issue.key, { body: "First yesterday" }, agent);
-  await createMessage(issue.key, { body: "Second yesterday" }, agent);
-  await createMessage(issue.key, { body: "Third today" }, agent);
-  await createMessage(issue.key, { body: "Fourth today" }, agent);
+  const issue = await createIssue({ project: "CORE", title: "Unread and follow" });
+  await createMessage(issue.key, { body: "First message" }, agent);
+  await createMessage(issue.key, { body: "Second message" }, agent);
+  await createMessage(issue.key, { body: "Third message" }, agent);
+  await createMessage(issue.key, { body: "Fourth message" }, agent);
   for (let index = 0; index < 30; index += 1) {
     await createMessage(issue.key, { body: `Overflow turn ${index}` }, agent);
   }
-
-  const events = await getIssueEvents(issue.key, { limit: 100 });
-  const first = events.find(
-    (event) => event.type === "message.created" && event.payload.body === "First yesterday"
-  );
-  const second = events.find(
-    (event) => event.type === "message.created" && event.payload.body === "Second yesterday"
-  );
-  const created = events.find((event) => event.type === "issue.created");
-  if (first === undefined || second === undefined || created === undefined) {
-    throw new Error("seeded divider events were not recorded");
-  }
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
-  await Promise.all([
-    setEventCreatedAt(created.id, yesterday),
-    setEventCreatedAt(first.id, yesterday),
-    setEventCreatedAt(second.id, yesterday),
-  ]);
-  await putIssueState(issue.key, { last_read_seq: second.seq });
+  await putIssueState(issue.key, { last_read_seq: (await getIssue(issue.key)).last_seq });
   await setLiveSessions([
     { session_id: "e2e-conv-agent", title: "Planner (e2e)" },
     { session_id: "e2e-conv-reviewer", title: "Reviewer (e2e)" },
@@ -564,20 +578,12 @@ test("Conversation divides unread turns by day, sends with Ctrl+Enter, and jumps
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
 
-    const dividers = page.getByRole("list", { name: "Conversation turns" }).getByRole("separator");
-    await expect(dividers).toHaveCount(3);
-    expect(
-      await dividers.evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))
-    ).toEqual(["Today", "Yesterday", "New since you last read"]);
-    const turnTexts = await page
-      .getByRole("list", { name: "Conversation turns" })
-      .locator("li")
-      .allTextContents();
-    const unreadIndex = turnTexts.indexOf("New since you last read");
-    const secondIndex = turnTexts.findIndex((text) => text.includes("Second yesterday"));
-    const thirdIndex = turnTexts.findIndex((text) => text.includes("Third today"));
-    expect(unreadIndex).toBeGreaterThan(thirdIndex);
-    expect(unreadIndex).toBeLessThan(secondIndex);
+    // The Conversation has no dividers of any kind - they belong to the Activity tab - and
+    // nothing is unread, so no card carries the New mark.
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(turn(page, "Overflow turn 29")).toBeVisible();
+    await expect(turns.getByRole("separator")).toHaveCount(0);
+    await expect(turns.getByText("New", { exact: true })).toHaveCount(0);
 
     const composer = page.getByRole("form", { name: "Comment composer" });
     await expect(
@@ -613,13 +619,17 @@ test("Conversation divides unread turns by day, sends with Ctrl+Enter, and jumps
     );
 
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-    const firstTurn = turn(page, "First yesterday");
+    const firstTurn = turn(page, "First message");
     const before = (await firstTurn.boundingBox())?.y;
+    // Everything on screen is read, so the count the pill carries is exactly the conversations
+    // that arrive next. The reader is at the oldest card, so no dwell writes the mark again.
+    await putIssueState(issue.key, { last_read_seq: (await getIssue(issue.key)).last_seq });
     await createMessage(issue.key, { body: "Tail arrives" }, bob);
     const jump = page.getByTestId("jump-to-latest");
     await expect(jump).toHaveText("Jump to latest · 1 new");
     await createMessage(issue.key, { body: "Another tail arrives" }, bob);
     await expect(jump).toHaveText("Jump to latest · 2 new");
+    await expect(turn(page, "Tail arrives").getByText("New", { exact: true })).toHaveCount(1);
     await expect.poll(async () => (await firstTurn.boundingBox())?.y).toBe(before);
     await jump.click();
     const tail = turn(page, "Tail arrives");
@@ -715,10 +725,10 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
   }
 });
 
-// A live session's title is free text and can be a whole sentence. An activity line that lets
-// its author set its own width pushed the line, the turns list and the document past the
-// viewport, so a reader scrolled sideways through the timeline.
-test("a long session title never widens the Conversation past its column", async ({
+// A live session's title is free text and can be a whole sentence. An Activity line that lets
+// its author set its own width pushed the line, the list and the document past the viewport, so
+// a reader scrolled sideways through the history.
+test("a long session title never widens the Activity list past its column", async ({
   browser,
 }, testInfo) => {
   const sessionId = "e2e-long-title-session";
@@ -726,7 +736,7 @@ test("a long session title never widens the Conversation past its column", async
     "Reviewing PR #1478 LEGION-67 conversation family visual polish pass at 390px and 1280px";
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Long author labels" });
-  // An upload is an activity line - `<author> added <name>` - so the session's title is the
+  // An upload is an Activity line - `<author> added <name>` - so the session's title is the
   // line's author column, which is the column under test.
   await createIssueArtifact(
     issue.key,
@@ -742,20 +752,18 @@ test("a long session title never widens the Conversation past its column", async
     if (testInfo.project.name === "chromium") {
       await page.setViewportSize({ height: 900, width });
     }
-    await page.goto(`/issues/${issue.key}/conversation`);
-    const turns = page.getByRole("region", { name: "Conversation" }).locator("ol").first();
-    await expect(turns).toBeVisible();
+    await page.goto(`/issues/${issue.key}/activity`);
+    const lines = page.getByRole("list", { name: "Issue activity" });
+    await expect(lines).toBeVisible();
     // The line really is carrying that title, so the measurement below is not vacuous.
-    const activity = page
-      .locator('[data-kind="activity"]')
-      .filter({ hasText: "Transcript sketch" });
+    const activity = lines.getByRole("listitem").filter({ hasText: "Transcript sketch" });
     await expect(activity).toContainText("Reviewing PR #1478");
 
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       width
     );
-    // The timeline never grows past the column it sits in.
-    const overflow = await turns.evaluate((node) => ({
+    // The list never grows past the column it sits in.
+    const overflow = await lines.evaluate((node) => ({
       client: (node.parentElement ?? node).clientWidth,
       scroll: node.scrollWidth,
     }));
@@ -772,33 +780,179 @@ test("a long session title never widens the Conversation past its column", async
   }
 });
 
-test("the Show activity checkbox is a checkbox, and its label is the touch target", async ({
+// The filter is the Conversation's one control, and it is not a preference: every visit opens on
+// All, whatever an earlier build of the tab stored under `dispatch.conversation.*`.
+test("the filter opens on All in a fresh context and ignores the settings an older build stored", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Activity toggle" });
-  await createComment(
+  const issue = await createIssue({ project: "CORE", title: "Filter buckets" });
+  const answered = await createAsk(
     issue.key,
-    { body: "A turn to show." },
-    { actor: { id: "e2e-activity", kind: "session" }, as: "agent" }
+    { options: [{ label: "Ship" }], question: "Ship the answered ask?" },
+    agent
   );
+  await answerAsk(answered.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
+  const retracted = await createAsk(issue.key, { question: "Ship the retracted ask?" }, agent);
+  await resolveAsk(
+    retracted.id,
+    { kind: "retracted", reason: "A newer question supersedes this one." },
+    agent
+  );
+  const resolved = await createComment(issue.key, { body: "A resolved thread." }, agent);
+  await resolveComment(resolved.id);
+  await createComment(issue.key, { body: "An open thread." }, agent);
 
-  const context = await asUser(browser, "alice");
+  const expectEverythingListed = async (page: Page) => {
+    await expect(conversationFilter(page, "All")).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(`[data-turn="ask:${answered.id}"]`)).toHaveCount(1);
+    await expect(page.locator(`[data-turn="ask:${retracted.id}"]`)).toHaveCount(1);
+    await expect(page.locator(`[data-turn="comment:${resolved.id}"]`)).toHaveCount(1);
+  };
+
+  const fresh = await asUser(browser, "alice");
   try {
-    const page = await context.newPage();
+    const page = await fresh.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    const box = page.getByRole("checkbox", { name: "Show activity" });
-    await expect(box).toBeVisible();
-    const boxSize = await box.boundingBox();
-    // A checkbox is the size of a checkbox; 44 px belongs to the label around it.
-    expect(boxSize?.height ?? 0).toBeLessThanOrEqual(24);
-    expect(boxSize?.width ?? 0).toBeLessThanOrEqual(24);
-    const labelSize = await page
-      .locator("label")
-      .filter({ hasText: "Show activity" })
-      .boundingBox();
-    expect(labelSize?.height ?? 0).toBeGreaterThanOrEqual(44);
+    await expectEverythingListed(page);
+
+    // Open hides the answered ask; All brings it back.
+    await conversationFilter(page, "Open").click();
+    await expect(page.locator(`[data-turn="ask:${answered.id}"]`)).toHaveCount(0);
+    await expect(page.locator(`[data-turn="ask:${retracted.id}"]`)).toHaveCount(0);
+    await expect(page.locator(`[data-turn="comment:${resolved.id}"]`)).toHaveCount(0);
+    await conversationFilter(page, "All").click();
+    await expectEverythingListed(page);
   } finally {
-    await context.close();
+    await fresh.close();
+  }
+
+  const stored = await asUser(browser, "alice");
+  try {
+    await stored.addInitScript(() => {
+      window.localStorage.setItem("dispatch.conversation.showActivity", "false");
+      window.localStorage.setItem("dispatch.conversation.showRetracted", "false");
+    });
+    const page = await stored.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expectEverythingListed(page);
+  } finally {
+    await stored.close();
+  }
+});
+
+// An ask answered after a later comment thread was written sits above it: the order is each
+// conversation's own newest activity, not when it started.
+test("an ask answered after a later comment thread sorts above it", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Order by newest activity" });
+  const ask = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }], question: "Answered last?" },
+    agent
+  );
+  const later = await createComment(issue.key, { body: "Written after the ask." }, agent);
+  await answerAsk(ask.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const cards = page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(":scope > li[data-turn]");
+    await expect(cards).toHaveCount(2);
+    await expect(cards.first()).toHaveAttribute("data-turn", `ask:${ask.id}`);
+    await expect(cards.last()).toHaveAttribute("data-turn", `comment:${later.id}`);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The defect this tab exists to fix: a conversation older than any window of the event log was
+// unreachable without paging back through it. The three per-issue reads have no window at all.
+test("a closed ask older than 200 events is listed under Closed with no paging", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "No window" });
+  const oldest = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }], question: "The oldest conversation?" },
+    agent
+  );
+  await answerAsk(oldest.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
+  for (let index = 0; index < 205; index += 1) {
+    await createMessage(issue.key, { body: `Burying message ${index}` }, agent);
+  }
+  expect((await getIssue(issue.key)).last_seq).toBeGreaterThan(200);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByRole("button", { name: "Load older" })).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    const card = page.locator(`[data-turn="ask:${oldest.id}"]`);
+    await expect(card).toHaveCount(1);
+    await expect(card).toContainText("The oldest conversation?");
+    await expect(page.getByRole("button", { name: "Load older" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// One card per conversation, and not one event row among them: 2 asks, 2 comment threads and 1
+// message thread make five cards however many status, claim and document events sit beside them.
+// `e2e/activity.e2e.ts` holds the other half - the rows the Conversation does not draw.
+test("the Conversation draws one card per conversation and no event row", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Review this specification.",
+    title: "One card per conversation",
+  });
+  const answered = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }], question: "Ship it?" },
+    agent
+  );
+  await answerAsk(answered.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
+  const retracted = await createAsk(issue.key, { question: "Withdrawn question?" }, agent);
+  await resolveAsk(retracted.id, { kind: "retracted", reason: "Superseded." }, agent);
+  const resolved = await createComment(issue.key, { body: "A resolved thread." }, agent);
+  await resolveComment(resolved.id);
+  const open = await createComment(issue.key, { body: "An open thread." }, agent);
+  const message = await createMessage(issue.key, { body: "A message thread." }, agent);
+  // Three events of the kinds the Conversation never draws: a status change, a claim, and a
+  // document version.
+  await patchIssue(issue.key, { status: "in_progress" });
+  await claimIssue(issue.key, agent);
+  await createIssueArtifact(issue.key, { content: "# Note\n", name: "note.md" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const cards = page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(":scope > li[data-turn]");
+    await expect(cards).toHaveCount(5);
+    expect(
+      (await cards.evaluateAll((items) => items.map((item) => item.getAttribute("data-turn"))))
+        .slice()
+        .sort()
+    ).toEqual(
+      [
+        `ask:${answered.id}`,
+        `ask:${retracted.id}`,
+        `comment:${resolved.id}`,
+        `comment:${open.id}`,
+        `message:${message.id}`,
+      ].sort()
+    );
+    await expect(page.locator('[data-kind="activity"]')).toHaveCount(0);
+  } finally {
+    await alice.close();
   }
 });

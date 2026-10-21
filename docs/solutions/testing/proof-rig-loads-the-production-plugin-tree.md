@@ -11,7 +11,7 @@ tags:
   - production-like
   - PATH
 date: 2026-09-13
-status: active
+status: superseded — the grant rig (`packages/pi-envoy/scripts/grant-rig`) and its `RIG_LEGION_BUILD` production-tree mode are gone with the grant file and credential routes (LEGION-631) and the TypeScript daemon; `packages/pi-legion/scripts/skill-scenarios/rig.sh` runs real agents on a checkout's packed plugin in an isolated Oh My Pi home (with `env -i`, so not from the shell a pane inherits), and the rule (prove a change on the production plugin tree, from the shell a pane inherits) still stands
 module: pi-envoy
 related_issues:
   - "LEGION-54"

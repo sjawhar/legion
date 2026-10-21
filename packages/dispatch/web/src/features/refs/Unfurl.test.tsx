@@ -18,7 +18,7 @@ test("Unfurl trims terminal punctuation before resolving a GitHub reference", as
   });
 
   try {
-    render(
+    const view = render(
       <QueryClientProvider client={queryClient}>
         <Unfurl body={"See https://github.com/owner/repository/issues/1."} />
       </QueryClientProvider>
@@ -27,6 +27,7 @@ test("Unfurl trims terminal punctuation before resolving a GitHub reference", as
     await waitFor(() => {
       expect(githubRest).toHaveBeenCalledWith("/repos/owner/repository/issues/1");
     });
+    view.unmount();
   } finally {
     githubRest.mockRestore();
   }
@@ -96,7 +97,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
   });
 
   try {
-    render(
+    const view = render(
       <QueryClientProvider client={queryClient}>
         <Unfurl body="See dispatch://CORE-1/artifact/design@v3" />
       </QueryClientProvider>
@@ -105,6 +106,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
     await screen.findByText("Version three");
     expect(getArtifactVersion).toHaveBeenCalledWith("artifact-1", 3);
     expect(getArtifactText).not.toHaveBeenCalled();
+    view.unmount();
   } finally {
     getArtifactVersion.mockRestore();
     getArtifactText.mockRestore();
@@ -142,7 +144,7 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
   });
 
   try {
-    render(
+    const view = render(
       <QueryClientProvider client={queryClient}>
         <Unfurl body="See dispatch://CORE/artifact/design-notes@v3" />
       </QueryClientProvider>
@@ -154,6 +156,7 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
     expect(screen.getByRole("link", { name: /Design notes/ }).getAttribute("href")).toBe(
       "/projects/CORE/documents/design-notes?version=3"
     );
+    view.unmount();
   } finally {
     getIssue.mockRestore();
     getArtifactVersion.mockRestore();

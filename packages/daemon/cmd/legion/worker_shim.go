@@ -22,24 +22,25 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
 // (podsafety.Apply: the turn-scoping overlay written to LEGION_STATE_DIR and named first in
 // PI_CONFIG_FILES, under the operator's, and the two variables that place a pod's sessions where
-// the pod leaves them unset; nothing of a repository's settings held off) with Oh My Pi's profile
-// directory made under the role's XDG_STATE_HOME (podsafety.EnsureStateHome). With --warm-codegraph,
-// which the Sandbox runtime passes for a role in an issue pod — never for a tmux pane, whose
-// workspace the daemon warms itself (internal/daemon/outbox.go), nor for the controller, which has
-// no workspace — the shim builds the CodeGraph index of the workspace LEGION_WORKSPACE names in the
-// background once Oh My Pi has started (shim.Config.WarmCodegraph); a build that finishes logs one
-// success line with the build's duration and the time since the role's launch. A stop before the
-// build ends — the launcher's SIGTERM to the role's process group, which ends Oh My Pi and the
-// codegraph child together — ends the warm-up with Oh My Pi: the shim exits only once the build's
-// lease is released, waiting at least shim.MinWarmUpDrain and at most what --stop-grace leaves
-// once the agent's own grace and the stdout drain are spent, so the role's relaunch is never told
-// a live build holds it. From shim.MinStopGrace up the whole stop fits inside the grace, which the
-// daemon's configuration load requires of worker_stop_timeout_seconds under `runtime: kubernetes`
-// (internal/config); this command refuses only a non-positive --stop-grace, since an older daemon
-// may still hand it a smaller one, and flooring the wait is the safe answer there. On a relaunch
-// the warm-up runs again: `codegraph status` on the volume's existing index answers complete and
-// nothing runs, or an index an earlier build left partial is repaired as
-// workspace.nextCodegraphStep decides.
+// the pod leaves them unset; nothing of a repository's settings held off), with the scratch
+// directories the runtime told this role to write under made (podsafety.EnsureScratch) and Oh My
+// Pi's profile directory made under the role's XDG_STATE_HOME (podsafety.EnsureStateHome). With
+// --warm-codegraph, which the Sandbox runtime passes for a role in an issue pod — never for a
+// tmux pane, whose workspace the daemon warms itself (internal/daemon/outbox.go), nor for the
+// controller, which has no workspace — the shim builds the CodeGraph index of the workspace
+// LEGION_WORKSPACE names in the background once Oh My Pi has started (shim.Config.WarmCodegraph);
+// a build that finishes logs one success line with the build's duration and the time since the
+// role's launch. A stop before the build ends — the launcher's SIGTERM to the role's process
+// group, which ends Oh My Pi and the codegraph child together — ends the warm-up with Oh My Pi:
+// the shim exits only once the build's lease is released, waiting at least shim.MinWarmUpDrain
+// and at most what --stop-grace leaves once the agent's own grace and the stdout drain are spent,
+// so the role's relaunch is never told a live build holds it. From shim.MinStopGrace up the whole
+// stop fits inside the grace, which the daemon's configuration load requires of
+// worker_stop_timeout_seconds under `runtime: kubernetes` (internal/config); this command refuses
+// only a non-positive --stop-grace, since an older daemon may still hand it a smaller one, and
+// flooring the wait is the safe answer there. On a relaunch the warm-up runs again: `codegraph
+// status` on the volume's existing index answers complete and nothing runs, or an index an
+// earlier build left partial is repaired as workspace.nextCodegraphStep decides.
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", "usage: legion worker-shim [flags] -- <omp argv…>", stderr)
 	var given workerShimFlags
@@ -78,10 +79,13 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 // podSafeEnvironment is environ on the pod's baseline: the turn-scoping overlay written to the
 // pod's state directory, which the runtime names as LEGION_STATE_DIR, and named first in
 // PI_CONFIG_FILES, and PI_CONFIG_DIR and OMP_SESSION_STORAGE set where environ leaves them unset;
-// then Oh My Pi's profile directory made under the XDG_STATE_HOME the runtime hands this role,
-// without which Oh My Pi would not read the variable and its browser broker's lock would be the
-// name every role of the pod takes. A directory that cannot be made is a refusal to start, naming
-// it, as a providers key that cannot be read is.
+// then the directories environ's TMPDIR, cache and data homes and Go and bun caches name, which
+// are the issue's shared scratch and its shared Go caches, none of which anything else makes — a
+// role told a temporary directory nothing created cannot run — and Oh My Pi's profile directory
+// under the XDG_STATE_HOME the runtime names for this role, the one directory of the set that is
+// this role's alone, without which Oh My Pi would not read the variable and its browser broker's
+// lock would be the name every role of the pod takes. A directory that cannot be made is a
+// refusal to start, naming it, as a providers key that cannot be read is.
 func podSafeEnvironment(environ []string) ([]string, error) {
 	state := os.Getenv("LEGION_STATE_DIR")
 	if state == "" {
@@ -89,6 +93,9 @@ func podSafeEnvironment(environ []string) ([]string, error) {
 	}
 	environ, err := podsafety.Apply(environ, state)
 	if err != nil {
+		return nil, err
+	}
+	if err := podsafety.EnsureScratch(environ); err != nil {
 		return nil, err
 	}
 	if err := podsafety.EnsureStateHome(environ); err != nil {

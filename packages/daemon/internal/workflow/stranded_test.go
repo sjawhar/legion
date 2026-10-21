@@ -72,7 +72,7 @@ func strandedClaim(t *testing.T, tree, issue string, role claim.Role, state supe
 }
 
 func strandedIssue(key, tree string, p phase.Phase) record.Issue {
-	issue := record.Issue{Key: key, Tree: tree, Project: "LEGION", Phase: p, Generation: 2, Status: "in_progress"}
+	issue := record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: tree, Project: "LEGION", Phase: p, Generation: 2, Status: "in_progress"}
 	if key != tree {
 		issue.Parent = &tree
 	}
@@ -101,10 +101,11 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		strandedIssue("LEGION-5", "LEGION-5", phase.Merging),
 		strandedIssue("LEGION-6", "LEGION-6", phase.Planning),
 		lingering,
-		strandedIssue("LEGION-8", "LEGION-7", phase.ProductionCheck),
+		strandedIssue("LEGION-8", "LEGION-7", phase.Retro),
 		strandedIssue("LEGION-9", "LEGION-404", phase.Planning),
 		waiting,
 		strandedIssue("LEGION-11", "LEGION-11", phase.Testing),
+		strandedIssue("LEGION-12", "LEGION-1", phase.Accepting),
 	}
 
 	implementer := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended)
@@ -135,8 +136,10 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		// A finished phase's worker is started again only when its phase comes.
 		strandedClaim(t, "LEGION-1", "LEGION-1", claim.RolePlanner, supervise.StateSuspended),
 		suspendedArchitect,
-		// A failed sub-architect the operator started.
+		// A failed sub-architect the operator started, and one on a child in accepting, whose phase
+		// RoleFor gives the tree's architect, not the sub-architect.
 		strandedClaim(t, "LEGION-1", "LEGION-2", claim.RoleArchitect, supervise.StateFailed),
+		strandedClaim(t, "LEGION-1", "LEGION-12", claim.RoleArchitect, supervise.StateFailed),
 		retro,
 		failedReviewer,
 		startQueued,

@@ -34,8 +34,8 @@ func TestAReviewEndsWhenTheReviewerCompletesIt(t *testing.T) {
 	}{
 		{name: "changes requested, then the reviewer completes", decision: "changes_requested", want: phase.Implementing},
 		{name: "the reviewer completes, then changes are requested", decision: "changes_requested", completeFirst: true, want: phase.Implementing},
-		{name: "approved on a green head, then the reviewer completes", decision: "approved", verdict: "green", want: phase.Retro},
-		{name: "the reviewer completes, then an approval on a green head", decision: "approved", verdict: "green", completeFirst: true, want: phase.Retro},
+		{name: "approved on a green head, then the reviewer completes", decision: "approved", verdict: "green", want: phase.Accepting},
+		{name: "the reviewer completes, then an approval on a green head", decision: "approved", verdict: "green", completeFirst: true, want: phase.Accepting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -89,7 +89,7 @@ func TestAReviewEndsWhenTheReviewerCompletesIt(t *testing.T) {
 // An approval of the head ends the round whatever CI says at that head: red, green, or no verdict
 // yet. The round reads no CI verdict - the reviewer reads the code commit's checks on GitHub before
 // it approves, and a red at the head is the daemon's separate rule, acted on by the CI fact that
-// makes it stand - so the issue moves to retro by the review's approval in either order of the
+// makes it stand - so the issue moves to accepting by the review's approval in either order of the
 // round's two halves, with no checks-red told and no review-stuck notice but the one a completion
 // before its decision always writes.
 func TestAnApprovalEndsTheRoundWhateverCISays(t *testing.T) {
@@ -119,8 +119,8 @@ func TestAnApprovalEndsTheRoundWhateverCISays(t *testing.T) {
 						t.Fatalf("half %d (%T) was refused: %+v", i, half, result.Refusal)
 					}
 				}
-				if got := issuePhase(t, pool); got != phase.Retro {
-					t.Fatalf("the issue is in %s, want retro: the approval ends the round whatever CI says", got)
+				if got := issuePhase(t, pool); got != phase.Accepting {
+					t.Fatalf("the issue is in %s, want accepting: the approval ends the round whatever CI says", got)
 				}
 				kinds := noticeKinds(t, pool, "LEGION-208")
 				if !containsNotice(kinds, "phase-finished") || containsNotice(kinds, "checks-red") {
@@ -145,7 +145,7 @@ func TestAnApprovalEndsTheRoundWhateverCISays(t *testing.T) {
 // reports (classify.Missing), so classify.HeadVerdict is neither red nor green.
 func seedReviewUndecided(t *testing.T, pool *pgxpool.Pool, head string) {
 	t.Helper()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{},
@@ -171,7 +171,7 @@ func seedReviewOf(t *testing.T, pool *pgxpool.Pool, head, verdict string) {
 // own settlement, when verdict names one, ran each of them, and in a red one each failed.
 func seedReviewRequiring(t *testing.T, pool *pgxpool.Pool, head, verdict string, required ...string) {
 	t.Helper()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Required: required}
@@ -223,50 +223,50 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		// told is what the round's one review-stuck notice names, when it has one.
 		told string
 	}{
-		{name: "approval, then the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "green", "complete"}, want: phase.Retro},
-		{name: "the reviewer's handoff push, then the approval", steps: []string{"sync", "push handoff", "green", "approve head", "complete"}, want: phase.Retro},
-		{name: "the push's paths arrive after the new head and the approval", steps: []string{"sync", "approve head", "green", "complete", "push handoff"}, want: phase.Retro},
-		{name: "the push's paths arrive before the new head", steps: []string{"push handoff", "approve head", "sync", "green", "complete"}, want: phase.Retro},
+		{name: "approval, then the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "green", "complete"}, want: phase.Accepting},
+		{name: "the reviewer's handoff push, then the approval", steps: []string{"sync", "push handoff", "green", "approve head", "complete"}, want: phase.Accepting},
+		{name: "the push's paths arrive after the new head and the approval", steps: []string{"sync", "approve head", "green", "complete", "push handoff"}, want: phase.Accepting},
+		{name: "the push's paths arrive before the new head", steps: []string{"push handoff", "approve head", "sync", "green", "complete"}, want: phase.Accepting},
 		{name: "a new head whose push never arrives", steps: []string{"sync", "approve head", "green", "complete"}, want: phase.Reviewing},
 		{name: "a code push, then the approval of the head before it", steps: []string{"sync", "push code", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "the approval, then a code push", steps: []string{"approve head", "sync", "push code", "green", "complete"}, want: phase.Reviewing},
 		{name: "a push of truncated paths, then the approval of the head before it", steps: []string{"sync", "push truncated", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a push with no paths marker, then the approval of the head before it", steps: []string{"sync", "push paths unmarked", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a comment between a code push and its new head", steps: []string{"approve head", "push code", "comment", "sync", "green", "complete"}, want: phase.Reviewing},
-		{name: "a comment on the handoff head after the approval", steps: []string{"approve head", "sync", "push handoff", "comment", "green", "complete"}, want: phase.Retro},
+		{name: "a comment on the handoff head after the approval", steps: []string{"approve head", "sync", "push handoff", "comment", "green", "complete"}, want: phase.Accepting},
 		{name: "a code push whose new head has not arrived", steps: []string{"approve head", "push code", "complete"}, want: phase.Reviewing},
-		{name: "the round ends on its approval of the head before a code push arrives", steps: []string{"approve head", "complete", "push code", "green head"}, want: phase.Retro, unsettled: true},
+		{name: "the round ends on its approval of the head before a code push arrives", steps: []string{"approve head", "complete", "push code", "green head"}, want: phase.Accepting, unsettled: true},
 		{name: "a code push, then a handoff push on top of it, neither head arrived", steps: []string{"approve head", "push code", "push handoff head-3", "complete"}, want: phase.Reviewing},
 		{name: "a code push that does not say which head it replaced", steps: []string{"approve head", "push code unplaced", "complete"}, want: phase.Reviewing},
-		{name: "a code push that did not say which head it replaced, then the branch moves on without it", steps: []string{"approve head", "sync", "push handoff", "push code unplaced head-x", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},
+		{name: "a code push that did not say which head it replaced, then the branch moves on without it", steps: []string{"approve head", "sync", "push handoff", "push code unplaced head-x", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Accepting},
 		{name: "a code head never synchronized, under a handoff head, pushes first", steps: []string{"push code", "push handoff head-3", "sync head-3", "green head-3", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a code head never synchronized, under a handoff head, the head first", steps: []string{"sync head-3", "push code", "push handoff head-3", "green head-3", "approve head", "complete"}, want: phase.Reviewing},
-		{name: "a late code push for a head already replaced", steps: []string{"approve head", "sync", "push handoff", "push code head-x", "green", "complete"}, want: phase.Retro},
-		{name: "two handoff pushes, each before its head", steps: []string{"approve head", "push handoff", "sync", "push handoff head-3", "sync head-3", "green head-3", "complete"}, want: phase.Retro},
-		{name: "two handoff pushes, each after its head", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},
-		{name: "two handoff pushes, both classified after both heads, the second first", steps: []string{"approve head", "sync", "sync head-3", "push handoff head-3", "push handoff", "green head-3", "complete"}, want: phase.Retro},
-		{name: "two handoff pushes, both classified after both heads, in order", steps: []string{"approve head", "sync", "sync head-3", "push handoff", "push handoff head-3", "green head-3", "complete"}, want: phase.Retro},
-		{name: "two handoff pushes, the second classified between the heads", steps: []string{"approve head", "sync", "push handoff head-3", "sync head-3", "push handoff", "green head-3", "complete"}, want: phase.Retro},
+		{name: "a late code push for a head already replaced", steps: []string{"approve head", "sync", "push handoff", "push code head-x", "green", "complete"}, want: phase.Accepting},
+		{name: "two handoff pushes, each before its head", steps: []string{"approve head", "push handoff", "sync", "push handoff head-3", "sync head-3", "green head-3", "complete"}, want: phase.Accepting},
+		{name: "two handoff pushes, each after its head", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Accepting},
+		{name: "two handoff pushes, both classified after both heads, the second first", steps: []string{"approve head", "sync", "sync head-3", "push handoff head-3", "push handoff", "green head-3", "complete"}, want: phase.Accepting},
+		{name: "two handoff pushes, both classified after both heads, in order", steps: []string{"approve head", "sync", "sync head-3", "push handoff", "push handoff head-3", "green head-3", "complete"}, want: phase.Accepting},
+		{name: "two handoff pushes, the second classified between the heads", steps: []string{"approve head", "sync", "push handoff head-3", "sync head-3", "push handoff", "green head-3", "complete"}, want: phase.Accepting},
 		{name: "a force push to a handoff commit on an older base, its push first", steps: []string{"approve head", "push handoff forced head-l", "sync head-l", "green head-l", "complete"}, want: phase.Reviewing},
 		{name: "a force push to a handoff commit on an older base, its head first", steps: []string{"approve head", "sync head-l", "push handoff forced head-l", "green head-l", "complete"}, want: phase.Reviewing},
 		{name: "a handoff push that does not say whether it was forced", steps: []string{"approve head", "sync", "push handoff unmarked", "green", "complete"}, want: phase.Reviewing},
 		{name: "a request for changes written after the approval, delivered first", steps: []string{"cr head id=12", "approve head id=11", "complete"}, want: phase.Implementing},
 		{name: "a request for changes written after the approval, delivered after", steps: []string{"approve head id=11", "cr head id=12", "complete"}, want: phase.Implementing},
 		{name: "a comment written after a request for changes, delivered first", steps: []string{"comment id=12", "cr head id=11", "complete"}, want: phase.Implementing},
-		{name: "a comment written after an approval, delivered first", steps: []string{"comment id=12", "approve head id=11", "complete"}, want: phase.Retro},
-		{name: "the reviewer's approval written after its request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Retro},
+		{name: "a comment written after an approval, delivered first", steps: []string{"comment id=12", "approve head id=11", "complete"}, want: phase.Accepting},
+		{name: "the reviewer's approval written after its request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Accepting},
 		{name: "an outsider's approval written after the reviewer's request for changes", steps: []string{"cr head id=11", "approve head id=12 by=outsider", "complete"}, want: phase.Implementing},
 		{name: "an outsider's approval written after the reviewer's request for changes, delivered first", steps: []string{"approve head id=12 by=outsider", "cr head id=11", "complete"}, want: phase.Implementing},
 		{name: "an outsider's approval the only review of the round", steps: []string{"approve head id=12 by=outsider", "complete"}, want: phase.Reviewing, told: "no review that decides it"},
 		{name: "a request for changes by an account with write access, written after the reviewer's approval", steps: []string{"approve head id=11", "cr head id=12 by=writer", "complete"}, want: phase.Implementing},
-		{name: "an approval by an account with write access, written after the reviewer's request for changes", steps: []string{"cr head id=11", "approve head id=12 by=writer", "complete"}, want: phase.Retro},
+		{name: "an approval by an account with write access, written after the reviewer's request for changes", steps: []string{"cr head id=11", "approve head id=12 by=writer", "complete"}, want: phase.Accepting},
 		{name: "a draft's request for changes submitted after a one-step approval", steps: []string{"approve head id=101 at=2", "cr head id=100 at=3", "complete"}, want: phase.Implementing},
 		{name: "a draft's request for changes submitted after a one-step approval, delivered first", steps: []string{"cr head id=100 at=3", "approve head id=101 at=2", "complete"}, want: phase.Implementing},
-		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Retro},
+		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Accepting},
 		{name: "an untimed request for changes, then an older approval redelivered with a time", steps: []string{"cr head id=12", "approve head id=11 at=2", "complete"}, want: phase.Implementing},
 		{name: "a timed approval, then a newer untimed request for changes", steps: []string{"approve head id=11 at=2", "cr head id=12", "complete"}, want: phase.Implementing},
 		{name: "a code push delivered after the branch was reset to the approved head", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete"}, want: phase.Reviewing},
-		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Retro},
+		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Accepting},
 		// A handoff push can carry GitHub's skip-checks trailer and start no CI, so the code head's
 		// settlement stands for the handoff head that replaced it, whenever it arrives. A required
 		// check cancelled, whether in the handoff head's own run or in the code head's carried to it,
@@ -274,26 +274,26 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		// a later settlement decides it. None of it holds the round or tells anybody: the approval of
 		// the head ends the round with the verdict still open, and a red that later stands for the
 		// head is the CI rule's, sent back from wherever the issue then is.
-		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Retro, unsettled: true, quiet: true},
-		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Retro, unsettled: true, quiet: true},
-		{name: "the code head's run cancelled by the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Retro, unsettled: true, quiet: true},
-		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Retro, unsettled: true, quiet: true},
+		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Accepting, unsettled: true, quiet: true},
+		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Accepting, unsettled: true, quiet: true},
+		{name: "the code head's run cancelled by the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Accepting, unsettled: true, quiet: true},
+		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Accepting, unsettled: true, quiet: true},
 		// A code push since the approval leaves it standing for nothing, whatever the new head's
 		// own settlement left pending: the round is told once that the approval does not approve the
 		// head, never that it stands, and the head's later green tells nothing more.
 		{name: "an approval, a code push, then the new head's own pending settlement and its green", steps: []string{"approve head", "sync", "push code", "cancelled", "complete", "rerun green"}, want: phase.Reviewing, unsettled: true, told: "does not approve head head-2"},
-		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Retro, unsettled: true},
-		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Retro, unsettled: true},
-		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Retro, unsettled: true},
-		{name: "the code head's checks settle under two handoff heads", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head", "complete"}, want: phase.Retro, unsettled: true},
+		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Accepting, unsettled: true},
+		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Accepting, unsettled: true},
+		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Accepting, unsettled: true},
+		{name: "the code head's checks settle under two handoff heads", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the checks of a head a code push replaced", steps: []string{"approve head", "sync", "push code", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
-		{name: "a late settlement of a head a code push replaced leaves the head's own", steps: []string{"sync", "push code", "green", "red head", "approve", "complete"}, want: phase.Retro, unsettled: true},
+		{name: "a late settlement of a head a code push replaced leaves the head's own", steps: []string{"sync", "push code", "green", "red head", "approve", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the checks of a head a force push replaced", steps: []string{"approve head", "sync head-l", "push handoff forced head-l", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
 		// The handoff head's own settlement outranks the code head's late one (classify.SettlementFor),
 		// and a red that stands for the head sends the work back before the reviewer completes.
 		{name: "the handoff head's own red outranks the code head's late green, and sends the work back", steps: []string{"approve head", "sync", "push handoff", "red", "green head"}, want: phase.Implementing, unsettled: true, quiet: true},
-		{name: "the handoff head's own green outranks the code head's late red", steps: []string{"approve head", "sync", "push handoff", "green", "red head", "complete"}, want: phase.Retro, unsettled: true},
-		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
+		{name: "the handoff head's own green outranks the code head's late red", steps: []string{"approve head", "sync", "push handoff", "green", "red head", "complete"}, want: phase.Accepting, unsettled: true},
+		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Accepting},
 		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -484,12 +484,12 @@ func TestAReviewFromAnEarlierRoundDeliveredAgainRecordsNothing(t *testing.T) {
 			t.Fatalf("after round 1's review delivered again and round 2's completion the issue is in %s, want reviewing", got)
 		}
 	}
-	if got := issuePhase(t, pool); got != phase.Retro {
-		t.Fatalf("the issue is in %s, want retro: round 2's approval is the newest review", got)
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("the issue is in %s, want accepting: round 2's approval is the newest review", got)
 	}
 }
 
-// A review that arrives once the round has ended - in retro, after the approval moved the issue on
+// A review that arrives once the round has ended - in accepting, after the approval moved the issue on
 // - decides nothing and counts no round: the rounds and the pull request's blocked notice belong
 // to the round that was open.
 func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
@@ -505,16 +505,16 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 			t.Fatalf("step %d = %+v, %v", i, result.Refusal, err)
 		}
 	}
-	if got := issuePhase(t, pool); got != phase.Retro {
-		t.Fatalf("the issue is in %s, want retro", got)
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("the issue is in %s, want accepting", got)
 	}
 	before := implementerRounds(t, pool)
 	if _, err := intake.ApplyFact(ctx, pool, "test", "late", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12,
 		State: "changes_requested", CommitID: "head", Author: testReviewApp, Body: "too late"}, engine); err != nil {
 		t.Fatalf("apply the late review: %v", err)
 	}
-	if got := issuePhase(t, pool); got != phase.Retro {
-		t.Fatalf("after the late review the issue is in %s, want retro", got)
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("after the late review the issue is in %s, want accepting", got)
 	}
 	if got := implementerRounds(t, pool); got != before {
 		t.Fatalf("the implementer's rounds went from %d to %d on a review outside reviewing", before, got)
@@ -529,7 +529,7 @@ func TestAReviewWhileHeldFromReviewingDecidesTheRound(t *testing.T) {
 		state string
 		want  phase.Phase
 	}{
-		{state: "approved", want: phase.Retro},
+		{state: "approved", want: phase.Accepting},
 		{state: "changes_requested", want: phase.Implementing},
 	} {
 		t.Run(tc.state, func(t *testing.T) {
@@ -580,8 +580,8 @@ func TestAReopenedPullRequestKeepsItsNewestReview(t *testing.T) {
 			t.Fatalf("fact %d (%T) = %+v, %v", i, fact, result.Refusal, err)
 		}
 	}
-	if got := issuePhase(t, pool); got != phase.Retro {
-		t.Fatalf("the issue is in %s, want retro: the redelivered request for changes is older than the approval", got)
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("the issue is in %s, want accepting: the redelivered request for changes is older than the approval", got)
 	}
 }
 
@@ -595,7 +595,7 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 		want   phase.Phase
 		rounds int
 	}{
-		{state: "approved", want: phase.Retro},
+		{state: "approved", want: phase.Accepting},
 		{state: "changes_requested", want: phase.Implementing, rounds: 1},
 	} {
 		t.Run(tc.state, func(t *testing.T) {
@@ -722,7 +722,7 @@ func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
 		t.Run(string(tc.from), func(t *testing.T) {
 			pool := migratedPool(t)
 			role := RoleFor(tc.from)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c0ffee", Required: []string{"lint"}})
@@ -774,8 +774,8 @@ func TestALateDeliveredApprovalEndsAStuckRound(t *testing.T) {
 	apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
 	apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "c0ffee", Author: testReviewApp,
 		Body: "ship it", SubmittedAt: time.Date(2026, 9, 22, 23, 59, 0, 0, time.UTC)})
-	if got := issuePhase(t, pool); got != phase.Retro {
-		t.Fatalf("the issue is in %s, want retro", got)
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("the issue is in %s, want accepting", got)
 	}
 	if got := reviewStuckNotices(t, pool); len(got) != 1 {
 		t.Fatalf("the architect was told %d times (%+v), want once: at the completion", len(got), got)
@@ -803,20 +803,20 @@ func TestARoundNoReviewDecidesTellsTheArchitect(t *testing.T) {
 		decision string
 		want     phase.Phase
 	}{
-		{name: "a COMMENT, then the reviewer completes", before: []string{"commented"}, told: 1, decision: "approved", want: phase.Retro},
-		{name: "no review at all", told: 1, decision: "approved", want: phase.Retro},
+		{name: "a COMMENT, then the reviewer completes", before: []string{"commented"}, told: 1, decision: "approved", want: phase.Accepting},
+		{name: "no review at all", told: 1, decision: "approved", want: phase.Accepting},
 		{name: "the reviewer completes, then its COMMENT submitted after the completion", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought", SubmittedAt: late}},
 			told: 2, decision: "changes_requested", want: phase.Implementing},
 		{name: "the reviewer completes, then its COMMENT submitted before the completion, delivered after", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought", SubmittedAt: early}},
 			told: 1, decision: "changes_requested", want: phase.Implementing},
 		{name: "the reviewer completes, then its COMMENT with no submission time", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought"}},
-			told: 1, decision: "approved", want: phase.Retro},
+			told: 1, decision: "approved", want: phase.Accepting},
 		{name: "the reviewer completes, then its COMMENT submitted within the clocks' skew of the completion", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, Body: "one more thought", SubmittedAt: withinSkew}},
-			told: 1, decision: "approved", want: phase.Retro},
+			told: 1, decision: "approved", want: phase.Accepting},
 		{name: "the reviewer completes, then its reply on a review thread", after: []intake.PullRequestReview{{State: "commented", Author: testReviewApp, SubmittedAt: late}},
-			told: 1, decision: "approved", want: phase.Retro},
+			told: 1, decision: "approved", want: phase.Accepting},
 		{name: "the reviewer completes, then another account's COMMENT", after: []intake.PullRequestReview{{State: "commented", Author: "a-human", Body: "a thought", SubmittedAt: late}},
-			told: 1, decision: "approved", want: phase.Retro},
+			told: 1, decision: "approved", want: phase.Accepting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -883,9 +883,9 @@ func TestOnlyTheReviewAppOrAWriterDecidesARound(t *testing.T) {
 		canWrite            bool
 		want                phase.Phase
 	}{
-		{name: "the review App's approval", author: testReviewApp, state: "approved", want: phase.Retro},
+		{name: "the review App's approval", author: testReviewApp, state: "approved", want: phase.Accepting},
 		{name: "the review App's request for changes", author: testReviewApp, state: "changes_requested", want: phase.Implementing},
-		{name: "an approval by an account with write access", author: "a-writer", canWrite: true, state: "approved", want: phase.Retro},
+		{name: "an approval by an account with write access", author: "a-writer", canWrite: true, state: "approved", want: phase.Accepting},
 		{name: "a request for changes by an account with write access", author: "a-writer", canWrite: true, state: "changes_requested", want: phase.Implementing},
 		{name: "an approval by an account without write access", author: "a-reader", state: "approved", want: phase.Reviewing},
 		{name: "a request for changes by an account without write access", author: "a-reader", state: "changes_requested", want: phase.Reviewing},
@@ -912,8 +912,8 @@ func TestOnlyTheReviewAppOrAWriterDecidesARound(t *testing.T) {
 			}
 			apply("the reviewer's decision", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 7, SubmittedAt: submitted, State: "approved",
 				CommitID: "c0ffee", Author: testReviewApp, Body: "the decision"})
-			if got := issuePhase(t, pool); got != phase.Retro {
-				t.Fatalf("after the review App's approval the issue is in %s, want retro", got)
+			if got := issuePhase(t, pool); got != phase.Accepting {
+				t.Fatalf("after the review App's approval the issue is in %s, want accepting", got)
 			}
 		})
 	}
@@ -955,18 +955,18 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 	}{
 		{name: "a push since the approved head changed code, then an approval of the head",
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), complete},
-			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Retro},
+			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
 		{name: "a push since the approved head changed code, then a request for changes",
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{requestChanges}, want: phase.Implementing},
 		{name: "the handoff push over a code push is classified after the completion",
 			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), sync("head-3"), complete, push("head-2", "head-3", handoff)},
-			told:  []string{"head-3"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-3")}, want: phase.Retro},
+			told:  []string{"head-3"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-3")}, want: phase.Accepting},
 		{name: "a code push whose new head has not arrived",
 			steps: []intake.Fact{approve("head"), push("head", "head-2", code), complete}, want: phase.Reviewing},
 		{name: "a code push whose new head arrives after the completion",
 			steps: []intake.Fact{approve("head"), push("head", "head-2", code), complete, sync("head-2")},
-			told:  []string{"head-2"}, by: "a push", then: []intake.Fact{approve("head-2")}, want: phase.Retro},
+			told:  []string{"head-2"}, by: "a push", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -1057,8 +1057,8 @@ func TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound(t *testing.T) {
 					t.Fatalf("after step %d (%T) the architect was told %d times (%+v), want %d", i, s.fact, len(got), got, s.told)
 				}
 			}
-			if got := issuePhase(t, pool); got != phase.Retro {
-				t.Fatalf("the issue is in %s, want retro", got)
+			if got := issuePhase(t, pool); got != phase.Accepting {
+				t.Fatalf("the issue is in %s, want accepting", got)
 			}
 			got := reviewStuckNotices(t, pool)
 			if len(got) != len(tc.told) {
@@ -1162,8 +1162,8 @@ func TestAReviewAppReviewFromAnotherSessionIsSetAside(t *testing.T) {
 	apply("the reviewer's own approval", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 2, State: "approved", CommitID: "c0ffee",
 		Author: testReviewApp, Body: "ship it\n\n<!-- legion: {\"session\":\"ses-reviewer\",\"phase\":\"review\"} -->",
 		SubmittedAt: time.Date(2026, 9, 23, 0, 2, 0, 0, time.UTC)})
-	if got := issuePhase(t, pool); got != phase.Retro {
-		t.Fatalf("after the reviewer's own review the issue is in %s, want retro", got)
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("after the reviewer's own review the issue is in %s, want accepting", got)
 	}
 }
 
@@ -1235,8 +1235,8 @@ func TestWithNoRecordedReviewerSessionTheLoginDecides(t *testing.T) {
 	apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"})
 	apply("review", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 1, State: "approved", CommitID: "c0ffee", Author: testReviewApp,
 		Body: "ship it", SubmittedAt: time.Date(2026, 9, 23, 0, 1, 0, 0, time.UTC)})
-	if got := issuePhase(t, pool); got != phase.Retro {
-		t.Fatalf("after the review the issue is in %s, want retro", got)
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("after the review the issue is in %s, want accepting", got)
 	}
 	if got := logs.String(); !strings.Contains(got, "the reviewer's session is not recorded; the review App's login decides") {
 		t.Fatalf("logs = %s, want the unrecorded-session line", got)

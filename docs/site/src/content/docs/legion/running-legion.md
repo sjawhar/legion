@@ -17,11 +17,34 @@ your cluster, from one published worker image.
 | A Kubernetes cluster | Agent Sandbox installed, a gVisor runtime class, a node pool for Legion, a namespace and a storage class ([below](#the-cluster)). |
 | A host for the daemon | Reachable from the pods on two ports: the API (`port`, 13370 by default) and the worker stream (`worker_stream_port`, the API port plus one). |
 | Postgres | One database for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment). |
-| [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents. |
+| [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents, and the project's repositories mapped to it in Dispatch's Settings → Repositories → Projects, one of them the project's default ([below](#the-projects-repositories)). |
 | The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
 | Three GitHub Apps | An **implement** App (the implementer's and merger's identity), a **review** App (every other role's) and an **Envoy** App (the webhook that feeds Envoy, and Dispatch's GitHub reads), each installed on the owner of every repository Legion works, with its private key ([below](#the-github-apps)). |
 | The worker image | `ghcr.io/sjawhar/legion-worker`, pinned by digest. |
 | A model route | An Oh My Pi provider file and settings overlay, and the credential they read ([below](#the-model-route)). |
+
+## The project's repositories
+
+A project's repositories are Dispatch's mapping, set on Dispatch's Settings → Repositories →
+Projects page, one of them the project's default; `legion.yaml` names none. Each issue targets the
+repository Dispatch resolves for it: its own (the issue header's Repository picker, or
+`dispatch issue-update --repo owner/name`), else its nearest ancestor's, else the project's default.
+The daemon records an issue on that repository, and its default branch as GitHub names it, when it
+first records the issue, and keeps both: a later change of the issue's repository in Dispatch is
+not applied, and the daemon says so on the issue. An issue whose repository resolves to none, or to
+one the daemon does not serve, is not admitted, and the daemon says why on the issue. A claim an
+operator starts on an issue the workflow does not record works the project's default repository as
+it is at each launch, whatever repository Dispatch resolves for that issue: change the default
+while an operator's tree runs and its next launch, or its pane's next GitHub token after a restart,
+is for the new default, whose workspace it does not have. While the project serves no default, its
+launches are refused and an adopted pane's gh keeps its last tokens until they expire.
+
+The daemon reads the mapping at boot and again whenever it changes in Dispatch. It serves each
+mapped repository both the implement and the review App are installed on, and leaves out one either
+App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
+with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
+the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
+every repository lacks an App boots serving none and admits nothing until an App is installed.
 
 ## The GitHub Apps
 
@@ -81,8 +104,12 @@ on the same repositories.
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
 - **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod carries a
   cpu and memory limit with a request no greater than it, and bounds its ephemeral storage — the
-  node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go and Bun caches a
-  build fills — with a per-role limit over a smaller request. A role's reservation is
+  node's disk its root filesystem writes to: `$HOME`, with the image's own content under it, and
+  whatever a recipe writes elsewhere under the home directory, the issue's temporary directory,
+  cache and data homes and bun install cache being one set its roles share on the issue's volume
+  instead, each role's state home its own directory there, and the two Go caches one pair on that
+  volume shared by the issue's roles —
+  with a per-role limit over a smaller request. A role's reservation is
   `runtime.kubernetes.resources.<role>` (`cpu` and `memory` the limits, `cpu_request` and
   `memory_request` what the scheduler reserves of them, `ephemeral_storage` the disk limit,
   `ephemeral_storage_request` what the scheduler reserves of it, each optional, each request at most
@@ -131,8 +158,9 @@ on the same repositories.
   under `controller: daemon`, the controller's pod are counted; `admission_cap` bounds roots alone,
   a tree of N children runs N+1 pods, and an issue pod the pool cannot place stays `Pending` until
   the daemon reads it dead and, once its launch failures run out, fails the claim.
-- **A namespace and a storage class.** Each issue's volume (`issue_volume`, 20Gi by default; the
-  daemon-launched controller's pod owns one too) comes from `storage_class`, which is required.
+- **A namespace and a storage class.** Each issue's volume (`issue_volume`, 50Gi by default, raised
+  from 20Gi with the shared scratch; the daemon-launched controller's pod owns one too) comes from
+  `storage_class`, which is required.
 - **Pod Security.** Pods run under the `restricted` profile: user 1000, no privilege escalation, all
   capabilities dropped, the `RuntimeDefault` seccomp profile, and no automounted API token.
 - **A ServiceAccount for the agents' pods**, named in `runtime.kubernetes.pod.service_account`
@@ -143,6 +171,8 @@ on the same repositories.
   - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
   - `secrets`: create, delete, update, get (never list);
   - `pods`: get, list, watch; `pods/log`: get;
+  - `services`: list, watch, so a launch checks its repository cache's Service is the cache's
+    own before an issue pod is told its address;
   - `events`: list;
   - and a cluster-scoped get on the CRD `sandboxes.agents.x-k8s.io` and a get on the Deployment
     `agent-sandbox-controller` in `agent-sandbox-system`.
@@ -184,8 +214,8 @@ the kubeconfig it names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) name
 
 What each part is for:
 
-- **`project`** is the Dispatch project key, and it must also be a key of `projects`, which maps
-  each Dispatch project the daemon runs to its GitHub repository. A project may name a
+- **`project`** is the Dispatch project key, and it must also be a key of `projects`, which names
+  each Dispatch project the daemon runs (its repositories are [Dispatch's mapping](#the-projects-repositories)). A project may name a
   `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
   when the head's own CI turns red before the merge, or the head starts conflicting with its base.
   Its optional `merge.by_hand` mapping holds regular-expression paths, each matched anywhere in a
@@ -224,12 +254,29 @@ What each part is for:
   projected ServiceAccount token for the broker's audience is mounted. The daemon logs in with that
   token at every start and keeps logging in; no person approves it, provided the broker's
   `BROKER_SERVICE_LOGINS` names the daemon's ServiceAccount.
+- **`runtime.kubernetes.setup`** (optional) is a command, as an argv, that every role's container
+  runs before each start of its Oh My Pi, such as installing an Oh My Pi plugin from a marketplace
+  repository. It runs in the role's working directory with the role's environment, and its `git`
+  answers `https://github.com` for your project's owners with the role's App token. Oh My Pi starts
+  only once it exits 0; a failure is a failed launch, and its output is in the role's log.
 - **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
   with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
   ([Start the controller](#start-the-controller)).
-- Workflow limits, all optional: `linger_hours` (72), `review_round_cap` (3), `max_fix_attempts`
+- Workflow limits, all optional: `linger_hours` (72), `production_check_hours` (336: how long a
+  closed issue's production check waits for its deploy before its last look, 14 days by default,
+  decimals allowed), `review_round_cap` (3), `max_fix_attempts`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+- **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
+  `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
+  default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
+  `reviewer`, `merger`) and only under `runtime: tmux`, since the worker image carries no Claude
+  Code; the loader refuses `claude` for the architect and under Kubernetes, naming why, and refuses
+  any other value. The controller always runs on Oh My Pi. A tmux daemon running a Claude Code role
+  resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP server runs on from
+  `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
+  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
+  `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
@@ -402,7 +449,8 @@ the complete shape (rendered in the [configuration reference](/legion/legion/ref
    legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370
    ```
 
-The command checks the file and the plugins, fetches a fresh controller credential from the daemon
+The command checks the file and the plugins, reads the project's repositories from the daemon (the
+controller is told them), fetches a fresh controller credential from the daemon
 with your operator token, then fetches the review App's token for the controller's `gh` and keeps
 it refreshed while the session runs (against a daemon with no GitHub App, it says so and the
 controller's `gh` acts as nobody), and starts Oh My Pi in the foreground; its first turn runs the
@@ -416,6 +464,14 @@ Closing the terminal leaves the project without one, and the daemon logs
    `legion` binary and both plugins from it.
 2. **Update `legion.yaml`**: set `runtime.kubernetes.image` to the new digest and run
    `legion start --config legion.yaml --check-config`.
+
+   **After the first upgrade to a release whose repositories are Dispatch's mapping,** a
+   `legion.yaml` that still sets `projects.<KEY>.repo` is refused at load with
+   `Unknown key "projects.<KEY>.repo": the project's repositories are Dispatch's mapping`. Upgrade
+   Dispatch first, map the project's repositories there with the old `repo` as the project's
+   default, then delete the key and upgrade the daemon: its first boot records each issue it
+   already runs on the repository Dispatch resolves for it, and refuses to boot, naming every
+   issue, while one resolves to none.
 
    **After the first upgrade to a release without `review_workflows`,** a `legion.yaml` that still
    sets `projects.<KEY>.review_workflows` is refused at load with
@@ -507,17 +563,28 @@ Closing the terminal leaves the project without one, and the daemon logs
   ```text
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
   admission: 3 active, 1 waiting, cap 4; 9 issues
+  open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, bound 2026-10-17T10:15:02Z
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
   ```
 
+  The `open production checks` line counts the closed issues whose production check is still
+  open and names the oldest: its pull request, merge commit, which look it is on, what woke that
+  look (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`)
+  and when, and when the check's bound comes due (`none` when no check is open).
+
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
-  issue under `issues` with its `phase`, `status`, `holdReason`, `architect` and `workers` (each
-  claim's `state`), `pullRequest` (`head`, `checksVerdict`, `fixAttempts`) and `designGate`
-  (`currentVersion`, `approvedVersion`), the `controllerLocator`, `pendingStatusWrites`,
+  issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
+  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
+  `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`) and, for a closed issue whose
+  production check is open, `check` (`repo`, `pullRequest`, `mergeCommit`, `openedAt`, `looks`,
+  `lookOpen`, `lastWake` with its `kind`, `detail` and `at`, `nextWakeAt`, `last`), the
+  `controllerLocator`, `pendingStatusWrites`,
   `heldOutboxRows` ([An issue's stop or start waits behind its own launch](/legion/legion/troubleshooting/#an-issues-stop-or-start-waits-behind-its-own-launch)),
   `strandedClaims` ([A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)),
+  `repositories` (the project's mapping as the daemon serves it: `owners`, `mapped`, and `refused`
+  with each left-out repository's `reason`),
   `settings` (the daemon's resolved `legion.yaml` — `max_fix_attempts`, `worker_boot_timeout_seconds`
   and the rest as the daemon runs them — with every credential, credential source and credential
   file path left out), and `agentSecretsLogin` when the broker is configured:

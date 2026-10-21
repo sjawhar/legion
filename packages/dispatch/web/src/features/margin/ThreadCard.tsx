@@ -93,6 +93,9 @@ export interface ThreadCardProps {
   actionFailure: CommentActionFailure | undefined;
   artifactSlug: string | undefined;
   className?: string;
+  /** The reply a deep link named, which only the Conversation passes: that reply's row carries
+   *  `aria-current`, as the card itself does when the link names its root. */
+  currentReplyId?: string;
   composerClassName?: string;
   /** Another composer answers this thread - the Conversation's docked composer, or a phone
    *  thread's own - so the card's reply composer stays mounted, hidden, keeping an unsent draft
@@ -215,6 +218,7 @@ export function ThreadCard({
   actionFailure,
   artifactSlug,
   className,
+  currentReplyId,
   composerClassName,
   hideReplyComposer = false,
   expanded,
@@ -424,7 +428,9 @@ export function ThreadCard({
               <ol aria-label="Replies" className={`mt-3 space-y-2 border-t pt-3 ${borderDefault}`}>
                 {thread.replies.map((reply) => (
                   <li
+                    aria-current={reply.id === currentReplyId ? "true" : undefined}
                     className={`rounded-lg p-2 ${card}`}
+                    data-reply=""
                     key={reply.id}
                     ref={reply === newestReply ? markRead : undefined}
                     style={{ marginLeft: "0px" }}

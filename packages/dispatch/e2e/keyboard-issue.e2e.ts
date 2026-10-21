@@ -1,6 +1,7 @@
 import { expect, type Page, type Request, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createProject, getIssue, patchIssue } from "./api";
+import { createAsk, createIssue, createProject, getIssue, patchIssue } from "./api";
+import { barAction, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -141,6 +142,7 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     for (const [key, tab] of [
       ["h", "Children"],
       ["a", "Artifacts"],
+      ["v", "Activity"],
       ["s", "Spec"],
     ] as const) {
       await page.keyboard.press("t");
@@ -161,6 +163,11 @@ test("the issue scope reaches the header controls and the tab chords, and ? list
     await expect(
       issueSection.getByRole("listitem").filter({ hasText: "Conversation tab" }).locator("kbd")
     ).toHaveText(["t", "c"]);
+    // Activity is the fifth tab and takes `t v`, since `t a` is Artifacts and `l` the labels.
+    await expect(issueSection).toContainText("Activity tab");
+    await expect(
+      issueSection.getByRole("listitem").filter({ hasText: "Activity tab" }).locator("kbd")
+    ).toHaveText(["t", "v"]);
     await page.screenshot({
       path: testInfo.outputPath(`issue-shortcut-help-${testInfo.project.name}.png`),
     });
@@ -597,24 +604,31 @@ test.describe("issue page", () => {
     }
   });
 
-  // The ask card is not the only control a reader's hand rests on. `Show activity` is an ordinary
-  // page checkbox, outside every card, and a digit or `Shift+P` straight after ticking it must
-  // not write the issue's priority or its pin either - the rule is that these two keys write only
-  // from the page itself, not from a control.
+  // The ask card is not the only control a reader's hand rests on. The margin ask composer's
+  // `Allow multiple` is an ordinary page checkbox, outside every ask card, and a digit or
+  // `Shift+P` straight after ticking it must not write the issue's priority or its pin either -
+  // the rule is that these two keys write only from the page itself, not from a control.
   test("a digit on a page checkbox writes no priority, and neither does Shift+P", async ({
     browser,
   }, testInfo) => {
     test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
     await createProject({ key: "CORE", name: "Core" });
-    const issue = await createIssue({ project: "CORE", title: "Activity and priority" });
-    await createComment(issue.key, { body: "Looking into it." }, session);
+    const issue = await createIssue({
+      project: "CORE",
+      spec: "The quick brown fox",
+      title: "Composer and priority",
+    });
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
       await page.setViewportSize({ width: 1280, height: 900 });
-      await page.goto(`/issues/${issue.key}/conversation`);
-      const activity = page.getByRole("checkbox", { name: "Show activity" });
-      await expect(activity).toBeVisible();
+      await page.goto(`/issues/${issue.key}/spec`);
+      await selectEditorText(page, "brown");
+      await barAction(page, "Ask");
+      const multiple = page
+        .getByRole("form", { name: "Comment composer" })
+        .getByLabel("Allow multiple");
+      await expect(multiple).toBeVisible();
 
       let patched = 0;
       await page.route(`**/api/v1/issues/${issue.key}`, (route) => {
@@ -627,8 +641,8 @@ test.describe("issue page", () => {
         return route.fallback();
       });
 
-      await activity.focus();
-      await expect(activity).toBeFocused();
+      await multiple.focus();
+      await expect(multiple).toBeFocused();
       await page.keyboard.press("1");
       await page.keyboard.press("Shift+P");
       await page.waitForTimeout(500);

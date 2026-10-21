@@ -205,6 +205,36 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	})
 }
 
+// A bare URL is read and written in time linear in its line. A line can hold a URL opening at
+// every place the guard is asked - each whitespace, `*`, `_`, `~` and `(`, and after the run of
+// quotes and other plain punctuation following one - that the browser editor's tokenizer refuses
+// only at its domain or its previous character, so nothing a refused read scans may be scanned
+// again from the next trigger. Each shape is one paragraph of one text node, which no element limit
+// stops, read as a rendering is and written from that tree.
+func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
+	for _, shape := range []string{"_www.a", "-www.x_", `(https://-a.b\`, ".www.a&", ".www", "www.", `www\.`, `www\.a `, "HTTP://a ", ` "'https://-a.b`, `(""www.a_`, ` ".www.a`} {
+		growsLinearly(t, fmt.Sprintf("reading and writing %q", shape), []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) (time.Duration, error) {
+			markdown := strings.Repeat(shape, size/len(shape)) + "._\n"
+			var doc *Node
+			parsed, err := cpuTimeOf(func() {
+				var err error
+				if doc, err = ParseRendering(markdown); err != nil {
+					t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
+				}
+			})
+			if err != nil {
+				return 0, err
+			}
+			rendered, err := cpuTimeOf(func() {
+				if _, err := Render(doc); err != nil {
+					t.Fatalf("render %d bytes of %q: %v", size, shape, err)
+				}
+			})
+			return parsed + rendered, err
+		})
+	}
+}
+
 // Writing a tree of many blocks into a document takes time linear in its blocks when the blocks it
 // adds or replaces stand together (LEGION-465). Update inserted the children a fragment gains one
 // index at a time, and ygo's fragment insert walks the fragment's children to the index it is given

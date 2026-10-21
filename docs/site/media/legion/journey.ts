@@ -44,8 +44,8 @@ export interface Example {
   readonly head: string;
   readonly ready: { readonly outcome: string; readonly risk: string };
   readonly merge: string;
-  readonly production: string;
-  readonly signOff: string;
+  /** The architect's acceptance of the reviewed head, posted before retro and the merge. */
+  readonly acceptance: string;
 }
 
 export const SAVED_CART: Example = {
@@ -85,10 +85,8 @@ I recommend Server: the second criterion needs the cart on another device, which
     risk: "the expiry email was checked in the mail provider's sandbox, not a real inbox.",
   },
   merge: "4b7d2a1",
-  production:
-    "Production: on the live storefront, saved a two-item cart as a test shopper, opened it from the account page in a second browser, and saw both items at their quantities. Merge commit 4b7d2a1.",
-  signOff:
-    "Signed off. All three acceptance criteria are met; review approved 9c41e07 with no open threads; retro is done; merged as 4b7d2a1; the production record shows the saved cart opening on a second device.",
+  acceptance:
+    "Signed off. All three acceptance criteria are met: the tester's handoff and both E2E lines prove them at 9c41e07, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
 };
 
 export const DELIVERY_DATE: Example = {
@@ -126,10 +124,8 @@ I recommend Carrier: its estimate already counts the warehouse's cut-off time an
     risk: "none",
   },
   merge: "7d03b9e",
-  production:
-    "Production: on the live storefront, opened checkout with one item as a test shopper and saw a delivery date beside each of the three shipping options. Merge commit 7d03b9e.",
-  signOff:
-    "Signed off. Both acceptance criteria are met; review approved 2f8e6c1 with no open threads; retro is done; merged as 7d03b9e; the production record shows the dates at checkout.",
+  acceptance:
+    "Signed off. Both acceptance criteria are met: the tester's handoff and both E2E lines prove them at 2f8e6c1, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
 };
 
 /** An example issue in Dispatch: its key and its spec document. */
@@ -246,8 +242,9 @@ export async function linkPullRequest(issue: Tracked, example: Example): Promise
   );
 }
 
-/** The statuses the daemon sets as the phases after implementation run. */
-export const PHASE_STATUSES = ["testing", "needs_review", "retro"] as const;
+/** The statuses the daemon sets as the phases after implementation run, up to the reviewer's
+ *  approval; the architect's acceptance (`accept`) sets the next. */
+export const PHASE_STATUSES = ["testing", "needs_review"] as const;
 
 /** The daemon sets one status. */
 export async function setStatus(issue: Tracked, status: string): Promise<void> {
@@ -277,16 +274,22 @@ export async function postReady(issue: Tracked, example: Example): Promise<void>
   );
 }
 
-/** After the human's merge, the implementer records the production check and the architect signs
- *  off; the daemon closes the issue. */
-export async function signOff(issue: Tracked, example: Example): Promise<void> {
+/** The reviewer approved, so the issue is in accepting: the architect posts its acceptance of the
+ *  reviewed head and signs off, and the daemon moves the issue to retro. */
+export async function accept(issue: Tracked, example: Example): Promise<void> {
   const api = await dispatchApi();
-  await api.createComment(issue.key, { body: example.production }, agent(issue.key, "implementer"));
-  await api.createComment(issue.key, { body: example.signOff }, agent(issue.key, "architect"));
+  await api.createComment(issue.key, { body: example.acceptance }, agent(issue.key, "architect"));
+  await api.patchIssue(issue.key, { status: "retro" }, DAEMON);
+}
+
+/** The merge closes the issue: the daemon writes done. The implementer's production check follows
+ *  on the pull request, which the example's GitHub does not show; a closed issue takes no comment. */
+export async function closeAtMerge(issue: Tracked): Promise<void> {
+  const api = await dispatchApi();
   await api.patchIssue(issue.key, { status: "done" }, DAEMON);
 }
 
-/** The whole journey, handover to sign-off, with no stop between the moves. */
+/** The whole journey, handover to the merge that closes the issue, with no stop between the moves. */
 export async function finish(issue: Tracked, example: Example): Promise<void> {
   await handOver(issue);
   await admit(issue);
@@ -295,8 +298,9 @@ export async function finish(issue: Tracked, example: Example): Promise<void> {
   await approve(await requestSpecApproval(issue, example));
   await linkPullRequest(issue, example);
   for (const status of PHASE_STATUSES) await setStatus(issue, status);
+  await accept(issue, example);
   await postReady(issue, example);
-  await signOff(issue, example);
+  await closeAtMerge(issue);
 }
 
 const REPORT_SPEC =

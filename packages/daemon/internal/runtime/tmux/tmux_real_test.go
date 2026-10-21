@@ -505,7 +505,7 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		DaemonURL:        r.daemon.server.URL,
 		EnvoyURL:         "http://127.0.0.1:9020",
 		NatsURLs:         []string{"nats://127.0.0.1:4222"},
-		OmpInvocation:    shellprefix.Word(r.omp),
+		Launchers:        ompOnly(shellprefix.Word(r.omp)),
 		StopGrace:        5 * time.Second,
 		ProbeInterval:    100 * time.Millisecond,
 		AdoptTimeout:     5 * time.Second,
@@ -514,6 +514,8 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		Environ:          r.environ,
 		Executable:       func() (string, error) { return r.legion, nil },
 		GitHubCredential: staticCredential,
+		GH:               fakeGH,
+		RepositoryOwner:  acmeOwner,
 	}
 	for _, f := range adjust {
 		f(&opts)
@@ -775,7 +777,8 @@ func TestRealTmuxLifecycle(t *testing.T) {
 
 	// The pane ran `sh -c`, and its OMP runs under the environment the runtime promises, from OMP's
 	// start: Oh My Pi copies its own environment once for every `gh` it runs to resolve a pr:// or
-	// issue:// read (LEGION-262), so GH_CONFIG_DIR must be there before its first.
+	// issue:// read (LEGION-262), so GH_CONFIG_DIR and the `legion gh` wrapper's two variables must
+	// be there before its first.
 	pid := panePid(t, loc)
 	if argv := procCmdline(pid); len(argv) < 2 || argv[0] != "/bin/sh" || argv[1] != "-c" {
 		t.Errorf("the pane's process is %q, want /bin/sh -c", argv)
@@ -785,7 +788,9 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	secrets := filepath.Join(r.stateDir, "secrets")
 	for name, want := range map[string]string{
 		"PATH":                   filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
-		"GH_CONFIG_DIR":          filepath.Join(secrets, string(spec.Claim)+"-gh"),
+		"GH_CONFIG_DIR":          filepath.Join(secrets, string(spec.Claim)+"-gh", "acme"),
+		"LEGION_GH_OWNERS_DIR":   filepath.Join(secrets, string(spec.Claim)+"-gh"),
+		"LEGION_GH_PATH":         fakeGH,
 		"GH_TOKEN":               "",
 		"GITHUB_TOKEN":           "",
 		"GH_HOST":                "",
@@ -831,8 +836,9 @@ func TestRealTmuxLifecycle(t *testing.T) {
 			t.Errorf("%s file holds the wrong secret", pointer)
 		}
 	}
-	// The pane's GH_CONFIG_DIR holds the role's gh files, which its plain gh reads the App token
-	// from: a 0700 directory of 0600 files, no token in the environment.
+	// The pane's GH_CONFIG_DIR, its default owner's directory of its gh bundle, holds the role's gh
+	// files, which its gh reads the App token from: a 0700 directory of 0600 files, no token in the
+	// environment.
 	if info, err := os.Stat(env["GH_CONFIG_DIR"]); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
 		t.Errorf("GH_CONFIG_DIR %s: %v, %v; want a 0700 directory", env["GH_CONFIG_DIR"], info, err)
 	}
@@ -1527,6 +1533,86 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 	}
 }
 
+// A pane verifies as its recorded process only while its command line holds the marker of a
+// harness the daemon launches (Launcher.Marker): the pane's own root process is `sh -c` on the
+// whole pane command, which names the harness the shim runs. A Claude Code pane verifies under a
+// daemon with both launchers; the same live pane, read by a runtime whose one launcher's marker it
+// does not hold, is not its recorded process, and is said not to run that launcher's harness.
+func TestRealTmuxVerifiesAPaneByItsConfiguredHarnessesMarkers(t *testing.T) {
+	fakeClaude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claude := NewClaudeLauncher(ClaudeLaunch{Binary: fakeClaude, PluginDir: t.TempDir(), Bun: "/bin/true"})
+	r := newRig(t, func(o *Options) { o.Launchers[runtime.BackendClaude] = claude })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	spec := r.spec("LEGION-2", "LEGION-2", claim.RoleImplementer)
+	spec.Backend = runtime.BackendClaude
+	loc, err := r.rt.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	pid := panePid(t, loc)
+	if argv := procCmdline(pid); len(argv) != 3 || argv[0] != shell || argv[1] != "-c" ||
+		!strings.Contains(argv[2], " worker-shim ") || !strings.Contains(argv[2], " claude-bridge -- ") {
+		t.Fatalf("the pane's root process is %q, want sh -c on the pane command running the bridge", argv)
+	}
+	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
+		t.Fatalf("Probe with both launchers = %+v, want alive", obs)
+	}
+	// Claude Code, under the bridge under the shim, runs with the role's gh bundle exactly as a pane's
+	// Oh My Pi does (TestRealTmuxLifecycle): the same gh variables, and the default owner's directory
+	// holding the role App's token. The stand-in execs sleep, so the process named sleep is it.
+	env := procEnviron(t, descendant(t, pid, "sleep"))
+	secrets := filepath.Join(r.stateDir, "secrets")
+	for name, want := range map[string]string{
+		"PATH":                 filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
+		"GH_CONFIG_DIR":        filepath.Join(secrets, string(spec.Claim)+"-gh", "acme"),
+		"LEGION_GH_OWNERS_DIR": filepath.Join(secrets, string(spec.Claim)+"-gh"),
+		"LEGION_GH_PATH":       fakeGH,
+		"GH_TOKEN":             "",
+		"GITHUB_TOKEN":         "",
+		"GH_HOST":              "",
+		"CLAUDE_CONFIG_DIR":    ClaudeConfigDir(r.stateDir, spec.Claim),
+	} {
+		if got, ok := env[name]; !ok || got != want {
+			t.Errorf("Claude Code's %s = %q (set %v), want %q", name, got, ok, want)
+		}
+	}
+	if hosts, err := os.ReadFile(filepath.Join(env["GH_CONFIG_DIR"], ghconfig.HostsFile)); err != nil {
+		t.Errorf("the Claude Code pane's hosts.yml: %v", err)
+	} else if token, err := ghconfig.TokenFromHosts(hosts); err != nil || token != staticCredentialToken(spec.Role) {
+		t.Errorf("the Claude Code pane's hosts.yml holds %q (%v), want %q", token, err, staticCredentialToken(spec.Role))
+	}
+	// Every pane's command holds "omp" (in `--append-system-prompt`), so Claude Code's own marker is
+	// proven by a runtime with its launcher alone.
+	claudeOnly := r.newRuntime(func(o *Options) { o.Launchers = map[runtime.Backend]Launcher{runtime.BackendClaude: claude} })
+	if obs := probe(t, claudeOnly, loc); obs.Kind != runtime.Alive {
+		t.Fatalf("Probe with Claude Code's launcher alone = %+v, want alive", obs)
+	}
+	unmarked := r.newRuntime(func(o *Options) {
+		o.Launchers = map[runtime.Backend]Launcher{runtime.BackendOmp: markedLauncher("no-such-harness")}
+	})
+	inc, err := parseIncarnation(loc.Incarnation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("pane %s pid %d is not running OMP (recorded pid %d start %d)", loc.Tmux.Pane, pid, pid, inc.ticks)
+	if obs := probe(t, unmarked, loc); obs.Kind != runtime.NotRecordedProcess || obs.Detail != want {
+		t.Errorf("Probe by a runtime whose launcher's marker the pane does not hold = %+v, want not_recorded_process: %s", obs, want)
+	}
+}
+
+// markedLauncher launches nothing; its marker is the string itself.
+type markedLauncher string
+
+func (m markedLauncher) Launch(runtime.SpawnSpec, Host) (string, []string, error) {
+	return "", nil, errors.New("markedLauncher launches nothing")
+}
+
+func (m markedLauncher) Marker() string { return string(m) }
+
 // A provider key reaches a pane's OMP as the daemon resolved it at boot — the secretsd key's value
 // under the variable OMP reads, through the daemon-held file the real shim is pointed at — and
 // reaches nothing else: not the shim's own environment, not under the secretsd key's own name, and
@@ -1660,17 +1746,36 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 
 // A Go pane's bash tool must run this daemon's `legion`, not whichever `legion` the operator's PATH
 // holds (a TypeScript CLI has no `handoff complete`): the launcher directory leads the pane's PATH.
-// Its gh is not intercepted — whatever gh the PATH gives reads the pane's credential from
-// GH_CONFIG_DIR — so nothing of the daemon's stands between the agent and gh.
+// Its gh is the launcher directory's too, the `legion gh` wrapper, which runs the real gh the pane
+// is told (LEGION_GH_PATH) with GH_CONFIG_DIR at the gh directory of the owner a command names:
+// sjawhar's for `gh api repos/sjawhar/…`, the issue owner's default for a command naming none.
 func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	ctx := context.Background()
-	r := newRig(t)
+	realGH := filepath.Join(t.TempDir(), "gh")
+	// The stand-in answers `legion gh`'s reads of a command's help (`[<command>] --help`) with the
+	// real gh's help of that command, gh's own for none, saved beside the wrapper's own tests, and
+	// every other run with the GH_CONFIG_DIR it was given.
+	help, err := filepath.Abs(filepath.Join("..", "..", "..", "cmd", "legion", "testdata", "gh-help"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/bin/sh\nfor last; do :; done\n" +
+		"if [ \"$last\" = --help ]; then\n" +
+		"  path=$(printf '%s ' \"$@\" | sed -e 's/--help $//' -e 's/ $//' -e 's/ /_/g')\n" +
+		"  exec cat '" + help + "'/\"${path:-gh}\".txt\nfi\n" +
+		"printf 'real gh %s\\n' \"$GH_CONFIG_DIR\"\n"
+	if err := os.WriteFile(realGH, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := newRig(t, func(o *Options) { o.GH = realGH })
 	if err := workerbin.Install(r.stateDir, r.legion); err != nil {
 		t.Fatalf("workerbin.Install: %v", err)
 	}
 	decoy := t.TempDir()
-	if err := os.WriteFile(filepath.Join(decoy, "legion"), []byte("#!/bin/sh\necho decoy-legion\n"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"legion", "gh"} {
+		if err := os.WriteFile(filepath.Join(decoy, name), []byte("#!/bin/sh\necho decoy-"+name+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	spec := r.spec("LEGION-10", "LEGION-10", claim.RoleArchitect)
 	spec.Env["PATH"] = decoy + ":" + os.Getenv("PATH")
@@ -1681,27 +1786,35 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	}
 	r.daemon.awaitReady(t, spec.BootToken)
 	env := procEnviron(t, descendant(t, panePid(t, loc), "omp"))
-	launcher := filepath.Join(r.stateDir, "bin", "legion")
-	want := filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"]
+	bin := filepath.Join(r.stateDir, "bin")
+	launcher := filepath.Join(bin, "legion")
+	want := bin + ":" + spec.Env["PATH"]
 	if env["PATH"] != want {
 		t.Fatalf("OMP's PATH = %q, want %q", env["PATH"], want)
 	}
-	// The agent's bash tool inherits OMP's environment: resolve and run `legion` exactly there.
-	shell := exec.Command("/bin/sh", "-c", "command -v legion; legion version")
-	shell.Env = []string{"PATH=" + env["PATH"], "HOME=" + env["HOME"]}
+	// The agent's bash tool inherits OMP's environment: resolve and run `legion` and `gh` exactly
+	// there, in a directory that is no clone of another owner's repository, as the agent's
+	// workspace is not (this test's own directory is a clone of sjawhar's).
+	shell := exec.Command("/bin/sh", "-c", "command -v legion; legion version; command -v gh; gh api repos/sjawhar/legion-smoke --jq .full_name; gh pr list")
+	shell.Dir = t.TempDir()
+	for _, name := range []string{"PATH", "HOME", "GH_CONFIG_DIR", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH"} {
+		shell.Env = append(shell.Env, name+"="+env[name])
+	}
 	out, err := shell.CombinedOutput()
 	if err != nil {
-		t.Fatalf("legion in the pane environment: %v: %s", err, out)
+		t.Fatalf("legion and gh in the pane environment: %v: %s", err, out)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 2 || lines[0] != launcher || !strings.HasPrefix(lines[1], "legion ") {
-		t.Fatalf("pane legion = %q, want the launcher %s printing the Go daemon's version", out, launcher)
+	root := runtime.GHConfigDir(r.stateDir, spec.Claim)
+	if len(lines) != 5 || lines[0] != launcher || !strings.HasPrefix(lines[1], "legion ") || lines[2] != filepath.Join(bin, "gh") ||
+		lines[3] != "real gh "+filepath.Join(root, "sjawhar") || lines[4] != "real gh "+filepath.Join(root, "acme") {
+		t.Fatalf("pane legion and gh = %q, want the launcher %s printing the Go daemon's version, then the gh wrapper running the real gh in sjawhar's directory and then acme's", out, launcher)
 	}
 	if info, err := os.Stat(launcher); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("launcher stat = %v, %v; want mode 0700", info, err)
 	}
 	if _, err := os.Stat(filepath.Join(r.stateDir, "worker-bin")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the state directory holds a worker-bin (%v), want no gh interception directory", err)
+		t.Fatalf("the state directory holds a worker-bin (%v), want the launcher directory alone", err)
 	}
 }
 

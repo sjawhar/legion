@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 )
 
 // TestAttributionMatchesGitHubURLsWhateverTheirCase: GitHub spells an owner and a repository as
@@ -137,7 +139,7 @@ func TestTheAttributionBackfillStaysWithinItsCallBudget(t *testing.T) {
 		})
 	}
 
-	NewReconcile(pool, fake.newTestClient()).runOnce(ctx)
+	NewReconcile(pool, fake.newTestClient(), events.NewBroker()).runOnce(ctx)
 
 	if n := calls.Load(); n > attributionBackfillCalls || n == 0 {
 		t.Fatalf("one pass made %d attribution calls; want between 1 and the budget of %d", n, attributionBackfillCalls)

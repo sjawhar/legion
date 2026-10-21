@@ -781,9 +781,9 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
 
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
- * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, and log pages,
- * project document pages (with their ?ask= / ?comment= deep links), and the page of an upload an
- * agent's conversation owns (`/agents/<session id>/artifacts/<slug>`).
+ * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
+ * pages, project document pages (with their ?ask= / ?comment= deep links), and the page of an
+ * upload an agent's conversation owns (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
@@ -801,7 +801,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     return value !== null && /^[1-9][0-9]*$/.test(value) ? `@v${value}` : "";
   };
   const issuePage = url.pathname.match(
-    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
+    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
   );
   if (issuePage) {
     const [, key, page, artifact, ask, comment, message] = issuePage;
@@ -814,6 +814,8 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       if (item !== undefined) return `dispatch://${key}/${item.kind}/${item.id}`;
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
+    // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
+    // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
       return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version}`;
@@ -852,6 +854,36 @@ const refGrammarProblem =
   "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 
 const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
+
+/**
+ * An ask, comment or message link names an item inside its issue or document. `dispatch read`
+ * reads that item and `dispatch ask` cites the link in its question; the other tools that take
+ * `ref` (comment, suggest, doc-edit, doc-read) take it as the owner they act on, so they would act
+ * on the owner and drop the item without a word. Such a ref is refused, naming what acts on it.
+ */
+function innerRefProblem(
+  tool: string,
+  ref: ParsedDispatchRef,
+  refText: string
+): string | undefined {
+  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message") return undefined;
+  if (tool === "dispatch_read" || tool === "dispatch_ask") return undefined;
+  const owner = refOwnerName(ref);
+  // suggest and doc-edit act on a document, so naming an issue alone would be refused in turn.
+  const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
+  const ownerArguments =
+    ref.owner.kind === "issue"
+      ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}`
+      : `project ${ref.owner.project} and artifact ${ref.artifact}`;
+  const fix =
+    tool === "dispatch_comment" && ref.kind === "ask"
+      ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}`
+      : tool === "dispatch_comment" && ref.kind === "comment"
+        ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}`
+        : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : `a ${ref.kind}`;
+  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
+}
 
 // The specs are frozen module constants, so each tool's schema is built once and shared;
 // parsing and issue formatting only read it.
@@ -923,6 +955,9 @@ async function resolveOwnerArguments(
           ? "ref must be a dispatch:// reference"
           : refGrammarProblem
       );
+    } else {
+      const inner = innerRefProblem(tool, ref, refText);
+      if (inner !== undefined) problems.push(inner);
     }
   }
   const issueArgument = args.issue;

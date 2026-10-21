@@ -530,8 +530,9 @@ test("closing an issue removes its asks from the inbox and pinning stays private
     const bob = await asUser(browser, "bob");
     const bobPage = await bob.newPage();
     try {
-      // Alice's issues are not in Bob's Mine; the closed one is gone from Everyone too.
-      await bobPage.goto("/?view=everyone");
+      // Alice's issues are nobody else's own work; the closed one is gone from the cleared
+      // filter too.
+      await bobPage.goto("/?assignee=everyone");
       await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(1);
       await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
       await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
@@ -664,8 +665,11 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
       )
       .toBe(true);
 
+    // The removal is an event, so it is the Activity tab's line and not a Conversation card.
+    await page.getByRole("tab", { name: "Activity" }).click();
+    await expect(page.getByRole("list", { name: "Issue activity" })).toContainText("unsubscribed");
     await page.getByRole("tab", { name: "Conversation" }).click();
-    await expect(page.getByRole("list", { name: "Conversation turns" })).toContainText(
+    await expect(page.getByRole("list", { name: "Conversation turns" })).not.toContainText(
       "unsubscribed"
     );
   } finally {

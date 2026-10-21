@@ -66,10 +66,8 @@ dispatch_url: https://dispatch.internal.example
 dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
   LEGION:
-    repo: sjawhar/legion
     slack_channels: [C0123ABCD, C0123ABCE]
   WIDGETS:
-    repo: acme/widgets
     merge_queue_role: merge-queue
     merge:
       by_hand: ['^deploy/', '\.sql$']
@@ -91,9 +89,11 @@ github_apps:
       -----END PRIVATE KEY-----
     installations: {sjawhar: "2003"}
 linger_hours: 1.5
+production_check_hours: 240
 review_round_cap: 4
 max_fix_attempts: 5
 controller: daemon
+worker_backends: {tester: omp}
 capabilities:
   decided:
     pool-capacity: "the pool is sized by hand for the admission cap"
@@ -132,6 +132,12 @@ runtime:
     plugins:
       pi_legion: 10.4.0
       pi_envoy: 10.4.0
+    setup: [/bin/sh, -c, 'echo fixture-setup']
+    repository_cache:
+      volume: 40Gi
+      refresh_minutes: 15
+      retain_hours: 48
+      resources: {cpu: 500m, memory: 1Gi}
 `
 
 // minimalSettingsFile is the smallest tmux legion.yaml that loads: every other setting is a
@@ -188,10 +194,12 @@ func populatedState(t *testing.T) State {
 		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
-				Key:        "LEGION-208",
-				Generation: 3,
-				Phase:      phase.Implementing,
-				Status:     "in_progress",
+				Key:           "LEGION-208",
+				Generation:    3,
+				Phase:         phase.Implementing,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
 				Architect: &ClaimView{
 					Session: "ses_architect_208",
 					State:   "ready",
@@ -247,6 +255,7 @@ func populatedState(t *testing.T) State {
 					},
 				},
 				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
 					Number:         1247,
 					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
 					ChecksVerdict:  "pending",
@@ -264,13 +273,44 @@ func populatedState(t *testing.T) State {
 				},
 			},
 			"LEGION-210": {
-				Key:        "LEGION-210",
-				Generation: 1,
-				Phase:      phase.Held,
-				Status:     "in_progress",
-				HoldReason: "escalated",
+				Key:           "LEGION-210",
+				Generation:    1,
+				Phase:         phase.Held,
+				Status:        "in_progress",
+				Repo:          "zeta/tools",
+				DefaultBranch: "release/v7.1",
+				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+				},
+			},
+			// LEGION-207 merged and closed; its production check is open at its second look, woken by
+			// Dispatch's issue.deployed, its implementer working that look in the kept pod.
+			"LEGION-207": {
+				Key:           "LEGION-207",
+				Generation:    2,
+				Phase:         phase.Done,
+				Status:        "done",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers: map[claim.Role]PhaseView{
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Rounds: 1},
+				},
+				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
+					Number:         1239,
+					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+					ReviewDecision: "approved",
+				},
+				Check: &CheckView{
+					Repo:        "acme/widgets",
+					PullRequest: 1239,
+					MergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
+					OpenedAt:    time.Date(2026, 9, 22, 8, 40, 12, 0, time.UTC),
+					Looks:       2,
+					LookOpen:    true,
+					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},
+					NextWakeAt:  time.Date(2026, 10, 6, 8, 40, 12, 0, time.UTC),
 				},
 			},
 		},
@@ -297,6 +337,27 @@ func populatedState(t *testing.T) State {
 			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
 			RolesWithoutResources: []claim.Role{claim.RoleTester},
 		}.Report()),
+		// The project maps three repositories of two owners; the review App is not installed on one,
+		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
+		// answered, zeta/tools' could not be read, and acme/legacy, mapped no longer, keeps its cache
+		// until its retention ends.
+		Repositories: RepositoriesView{
+			Owners: []string{"acme", "zeta"},
+			Mapped: []MappedRepositoryView{
+				{Repo: "acme/widgets", Default: true, Cache: &CacheView{
+					Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
+					Head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992", LastFetchAt: time.Date(2026, 10, 16, 19, 20, 30, 0, time.UTC), Bytes: 6612345678,
+				}},
+				{Repo: "zeta/tools", Cache: &CacheView{
+					Repo: "zeta/tools", Sandbox: "legion-legion-cache-zeta-tools-1b2c3d4e", State: "failing",
+					Reason: "container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
+				}},
+			},
+			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			Caches: []CacheView{{
+				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
+			}},
+		},
 		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
 		Settings: SettingsOf(settingsFixtureConfig(t)),
 	}
@@ -318,11 +379,13 @@ func TestStateStage3Golden(t *testing.T) {
 		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
 		Issues: map[string]Issue{
 			"LEGION-208": {
-				Key:        "LEGION-208",
-				Generation: 4,
-				Phase:      phase.Reviewing,
-				Status:     "needs_review",
-				Workers:    map[claim.Role]PhaseView{},
+				Key:           "LEGION-208",
+				Generation:    4,
+				Phase:         phase.Reviewing,
+				Status:        "needs_review",
+				Repo:          "sjawhar/legion-smoke",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
 			},
 		},
 		PendingStatusWrites: []PendingStatusWrite{{
@@ -500,15 +563,19 @@ func TestControllerSecretResponseGolden(t *testing.T) {
 	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
 }
 
-// What `legion controller start` fetches for the review App's token, rendered as the two files
-// `gh` reads.
+// What `legion controller start` fetches for the review App's read-only tokens, one per owner,
+// each rendered as the two files `gh` reads.
 func TestControllerCredentialResponseGolden(t *testing.T) {
 	expiresAt := time.Date(2026, 9, 22, 10, 15, 2, 0, time.UTC)
-	rendered := ghconfig.Render("ghs_placeholder_token", "review", expiresAt)
+	acme := ghconfig.Render("ghs_placeholder_acme_token", "review", expiresAt)
+	sjawhar := ghconfig.Render("ghs_placeholder_sjawhar_token", "review", expiresAt)
 	golden(t, "controller-github-credential.json", ControllerCredentialResponse{
-		Hosts:     rendered.Hosts,
-		Config:    rendered.Config,
-		App:       rendered.App,
+		Owners: map[string]ControllerOwnerCredential{
+			"acme":    {Hosts: acme.Hosts, Config: acme.Config},
+			"sjawhar": {Hosts: sjawhar.Hosts, Config: sjawhar.Config},
+		},
+		Default:   "acme",
+		App:       "review",
 		ExpiresAt: expiresAt.UTC().Format(timeFormat),
 	})
 }

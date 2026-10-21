@@ -1,16 +1,18 @@
 // Package ghconfig renders the two files a plain `gh` reads its GitHub credential from, so a
-// Legion role's GitHub App token reaches `gh` and `git` as gh's own configuration rather than
-// through a wrapper of the daemon's.
+// Legion role's GitHub App tokens reach `gh` and `git` as gh's own configuration.
 //
 // The files are gh's `hosts.yml`, which holds the token for github.com, and its `config.yml`, in
-// the directory GH_CONFIG_DIR names. gh reads both on every invocation and holds nothing between
-// invocations, so the daemon rewriting hosts.yml from a fresh lease is what the next `gh` runs
-// with, and `gh auth git-credential`, the helper every shared clone's `credential.helper` names
-// (workspace.GitHubCredentialHelper), answers git from the same file. In a pod the directory is a
-// read-only Secret volume, which gh never needs to write: it writes under GH_CONFIG_DIR only when
-// told to (`gh auth login`, `gh config set`) or when migrating a pre-2.40 hosts.yml into its
-// multi-account shape, and its git-credential helper treats git's `store` and `erase` as no-ops,
-// so nothing a worker's git does tries to write there either. A `config.yml` carrying
+// one directory per GitHub owner of the project under the role's bundle root (Bundle, WriteBundle):
+// the issue's owner's directory holds its role's App token, which GH_CONFIG_DIR names, and every
+// other owner's a token of the same App narrowed to reading. gh reads both files on every
+// invocation and holds nothing between invocations, so the daemon rewriting hosts.yml from a fresh
+// lease is what the next `gh` runs with. `legion gh`, the `gh` first on a pane's PATH, points the
+// real gh at the directory of the owner a command names, and `legion git-credential`, the helper
+// every shared clone's `credential.helper` names (workspace.GitHubCredentialHelper), answers git
+// from the hosts.yml of the owner in the path git asks about and treats git's `store` and `erase`
+// as no-ops. In a pod the root is a read-only Secret volume, which gh never needs to write: it
+// writes under GH_CONFIG_DIR only when told to (`gh auth login`, `gh config set`) or when
+// migrating a pre-2.40 hosts.yml into its multi-account shape. A `config.yml` carrying
 // `version: "1"` is what tells gh that migration has already happened, and Hosts renders the
 // migrated shape it then expects.
 package ghconfig
@@ -122,12 +124,11 @@ func Render(token, app string, expiresAt time.Time) Rendered {
 	return Rendered{Hosts: Hosts(token), Config: Config, App: app, ExpiresAt: expiresAt}
 }
 
-// Write brings dir, a role's GH_CONFIG_DIR, to rendered: the directory made 0700 if it is gone,
-// config.yml written once when absent or different, and hosts.yml replaced — a temporary file in
-// the directory (0600, as os.CreateTemp makes it) renamed over it, so the gh reading it never sees
-// a half-written file — only when its content differs. It reports whether hosts.yml changed. It is
-// the one writer of a role's gh directory: the tmux runtime calls it at spawn and at each refresh
-// tick, and `legion controller start` calls it for the operator-launched controller's directory.
+// Write brings dir, one owner's directory of a gh bundle, to rendered: the directory made 0700 if
+// it is gone, config.yml written once when absent or different, and hosts.yml replaced — a
+// temporary file in the directory (0600, as os.CreateTemp makes it) renamed over it, so the gh
+// reading it never sees a half-written file — only when its content differs. It reports whether
+// hosts.yml changed. WriteBundle calls it for each owner of a bundle.
 func Write(dir string, rendered Rendered) (changed bool, err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false, err

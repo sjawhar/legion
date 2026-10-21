@@ -1,12 +1,8 @@
 # Before and after: a decision block, a reply, a message, and a draft
 
-`skill://dispatch` sends you here for worked examples: a design decision in its document, a reply
-that names its mechanism, a message that should not be sent, and a draft placed where the human
-reads it.
-
 ## Before / after
 
-Before — a wall of text hides the decision and the human never receives it:
+Before: a wall of text hides the decision, and the human never gets it.
 
 ```text
 The deploy branch has the migration and dashboard changes. Staging is fine, but release notes are
@@ -14,8 +10,7 @@ not reviewed before tomorrow's customer demo. Review the notes, ship without the
 dashboard from the release. Waiting is safest, but the list above may be stale.
 ```
 
-After — write the decision into the document section it concerns: state the problem, and make each
-genuinely different option a button, so the answer stays with the release design:
+After: a decision block in the section it concerns, each real option a button.
 
 ```bash
 dispatch doc-edit --issue LEGION-815 --artifact spec --ops-json-file - <<'EOF'
@@ -27,35 +22,27 @@ dispatch doc-edit --issue LEGION-815 --artifact spec --ops-json-file - <<'EOF'
 EOF
 ```
 
-Before — a progress note that nobody needs, posted where humans look for decisions:
+Before: a progress note nobody needs.
 
 ```bash
 dispatch message --issue LEGION-815 --body 'Merged the release PR, moving to docs next.'
 ```
 
-After — nothing. The merge is visible on the pull request; the docs work shows up as its own deliverable. Post a message only when
-a human must act or a deliverable is theirs to use:
+After: nothing. The PR shows the merge. Post only when a human must act or can use a deliverable:
 
 ```bash
 dispatch message --issue LEGION-815 --body 'Release 1.4 is live on the devbox (dispatch://LEGION-815/artifact/release-notes). Nothing needed from you.'
 ```
 
-Before — a draft the human must read is uploaded as a separate file, the spec only names it, and
-the ask does not point at it, so the reader has to go looking:
+Before: the draft is a separate file, the spec only names it, and the ask does not link it.
 
 ```bash
 dispatch artifact --issue OPS-52 --name cu-update-2026-09-15.md --content 'Hi team, ...'
 dispatch doc-edit --issue OPS-52 --artifact spec \
   --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft (artifact cu-update-2026-09-15.md)"}]'
-dispatch ask --issue OPS-52 \
-  --question 'Customers need an update today, but the draft is only in a separate file, so the reader cannot review it in context. How should we proceed? Recommendation: put the draft in the spec before sending it.' \
-  --option 'Put the draft in the spec: Adds a spec edit before sending but lets the reader review it in context.' \
-  --option 'Keep the separate file: Saves the spec edit but leaves the reader to find the draft.'
 ```
 
-After — the draft is a section of the spec, and the ask anchors there. Sending it is a to-do only a
-human can complete, so it stays a standalone ask. If it really must be a file, the spec and the ask
-both link the slug the upload printed:
+After: the draft is a spec section, and the ask (a human-only send) anchors there. A real file is linked by its slug from both.
 
 ```bash
 dispatch doc-edit --issue OPS-52 --artifact spec \
@@ -64,7 +51,7 @@ dispatch ask --issue OPS-52 --anchor-json '{"artifact":"spec","quote":"Hi team,"
   --question 'Customers need an update today, and the reviewed text is ready in the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.' \
   --option 'Send the reviewed update: Delivers the update today but makes its text external.' \
   --option 'Hold the update: Avoids sending now but leaves customers without the update.'
-# or, for a real file — the spec links it where the reader needs it, and so does the ask:
+# or, for a real file:
 dispatch doc-edit --issue OPS-52 --artifact spec \
   --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft\n\nThe update to send: dispatch://OPS-52/artifact/cu-update-2026-09-15-md"}]'
 dispatch ask --issue OPS-52 --ref dispatch://OPS-52/artifact/cu-update-2026-09-15-md \
@@ -75,8 +62,7 @@ dispatch ask --issue OPS-52 --ref dispatch://OPS-52/artifact/cu-update-2026-09-1
 
 ## Naming the mechanism
 
-Before — a reply explaining a design paraphrases its tool, its route and its event away, so the
-reader has to ask which tool, and how Legion "notices" anything:
+Before: the reply paraphrases its tool, route and event away.
 
 ```text
 Today, when a spec is ready, the architect tells Legion so with a dedicated call on its Legion
@@ -84,8 +70,7 @@ tool, and Legion then waits for your approval. This change removes that call, be
 notice your approval of the spec by itself.
 ```
 
-After — the reader's sentence first, then each mechanism by its real name, with how it works in a
-clause:
+After: the reader's sentence first, then each mechanism by name, with how it works in a clause.
 
 ```text
 For you nothing changes: you still click Approve on the spec. What goes is a step the architect
@@ -97,6 +82,4 @@ version, which Dispatch does when you click Approve on the request the architect
 document from Dispatch itself and waits for the same event.
 ```
 
-"A dedicated call", "tells" and "notice" each stood for something the reader can search for, find
-in a log, or set. None is a noun anyone coined, so each is named; the clause after each name is
-what keeps the reply readable on a phone.
+"A dedicated call", "tells" and "notice" each stood for something the reader can search, find in a log, or set.

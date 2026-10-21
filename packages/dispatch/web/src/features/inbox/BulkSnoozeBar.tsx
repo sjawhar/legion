@@ -47,8 +47,8 @@ export function BulkSnoozeBar({
   refusal: string | undefined;
 }): ReactNode {
   return (
-    // A fieldset, like the view switch: the group's name comes from its legend, and `min-w-0`
-    // holds back the UA's `min-inline-size: min-content` so a long refusal wraps inside it.
+    // A fieldset: the group's name comes from its legend, and `min-w-0` holds back the UA's
+    // `min-inline-size: min-content` so a long refusal wraps inside it.
     <fieldset
       className={`flex min-w-0 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 ${focusVisibleRing} outline-none focus-visible:ring-2 ${borderDefault}`}
       ref={barRef}

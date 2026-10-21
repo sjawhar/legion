@@ -12,7 +12,8 @@ const entry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
 // What Claude Code sees over MCP, with Dispatch configured: the Envoy tools and nothing else, since
 // agents reach Dispatch through the `dispatch` command the plugin's bin/ puts on the Bash tool's PATH.
-test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, and points at the dispatch command", async () => {
+// Its deliveries are channel notifications, so the session advertises Aside alone.
+test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, points at the dispatch command, and advertises aside alone", async () => {
   const broker = new FakeNatsServer()
   const dispatchRequests: string[] = []
   const dispatch = Bun.serve({
@@ -22,12 +23,18 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, and
       return Response.json({ error: "unexpected" }, { status: 500 })
     },
   })
+  const advertised: unknown[] = []
   const listener = Bun.serve({
     port: 0,
     fetch: async (request) => {
       const url = new URL(request.url)
       if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
-        const body = (await request.json()) as { session_id: string; topics: string[] }
+        const body = (await request.json()) as {
+          session_id: string
+          topics: string[]
+          capabilities?: unknown
+        }
+        advertised.push(body.capabilities)
         return Response.json({
           session_id: body.session_id,
           machine_id: "test",
@@ -52,6 +59,9 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, and
       ENVOY_URL: `http://127.0.0.1:${listener.port}`,
       CLAUDE_CODE_SESSION_ID: "ses_mcp",
       CLAUDE_PLUGIN_DATA: stateDirectory,
+      // The test runner, not `claude --channels`, starts this server, so the channel gate
+      // (`src/claude-channel.ts`) would find no channel and advertise nothing.
+      ENVOY_CHANNEL_LOADED: "1",
       DISPATCH_URL: `http://127.0.0.1:${dispatch.port}`,
       DISPATCH_TOKEN: "test-token",
     },
@@ -75,6 +85,9 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, and
 
     const { tools } = await client.listTools()
     expect(tools.map(({ name }) => name)).toEqual(envoyToolSpecs.map(({ name }) => name))
+    // Every registration of the session carries Aside alone.
+    expect(advertised.length).toBeGreaterThan(0)
+    for (const modes of advertised) expect(modes).toEqual(["aside"])
 
     const instructions = client.getInstructions() ?? ""
     expect(instructions).toContain("`dispatch` command")

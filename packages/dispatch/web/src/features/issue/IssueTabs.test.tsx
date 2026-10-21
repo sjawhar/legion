@@ -32,11 +32,14 @@ test("IssueTabs exposes the Conversation tab at its canonical route", () => {
       "Conversation",
       "Children",
       "Artifacts",
+      "Activity",
     ]);
     fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
     expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/conversation");
     fireEvent.click(screen.getByRole("tab", { name: "Artifacts" }));
     expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/artifacts");
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByTestId("location").textContent).toBe("/issues/CORE-1/activity");
   } finally {
     view.unmount();
   }

@@ -13,25 +13,27 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// HandoffCompleteRequest is what a worker reports when its phase is done. Commit is the commit the
+// HandoffCompleteRequest is what a worker reports when its phase is done, or what the implementer
+// reports on a look of its closed issue's production check. Commit is the commit a phase
 // completion is of: for a file-backed phase the pushed commit carrying .legion/<issue>/<phase>.json,
 // which the `legion` tool's handoff_complete finds in the pane with its jj (as `legion handoff
 // complete` did) before posting; for every other phase the commit the workspace stands on. The
 // daemon reads no handoff file and no branch head: what each handoff holds is the role prompt's to
 // spell, and the workflow refuses only a commit the role already reported for its previous phase
-// (HANDOFF_NOT_NEW).
+// (HANDOFF_NOT_NEW). A check report carries no commit (nothing was pushed) and a Verdict of pass,
+// pending or fail; a tester's completion a Verdict of pass or fail.
 type HandoffCompleteRequest struct {
 	GrantID string `json:"grantId"`
 	Summary string `json:"summary"`
 	Verdict string `json:"verdict"`
 	Ready   bool   `json:"ready"`
-	Commit  string `json:"commit"`
+	Commit  string `json:"commit,omitempty"`
 }
 
 // HandoffCompleteResponse confirms that the completion fact committed. Note is what READY's checks
@@ -42,9 +44,16 @@ type HandoffCompleteResponse struct {
 	Note string `json:"note,omitempty"`
 }
 
+// handoffComplete records a phase completion or a production check report (checkReport). The grant
+// is redeemed and the record read before the two are told apart, so an invalid grant is refused
+// before a field only one of them requires: a call by the implementer on its closed issue (phase
+// done, which no role works: the check is the work after the close) is a check report when the
+// issue's check is open, and is refused CHECK_NOT_OPEN otherwise; every other call is a phase
+// completion, held to its commit, its role's verdict rule and the run its claim serves, and the
+// engine refuses one of a phase its role does not run (HANDOFF_NOT_CURRENT_PHASE).
 func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	var req HandoffCompleteRequest
-	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}, field{"commit", req.Commit}) {
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}) {
 		return
 	}
 	grant, ok := s.redeem(w, r, req.GrantID)
@@ -53,14 +62,6 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if grant.Controller {
 		writeFailure(w, http.StatusForbidden, "GRANT_INVALID", "grant is unavailable")
-		return
-	}
-	if grant.Role == claim.RoleTester && req.Verdict != "pass" && req.Verdict != "fail" {
-		writeFailure(w, http.StatusBadRequest, "TESTER_VERDICT_REQUIRED", "tester verdict must be pass or fail")
-		return
-	}
-	if grant.Role != claim.RoleTester && req.Verdict != "" {
-		writeFailure(w, http.StatusBadRequest, "VERDICT_ROLE_FORBIDDEN", "only a tester may report a verdict")
 		return
 	}
 	if req.Ready && grant.Role != claim.RoleMerger {
@@ -76,6 +77,31 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "HANDOFF_NO_CLAIM", "the daemon supervises no claim for this grant")
 		return
 	}
+	position, err := s.handoffPosition(r.Context(), grant.Issue)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the issue record")
+		return
+	}
+	issue := position.issue
+	if issue == nil {
+		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", "issue is not recorded")
+		return
+	}
+	if grant.Role == claim.RoleImplementer && issue.Phase == phase.Done {
+		s.checkReport(w, r, grant, position.check, req)
+		return
+	}
+	if !requireFailureFields(w, field{"commit", req.Commit}) {
+		return
+	}
+	if grant.Role == claim.RoleTester && req.Verdict != "pass" && req.Verdict != "fail" {
+		writeFailure(w, http.StatusBadRequest, "TESTER_VERDICT_REQUIRED", "tester verdict must be pass or fail")
+		return
+	}
+	if grant.Role != claim.RoleTester && req.Verdict != "" {
+		writeFailure(w, http.StatusBadRequest, "VERDICT_ROLE_FORBIDDEN", "only a tester may report a verdict")
+		return
+	}
 	// The run this completion belongs to is the run of the task the worker took, which the claim
 	// answers (supervise.Claim.ServingRun) and nothing on the request says.
 	serving := machine.Claim().ServingRun()
@@ -84,15 +110,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 			"this completion belongs to no task: this claim has taken none, so the run it reports cannot be told")
 		return
 	}
-	issue, treeGeneration, round, err := s.handoffPosition(r.Context(), grant.Issue)
-	if err != nil {
-		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the issue record")
-		return
-	}
-	if issue == nil {
-		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", "issue is not recorded")
-		return
-	}
+	treeGeneration, round := position.treeGeneration, position.round
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
 	// workflow committed would be recorded as processed under this completion's key, which leaves
 	// the summary out, while a refusal here records nothing, and the corrected retry at the same
@@ -117,11 +135,11 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// One phase's completion is identified by where the issue stands — its generation, phase, and
 	// review round — with the role and what it reported: the commit, the verdict, and READY. A
 	// retried call for the same phase is the same fact; the next phase's completion at the same
-	// commit (the implementer's retro, then its production check) is a different one, and so is a
-	// corrected report at the same commit (a merger's ready: true after READY_REQUIRED), since a
-	// refusal is recorded as processed. The position is read before the fact's own transaction:
-	// should the issue move in between, the engine re-reads it there and refuses a completion whose
-	// role no longer owns the phase.
+	// commit (the implementer's retro, standing on its implementing round's last push) is a
+	// different one, and so is a corrected report at the same commit (a merger's ready: true after
+	// READY_REQUIRED), since a refusal is recorded as processed. The position is read before the
+	// fact's own transaction: should the issue move in between, the engine re-reads it there and
+	// refuses a completion whose role no longer owns the phase.
 	//
 	// The run the completion is attributed to is part of the key, because a refusal is recorded
 	// under it: a stale completion of the run that is over would otherwise take the key of the new
@@ -158,6 +176,46 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: answer.note})
 }
 
+// checkReport records the implementer's report on a look of its closed issue's production check
+// (intake.CheckReport): the check must be open (CHECK_NOT_OPEN: a done issue whose check closed, or
+// never opened, since nothing merged), and the verdict one of pass, pending or fail
+// (CHECK_VERDICT_REQUIRED). No commit is read: the look pushed nothing. No run is read either: the
+// check fences itself on the issue and the look the route read as the current one, which the
+// engine holds the report to (CHECK_LOOK_NOT_OPEN), rather than on the claim's run, since the look's
+// task is no phase's run and a woken session may hold an older one. The event is the issue, the
+// check (record.ProductionCheck.ID: a later merge of the same issue replaces the check and counts
+// its looks from one again, and the rerun's report on look 1 is a new fact, not the first check's),
+// the look and the verdict: a retried report of the same look is the same fact, and a refusal — the
+// look ended by its bound before the report landed — is recorded as processed under it, so the
+// report of the next look is a new fact.
+func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant credential.Grant, check *record.ProductionCheck, req HandoffCompleteRequest) {
+	if check == nil || !check.Open() {
+		writeFailure(w, http.StatusConflict, "CHECK_NOT_OPEN", fmt.Sprintf("%s has no open production check; this completion changed nothing", grant.Issue))
+		return
+	}
+	if req.Verdict != "pass" && req.Verdict != "pending" && req.Verdict != "fail" {
+		writeFailure(w, http.StatusBadRequest, "CHECK_VERDICT_REQUIRED", "a production check report names a verdict of pass, pending or fail")
+		return
+	}
+	eventID := fmt.Sprintf("check:%s:%s:%d:%s", grant.Issue, check.ID(), check.Looks, req.Verdict)
+	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.CheckReport{Issue: grant.Issue, Claim: grant.Claim, Look: check.Looks,
+		Verdict: req.Verdict, Summary: req.Summary}, s.handlers...)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
+		return
+	}
+	if result.Duplicate {
+		writeFailure(w, http.StatusConflict, "HANDOFF_ALREADY_RECORDED", fmt.Sprintf(
+			"the %s report on look %d of %s's production check was already received; this call changed nothing", req.Verdict, check.Looks, grant.Issue))
+		return
+	}
+	if result.Refusal != nil {
+		writeFailure(w, result.Refusal.Status, result.Refusal.Code, result.Refusal.Message)
+		return
+	}
+	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
+}
+
 // byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet with,
 // empty when READY carries none.
 func byHandShare(mergeNote string) string {
@@ -167,31 +225,27 @@ func byHandShare(mergeNote string) string {
 	return ", with the by-hand note the daemon tells above it,"
 }
 
-// readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub for a
-// merger's ready: true, and is what they leave (readyAnswer). Every refusal is written before the
-// fact is applied, so nothing is recorded under the completion's key and the corrected retry at the
-// same commit is applied:
+// readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub, in
+// the repository issue's record names, for a merger's ready: true, and is what they leave
+// (readyAnswer). Every refusal is written before the fact is applied, so nothing is recorded under
+// the completion's key and the corrected retry at the same commit is applied:
 //
-//   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
-//     requires one).
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
 //     (unreviewedChange: the head is not the review round's approved head plus retro's commits),
 //     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
-// The reads are made as the implement App, whose token never leaves the daemon; a runtime that
-// boots without Apps publishes no READY (leaseForGrant).
+// The reads are made as the implement App, minted for the repository's owner, whose token never
+// leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
 func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
-	var repository ghrepo.Repository
-	if s.repository != nil {
-		repository, ok = s.repository(issue.Project)
-	}
-	if !ok || repository.IsZero() {
-		writeFailure(w, http.StatusConflict, "NO_REPOSITORY", fmt.Sprintf("the project %s of %s has no repository configured, so its pull request cannot be read", issue.Project, issue.Key))
+	repository, err := issue.Repository()
+	if err != nil {
+		s.log.Error("api: read the repository of a completing issue", "issue", issue.Key, "error", err)
+		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", fmt.Sprintf("the record of %s names no repository its pull request can be read in", issue.Key))
 		return readyAnswer{}, false
 	}
-	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement)
+	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
 	if !ok {
 		return readyAnswer{}, false
 	}
@@ -241,31 +295,41 @@ func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullReq
 	return pr, pending, head, err
 }
 
-// handoffPosition reads the issue record, its tree's generation (the root's), and its review round:
-// the implementer's count of returns to implementing, which tells each implementing, testing, and
-// reviewing pass from the last.
-func (s *server) handoffPosition(ctx context.Context, key string) (*record.Issue, uint64, int, error) {
+// completionPosition is where issue key stands as the completion route reads it, in one repeatable-read
+// snapshot: the issue record, its tree's generation (the root's), its review round — the
+// implementer's count of returns to implementing, which tells each implementing, testing, and
+// reviewing pass from the last — and its production check, nil while none was ever opened.
+type completionPosition struct {
+	issue          *record.Issue
+	treeGeneration uint64
+	round          int
+	check          *record.ProductionCheck
+}
+
+// handoffPosition reads key's position (completionPosition); an issue the workflow does not record is
+// a position with no issue and no error.
+func (s *server) handoffPosition(ctx context.Context, key string) (completionPosition, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})
 	if err != nil {
-		return nil, 0, 0, err
+		return completionPosition{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	issue, err := s.records.Issue(ctx, tx, key)
 	if err != nil || issue == nil {
-		return nil, 0, 0, err
+		return completionPosition{}, err
 	}
 	root := issue
 	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if root, err = s.records.Issue(ctx, tx, issue.Tree); err != nil {
-			return nil, 0, 0, err
+			return completionPosition{}, err
 		}
 		if root == nil {
-			return nil, 0, 0, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
+			return completionPosition{}, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
 		}
 	}
 	rows, err := s.records.Phases(ctx, tx, key)
 	if err != nil {
-		return nil, 0, 0, err
+		return completionPosition{}, err
 	}
 	round := 0
 	for _, row := range rows {
@@ -273,5 +337,9 @@ func (s *server) handoffPosition(ctx context.Context, key string) (*record.Issue
 			round = row.Rounds
 		}
 	}
-	return issue, root.Generation, round, tx.Commit(ctx)
+	check, err := s.records.ProductionCheck(ctx, tx, key)
+	if err != nil {
+		return completionPosition{}, err
+	}
+	return completionPosition{issue: issue, treeGeneration: root.Generation, round: round, check: check}, tx.Commit(ctx)
 }

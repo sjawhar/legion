@@ -21,6 +21,8 @@
       "generation": 4,
       "phase": "reviewing",
       "status": "needs_review",
+      "repo": "sjawhar/legion-smoke",
+      "defaultBranch": "main",
       "workers": {}
     }
   },
@@ -38,6 +40,12 @@
   "heldOutboxRows": [],
   "strandedClaims": [],
   "capabilities": [],
+  "repositories": {
+    "owners": [],
+    "mapped": [],
+    "refused": [],
+    "caches": []
+  },
   "settings": {
     "project": "DEMO",
     "port": 13370,
@@ -69,11 +77,13 @@
       "design": "root-issues"
     },
     "linger_hours": 72,
+    "production_check_hours": 336,
     "review_round_cap": 3,
     "max_fix_attempts": 3,
     "controller": "operator",
     "capabilities": {
       "decided": {}
-    }
+    },
+    "worker_backends": {}
   }
 }

@@ -7,7 +7,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
-- Daemon API contract 30 (LEGION-791): `legion state` and the controller's `read_state` carry
+- Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out (`max_fix_attempts`, `worker_boot_timeout_seconds`,
   `admission_cap`, `linger_hours`, the runtime block, the projects, the GitHub Apps' ids and
@@ -66,6 +66,78 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The reviewer's pair rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) are the
+  one copy of these skills: the operator's dotfiles copies are gone. Each is shorter, and each
+  report now starts with `Verdict: APPROVE at <sha>` or `Verdict: CHANGES at <sha>`, which a PR
+  gate reads from the first line of a posted report. The deep review keeps its eight Security
+  Guidelines rows (`agent-def` and `transport` included) and its rule that a security finding
+  with no stated exploit path is hardening, not a finding.
+
+- The daemon client, the handoff-commit lookup and the jj lock come from `@legion/pi-shared`
+  (`./daemon-client`, `./handoff-commit`, `./git-lock`), so `claude-envoy`'s Legion tool uses the
+  same code (sjawhar/legion#2032). No behavior change.
+- The `legion` tool's phase ops (`read_record`, `handoff_complete`, `request_backward_move`) run
+  on the schema, description template and executor `@legion/pi-shared/legion-phase-ops` shares
+  with `claude-envoy`'s Legion tool, and the claim session boots through the claim boot both share
+  (`@legion/pi-shared/legion-claim-core`), in the same order and with the same log lines. The
+  template gives the tool the description and parameter schema pi-legion wrote itself, each
+  pinned byte for byte in `src/tools.test.ts`. Three things a phase op answers differ:
+  - A root architect's `handoff_complete` is refused as unavailable before its own fields are
+    read, after naming any field `handoff_complete` does not take:
+    `{op: "handoff_complete", phase: "plan"}` answers `handoff_complete does not accept field
+    "phase"; handoff_complete is not available to a root architect session, which runs no phase`,
+    where it answered the first clause alone.
+  - A refusal names every problem with the call's arguments, joined by `; `, where it named the
+    first: a field the operation does not take first, then each of its own fields in turn
+    (`request_backward_move requires to; request_backward_move requires reason`).
+  - `request_backward_move` checks `to` (a backward target) and `reason` before it mints a grant,
+    so a refused call mints none; a blank or non-string `to` is refused as `requires to`, and any
+    other value outside the backward targets as `request_backward_move's to is one of …`.
+- Daemon API contract 34 (INFRA-31): under the Kubernetes runtime the roles of an issue share one
+  scratch on the issue's volume, and every role container of a pod, a workflow role's and the
+  project controller's, is told the same four directories of it —
+  `TMPDIR=/legion/scratch/tmp`, `XDG_CACHE_HOME=/legion/scratch/cache`,
+  `XDG_DATA_HOME=/legion/scratch/data` and
+  `BUN_INSTALL_CACHE_DIR=/legion/scratch/bun/install/cache` — so the values naming where a role
+  writes what nothing told it where to put all point onto that volume rather than at the
+  container's own filesystem. `GOCACHE` and `GOMODCACHE`, which the runtime did not set before,
+  name the issue's one pair beside uv's cache, `/legion/go/build` and `/legion/go/mod`.
+  `XDG_STATE_HOME` (whose `/home/legion/.local/state/<role>` contract 18 declared) is the one
+  per-role directory and is now `/legion/scratch/state/<role>`: Oh My Pi names its browser
+  broker's lock from the state root, the name is an abstract unix socket, and an abstract socket
+  name is one name across every container of a pod, so one state home would block every role's
+  broker but the first. A shared cache costs nothing the pod does not already share, and a pair
+  of Go caches is 751 MiB of build cache and 375 MiB of module cache for this repository, so six
+  per-role copies would have been five redundant ones, about 5.5 GiB. Every name above is the
+  runtime's own and a spec or an operator's pod env is refused for setting them.
+  `XDG_CONFIG_HOME` is unchanged, the pod's shared in-memory volume, and `workspace-init`, the
+  one init container told any XDG home, keeps every value it had. A role container is admitted
+  with about a gigabyte of ephemeral storage on GKE Autopilot, and a container past that limit
+  has its whole pod evicted — every role of the issue runs in that one pod — which the Go, bun
+  and browser caches a build fills had reached. Install this release's pair with a daemon at 34.
+- Daemon API contract 32 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
+  repository gets a repository cache pod running the image's `legion workspace-init cache`, and
+  an issue pod's `workspace-init fetch` fills a fresh feed from that cache alone and fetches only
+  the delta from GitHub; `legion state`'s `repositories` carries each mapped repository's `cache`
+  (its `state`: `starting`, `cloning`, `ready`, `failing`, or `refused` while a Service of its
+  name is not its own or the daemon's Services watch is failing) and the `caches` of repositories
+  no longer mapped. An image built before it is refused by the daemon's image probe. Install this
+  release with a `legion` built from the same commit.
+- Daemon API contract 31 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
+  `legion state --json` carry each recorded issue's `repo` and `defaultBranch`, its pull request's
+  `repo`, and the state's `repositories` (the project's mapping as the daemon serves it: `owners`,
+  `mapped`, and `refused` with each left-out repository's `reason`). The strict reader refuses a
+  state without `repositories`. Install this release with a `legion` built from the same commit.
+- Daemon API contract 30 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
+  tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
+  issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
+  first on PATH is `legion gh`, which runs the real gh (`LEGION_GH_PATH`) with the directory of the
+  owner a command names, and git answers from that owner's directory through `legion git-credential`.
+  The controller's credential answer is per owner. An image built before it is refused by the
+  daemon's image probe. (This change took 28, then 29 once LEGION-694 landed at 28; pi-legion
+  v10.5.0 was released declaring 29 for sjawhar/legion#1998 without these shapes, so it takes 30,
+  the number above the released one.) Install this release with a `legion` built from the same
+  commit.
 - The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
   `DISPATCH_PUBLIC_URL` outside a rule narrower than the agents' URL parser (http or https, no
   userinfo, a host that is a plain DNS name, a dotted-quad IPv4 or a bracketed IPv6 address, a
@@ -385,6 +457,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- A reviewer no longer passes a `verdict` to `handoff_complete`, which the daemon refuses from
+  every role but the tester (`VERDICT_ROLE_FORBIDDEN`). The reviewer's task names the tester's
+  result as `Tester's verdict: pass` rather than `Handoff verdict: pass`; the `legion` tool's
+  description says `verdict` comes from the tester alone, where it said "when your role's
+  instructions require one"; the reviewer's prompt says its completion carries only a `summary`;
+  and `review.json` records the reviewer's decision as `decision`, no longer `verdict`.
+- The phase-stall follow-up for a final message holding a tool call written as text is sent once
+  more when the model answers it with the same call as text again (state `text-call`); a third, or a
+  first follow-up of any other kind, is the stall's last, so a stall sends at most two. The
+  follow-up texts and both patterns are unchanged.
 - Session attribution's `jj config path --user` gives up after 10 s and kills its process group.
   Root bootstrap awaits it, so a `jj` that never answered (a PATH wrapper that loops) held the
   `session_start` handler past Oh My Pi's 30 s and the claim never reached `ready`; attribution now

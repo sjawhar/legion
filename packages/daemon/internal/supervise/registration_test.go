@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"testing"
@@ -37,6 +38,139 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 			}
 			h.wantState(StateLaunching)
 		})
+	}
+}
+
+// A daemon stopping mid-relaunch leaves a claim with no Locator at all, in StateLaunching: the
+// registration deadline retires the live process (letGo clears Locator) and starts its relaunch,
+// but the relaunch's own backoff wait (launchAfter's backOff, machine.go) returns the context's
+// own cancellation before ever reaching a new Spawn, since the daemon's shutdown context is what
+// every internally-armed timer's Handle call carries (arm, machine.go). The retired process's own
+// connection then closing (onClosed is valid in StateLaunching, table.go) must not crash: probe
+// has nothing to probe and nothing to arm, since the claim's own relaunch path, not this stream
+// event, decides what happens to it next.
+func TestAStreamClosedAfterAShutdownInterruptedRelaunchDoesNotCrash(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateShimConnected)
+	h.shutdown()
+
+	h.advance(deadline)
+
+	if loc := h.claim().Locator; loc != nil {
+		t.Fatalf("claim %+v, want no Locator: the relaunch's own backoff wait should have been cut short by the shutdown before any new Spawn", loc)
+	}
+	h.wantState(StateLaunching)
+	if lines := h.logs.lines("the wait before the next launch was cut short"); len(lines) != 1 {
+		t.Fatalf("logged %v, want the relaunch's wait cut short by the shutdown once", lines)
+	}
+	before := len(h.rt.Methods())
+
+	h.must(StreamClosed{Claim: h.token})
+
+	h.wantState(StateLaunching)
+	if loc := h.claim().Locator; loc != nil {
+		t.Errorf("claim %+v, want still no Locator: the stream closing records no new process", loc)
+	}
+	if after := h.rt.Methods(); len(after) != before {
+		t.Errorf("runtime calls after the stream closed: %v, want none added: nothing to probe with no Locator", after[before:])
+	}
+	if lines := h.logs.lines("probed with no process to probe"); len(lines) != 1 {
+		t.Errorf("logged %v, want the no-op probe logged once", lines)
+	}
+}
+
+// A hello or a registration at the generation of a launch that records no process moves the claim
+// nowhere. Two launches record none: one the daemon's stop cut short while the process it started
+// was already saying hello and registering, and a retired process's relaunch waiting for the store
+// to answer its lifecycle check (relaunchRefused), whose generation is still the retired process's
+// own. Neither process is the claim's: the next boot reaps the first, and the relaunch waits out the
+// second. So the hello is dropped and the registration refused, and the claim stays launching with
+// no process, records no new session and holds no capability, in memory as in the store, rather
+// than promoted to shim_connected or registered with no process for anything to watch or relaunch.
+func TestAHelloOrRegistrationAtALaunchThatRecordsNoProcessPromotesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// leave brings a harness to a launch that records no process and hands the hello and the
+		// registration of that launch's generation to the machine, returning what each answered.
+		leave func(t *testing.T) (h *harness, hello, register error)
+	}{
+		{
+			name: "a launch the daemon's stop cut short, its hello and registration in flight",
+			leave: func(t *testing.T) (*harness, error, error) {
+				h := newBareHarness(t)
+				gated := &gatedSpawn{Runtime: h.rt, entered: make(chan struct{}, 1), release: make(chan struct{})}
+				h.deps.Runtime = gated
+				if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+					t.Fatal(err)
+				}
+				h.start(queuedClaim())
+				stopping, stop := context.WithCancel(h.ctx)
+				launched := make(chan error, 1)
+				go func() { launched <- h.m.Handle(stopping, RequestSpawn{Claim: testToken}) }()
+				select {
+				case <-gated.entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the launch never reached the runtime")
+				}
+				// The process the launch started says hello and registers while the launch still holds
+				// the claim, waiting on the runtime's answer; then the daemon stops.
+				helloed, registered := make(chan error, 1), make(chan error, 1)
+				go func() { helloed <- h.m.Handle(h.ctx, StreamHello{Claim: testToken, Generation: 1}) }()
+				go func() { registered <- h.m.Handle(h.ctx, registration(1)) }()
+				stop()
+				if err := <-launched; !errors.Is(err, context.Canceled) {
+					t.Fatalf("the cut-short launch returned %v, want its context's cancellation", err)
+				}
+				hello, register := <-helloed, <-registered
+				h.m.Wait()
+				return h, hello, register
+			},
+		},
+		{
+			name: "a retired process's relaunch waiting on the store",
+			leave: func(t *testing.T) (*harness, error, error) {
+				store := &epochStore{epoch: 1}
+				h := lifecycleHarness(t, store, queuedClaim())
+				h.reach(StateRegistered)
+				h.m.deps.Runtime = &unansweredSuspend{Runtime: h.rt, store: store, checks: 1}
+				h.advance(deadline)
+				h.wantState(StateLaunching)
+				return h, h.handle(StreamHello{Claim: testToken, Generation: h.generation()}), h.handle(registration(h.generation()))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, hello, register := tc.leave(t)
+
+			if hello != nil {
+				t.Errorf("the hello = %v, want it dropped", hello)
+			}
+			var refused *RefusedError
+			if !errors.As(register, &refused) || refused.State != StateLaunching || refused.Request != "register" {
+				t.Errorf("the registration = %v, want refused in launching", register)
+			}
+			for where, c := range map[string]Claim{"memory": h.claim(), "the store": h.store.load(h.token)} {
+				if c.State != StateLaunching || c.Locator != nil || c.SessionFile == "/sessions/late.jsonl" || len(c.CapabilityHash) != 0 {
+					t.Errorf("%s holds the claim %s with locator %+v, session file %q and capability %x; want launching with no process, the late session unrecorded and no capability",
+						where, c.State, c.Locator, c.SessionFile, c.CapabilityHash)
+				}
+			}
+			if lines := h.logs.lines("refused a registration: the launch at its generation records no process"); len(lines) != 1 {
+				t.Errorf("logged %v, want the registration's refusal once", lines)
+			}
+			if lines := h.logs.lines("dropped a stale event", "event=StreamHello", "fence=process"); len(lines) != 1 {
+				t.Errorf("logged %v, want the hello dropped once", lines)
+			}
+		})
+	}
+}
+
+// registration is the late agent's registration at generation: the claim's own session, which a
+// relaunch resumes, with a session file of its own.
+func registration(generation uint64) RequestRegister {
+	return RequestRegister{
+		Claim: testToken, Generation: generation, Session: session, SessionFile: "/sessions/late.jsonl",
+		CapabilityHash: []byte("late"), PluginContract: 24,
 	}
 }
 

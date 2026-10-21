@@ -114,7 +114,7 @@ func operatorHeld(c supervise.Claim) supervise.Claim {
 
 // runningRoot is a root admitted at generation 1 and working phase p.
 func runningRoot(key string, p phase.Phase) record.Issue {
-	return record.Issue{Key: key, Tree: key, Project: projectOf(key), Title: key, Phase: p, Generation: 1, Status: "in_progress", Rank: "m", HandedOver: true}
+	return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: projectOf(key), Title: key, Phase: p, Generation: 1, Status: "in_progress", Rank: "m", HandedOver: true}
 }
 
 // projectOf is the Dispatch project key an issue key names.
@@ -185,8 +185,8 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	key := func(n string) string { return cfg.Project + "-" + n }
 	implementing, reviewing, tested, lingering, lingeringChild, planning := key("1"), key("2"), key("3"), key("4"), key("5"), key("6")
 	until := time.Now().Add(time.Hour)
-	parked := record.Issue{Key: lingering, Tree: lingering, Project: cfg.Project, Title: lingering, Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "n", HandedOver: true, LingerUntil: &until}
-	child := runningRoot(lingeringChild, phase.ProductionCheck)
+	parked := record.Issue{Key: lingering, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: lingering, Project: cfg.Project, Title: lingering, Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "n", HandedOver: true, LingerUntil: &until}
+	child := runningRoot(lingeringChild, phase.Retro)
 	child.Tree, child.Parent = lingering, &parked.Key
 	// The tester's start for its phase is due in an hour: the outbox holds it, but the operator
 	// suspended the tester, so the start waits for the operator's resume and wakes nothing.
@@ -259,7 +259,7 @@ func TestABootWithOnlyIdleSuspendedClaimsReportsNothing(t *testing.T) {
 	key := func(n string) string { return cfg.Project + "-" + n }
 	root, lingering, lingeringChild := key("1"), key("2"), key("3")
 	until := time.Now().Add(time.Hour)
-	parked := record.Issue{Key: lingering, Tree: lingering, Project: cfg.Project, Title: lingering, Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "n", HandedOver: true, LingerUntil: &until}
+	parked := record.Issue{Key: lingering, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: lingering, Project: cfg.Project, Title: lingering, Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "n", HandedOver: true, LingerUntil: &until}
 	child := runningRoot(lingeringChild, phase.Implementing)
 	child.Tree, child.Parent = lingering, &parked.Key
 	putPreviousRun(t, cfg, previousRun{
@@ -335,7 +335,7 @@ func TestABootServesHealthzWhileTheStrandedReportStoreReadWaits(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(runCtx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
+	go func() { done <- run(runCtx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
 	t.Cleanup(func() {
 		if locked {
 			_ = lock.Rollback(context.Background())

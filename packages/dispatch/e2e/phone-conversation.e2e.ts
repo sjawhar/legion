@@ -8,6 +8,7 @@ import {
   patchIssue,
   resolveComment,
 } from "./api";
+import { expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
 import { answeredPost, holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -38,26 +39,6 @@ async function openThread(page: Page, commentId: string): Promise<Locator> {
 async function leaveThread(page: Page): Promise<void> {
   await threadView(page).getByRole("button", { name: "Back" }).click();
   await expect(threadView(page)).toHaveCount(0);
-}
-
-/** Fails unless `pill` and `region` come to share no point on screen: the pill covers none of it.
- *  It waits for a layout that settles after a resize. */
-async function expectUncovered(pill: Locator, region: Locator): Promise<void> {
-  await expect(async () => {
-    const covering = await pill.boundingBox();
-    const covered = await region.boundingBox();
-    expect(covering).not.toBeNull();
-    expect(covered).not.toBeNull();
-    if (covering === null || covered === null) return;
-    const apart =
-      covering.x + covering.width <= covered.x ||
-      covered.x + covered.width <= covering.x ||
-      covering.y + covering.height <= covered.y ||
-      covered.y + covered.height <= covering.y;
-    expect(apart, `the pill at ${JSON.stringify(covering)} covers ${JSON.stringify(covered)}`).toBe(
-      true
-    );
-  }).toPass({ timeout: 5_000 });
 }
 
 /** Scrolls the page to its foot, past the latest turn, as a reader browsing older turns does. */
@@ -808,8 +789,10 @@ test("on a phone, Jump to latest stays off a thread opened over the Conversation
 });
 
 /** Where a tap at the centre of each control above the turns - the issue's header, its tabs and
- *  the filters - lands, for each one it does not reach as it should: a tab must take its own tap,
- *  and no control may lose its tap to `Jump to latest`. Controls whose centre is off screen are
+ *  the All / Open / Closed filter - lands, for each one it does not reach as it should: a tab
+ *  must take its own tap, and no control may lose its tap to `Jump to latest`. Controls whose
+ *  centre is off screen, or clipped out of view by a scrolling ancestor (the issue tablist
+ *  scrolls sideways at this width, so a tab past its edge is not on screen to tap at all), are
  *  not tapped. */
 async function tapsLostAboveTurns(page: Page): Promise<string[]> {
   return page.evaluate(() => {
@@ -826,6 +809,18 @@ async function tapsLostAboveTurns(page: Page): Promise<string[]> {
       const y = box.top + box.height / 2;
       if (pill?.contains(control) || box.width === 0 || box.bottom > turnsTop) continue;
       if (x < 0 || x >= window.innerWidth || y < 0 || y >= window.innerHeight) continue;
+      let clipped = false;
+      for (
+        let ancestor = control.parentElement;
+        ancestor !== null && !clipped;
+        ancestor = ancestor.parentElement
+      ) {
+        const style = getComputedStyle(ancestor);
+        if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+        const bounds = ancestor.getBoundingClientRect();
+        clipped = x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom;
+      }
+      if (clipped) continue;
       const hit = document.elementFromPoint(x, y);
       const reached = hit !== null && (control.contains(hit) || hit.contains(control));
       const lostToPill = hit !== null && pill?.contains(hit) === true;

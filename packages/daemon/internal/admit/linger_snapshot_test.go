@@ -25,7 +25,7 @@ func TestReleaseAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineNotOnlyTheR
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-PARK", Project: testProject, Title: "park", Tree: "LEGION-PARK", Phase: phase.Implementing,
+		Key: "LEGION-PARK", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "park", Tree: "LEGION-PARK", Phase: phase.Implementing,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 	})
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -35,7 +35,7 @@ func TestReleaseAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineNotOnlyTheR
 	})
 
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-PARK", Title: "park", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 2},
+		{Key: "LEGION-PARK", ResolvedRepo: "acme/widgets", Title: "park", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 2},
 	}, 10, 0, false)
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind parked record, want it held")
@@ -75,7 +75,7 @@ func TestReconcileAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineWhenTheCo
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-PARK2", Project: testProject, Title: "park2", Tree: "LEGION-PARK2", Phase: phase.Implementing,
+		Key: "LEGION-PARK2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "park2", Tree: "LEGION-PARK2", Phase: phase.Implementing,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 	})
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -87,7 +87,7 @@ func TestReconcileAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineWhenTheCo
 	// idle true: caughtUp regardless of target, so Reconcile applies this summary immediately
 	// rather than deferring it.
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-PARK2", Title: "park2", Status: "done", Rank: "A", HandedOver: true, LastSeq: 2},
+		{Key: "LEGION-PARK2", ResolvedRepo: "acme/widgets", Title: "park2", Status: "done", Rank: "A", HandedOver: true, LastSeq: 2},
 	}, 10, 10, true)
 	if admission.Held() {
 		t.Fatal("Held() = true after an idle, caught-up reconcile; want nothing held")
@@ -122,12 +122,12 @@ func TestReconcileReentersAParkedChildSetBackToTodoInABootSummary(t *testing.T) 
 	seedSlotted(t, pool, "LEGION-ROOT", "A")
 	parent := "LEGION-ROOT"
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-CHILD", Tree: "LEGION-ROOT", Project: testProject, Title: "child", Parent: &parent,
+		Key: "LEGION-CHILD", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-ROOT", Project: testProject, Title: "child", Parent: &parent,
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", LastDispatchSeq: 1,
 	})
 
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-CHILD", Title: "child", Status: "todo", Parent: &parent, Rank: "B", LastSeq: 5},
+		{Key: "LEGION-CHILD", ResolvedRepo: "acme/widgets", Title: "child", Status: "todo", Parent: &parent, Rank: "B", LastSeq: 5},
 	}, 10, 10, true)
 
 	got := issue(t, pool, "LEGION-CHILD")
@@ -148,7 +148,7 @@ func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfW
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-AGENT", Project: testProject, Title: "agent", Tree: "LEGION-AGENT", Phase: phase.Implementing,
+		Key: "LEGION-AGENT", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "agent", Tree: "LEGION-AGENT", Phase: phase.Implementing,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 5,
 	})
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -161,7 +161,7 @@ func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfW
 	// The boot listing shows the agent's own out-of-workflow write, no newer than what the daemon
 	// already recorded (its own reassert already landed at this same sequence).
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-AGENT", Title: "agent", Status: "done", Rank: "A", HandedOver: true, LastSeq: 5},
+		{Key: "LEGION-AGENT", ResolvedRepo: "acme/widgets", Title: "agent", Status: "done", Rank: "A", HandedOver: true, LastSeq: 5},
 	}, 10, 10, true)
 
 	got := issue(t, pool, "LEGION-AGENT")
@@ -191,7 +191,7 @@ func TestABootListingOfASetBackBacklogLeavesTheTreeRunning(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			putIssue(t, pool, record.Issue{
-				Key: "LEGION-RUN", Project: testProject, Title: "run", Tree: "LEGION-RUN", Phase: phase.Implementing,
+				Key: "LEGION-RUN", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "run", Tree: "LEGION-RUN", Phase: phase.Implementing,
 				Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 5,
 			})
 			inTx(t, pool, func(tx pgx.Tx) {
@@ -202,9 +202,9 @@ func TestABootListingOfASetBackBacklogLeavesTheTreeRunning(t *testing.T) {
 			seedWaiting(t, pool, "LEGION-NEXT", "B")
 
 			reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
-				{Key: "LEGION-RUN", Title: "run", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 7},
+				{Key: "LEGION-RUN", ResolvedRepo: "acme/widgets", Title: "run", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 7},
 			}, 10, 2, false)
-			apply(t, pool, admission, "outside-backlog", intake.DispatchIssue{Key: "LEGION-RUN", Seq: 6, Type: "issue.updated", Status: "backlog", Title: "run", Rank: "A",
+			apply(t, pool, admission, "outside-backlog", intake.DispatchIssue{Key: "LEGION-RUN", ResolvedRepo: "acme/widgets", Seq: 6, Type: "issue.updated", Status: "backlog", Title: "run", Rank: "A",
 				HandedOver: true, ActorSession: "ses-outsider"}, admission.engine)
 			if tc.finished {
 				if _, err := pool.Exec(context.Background(), "delete from outbox where kind = 'dispatch_status'"); err != nil {
@@ -234,7 +234,7 @@ func TestAReleasedRootIgnoresAnOlderLateEvent(t *testing.T) {
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-LATE", Title: "late", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 5},
+		{Key: "LEGION-LATE", ResolvedRepo: "acme/widgets", Title: "late", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 5},
 	}, 10, 0, false)
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind labeled record, want it held")
@@ -250,7 +250,7 @@ func TestAReleasedRootIgnoresAnOlderLateEvent(t *testing.T) {
 
 	// An older event, already superseded by the summary that created this record, arrives late —
 	// a nak's redelivery, or the outbox's own publish backoff finally catching up.
-	apply(t, pool, admission, "older-late-event", intake.DispatchIssue{Key: "LEGION-LATE", Seq: 3, Type: "issue.updated", Status: "todo", Title: "late", Rank: "A", HandedOver: false}, engineStub{})
+	apply(t, pool, admission, "older-late-event", intake.DispatchIssue{Key: "LEGION-LATE", ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: "late", Rank: "A", HandedOver: false}, engineStub{})
 	if got := issue(t, pool, "LEGION-LATE"); !got.HandedOver {
 		t.Fatalf("LEGION-LATE after an older late event = %#v, want HandedOver still true: the event is older than what created the record", got)
 	}

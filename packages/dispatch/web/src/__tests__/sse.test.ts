@@ -384,6 +384,14 @@ const eventsByType: Record<EventType, readonly Event[]> = {
       reason: "released",
     }),
   ],
+  "issue.deployed": [
+    event("issue.deployed", {
+      repo: "acme/widgets",
+      number: 501,
+      run_id: 900,
+      completed_at: "2024-01-01T02:10:00Z",
+    }),
+  ],
   "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
   "artifact.version": [
     event("artifact.version", { artifact_id: "artifact-1" }),
@@ -707,6 +715,21 @@ function keySet(keys: readonly (readonly unknown[])[]): string[] {
   return [...new Set(keys.map((key) => JSON.stringify(key)))].sort();
 }
 
+/** The Conversation builds its list from the issue's own asks, comments and messages
+ *  (`features/conversation/ConversationTab.tsx`). Its asks and its comments are the reads the
+ *  margin already holds, under the keys it owns, so only the message list is a key of the
+ *  Conversation's own - and it refreshes exactly when the Agents-page list it mirrors does. */
+const CONVERSATION_LISTS: Record<string, string> = {
+  messages: "issue-messages",
+};
+
+function conversationListAdditions(keys: readonly unknown[][]): unknown[][] {
+  return keys.flatMap((key) => {
+    const list = typeof key[0] === "string" ? CONVERSATION_LISTS[key[0]] : undefined;
+    return list === undefined ? [] : [[list, ...key.slice(1)]];
+  });
+}
+
 // One case per corpus entry, so a failure names the event and the rest still run.
 const corpus = representativeEvents.map(
   (incoming, index) => [`${incoming.type}#${index}`, incoming] as const
@@ -727,9 +750,12 @@ test.each(
   ];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
+  const lists = conversationListAdditions([...base, ...counted]);
   // Which rows refresh is the contract; the order they are queued in and whether a key is
   // repeated are not, since the stream's pending map is keyed on the serialised key.
-  expect(keySet(invalidatedKeys(incoming))).toEqual(keySet([...base, ...counted, ...references]));
+  expect(keySet(invalidatedKeys(incoming))).toEqual(
+    keySet([...base, ...counted, ...references, ...lists])
+  );
 });
 
 test("the corpus contains events the subtraction applies to", () => {

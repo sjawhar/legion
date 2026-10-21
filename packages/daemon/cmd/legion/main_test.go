@@ -302,8 +302,11 @@ func TestHelpListsEveryCommand(t *testing.T) {
 }
 
 // Every command answers -h, -help and --help with its usage, `usage: legion <command>…`, and exit
-// 0: the docs site's CLI generator fails the build on any other answer.
+// 0: the docs site's CLI generator fails the build on any other answer. It runs each help with no
+// LEGION_* variable, and so does this test: in a Legion pane, LEGION_GH_PATH would have `legion gh
+// --help` exec the real gh in place of the test binary.
 func TestEveryCommandAnswersHelp(t *testing.T) {
+	unsetenv(t, "LEGION_GH_PATH")
 	for name := range commands {
 		for _, help := range []string{"-h", "-help", "--help"} {
 			var out, errb bytes.Buffer
@@ -489,7 +492,8 @@ func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) 
 // workflowConfig writes a Stage 3 configuration whose two GitHub Apps read their keys through a
 // private_key_command that leaves marker behind and fails: a command that ran it is seen twice
 // over, in the marker and in the refusal. The operator and Dispatch bearer files it names exist, and
-// LEGION_OMP_PATH names an executable, so the OMP invocation resolves without mise.
+// LEGION_OMP_PATH and LEGION_GH_PATH name an executable, so the OMP invocation resolves without
+// mise and the real gh whatever heads the machine's PATH.
 func workflowConfig(t *testing.T, port int, extra string) (path, marker string) {
 	t.Helper()
 	omp, err := os.Executable()
@@ -497,6 +501,7 @@ func workflowConfig(t *testing.T, port int, extra string) (path, marker string) 
 		t.Fatal(err)
 	}
 	t.Setenv("LEGION_OMP_PATH", omp)
+	t.Setenv("LEGION_GH_PATH", omp)
 	dir := t.TempDir()
 	marker = filepath.Join(dir, "private-key-command-ran")
 	command := "touch " + marker + "; exit 1"
@@ -509,7 +514,7 @@ dispatch_url: https://dispatch.test
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://127.0.0.1:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: %q }
   review: { app_id: "2", private_key_command: %q }
@@ -651,7 +656,8 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 
 // --check-config makes every refusal boot makes from the configuration, the environment and the
 // files they name before boot writes anything (daemon.CheckStart, which boot's prepare shares): the
-// operator bearer's file, the Dispatch bearer's file, the instructions file and the OMP invocation.
+// operator bearer's file, the Dispatch bearer's file, the instructions file, the OMP invocation and
+// the real gh every pane's `legion gh` runs, which a script heading PATH (a gh wrapper) is not.
 // Each is refused in boot's words, no App key command runs, and no state directory is made.
 func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 	legionState(t)
@@ -682,6 +688,20 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 		{"no OMP invocation", "", func(t *testing.T, _ string) { t.Setenv("LEGION_OMP_PATH", "") },
 			func(string) string {
 				return "legion start: omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path\n"
+			}},
+		{"a script as the first gh on PATH", "", func(t *testing.T, dir string) {
+			shims := filepath.Join(dir, "shims")
+			if err := os.MkdirAll(shims, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(shims, "gh"), []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unsetenv(t, "LEGION_GH_PATH")
+			t.Setenv("PATH", shims+string(os.PathListSeparator)+os.Getenv("PATH"))
+		},
+			func(dir string) string {
+				return "legion start: the first gh on PATH, " + filepath.Join(dir, "shims", "gh") + ", is a script, not the real gh"
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -886,7 +906,7 @@ dispatch_url: https://dispatch.internal.example
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: %q }
   review: { app_id: "2", private_key_command: %q }
@@ -938,7 +958,7 @@ dispatch_url: https://dispatch.internal.example
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }
@@ -1011,7 +1031,7 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
-			if want := "Config OK: project=DEMO\n" + tc.want + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+			if want := "Config OK: project=DEMO\n" + tc.want + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
 		})
@@ -1066,7 +1086,7 @@ func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
 			secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
-			want := "Config OK: project=DEMO\n" + secretsGap + tc.want
+			want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + tc.want
 			if code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
@@ -1096,7 +1116,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		}
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + budgetLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := "Config OK: project=DEMO\n" + secretsGap + budgetLine + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1105,7 +1125,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		config := kubernetesCheckConfig(t, "")
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1118,6 +1138,26 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
+}
+
+// defaultCacheLine is the line --check-config prints under kubernetes for the repository cache at
+// its defaults, before the plugins line.
+const defaultCacheLine = "repository cache: a 20Gi volume per mapped repository, fetched from GitHub every 10 minutes, kept 168 hours after its repository leaves the mapping; its container reserves cpu 1, memory 4Gi, ephemeral storage 1Gi under 2Gi\n"
+
+// --check-config names the repository cache each mapped repository gets, as the file settles it:
+// the defaults, or the file's own members over them, a raised limit alone requested in full and a
+// lower request named under its limit, as a role's.
+func TestStartCheckConfigNamesTheRepositoryCache(t *testing.T) {
+	legionState(t)
+	secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
+	pluginsGap := "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
+	config := kubernetesCheckConfig(t, "    repository_cache: {volume: 50Gi, refresh_minutes: 5, retain_hours: 24, resources: {cpu: \"2\", memory: 8Gi, memory_request: 4Gi}}\n")
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+	cache := "repository cache: a 50Gi volume per mapped repository, fetched from GitHub every 5 minutes, kept 24 hours after its repository leaves the mapping; its container reserves cpu 2, memory 4Gi under 8Gi, ephemeral storage 1Gi under 2Gi\n"
+	if want := "Config OK: project=DEMO\n" + secretsGap + cache + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+	}
 }
 
 // A decision may name only a capability the daemon measures from the deployment: anything else is
@@ -1259,6 +1299,58 @@ func TestPlainStateSummarizesTheHeldLifecycleRows(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			served := "{" + daemon + `,"heldOutboxRows":` + tc.held + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An operator reading plain `legion state` is told how many production checks are open and the
+// oldest: its issue, pull request and merge commit, the look it is on with what woke it and when,
+// and when the check is bound — read from each issue record's `check`, which the daemon serves for
+// an open check and leaves out once it closes. With none open the line says so.
+func TestPlainStateSummarizesTheOpenProductionChecks(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
+	closed := `"LEGION-207":{"key":"LEGION-207","generation":1,"phase":"done","status":"done"}`
+	oldest := `"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"done","status":"done","check":{"repo":"sjawhar/legion","pullRequest":1301,` +
+		`"mergeCommit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","openedAt":"2026-10-19T09:00:00Z","looks":2,"lookOpen":false,` +
+		`"lastWake":{"kind":"issue.deployed","detail":"run 77 completed 2026-10-19T10:00:00Z","at":"2026-10-19T10:00:05Z"},"nextWakeAt":"2026-11-02T09:00:00Z","last":false}}`
+	newer := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"done","status":"done","check":{"repo":"sjawhar/legion","pullRequest":1302,` +
+		`"mergeCommit":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","openedAt":"2026-10-19T11:00:00Z","looks":1,"lookOpen":true,` +
+		`"lastWake":{"kind":"merge","detail":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","at":"2026-10-19T11:00:00Z"},"nextWakeAt":"2026-11-02T11:00:00Z","last":false}}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "two open, the oldest not the first listed",
+			issues: `{` + newer + `,` + closed + `,` + oldest + `}`,
+			want:   "open production checks: 2; the oldest, LEGION-208 #1301 at a1b2c3d, look 2 woken by issue.deployed at 2026-10-19T10:00:05Z, bound 2026-11-02T09:00:00Z\n",
+		},
+		{
+			name:   "one open",
+			issues: `{` + closed + `,` + newer + `}`,
+			want:   "open production checks: 1; the oldest, LEGION-209 #1302 at b2c3d4e, look 1 woken by merge at 2026-10-19T11:00:00Z, bound 2026-11-02T11:00:00Z\n",
+		},
+		{name: "none open", issues: `{` + closed + `}`, want: "open production checks: none\n"},
+		{name: "no issues", issues: `{}`, want: "open production checks: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(served))

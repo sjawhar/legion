@@ -1,16 +1,30 @@
 package daemon
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
 func executable(t *testing.T, dir, name string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// binary is an executable in dir that reads as a compiled program, as the real gh is: an ELF
+// header, no `#!` line.
+func binary(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("\x7fELF\x02\x01\x01\x00"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -29,9 +43,9 @@ func fakeJJ(t *testing.T, dir, version string) string {
 	return path
 }
 
-// Boot resolves the binaries Legion itself runs — git and jj, never gh — once, each by its
-// LEGION_<TOOL>_PATH override or on the daemon's PATH, and names every missing one with its
-// override.
+// Boot resolves the binaries Legion itself runs or hands a pane — git, jj and the real gh a pane's
+// `legion gh` runs — once, each by its LEGION_<TOOL>_PATH override or on the daemon's PATH, and
+// names every missing one with its override.
 func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	onPath, elsewhere := t.TempDir(), t.TempDir()
 	executable(t, onPath, "git")
@@ -40,23 +54,103 @@ func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	lookup := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
 
 	_, err := resolveTools(lookup)
-	if err == nil || !strings.Contains(err.Error(), "jj (set LEGION_JJ_PATH to an absolute executable path)") || strings.Contains(err.Error(), "git (") {
-		t.Fatalf("resolveTools with no jj = %v, want only jj named with its override", err)
+	if err == nil || !strings.Contains(err.Error(), "jj (set LEGION_JJ_PATH to an absolute executable path)") ||
+		!strings.Contains(err.Error(), "gh (set LEGION_GH_PATH to an absolute executable path)") || strings.Contains(err.Error(), "git (") {
+		t.Fatalf("resolveTools with no jj or gh = %v, want only jj and gh named with their overrides", err)
 	}
 	fakeJJ(t, onPath, currentJJ)
+	gh := executable(t, elsewhere, "gh")
+	env["LEGION_GH_PATH"] = gh
 	tools, err := resolveTools(lookup)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
-	if tools["git"] != pinned || tools["jj"] != filepath.Join(onPath, "jj") {
-		t.Fatalf("resolveTools = %v, want the override for git and PATH for jj", tools)
-	}
-	if _, resolved := tools["gh"]; resolved || len(tools) != 2 {
-		t.Fatalf("resolveTools = %v, want git and jj alone: a pane's gh is its PATH's", tools)
+	if tools["git"] != pinned || tools["jj"] != filepath.Join(onPath, "jj") || tools["gh"] != gh || len(tools) != 3 {
+		t.Fatalf("resolveTools = %v, want the override for git and gh and PATH for jj", tools)
 	}
 	env["LEGION_JJ_PATH"] = "jj"
 	if _, err := resolveTools(lookup); err == nil || !strings.Contains(err.Error(), "LEGION_JJ_PATH") {
 		t.Fatalf("resolveTools with a relative override = %v, want it refused", err)
+	}
+}
+
+// A configuration that puts a role on claude needs Claude Code, bun for its MCP server, and the
+// built claude-envoy plugin: boot names every gap in one refusal, and takes each tool's override
+// before PATH.
+func TestResolveClaudeNamesEveryGap(t *testing.T) {
+	onPath, plugin := t.TempDir(), t.TempDir()
+	env := map[string]string{"PATH": onPath}
+	lookup := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
+	resolve := func() (launchReads, error) { return resolveClaude(config.Config{}, lookup, nil) }
+	_, err := resolve()
+	want := "worker_backends runs a role on claude, and boot is missing bun (set LEGION_BUN_PATH to an absolute executable path), " +
+		"claude (set LEGION_CLAUDE_PATH to an absolute executable path), the claude-envoy plugin (set LEGION_CLAUDE_PLUGIN_DIR to its package directory)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("resolveClaude with nothing = %v\nwant %s", err, want)
+	}
+	executable(t, onPath, "bun")
+	pinned := executable(t, t.TempDir(), "claude")
+	env["LEGION_CLAUDE_PATH"], env["LEGION_CLAUDE_PLUGIN_DIR"] = pinned, plugin
+	if _, err := resolve(); err == nil || !strings.Contains(err.Error(), "holds no dist/envoy-channel.js: build the plugin") {
+		t.Fatalf("resolveClaude with an unbuilt plugin = %v", err)
+	}
+	for _, file := range []string{"dist/envoy-channel.js", "legion/.claude-plugin/plugin.json"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(plugin, file)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(plugin, file), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read, err := resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged strings.Builder
+	read.log(slog.New(slog.NewTextHandler(&logged, nil)))
+	for _, want := range []string{"claude=" + pinned, "bun=" + filepath.Join(onPath, "bun"), "plugin=" + plugin} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("resolveClaude logged %q, want %s", logged.String(), want)
+		}
+	}
+	if read.launcher.Marker() != " claude-bridge -- " || read.invocation != "" {
+		t.Errorf("resolveClaude = marker %q, invocation %q", read.launcher.Marker(), read.invocation)
+	}
+	env["LEGION_CLAUDE_PLUGIN_DIR"] = "relative"
+	if _, err := resolve(); err == nil || !strings.Contains(err.Error(), "LEGION_CLAUDE_PLUGIN_DIR is not an absolute path") {
+		t.Errorf("a relative plugin dir = %v", err)
+	}
+}
+
+// The gh boot finds on PATH is every pane's real gh (LEGION_GH_PATH), which `legion gh` runs with
+// the owner's gh directory. The real gh is a compiled program, so a script heading PATH is a
+// wrapper — a machine's own gh shim, which routes to a token of its own, or Legion's own `legion
+// gh` wrapper, which would run `legion gh` again — and boot refuses it, naming it and
+// LEGION_GH_PATH, rather than taking the compiled gh behind it. LEGION_GH_PATH is the operator's
+// own word, so a script it names is taken.
+func TestResolveToolsRefusesAScriptAsTheRealGh(t *testing.T) {
+	shims, bin := t.TempDir(), t.TempDir()
+	binary(t, bin, "git")
+	fakeJJ(t, bin, currentJJ)
+	real := binary(t, bin, "gh")
+	shim := filepath.Join(shims, "gh")
+	if err := os.WriteFile(shim, []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"PATH": shims + ":" + bin}
+	lookup := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
+
+	_, err := resolveTools(lookup)
+	if err == nil || !strings.Contains(err.Error(), "the first gh on PATH, "+shim+", is a script") || !strings.Contains(err.Error(), "LEGION_GH_PATH") {
+		t.Fatalf("resolveTools with a script first on PATH = %v, want it refused naming %s and LEGION_GH_PATH", err, shim)
+	}
+	env["PATH"] = bin + ":" + shims
+	if tools, err := resolveTools(lookup); err != nil || tools["gh"] != real {
+		t.Fatalf("resolveTools with the compiled gh first on PATH = %v, %v; want %s", tools, err, real)
+	}
+	env["PATH"], env["LEGION_GH_PATH"] = shims+":"+bin, shim
+	if tools, err := resolveTools(lookup); err != nil || tools["gh"] != shim {
+		t.Fatalf("resolveTools with LEGION_GH_PATH naming a script = %v, %v; want %s", tools, err, shim)
 	}
 }
 
@@ -80,6 +174,7 @@ func TestResolveToolsRefusesAJJOlderThanTheLayoutProvisioningReliesOn(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			onPath, elsewhere := t.TempDir(), t.TempDir()
 			executable(t, onPath, "git")
+			binary(t, onPath, "gh")
 			env := map[string]string{"PATH": onPath}
 			if tc.override {
 				env["LEGION_JJ_PATH"] = fakeJJ(t, elsewhere, tc.version)

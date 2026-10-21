@@ -83,7 +83,7 @@ func reviewsStandInWith(t *testing.T, reviews func() string, reads *atomic.Int64
 // reviewReadRuntime is a workflow runtime over pool whose GitHub reads go to api, with the review
 // App's login set on the engine and the runtime as a boot sets both.
 func reviewReadRuntime(pool *pgxpool.Pool, api string) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", ReviewRoundCap: 10, ReviewAppLogin: reviewReadApp}, quietLogger())
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReviewRoundCap: 10, ReviewAppLogin: reviewReadApp}, quietLogger())
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: quietLogger(), githubAPI: api, reviewAppLogin: reviewReadApp,
@@ -131,11 +131,11 @@ func TestAReviewWhoseWebhookNeverArrivedDecidesItsRoundOnThePass(t *testing.T) {
 		decision string
 	}{
 		{name: "the review App's approval of the green head", reviews: []string{listedReview(5463503611, reviewReadApp, "APPROVED", "code", early)},
-			want: phase.Retro, decision: "approved"},
+			want: phase.Accepting, decision: "approved"},
 		{name: "the review App's request for changes", reviews: []string{listedReview(5463503611, reviewReadApp, "CHANGES_REQUESTED", "code", early)},
 			want: phase.Implementing, decision: "changes_requested"},
 		{name: "a writer's approval", reviews: []string{listedReview(5463503611, "a-writer", "APPROVED", "code", early)},
-			want: phase.Retro, decision: "approved"},
+			want: phase.Accepting, decision: "approved"},
 		{name: "an outsider's approval decides nothing", reviews: []string{listedReview(5463503611, "an-outsider", "APPROVED", "code", early)},
 			want: phase.Reviewing},
 		{name: "a comment, a dismissed approval and a draft decide nothing", reviews: []string{
@@ -215,8 +215,8 @@ func TestTheReviewsReadDecodesGitHubsOwnAnswer(t *testing.T) {
 	}
 	var reads atomic.Int64
 	reviewReadRuntime(pool, reviewsStandIn(t, func() string { return string(answer) }, &reads).URL).readRequiredChecks(context.Background())
-	if got, _ := capturePhase(t, pool); got != phase.Retro {
-		t.Fatalf("after the pass the issue is in %s, want retro", got)
+	if got, _ := capturePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("after the pass the issue is in %s, want accepting", got)
 	}
 	var state, approved string
 	if err := pool.QueryRow(context.Background(), "select decision->>'state', decision->>'head' from phases where issue = 'CAPTURE-1' and role = 'reviewer'").Scan(&state, &approved); err != nil {
@@ -289,7 +289,7 @@ func TestAReviewDecisionDeliveredTwiceActsOnce(t *testing.T) {
 
 			listed = append(listed, listedReview(12, reviewReadApp, "APPROVED", "code", "2026-10-08T23:24:06Z"))
 			w.readRequiredChecks(ctx)
-			expect("round 2's own review", phase.Retro, "approved", 1)
+			expect("round 2's own review", phase.Accepting, "approved", 1)
 		})
 	}
 }
@@ -461,8 +461,8 @@ func TestTheReadSetsAsideAReviewAppReviewFromAnotherSession(t *testing.T) {
 	}, &reads).URL
 	w := reviewReadRuntime(pool, api)
 	w.readRequiredChecks(context.Background())
-	if got, _ := capturePhase(t, pool); got != phase.Retro {
-		t.Fatalf("after the pass the issue is in %s, want retro: the reviewer's own approval decides, the controller's newer request for changes is set aside", got)
+	if got, _ := capturePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("after the pass the issue is in %s, want accepting: the reviewer's own approval decides, the controller's newer request for changes is set aside", got)
 	}
 	if got, _ := reviewerDecision(t, pool); got != "approved" {
 		t.Fatalf("the round's recorded decision = %q, want approved", got)
@@ -471,8 +471,8 @@ func TestTheReadSetsAsideAReviewAppReviewFromAnotherSession(t *testing.T) {
 		t.Fatalf("refused reviews = %v, want the controller's review 41 alone", w.refusedReviews)
 	}
 	w.readRequiredChecks(context.Background())
-	if got, _ := capturePhase(t, pool); got != phase.Retro || reads.Load() != 2 {
-		t.Fatalf("after the second pass the issue is in %s and the reviews were read %d times, want retro and twice: the set-aside review is not judged again", got, reads.Load())
+	if got, _ := capturePhase(t, pool); got != phase.Accepting || reads.Load() != 2 {
+		t.Fatalf("after the second pass the issue is in %s and the reviews were read %d times, want accepting and twice: the set-aside review is not judged again", got, reads.Load())
 	}
 }
 
@@ -485,7 +485,7 @@ func TestARateLimitOnTheReviewsReadEndsThePass(t *testing.T) {
 	seedCapture(t, pool, phase.Reviewing, "needs_review", completedReviewer("review-1"))
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
 			Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "V"}); err != nil {
 			return err
 		}

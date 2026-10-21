@@ -93,13 +93,15 @@ func testSpec() runtime.SpawnSpec {
 }
 
 // The pane's -e pairs, in the one order: the pairs every Legion pane carries, the claim's gh
-// directory as GH_CONFIG_DIR with GH_TOKEN, GITHUB_TOKEN and GH_HOST emptied so no token in the
-// daemon's environment outranks the file, PI_SHELL_PREFIX over the launcher directory alone,
-// PI_CONFIG_FILES naming the turn-scoping overlay writeTurnScopeOverlay writes under the state
-// directory, the XDG base directories under `<state_dir>/home` explicitly, the caller's own
-// variables sorted, then one `<NAME>_FILE` pointer per secret — the boot token's first. PATH is
-// never a pair: tmux would discard it (LEGION-91); the shell command exports it. No tool path is a
-// pair: a pane's gh, git and jj are its PATH's. No secret value is in any pair.
+// bundle — GH_CONFIG_DIR its default owner's directory, with GH_TOKEN, GITHUB_TOKEN and GH_HOST
+// emptied so no token in the daemon's environment outranks the file, LEGION_GH_OWNERS_DIR the
+// bundle's root and LEGION_GH_PATH the real gh the `legion gh` wrapper runs — PI_SHELL_PREFIX over
+// the launcher directory alone, PI_CONFIG_FILES naming the turn-scoping overlay
+// writeTurnScopeOverlay writes under the state directory, the XDG base directories under
+// `<state_dir>/home` explicitly, the caller's own variables sorted, then one `<NAME>_FILE` pointer
+// per secret — the boot token's first. PATH is never a pair: tmux would discard it (LEGION-91); the
+// shell command exports it. No other tool path is a pair: a pane's git and jj are its PATH's. No
+// secret value is in any pair.
 func TestPanePairs(t *testing.T) {
 	spec := testSpec()
 	in := PaneInputs{
@@ -108,7 +110,9 @@ func TestPanePairs(t *testing.T) {
 		DaemonURL:   "http://127.0.0.1:13370",
 		EnvoyURL:    "http://127.0.0.1:9020",
 		NATSURLs:    []string{"nats://a:4222", "nats://b:4222"},
-		GHConfigDir: "/state/secrets/legion-omp-legion-43-tester-gh",
+		GHOwnersDir: "/state/secrets/legion-omp-legion-43-tester-gh",
+		GHDefault:   "acme",
+		GH:          "/usr/bin/gh",
 	}
 	spec.Secrets["NATS_NKEY_SEED"] = "SU-seed"
 	files := secretFiles("/state", spec)
@@ -124,10 +128,12 @@ func TestPanePairs(t *testing.T) {
 		"-e", "LEGION_WORKSPACE=/state/workspaces/LEGION-43",
 		"-e", "ENVOY_NATS_URL=nats://a:4222,nats://b:4222",
 		"-e", "ENVOY_URL=http://127.0.0.1:9020",
-		"-e", "GH_CONFIG_DIR=/state/secrets/legion-omp-legion-43-tester-gh",
+		"-e", "GH_CONFIG_DIR=/state/secrets/legion-omp-legion-43-tester-gh/acme",
 		"-e", "GH_TOKEN=",
 		"-e", "GITHUB_TOKEN=",
 		"-e", "GH_HOST=",
+		"-e", "LEGION_GH_OWNERS_DIR=/state/secrets/legion-omp-legion-43-tester-gh",
+		"-e", "LEGION_GH_PATH=/usr/bin/gh",
 		"-e", "PI_SHELL_PREFIX=" + shellprefix.For("/state/bin"),
 		"-e", "PI_CONFIG_FILES=/state/" + podsafety.TurnScopeFile,
 		"-e", "GIT_TERMINAL_PROMPT=0",
@@ -153,17 +159,19 @@ func TestPanePairs(t *testing.T) {
 		}
 	}
 
-	// A controller pane gets the review App's gh files like any pane.
+	// A controller pane gets the review App's gh bundle like any pane.
 	controller := runtime.SpawnSpec{
 		Claim: claim.ControllerToken("omp"), Project: "omp", Role: claim.RoleController, Generation: 1, BootToken: "boot-secret",
 		Prompt: runtime.PromptParts{RolePromptPaths: []string{"/roles/controller-root.md"}},
 	}
-	in.GHConfigDir = runtime.GHConfigDir("/state", controller.Claim)
+	in.GHOwnersDir = runtime.GHConfigDir("/state", controller.Claim)
 	wantPairs := map[string]string{
-		"GH_CONFIG_DIR=": in.GHConfigDir,
-		"GH_TOKEN=":      "",
-		"GITHUB_TOKEN=":  "",
-		"GH_HOST=":       "",
+		"GH_CONFIG_DIR=":        in.GHOwnersDir + "/acme",
+		"GH_TOKEN=":             "",
+		"GITHUB_TOKEN=":         "",
+		"GH_HOST=":              "",
+		"LEGION_GH_OWNERS_DIR=": in.GHOwnersDir,
+		"LEGION_GH_PATH=":       "/usr/bin/gh",
 	}
 	found := map[string]bool{}
 	for _, pair := range panePairs(controller, in, secretFiles("/state", controller)) {
@@ -192,7 +200,7 @@ func TestTmuxRuntimeNeverReadsSpecPlugins(t *testing.T) {
 		DaemonURL:   "http://127.0.0.1:13370",
 		EnvoyURL:    "http://127.0.0.1:9020",
 		NATSURLs:    []string{"nats://a:4222"},
-		GHConfigDir: "/state/secrets/legion-omp-legion-43-tester-gh",
+		GHOwnersDir: "/state/secrets/legion-omp-legion-43-tester-gh", GHDefault: "acme", GH: "/usr/bin/gh",
 	}
 	plain := testSpec()
 	withPlugins := testSpec()
@@ -311,9 +319,9 @@ func TestNewRefusesAProviderKeyEveryPaneCarries(t *testing.T) {
 			}
 			_, err := New(Options{
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
-				EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
+				EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
 			})
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("New = %v, want %q", err, tc.want)
@@ -345,9 +353,9 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 			}
 			opts := Options{
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
-				EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
+				EnvoyURL: "http://127.0.0.1:2", Launchers: ompOnly("omp"), StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
 			}
 			if tc.dispatch {
 				opts.DispatchURL = "http://127.0.0.1:18766"
@@ -377,7 +385,7 @@ func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 		StateDir: "/state", Workspace: "/state/workspaces/LEGION-43", DaemonURL: "http://127.0.0.1:13370",
 		EnvoyURL: "http://127.0.0.1:9020", NATSURLs: []string{"nats://a:4222"},
 		DispatchURL: "http://127.0.0.1:18766", DispatchTokenFile: "/state/secrets/" + runtime.DispatchTokenFileName,
-		GHConfigDir: "/state/secrets/legion-omp-legion-43-tester-gh",
+		GHOwnersDir: "/state/secrets/legion-omp-legion-43-tester-gh", GHDefault: "acme", GH: "/usr/bin/gh",
 	}
 	told := map[string]bool{}
 	pairs := panePairs(spec, in, secretFiles("/state", spec))

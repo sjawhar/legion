@@ -343,7 +343,7 @@ func TestAnUnacknowledgedResendLeavesTheGivenUpPromptsRefusalToClearTheMark(t *t
 			if tc.identity {
 				// A send adopts the role's identity before it writes its frame; the first send's
 				// adopt succeeds and the re-send's fails.
-				h.deps.Identity = func(context.Context, claim.Role) (runtime.GitIdentity, error) {
+				h.deps.Identity = func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
 					return runtime.GitIdentity{Name: "legion-tester[bot]", Email: "t@example.invalid"}, nil
 				}
 				h.restart()

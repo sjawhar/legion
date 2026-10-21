@@ -22,6 +22,7 @@ type projectionStore struct {
 	phases       map[string][]record.PhaseRow
 	slots        []record.Slot
 	pullRequests map[string]*record.PullRequest
+	checks       []record.ProductionCheck
 	held         []record.HeldRow
 }
 
@@ -44,6 +45,9 @@ func (s projectionStore) PullRequest(_ context.Context, _ pgx.Tx, issue string) 
 func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate, error) {
 	return nil, nil
 }
+func (s projectionStore) OpenProductionChecks(context.Context, pgx.Tx) ([]record.ProductionCheck, error) {
+	return s.checks, nil
+}
 
 // projectedAt is the fixed instant every test here projects at.
 var projectedAt = time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
@@ -52,11 +56,11 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	now := projectedAt
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000"},
-			{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
-			{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
-			{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true},
-			{Key: "LEGION-214", Tree: "LEGION-214", Status: "todo", Rank: "00002", HandedOver: true},
+			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-210", Status: "done", Rank: "00000"},
+			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
+			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+			{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true},
+			{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-214", Status: "todo", Rank: "00002", HandedOver: true},
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
@@ -134,7 +138,7 @@ func TestProjectShowsEachClaimsPluginContract(t *testing.T) {
 func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	token := claim.Token("legion-208-architect")
 	store := projectionStore{
-		issues: []record.Issue{{Key: "LEGION-208", Tree: "LEGION-208", Status: "todo", Rank: "00042U"}},
+		issues: []record.Issue{{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "todo", Rank: "00042U"}},
 		phases: map[string][]record.PhaseRow{
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleArchitect, Claim: token}},
 		},
@@ -160,8 +164,8 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-208", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
-			{Key: "LEGION-209", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
+			{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
+			{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
 		},
 		phases: map[string][]record.PhaseRow{
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "gone-reviewer",
@@ -182,6 +186,45 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	}
 	if pr := got.Issues["LEGION-209"].PullRequest; pr == nil || pr.ReviewDecision != "" {
 		t.Fatalf("LEGION-209's pull request = %+v, want no decision before one is made", pr)
+	}
+}
+
+// An issue's open production check shows on its record as the check view: the repository, pull
+// request and merge commit, the looks and whether the latest is open, what woke it — absent
+// before a look wakes — the bound as the next wake, and whether the last look has started. An
+// issue the store lists no open check for, closed or never opened, shows none.
+func TestProjectShowsTheOpenProductionCheckOnItsIssue(t *testing.T) {
+	opened := projectedAt.Add(-2 * time.Hour)
+	woke := projectedAt.Add(-time.Hour)
+	store := projectionStore{
+		issues: []record.Issue{
+			{Key: "LEGION-208", Tree: "LEGION-208", Status: "done", Phase: phase.Done},
+			{Key: "LEGION-209", Tree: "LEGION-209", Status: "done", Phase: phase.Done},
+			{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Phase: phase.Done},
+		},
+		checks: []record.ProductionCheck{
+			{Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, MergeSHA: "merge-208", OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour),
+				Looks: 2, LookOpen: true, LookWakeAt: &woke, LastWakeKind: "issue.deployed", LastWakeDetail: "run 7 completed 2026-09-22T23:00:00Z", LastWakeAt: &woke, Last: true},
+			{Issue: "LEGION-209", Repo: "acme/widgets", Number: 43, OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour)},
+		},
+	}
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	want := &api.CheckView{
+		Repo: "acme/widgets", PullRequest: 42, MergeCommit: "merge-208", OpenedAt: opened, Looks: 2, LookOpen: true,
+		LastWake:   &api.CheckWakeView{Kind: "issue.deployed", Detail: "run 7 completed 2026-09-22T23:00:00Z", At: woke},
+		NextWakeAt: opened.Add(336 * time.Hour), Last: true,
+	}
+	if check := got.Issues["LEGION-208"].Check; !reflect.DeepEqual(check, want) {
+		t.Fatalf("LEGION-208's check = %+v, want %+v", check, want)
+	}
+	if check := got.Issues["LEGION-209"].Check; check == nil || check.LastWake != nil || check.MergeCommit != "" || check.Looks != 0 {
+		t.Fatalf("LEGION-209's check = %+v, want the check with no wake and no merge commit yet", check)
+	}
+	if check := got.Issues["LEGION-210"].Check; check != nil {
+		t.Fatalf("LEGION-210's check = %+v, want none", check)
 	}
 }
 

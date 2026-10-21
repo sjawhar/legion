@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -78,6 +79,71 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	}
 	if issue.Parent == nil || *issue.Parent != "LEGION-1" {
 		t.Fatalf("issue parent = %v, want LEGION-1", issue.Parent)
+	}
+}
+
+// An issue's resolved repository is Dispatch's to compute (its own, else its nearest ancestor's,
+// else the project's default); the list and the detail carry it, and null reads as none.
+func TestListAndDetailCarryTheResolvedRepository(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/issues":
+			writeJSON(t, w, []map[string]any{
+				{"key": "LEGION-1", "status": "todo", "rank": "a", "repo": nil, "resolved_repo": "acme/widgets"},
+				{"key": "LEGION-2", "status": "todo", "rank": "b", "repo": nil, "resolved_repo": nil},
+			})
+		case "/api/v1/issues/LEGION-3":
+			writeJSON(t, w, map[string]any{"key": "LEGION-3", "status": "todo", "rank": "c", "repo": "acme/gadgets", "resolved_repo": "acme/gadgets"})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	issues, err := client.ListIssues(context.Background(), "LEGION", nil)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(issues) != 2 || issues[0].ResolvedRepo != "acme/widgets" || issues[1].ResolvedRepo != "" {
+		t.Fatalf("listed issues = %#v, want LEGION-1 resolved to acme/widgets and LEGION-2 to none", issues)
+	}
+	issue, err := client.GetIssue(context.Background(), "LEGION-3")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if issue.ResolvedRepo != "acme/gadgets" {
+		t.Fatalf("issue = %#v, want it resolved to acme/gadgets", issue)
+	}
+}
+
+// The repository mapping is every project's (GET /api/v1/settings/repo-projects), each mapping
+// with its project and whether it is that project's default; the daemon keeps its own project's.
+func TestListRepoProjectsReadsEveryMappingWithItsDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/settings/repo-projects" {
+			t.Fatalf("request = %s %s, want GET /api/v1/settings/repo-projects", r.Method, r.URL.Path)
+		}
+		assertBearer(t, r)
+		writeJSON(t, w, []map[string]any{
+			{"repo": "acme/gadgets", "project": "LEGION", "default": false, "created_by": nil, "created_at": "2026-10-16T12:00:00Z"},
+			{"repo": "acme/widgets", "project": "LEGION", "default": true, "created_by": nil, "created_at": "2026-10-16T12:00:00Z"},
+			{"repo": "other/thing", "project": "OTHER", "default": true, "created_by": nil, "created_at": "2026-10-16T12:00:00Z"},
+		})
+	}))
+	defer server.Close()
+
+	mappings, err := New(server.URL, dispatchToken).ListRepoProjects(context.Background())
+	if err != nil {
+		t.Fatalf("list repo projects: %v", err)
+	}
+	want := []RepoProject{
+		{Repo: "acme/gadgets", Project: "LEGION"},
+		{Repo: "acme/widgets", Project: "LEGION", Default: true},
+		{Repo: "other/thing", Project: "OTHER", Default: true},
+	}
+	if !reflect.DeepEqual(mappings, want) {
+		t.Fatalf("mappings = %#v, want %#v", mappings, want)
 	}
 }
 
@@ -354,6 +420,48 @@ func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
 	}
 	if requests != 2 || len(bodies) != 1 || bodies[0] != "Existing daemon notice." {
 		t.Fatalf("requests=%d bodies=%#v, want one recent message", requests, bodies)
+	}
+}
+
+// BuildCommit is Dispatch's /healthz `commit`: the stamped build commit when the build has one, and
+// none ("") when the field is null or absent; a Dispatch that answers other than 2xx — its own 503
+// while a dependency is down — is an error, not a commit of none.
+func TestBuildCommitReadsTheHealthzCommitAndNoneForNullOrAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+		err    bool
+	}{
+		{name: "stamped", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":41}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
+		{name: "null", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":41}`},
+		{name: "absent", status: http.StatusOK, body: `{"ok":true,"db":true}`},
+		{name: "unavailable", status: http.StatusServiceUnavailable, body: `{"ok":false,"db":false,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"}`, err: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/healthz" {
+					t.Fatalf("request = %s %s, want GET /healthz", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			got, err := New(server.URL, dispatchToken).BuildCommit(context.Background())
+			if tc.err {
+				var refused *Error
+				if !errors.As(err, &refused) || refused.Status != tc.status {
+					t.Fatalf("BuildCommit = %q, %v; want Dispatch's %d as an error", got, err, tc.status)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("BuildCommit = %q, %v; want %q", got, err, tc.want)
+			}
+		})
 	}
 }
 

@@ -63,7 +63,8 @@ A thread is a card with its replies in order. In a thread you can:
 - **Resolve** the thread when it is done.
 
 Resolved threads fold into **Resolved (N)**. A resolved thread has **Reopen**. The same comments
-also appear on the issue's Conversation tab, in time order.
+also appear on the issue's Conversation tab, one card per thread, where a resolved one is listed
+under **Closed**.
 
 ### Suggestions
 

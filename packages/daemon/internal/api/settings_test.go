@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // settingsClassifiedTypes are config.Config and every type reachable from it: each exported field
@@ -34,7 +33,7 @@ var settingsClassifiedTypes = []reflect.Type{
 	reflect.TypeFor[config.GitHubApps](),
 	reflect.TypeFor[config.GitHubApp](),
 	reflect.TypeFor[config.Capabilities](),
-	reflect.TypeFor[ghrepo.Repository](),
+	reflect.TypeFor[config.RepositoryCacheConfig](),
 }
 
 // settingsEmitted is every config field SettingsOf emits, by `<Type>.<Field>`, and the settings
@@ -71,10 +70,12 @@ var settingsEmitted = map[string]string{
 	"Config.Gates":                                   "gates",
 	"Config.GitHubApps":                              "github_apps",
 	"Config.Linger":                                  "linger_hours",
+	"Config.ProductionCheckBound":                    "production_check_hours",
 	"Config.ReviewRoundCap":                          "review_round_cap",
 	"Config.MaxFixAttempts":                          "max_fix_attempts",
 	"Config.ControllerLaunch":                        "controller",
 	"Config.Capabilities":                            "capabilities",
+	"Config.WorkerBackends":                          "worker_backends",
 	"Runtime.Name":                                   "runtime.name",
 	"Runtime.Kubernetes":                             "runtime.kubernetes",
 	"Kubernetes.Namespace":                           "runtime.kubernetes.namespace",
@@ -86,6 +87,12 @@ var settingsEmitted = map[string]string{
 	"Kubernetes.AgentSecrets":                        "runtime.kubernetes.agent_secrets",
 	"Kubernetes.SessionDSNSecret":                    "runtime.kubernetes.session_store (\"postgres\" iff set, else \"pvc\"; the key itself is never emitted)",
 	"Kubernetes.Plugins":                             "runtime.kubernetes.plugins",
+	"Kubernetes.Setup":                               "runtime.kubernetes.setup",
+	"Kubernetes.RepositoryCache":                     "runtime.kubernetes.repository_cache",
+	"RepositoryCacheConfig.Volume":                   "runtime.kubernetes.repository_cache.volume",
+	"RepositoryCacheConfig.RefreshMinutes":           "runtime.kubernetes.repository_cache.refresh_minutes",
+	"RepositoryCacheConfig.RetainHours":              "runtime.kubernetes.repository_cache.retain_hours",
+	"RepositoryCacheConfig.Resources":                "runtime.kubernetes.repository_cache.resources",
 	"Scheduling.NodeSelector":                        "runtime.kubernetes.scheduling.node_selector",
 	"Scheduling.Tolerations":                         "runtime.kubernetes.scheduling.tolerations",
 	"Scheduling.PriorityClass":                       "runtime.kubernetes.scheduling.priority_class",
@@ -105,7 +112,6 @@ var settingsEmitted = map[string]string{
 	"PluginsConfig.PiLegion":                         "runtime.kubernetes.plugins.pi_legion",
 	"PluginsConfig.PiEnvoy":                          "runtime.kubernetes.plugins.pi_envoy",
 	"ProviderKey.Env":                                "provider_keys[]",
-	"Project.Repo":                                   "projects.<KEY>.repo",
 	"Project.MergeQueueRole":                         "projects.<KEY>.merge_queue_role",
 	"Project.Merge":                                  "projects.<KEY>.merge",
 	"Project.SlackChannels":                          "projects.<KEY>.slack_channels",
@@ -217,8 +223,8 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"tree_stop_timeout_seconds", "slow_command_timeout_seconds", "probe_interval_seconds",
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",
-		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "review_round_cap",
-		"max_fix_attempts", "controller", "capabilities",
+		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours", "review_round_cap",
+		"max_fix_attempts", "controller", "capabilities", "worker_backends",
 	}
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
@@ -228,7 +234,10 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	assertKeys(t, "settings.runtime", runtimeKeys, []string{"name", "kubernetes"})
 	assertKeys(t, "settings.runtime.kubernetes", keysOf(t, runtimeKeys["kubernetes"]), []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
-		"agent_secrets", "plugins",
+		"agent_secrets", "plugins", "setup", "repository_cache",
+	})
+	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, keysOf(t, runtimeKeys["kubernetes"])["repository_cache"]), []string{
+		"volume", "refresh_minutes", "retain_hours", "resources",
 	})
 	apps := keysOf(t, top["github_apps"])
 	assertKeys(t, "settings.github_apps", apps, []string{"implement", "review"})
@@ -270,8 +279,21 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	if want := []string{"^deploy/", `\.sql$`}; !slices.Equal(settings.Projects["WIDGETS"].Merge.ByHand, want) {
 		t.Errorf("projects.WIDGETS.merge.by_hand = %q, want %q", settings.Projects["WIDGETS"].Merge.ByHand, want)
 	}
-	if settings.Projects["LEGION"].Repo != "sjawhar/legion" || settings.Projects["WIDGETS"].MergeQueueRole != "merge-queue" {
-		t.Errorf("projects = %+v, want LEGION's repo and WIDGETS's merge queue role", settings.Projects)
+	if settings.Projects["WIDGETS"].MergeQueueRole != "merge-queue" {
+		t.Errorf("projects = %+v, want WIDGETS's merge queue role", settings.Projects)
+	}
+	if settings.ProductionCheckHours != 240 {
+		t.Errorf("production_check_hours = %v, want the file's 240", settings.ProductionCheckHours)
+	}
+	if want := map[string]string{"tester": "omp"}; !maps.Equal(settings.WorkerBackends, want) {
+		t.Errorf("worker_backends = %q, want %q", settings.WorkerBackends, want)
+	}
+	if want := []string{"/bin/sh", "-c", "echo fixture-setup"}; !slices.Equal(settings.Runtime.Kubernetes.Setup, want) {
+		t.Errorf("runtime.kubernetes.setup = %q, want %q", settings.Runtime.Kubernetes.Setup, want)
+	}
+	cache := settings.Runtime.Kubernetes.RepositoryCache
+	if cache.Volume != "40Gi" || cache.RefreshMinutes != 15 || cache.RetainHours != 48 || cache.Resources.CPU != "500m" || cache.Resources.CPURequest != "500m" || cache.Resources.Memory != "1Gi" || cache.Resources.EphemeralStorage != "2Gi" {
+		t.Errorf("runtime.kubernetes.repository_cache = %+v, want the file's volume, refresh, retention, cpu and memory with the default ephemeral storage", cache)
 	}
 	if settings.LingerHours != 1.5 || settings.WorkerStopTimeoutSeconds != 30 || settings.Controller != config.ControllerLaunchDaemon {
 		t.Errorf("linger_hours %v, worker_stop_timeout_seconds %d, controller %q; want 1.5, 30, daemon", settings.LingerHours, settings.WorkerStopTimeoutSeconds, settings.Controller)

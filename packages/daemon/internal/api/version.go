@@ -2,7 +2,7 @@ package api
 
 // DaemonAPIVersion is the contract this daemon speaks with the Legion plugin (@sjawhar/pi-legion):
 // the claim, credential, workflow, controller and state shapes the plugin's client parses strictly
-// (`packages/pi-legion/src/daemon-client.ts`, through
+// (`packages/pi-shared/src/daemon-client.ts`, through
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s
@@ -209,9 +209,91 @@ package api
 // channel and ships neither `slack_post` nor the reference, so the boot gate and
 // `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
 //
-// 30: LEGION-791 -- api.State gains `settings`, the daemon's resolved legion.yaml with every
+// 30: sjawhar/legion#1986 (per-owner credentials) -- every pane and pod holds a gh bundle, one
+// directory per GitHub owner of the project under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's
+// owner's (write) and every other owner's read-only, with LEGION_GH_PATH the real gh the `gh`
+// wrapper first on PATH (`legion gh`; `/opt/legion/bin/gh` in the image) runs; every shared
+// clone's credential helper is `legion git-credential` with `credential.useHttpPath` on. A role
+// Secret's gh keys are per owner (`github-hosts-<owner>`, `github-config-<owner>`,
+// `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
+// `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
+// `expiresAt` in place of one `hosts` and `config`. An image built before 30 has neither the
+// wrapper nor the two commands, so the image probe refuses it. (This branch took 28, then 29 when
+// sjawhar/legion#1999 landed at 28; main then landed sjawhar/legion#2003 at 29 and released
+// pi-legion v10.5.0 declaring it without these shapes, so this branch takes the number above it,
+// as the collision note says.)
+//
+// 31: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
+// targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
+// when the daemon first records it: `GET /legion/v1/state` and `read_record` answer `repo` and
+// `defaultBranch` on every issue and `repo` on its pull request, and the state answers
+// `repositories`, the project's mapping as the daemon serves it (`owners`, `mapped` with each
+// repository's `default`, and `refused`, each mapped repository left out with its `reason`). A
+// plugin at 30 reads the state with a strict schema that knows none of these fields, so it
+// refuses the state.
+//
+// 32: sjawhar/legion#1986 (the repository cache) -- the daemon runs one repository cache pod per
+// served repository, whose one container is the image's `legion workspace-init cache`, and every
+// issue pod's `workspace-init fetch` is told its repository's cache (`LEGION_REPOSITORY_CACHE_URL`)
+// and that cache's bearer token (`LEGION_REPOSITORY_CACHE_TOKEN_FILE`), and fills a fresh feed
+// from that cache alone, verified, fetching only the delta from GitHub; its `workspace-init
+// provision` makes the issue's clone shared with the feed, which now lives on the issue's own
+// volume. An image whose `legion` was built before 32 exits 2 on the unknown subcommand in every
+// cache pod, and its fetch clones from GitHub, ignoring the cache, so the daemon's image probe,
+// which holds the image's pi-legion to this number, refuses such an image at boot instead. The
+// state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
+// its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
+// `retainedUntil`, which a plugin at 31 reads with a strict schema that knows neither.
+//
+// 33: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
+// production check is work after the close. The phase enum gains `accepting` (between `reviewing`
+// and `retro`, the architect's `sign_off` phase, a backward target too) and loses
+// `production_check`; the issue record on GET /legion/v1/state gains `check` (api.CheckView), the
+// issue's open production check with its repository, pull request, merge commit, looks, last wake
+// and bound, absent once it closes; `HandoffCompleteRequest.commit` becomes optional, since the
+// implementer's report on a look of that check (`handoff_complete` on a done issue whose check is
+// open) pushes nothing, and its `verdict` gains `pending` beside `pass` and `fail`;
+// `PhaseBackwardRequest` gains an optional `issue`, which the architect's grant, serving its whole
+// tree, names the issue it returns from `accepting` with. A 32 plugin's strict reader refuses a
+// state carrying `check` or the phase `accepting`, and its `handoff_complete` requires a commit the
+// check report has none of, so the boot gate and `legion probe-image` refuse the mixed pair. (This
+// branch took 30, then 31 when main landed sjawhar/legion#1986 at 30 and released pi-legion
+// v10.8.3 declaring it; main then landed sjawhar/legion#2005 at 31 and released pi-legion v10.9.0
+// declaring it, then sjawhar/legion#2009 at 32 and released pi-legion v10.10.0 declaring it, each
+// without these shapes, so this branch takes the number above it, as the collision note says.)
+//
+// 34: sjawhar/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
+// `/legion/scratch` (scratchRoot), and the values `mainEnvironment` sets name its directories:
+// every role container of a pod, a workflow role's and the controller's, is told the same
+// `TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR` —
+// `/legion/scratch/{tmp,cache,data,bun/install/cache}` — and the same `GOCACHE` and `GOMODCACHE`,
+// `/legion/go/build` and `/legion/go/mod` beside the workspaces, as `UV_CACHE_DIR` already was.
+// `TMPDIR`, `BUN_INSTALL_CACHE_DIR`, `GOCACHE` and `GOMODCACHE` are new names; `XDG_CACHE_HOME`
+// and `XDG_DATA_HOME` move off the image's home directory. The Go pair is shared because both
+// hold content addressed by its hash and the roles of one issue may fill them at once, and a pair
+// is 751 MiB of build cache and 375 MiB of module cache for this repository, so the five
+// redundant copies would be about 5.5 GiB spent on nothing. `XDG_STATE_HOME`, whose
+// `/home/legion/.local/state/<role>` entry 18 declared, is the one directory of the scratch that
+// stays the role's own, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
+// from the state root, the name is an abstract unix socket, and an abstract socket name is one
+// name across every container of the pod, so one state home would block every role's broker but
+// the first. `XDG_CONFIG_HOME` is unchanged, the pod's shared in-memory volume `workspace-init`
+// writes the agents' jj configuration in, and the issue pod's `workspace-init`, the one init
+// container told any XDG home, keeps every value it had. These directories are on the volume
+// rather than the gigabyte of ephemeral storage the container is admitted with, which the tools'
+// caches overran: GKE Autopilot evicted the pod. The volume a project's issues get by default is
+// 50Gi (`runtime.kubernetes.issue_volume`). The pane and pod environment is the surface this
+// contract names, and four of these names are the runtime's alone (`runtimeOwned`), which a spec
+// or an operator's pod env is now refused for setting, so the boot gate and `legion probe-image`
+// hold the daemon and the plugin to the same list. (This branch took 33; main then landed
+// LEGION-781 at 33 and released pi-legion v10.16.0 declaring it, without these shapes, so this
+// branch takes the number above it, as the collision note says.)
+//
+// 35: LEGION-791 -- api.State gains `settings`, the daemon's resolved legion.yaml with every
 // credential, credential source and credential file path left out, keyed as the file is. Required,
 // so a plugin built before it refuses the state and the bump is why the two never meet; the plugin
 // parses it loosely (two typed keys, the rest unknown), so a later legion.yaml key changes no
-// strictly parsed shape and bumps nothing.
-const DaemonAPIVersion = 30
+// strictly parsed shape and bumps nothing. (This branch took 30; main then landed
+// sjawhar/legion#1986 at 30, 31 and 32, LEGION-781 at 33 and INFRA-31 at 34, each released
+// without this shape, so this branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 35

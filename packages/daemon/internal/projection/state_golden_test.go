@@ -40,7 +40,7 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	controller := claim.ControllerToken("legion")
 	admitted := time.Date(2026, 10, 6, 18, 2, 11, 0, time.UTC)
 	store := projectionStore{
-		issues: []record.Issue{{Key: issue, Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true}},
+		issues: []record.Issue{{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true}},
 		phases: map[string][]record.PhaseRow{issue: {{Issue: issue, Role: claim.RoleArchitect, Claim: architect}}},
 		slots:  []record.Slot{{Issue: issue, Index: 0, AdmittedAt: admitted}},
 	}
@@ -115,6 +115,7 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		EnvoyURL:                                "http://127.0.0.1:9020",
 		Gates:                                   config.Gates{Design: config.DesignGateRootIssues},
 		Linger:                                  72 * time.Hour,
+		ProductionCheckBound:                    336 * time.Hour,
 		ReviewRoundCap:                          3,
 		MaxFixAttempts:                          3,
 		ControllerWakeInterval:                  time.Hour,

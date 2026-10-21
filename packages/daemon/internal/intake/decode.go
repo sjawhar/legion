@@ -40,10 +40,15 @@ type envoyEnvelope struct {
 	TraceID        string `json:"trace_id"`
 }
 
+// serverStartedSubject is the one subject Dispatch publishes its own start on (not an issue's):
+// the daemon's third durable filters on it (OpenConsumers), and decodeMessage matches it whole.
+const serverStartedSubject = "notifications.dispatch.server.started"
+
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
 // repositories are its configured repositories: a GitHub event whose payload names another
-// repository is a nil Fact, whatever subject carried it.
+// repository is a nil Fact, whatever subject carried it. Dispatch's own start is matched before
+// the issue subjects, which it is not one of.
 func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
@@ -57,11 +62,21 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 	var unread []string
 	var err error
 	switch {
+	case subject == serverStartedSubject:
+		if envelope.Source != "dispatch" {
+			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
+		}
+		fact, err = decodeServerStarted(envelope.Payload)
 	case strings.HasPrefix(subject, "notifications.dispatch.issue."):
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
 		}
 		fact, err = decodeDispatchFact(subject, project, envelope.Payload)
+	case strings.HasPrefix(subject, dispatchProjectPrefix):
+		if envelope.Source != "dispatch" {
+			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
+		}
+		fact, err = decodeDispatchProjectFact(subject, project, envelope.Payload)
 	case strings.HasPrefix(subject, "notifications.github."):
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
@@ -98,6 +113,23 @@ func (e envoyEnvelope) valid() error {
 		return fmt.Errorf("Envoy envelope payload is not JSON")
 	}
 	return nil
+}
+
+// decodeServerStarted decodes Dispatch's server.started: the build commit Dispatch started on
+// (ServerStarted), which the workflow compares against the open production checks. A start naming
+// no commit — a Dispatch built without one stamped — is no fact, not poison: there is nothing to
+// compare, and the daemon's own boot covers its own build.
+func decodeServerStarted(payload string) (Fact, error) {
+	var started struct {
+		Commit string `json:"commit"`
+	}
+	if err := json.Unmarshal([]byte(payload), &started); err != nil {
+		return nil, fmt.Errorf("decode Dispatch server.started payload: %w", err)
+	}
+	if started.Commit == "" {
+		return nil, nil
+	}
+	return ServerStarted{Commit: started.Commit}, nil
 }
 
 type dispatchEvent struct {
@@ -138,18 +170,30 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
-			Key    string   `json:"key"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Parent *string  `json:"parent"`
-			Rank   string   `json:"rank"`
-			Labels []string `json:"labels"`
+			Key          string          `json:"key"`
+			Status       string          `json:"status"`
+			Title        string          `json:"title"`
+			Parent       *string         `json:"parent"`
+			Rank         string          `json:"rank"`
+			Labels       []string        `json:"labels"`
+			ResolvedRepo json.RawMessage `json:"resolved_repo"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
 		}
 		if issue.Key != event.IssueKey {
 			return nil, fmt.Errorf("Dispatch issue event payload key disagrees with event issue_key")
+		}
+		// A Dispatch that resolves an issue's repository sends resolved_repo on every issue event,
+		// null for none. An event JetStream retained from an older Dispatch has no such field: it
+		// still carries its actor and sequence, which the workflow's fences read, so it is decoded
+		// with its repository missing, for the consumer's PrepareRepository to fill.
+		missing := issue.ResolvedRepo == nil
+		var resolved *string
+		if !missing {
+			if err := json.Unmarshal(issue.ResolvedRepo, &resolved); err != nil {
+				return nil, fmt.Errorf("decode Dispatch issue payload resolved_repo: %w", err)
+			}
 		}
 		parent := ""
 		if issue.Parent != nil {
@@ -163,7 +207,9 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if event.Actor.Kind == "session" && !daemonActor {
 			actorSession = event.Actor.ID
 		}
-		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor}, nil
+		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
+			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
+			ResolvedRepoMissing: missing}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -204,6 +250,27 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
 		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+	case "issue.deployed":
+		var deployed struct {
+			Repo        string `json:"repo"`
+			Number      int    `json:"number"`
+			RunID       int64  `json:"run_id"`
+			CompletedAt string `json:"completed_at"`
+		}
+		if err := json.Unmarshal(event.Payload, &deployed); err != nil {
+			return nil, fmt.Errorf("decode Dispatch issue.deployed payload: %w", err)
+		}
+		if deployed.Repo == "" {
+			return nil, fmt.Errorf("Dispatch issue.deployed payload has no repo")
+		}
+		if deployed.Number <= 0 {
+			return nil, fmt.Errorf("Dispatch issue.deployed payload has no positive integer number")
+		}
+		completedAt, err := time.Parse(time.RFC3339, deployed.CompletedAt)
+		if err != nil {
+			return nil, fmt.Errorf("Dispatch issue.deployed payload has no RFC 3339 completed_at: %w", err)
+		}
+		return IssueDeployed{Issue: event.IssueKey, Repo: deployed.Repo, Number: deployed.Number, RunID: deployed.RunID, CompletedAt: completedAt.UTC()}, nil
 	default:
 		return nil, nil
 	}
@@ -214,6 +281,51 @@ func dispatchSubjectKey(subject string) (string, bool) {
 	remaining := strings.TrimPrefix(subject, prefix)
 	key, _, _ := strings.Cut(remaining, ".")
 	return key, key != ""
+}
+
+// dispatchProjectPrefix begins every Dispatch event of a project rather than an issue
+// (packages/envoy/internal/dispatch/outbox/publisher.go envelope): notifications.dispatch.project.
+// <KEY>.<type>.
+const dispatchProjectPrefix = "notifications.dispatch.project."
+
+// repoMappingType is the project event Dispatch emits when a repository's mapping to a project
+// changes, on the project it changed for (a move emits on the project left and the one joined).
+const repoMappingType = "settings.repo_project.updated"
+
+// mappingSubject is the subject Dispatch publishes project's mapping changes on, which the
+// Dispatch consumer hears beside every issue event.
+func mappingSubject(project string) string {
+	return dispatchProjectPrefix + project + "." + repoMappingType
+}
+
+// decodeDispatchProjectFact decodes one Dispatch project event: the mapping change of project is a
+// RepoMappingChanged, and any other project's event, or another type, is no fact.
+func decodeDispatchProjectFact(subject, project, payload string) (Fact, error) {
+	subjectProject, eventType, ok := strings.Cut(strings.TrimPrefix(subject, dispatchProjectPrefix), ".")
+	if !ok || subjectProject == "" {
+		return nil, fmt.Errorf("Dispatch project subject has no project key: %s", subject)
+	}
+	if subjectProject != project || eventType != repoMappingType {
+		return nil, nil
+	}
+	var event struct {
+		Project string `json:"project"`
+		Type    string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return nil, fmt.Errorf("decode Dispatch project event: %w", err)
+	}
+	if event.Project != subjectProject || event.Type != eventType {
+		return nil, fmt.Errorf("Dispatch project event %s of %s disagrees with its subject %s", event.Type, event.Project, subject)
+	}
+	return RepoMappingChanged{Project: project}, nil
+}
+
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func isJSONObject(raw json.RawMessage) bool {
@@ -227,10 +339,11 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 		return nil, nil, nil
 	}
 	// The payload names the event's repository; the subject's segments cannot, since a name may hold
-	// a dot. Only a configured repository's event is this daemon's, as in the shipped daemon, which
-	// registers a pull request only for its issue's repository (reducers.ts registerPrFenced).
+	// a dot. Only the event of a repository GitHub intake hears (ConsumerSpec.Repositories, as
+	// SetRepositories changes them) is this daemon's, matched case-insensitively as GitHub matches
+	// owner and repository names, and its fact names the heard repository.
 	repo, _ := rawString(raw, "repo")
-	at := slices.IndexFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo })
+	at := slices.IndexFunc(repositories, func(heard ghrepo.Repository) bool { return strings.EqualFold(heard.String(), repo) })
 	if at < 0 {
 		return nil, nil, nil
 	}

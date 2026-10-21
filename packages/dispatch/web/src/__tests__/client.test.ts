@@ -460,6 +460,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.getInbox("CORE");
   await api.createAsk("CORE-1", { question: "Ship?" });
   await api.listIssueAsks("CORE-1");
+  await api.listIssueAskThreads("CORE-1");
   await api.getAsk("ask-1");
   await api.listMyAnswers({ limit: 50, offset: 100 });
   await api.listMyReplies({ limit: 50, offset: 0 });
@@ -515,6 +516,7 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["GET", "/api/v1/inbox?project=CORE"],
     ["POST", "/api/v1/issues/CORE-1/asks"],
     ["GET", "/api/v1/issues/CORE-1/asks?state=all"],
+    ["GET", "/api/v1/issues/CORE-1/asks?state=all&thread=1"],
     ["GET", "/api/v1/asks/ask-1"],
     ["GET", "/api/v1/me/answers?limit=50&offset=100"],
     ["GET", "/api/v1/me/replies?limit=50&offset=0"],

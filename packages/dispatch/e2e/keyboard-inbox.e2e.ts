@@ -1,6 +1,14 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createComment, createIssue, createProject, getInbox, patchIssue } from "./api";
+import {
+  assigneeFilter,
+  assigneeOptions,
+  clearAssigneeFilter,
+  closeAssigneeFilter,
+  openAssigneeFilter,
+  pickAssignee,
+} from "./inbox-filter";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -216,8 +224,8 @@ test.describe("inbox selection", () => {
 
   // Escape with no row focused is the keyboard's Clear, and it is offered whenever the bar's Clear
   // is - including while a pick is in flight, when the optimistic move has folded the marked rows
-  // into Later and the bar counts nothing on the page. It clears every mark, a mark made in
-  // another view included; the late refusal then re-marks only the id it refused.
+  // into Later and the bar counts nothing on the page. It clears every mark, one made under a
+  // wider filter included; the late refusal then re-marks only the id it refused.
   test("Escape during a pending bulk snooze clears every mark, and a late refusal re-marks only its own", async ({
     browser,
   }) => {
@@ -246,12 +254,14 @@ test.describe("inbox selection", () => {
       const checkbox = (askId: string) =>
         page.locator(`[data-inbox-row="${askId}"]`).getByRole("checkbox");
 
-      // A mark made under Everyone, on a row Mine does not list.
-      await page.goto("/?view=everyone");
+      // A mark made with the filter cleared, on a row the reader's own list does not hold. The
+      // filter is driven rather than navigated to: a reload would lose the mark this is about.
+      await page.goto("/?assignee=everyone");
       const rows = page.locator("[data-inbox-row]");
       await expect(rows).toHaveCount(3);
       await checkbox(hidden.id).check();
-      await page.getByRole("button", { name: "Mine" }).click();
+      await pickAssignee(page, "alice");
+      await closeAssigneeFilter(page);
       await expect(rows).toHaveCount(2);
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
@@ -281,7 +291,8 @@ test.describe("inbox selection", () => {
       await expect(checkbox(refusedAsk.id)).toBeChecked();
       await page.getByRole("button", { name: /^Later \(1\)/ }).click();
       await expect(checkbox(takenAsk.id)).not.toBeChecked();
-      await page.getByRole("button", { name: "Everyone" }).click();
+      await clearAssigneeFilter(page);
+      await closeAssigneeFilter(page);
       await expect(checkbox(hidden.id)).not.toBeChecked();
     } finally {
       await context.close();
@@ -474,6 +485,40 @@ test.describe("inbox selection", () => {
     }
   });
 
+  // Escape is one level out, and while the assignee popover is open it is the innermost level:
+  // it closes, and the selection the same key would otherwise clear stays made. Two undos for
+  // one press is what the page's binding stands down for (`clear-selection`'s `!filterOpen`).
+  test("Escape inside the assignee popover closes it and clears nothing", async ({ browser }) => {
+    await seedInbox();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openInbox(page);
+      const rows = page.locator("[data-inbox-row]");
+      const bar = page.getByRole("group", { name: "Selected asks" });
+      await page.keyboard.press("j");
+      await page.keyboard.press("x");
+      await expect(bar).toContainText("1 selected");
+      // No row focused, so the page's Escape is the Clear the popover now stands in front of.
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+      await openAssigneeFilter(page);
+      await expect(page.getByRole("combobox", { name: "Search people" })).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(assigneeOptions(page)).toHaveCount(0);
+      await expect(assigneeFilter(page)).toBeFocused();
+      await expect(bar).toContainText("1 selected");
+      await expect(rows.nth(0).getByRole("checkbox")).toBeChecked();
+
+      // With the popover shut, the same key clears the selection, as it always did.
+      await page.keyboard.press("Escape");
+      await expect(bar).toHaveCount(0);
+      await expect(rows.nth(0).getByRole("checkbox")).not.toBeChecked();
+    } finally {
+      await context.close();
+    }
+  });
+
   // Two asks on one issue are two different questions, and a control named after the issue alone
   // says the same thing twice.
   test("each row's controls are named after its own ask", async ({ browser }) => {
@@ -525,9 +570,10 @@ test.describe("inbox selection", () => {
     }
   });
 
-  // The bar speaks for the rows this view lists. A mark made under Everyone must not follow the
-  // reader into Mine, where its row is not on screen and a bulk snooze would write unseen.
-  test("a mark made in another view neither counts nor snoozes once its row is out of the list", async ({
+  // The bar speaks for the rows this list holds. A mark made with the filter cleared must not
+  // follow the reader into their own list, where its row is not on screen and a bulk snooze
+  // would write unseen.
+  test("a mark made under a wider filter neither counts nor snoozes once its row is out of the list", async ({
     browser,
   }) => {
     await createProject({ key: "CORE", name: "Core" });
@@ -540,7 +586,7 @@ test.describe("inbox selection", () => {
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
-      await page.goto("/?view=everyone");
+      await page.goto("/?assignee=everyone");
       const rows = page.locator("[data-inbox-row]");
       await expect(rows).toHaveCount(2);
       await page.locator("body").focus();
@@ -555,7 +601,10 @@ test.describe("inbox selection", () => {
         wrote = true;
         return route.fallback();
       });
-      await page.getByRole("button", { name: "Mine" }).click();
+      // Narrowing to the reader alone, through the control: the Inbox stays mounted, so the
+      // mark is still made while its row is off the list.
+      await pickAssignee(page, "alice");
+      await closeAssigneeFilter(page);
       await expect(rows).toHaveCount(1);
       await expect(hiddenRow).toHaveCount(0);
       await expect(bar).toHaveCount(0);
@@ -570,8 +619,9 @@ test.describe("inbox selection", () => {
     }
   });
 
-  // The `?agent=` chip narrows the list the same way the view switch does, and the Inbox stays
-  // mounted across it: the chip's clear link and the browser's own Back are client-side moves.
+  // The `?agent=` chip narrows the list the same way the assignee filter does, and the Inbox
+  // stays mounted across it: the chip's clear link and the browser's own Back are client-side
+  // moves.
   test("a mark made outside the agent filter does not count inside it", async ({ browser }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", title: "Two agents, one issue" });

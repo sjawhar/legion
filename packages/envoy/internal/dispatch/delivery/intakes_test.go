@@ -14,6 +14,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -40,7 +41,7 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 			clients = append(clients, client)
 		}
 		return client, err
-	}, pool, fake.newTestClient())
+	}, pool, fake.newTestClient(), events.NewBroker())
 	if err != nil {
 		cancel()
 		t.Fatalf("start the intakes: %v", err)
@@ -151,7 +152,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	stop, err := StartIntakes(runCtx, func(string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL})
-	}, pool, github)
+	}, pool, github, events.NewBroker())
 	if err != nil {
 		cancel()
 		t.Fatalf("start the intakes: %v", err)
@@ -216,7 +217,7 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 	stop, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {
 		t.Error("connected a client for intakes that have no GitHub App")
 		return nil, errors.New("no connection here")
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}
@@ -246,7 +247,7 @@ func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
 		var err error
 		first, err = bus.Connect([]string{natsURL})
 		return first, err
-	}, nil, newFakeGitHub(t).newTestClient())
+	}, nil, newFakeGitHub(t).newTestClient(), events.NewBroker())
 	if !errors.Is(err, refused) {
 		t.Fatalf("start the intakes = %v, want the job intake's connect error", err)
 	}
@@ -289,7 +290,7 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 	})
 
 	seedDeliverySettings(t, ctx, pool)
-	startIntake(t, newIntake(shared, pool, github))
+	startIntake(t, newIntake(shared, pool, github, events.NewBroker()))
 	var refusal map[string]any
 	waitFor(t, 20*time.Second, func() bool {
 		for _, record := range logs() {

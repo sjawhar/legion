@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // fetching is a pod's status while workspace-fetch runs: Pending, workspace-init not started.
@@ -156,6 +157,55 @@ func TestTheLauncherDeadlineFollowsProvisioningUpToItsBound(t *testing.T) {
 				t.Fatalf("launcherDeadline = start + %s, want start + %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// The launch's wait for its pod's launcher outlasts the fetch's whole budget, which workspace-fetch
+// keeps to, so a fetch still within it is never cut short by the launch, and one that runs out of
+// it fails, naming why, before the launch would give up. With the default 2-minute boot timeout
+// and the runtime's own bound: a pod pulled in a minute whose fetch waits 35 minutes for its
+// repository's cache is still waited on, and one whose fetch runs its whole FetchBudget leaves
+// workspace-init the boot timeout.
+func TestTheLauncherWaitOutlastsTheFetchsWholeBudget(t *testing.T) {
+	g := newRig(t, nil)
+	start := time.Date(2026, 10, 16, 23, 0, 0, 0, time.UTC)
+	first, boot := start.Add(time.Minute), 2*time.Minute
+	for _, tc := range []struct {
+		name string
+		last time.Duration
+		want time.Duration
+	}{
+		{"a fetch waiting 35 minutes for its repository's cache", 35 * time.Minute, 35*time.Minute + boot},
+		{"a fetch running its whole budget", workspace.FetchBudget, workspace.FetchBudget + boot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := launcherDeadline(first, first.Add(tc.last), boot, g.r.ProvisionBound()).Sub(first); got != tc.want {
+				t.Fatalf("launcherDeadline = first provisioning + %s, want + %s: the fetch's own bound ends first", got, tc.want)
+			}
+		})
+	}
+}
+
+// A launch that gives up on a pod whose workspace-fetch is still running says so, with the state
+// of the repository cache that fetch fills a fresh feed from: the fetch's own failure, which would
+// name it, has not come.
+func TestALaunchThatGivesUpOnAFetchNamesTheRepositorysCache(t *testing.T) {
+	g := newRig(t, nil)
+	g.autoStart.Store(false)
+	g.r.provisionBound = time.Second
+	spec := workerSpec(t)
+	result := make(chan error, 1)
+	go func() { _, err := g.r.Spawn(g.ctx, spec); result <- err }()
+	g.pendingPod(SandboxName(spec.Claim), fetching)
+
+	select {
+	case err := <-result:
+		want := "; its workspace-fetch is still running; the repository cache of " + spec.Repository.String() + ", which a fresh feed comes from alone, is "
+		if err == nil || !strings.Contains(err.Error(), "wait for its role launcher: timed out after") || !strings.Contains(err.Error(), want) {
+			t.Fatalf("Spawn = %v, want the launcher wait's timeout naming the running fetch and %q", err, want)
+		}
+	case <-time.After(2*g.opts.BootTimeout + 5*time.Second):
+		t.Fatal("the launch still waits past its bound on a pod that is still fetching")
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -38,7 +39,7 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status`
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -72,7 +73,16 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 }
 
 func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
-	if issue.Generation > maxInt64 {
+	switch {
+	case issue.Repo == "":
+		return fmt.Errorf("record issue %s: repository is required", issue.Key)
+	case issue.DefaultBranch == "":
+		return fmt.Errorf("record issue %s: default branch is required", issue.Key)
+	case issue.GitHubRepo == "":
+		return fmt.Errorf("record issue %s: GitHub's spelling of its repository is required", issue.Key)
+	case !strings.EqualFold(issue.GitHubRepo, issue.Repo):
+		return fmt.Errorf("record issue %s: GitHub's spelling %s names another repository than %s", issue.Key, issue.GitHubRepo, issue.Repo)
+	case issue.Generation > maxInt64:
 		return fmt.Errorf("put issue %s: generation %d does not fit a bigint", issue.Key, issue.Generation)
 	}
 	var heldFrom any
@@ -80,18 +90,113 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	if issue.Hold != nil {
 		heldFrom, holdReason = string(issue.Hold.From), issue.Hold.Reason
 	}
-	_, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16)
+	// The update's condition keeps a recorded issue on the repository, default branch and GitHub
+	// spelling it was recorded with: a write naming others changes no row, and is refused below.
+	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, linger_until, held_from, last_dispatch_seq, ready_pending_version, hold_reason, dispatch_status, repo, default_branch, github_repo)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19)
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, linger_until = excluded.linger_until,
 		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
-		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status`,
+		ready_pending_version = excluded.ready_pending_version, hold_reason = excluded.hold_reason, dispatch_status = excluded.dispatch_status
+		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
 		issue.Rank, issue.HandedOver, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion, string(holdReason), issue.DispatchStatus,
+		issue.Repo, issue.DefaultBranch, issue.GitHubRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
+	}
+	if tag.RowsAffected() == 0 {
+		var repo, branch, github string
+		if err := tx.QueryRow(ctx, "select repo, default_branch, github_repo from issues where key = $1", issue.Key).Scan(&repo, &branch, &github); err != nil {
+			return fmt.Errorf("put issue %s: read the repository it is recorded on: %w", issue.Key, err)
+		}
+		return fmt.Errorf("record issue %s: it is recorded on %s@%s (GitHub's %s), and an issue's repository and default branch never change", issue.Key, repo, branch, github)
+	}
+	return nil
+}
+
+func (s *Postgres) UnfilledIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	return s.issuesWhere(ctx, tx, "project = $1 and (repo = '' or default_branch = '')", project, "with no repository")
+}
+
+func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
+}
+
+// issuesWhere is every record of project the condition selects, by key; what names them in an
+// error.
+func (s *Postgres) issuesWhere(ctx context.Context, tx pgx.Tx, condition, project, what string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues where "+condition+" order by key", project)
+	if err != nil {
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+	}
+	return issues, nil
+}
+
+func (s *Postgres) FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, defaultBranch, githubRepo string) error {
+	if repo == "" || defaultBranch == "" || githubRepo == "" {
+		return fmt.Errorf("fill the repository of %s: the repository, its default branch and GitHub's spelling of it are required", key)
+	}
+	if !strings.EqualFold(repo, githubRepo) {
+		return fmt.Errorf("fill the repository of %s: GitHub's spelling %s names another repository than %s", key, githubRepo, repo)
+	}
+	tag, err := tx.Exec(ctx, "update issues set repo = $2, default_branch = $3, github_repo = $4 where key = $1 and repo = '' and default_branch = ''",
+		key, repo, defaultBranch, githubRepo)
+	if err != nil {
+		return fmt.Errorf("fill the repository of %s: %w", key, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("fill the repository of %s: it has no unfilled record", key)
+	}
+	return nil
+}
+
+func (s *Postgres) NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error {
+	if !strings.EqualFold(repo, githubRepo) {
+		return fmt.Errorf("name the repository of %s: GitHub's spelling %s names another repository than %s", key, githubRepo, repo)
+	}
+	tag, err := tx.Exec(ctx, "update issues set github_repo = $3 where key = $1 and repo = $2 and github_repo = ''", key, repo, githubRepo)
+	if err != nil {
+		return fmt.Errorf("name the repository of %s: %w", key, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("name the repository of %s: it has no record on %s without GitHub's spelling", key, repo)
+	}
+	return nil
+}
+
+func (s *Postgres) RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error) {
+	var note RepoNote
+	err := tx.QueryRow(ctx, "select issue, resolved_repo, note, posted_at from repo_notes where issue = $1", issue).
+		Scan(&note.Issue, &note.ResolvedRepo, &note.Note, &note.PostedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read the repository note of %s: %w", issue, err)
+	}
+	return &note, nil
+}
+
+func (s *Postgres) PutRepoNote(ctx context.Context, tx pgx.Tx, note RepoNote) error {
+	if _, err := tx.Exec(ctx, `insert into repo_notes (issue, resolved_repo, note, posted_at) values ($1, $2, $3, $4)
+		on conflict (issue) do update set resolved_repo = excluded.resolved_repo, note = excluded.note, posted_at = excluded.posted_at`,
+		note.Issue, note.ResolvedRepo, note.Note, note.PostedAt); err != nil {
+		return fmt.Errorf("record the repository note of %s: %w", note.Issue, err)
 	}
 	return nil
 }
@@ -109,7 +214,8 @@ func scanIssue(row scanner) (*Issue, error) {
 	var heldFrom *string
 	var holdReason string
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
-		&issue.Rank, &issue.HandedOver, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus); err != nil {
+		&issue.Rank, &issue.HandedOver, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion, &holdReason, &issue.DispatchStatus,
+		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo); err != nil {
 		return nil, err
 	}
 	if generation < 0 {
@@ -190,7 +296,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
 	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
 	generation, snapshot, pushes, head_counted, head_counted_before, planned_red, review_seen, review_seen_at, state,
-	checked_head, required, required_workflows, required_workflows_head, mergeability`
+	checked_head, required, required_workflows, required_workflows_head, mergeability, merge_sha`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -281,8 +387,8 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
 		head_counted, head_counted_before, planned_red, review_seen, review_seen_at, state, checked_head, required,
-		required_workflows, required_workflows_head, mergeability)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+		required_workflows, required_workflows_head, mergeability, merge_sha)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
@@ -292,12 +398,13 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
 		required = excluded.required, required_workflows = excluded.required_workflows,
-		required_workflows_head = excluded.required_workflows_head, mergeability = excluded.mergeability`,
+		required_workflows_head = excluded.required_workflows_head, mergeability = excluded.mergeability,
+		merge_sha = excluded.merge_sha`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
 		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
 		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.HeadCountedBefore, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
-		workflows, pr.WorkflowsHead, pr.Mergeability,
+		workflows, pr.WorkflowsHead, pr.Mergeability, pr.MergeSHA,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -371,7 +478,7 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
 		&pushes, &pr.HeadCounted, &pr.HeadCountedBefore, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
-		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability); err != nil {
+		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability, &pr.MergeSHA); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -395,6 +502,86 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 		return nil, fmt.Errorf("decode required workflows: %w", err)
 	}
 	return &pr, nil
+}
+
+const productionCheckColumns = `issue, project, tree, repo, pr_number, merge_sha, opened_at, bound_at, looks, look_open,
+	look_wake_at, last_wake_kind, last_wake_detail, last_wake_at, pending_cause_kind, pending_cause_detail, last,
+	closed_at, outcome`
+
+func (s *Postgres) ProductionCheck(ctx context.Context, tx pgx.Tx, issue string) (*ProductionCheck, error) {
+	check, err := scanProductionCheck(tx.QueryRow(ctx, "select "+productionCheckColumns+" from production_checks where issue = $1", issue))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read production check of %s: %w", issue, err)
+	}
+	return check, nil
+}
+
+func (s *Postgres) PutProductionCheck(ctx context.Context, tx pgx.Tx, check ProductionCheck) error {
+	_, err := tx.Exec(ctx, `insert into production_checks (issue, project, tree, repo, pr_number, merge_sha, opened_at, bound_at,
+		looks, look_open, look_wake_at, last_wake_kind, last_wake_detail, last_wake_at, pending_cause_kind, pending_cause_detail,
+		last, closed_at, outcome)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, nullif($19::text, ''))
+		on conflict (issue) do update set project = excluded.project, tree = excluded.tree, repo = excluded.repo,
+		pr_number = excluded.pr_number, merge_sha = excluded.merge_sha, opened_at = excluded.opened_at, bound_at = excluded.bound_at,
+		looks = excluded.looks, look_open = excluded.look_open, look_wake_at = excluded.look_wake_at,
+		last_wake_kind = excluded.last_wake_kind, last_wake_detail = excluded.last_wake_detail, last_wake_at = excluded.last_wake_at,
+		pending_cause_kind = excluded.pending_cause_kind, pending_cause_detail = excluded.pending_cause_detail,
+		last = excluded.last, closed_at = excluded.closed_at, outcome = excluded.outcome`,
+		check.Issue, check.Project, check.Tree, check.Repo, check.Number, check.MergeSHA, check.OpenedAt, check.BoundAt,
+		check.Looks, check.LookOpen, check.LookWakeAt, check.LastWakeKind, check.LastWakeDetail, check.LastWakeAt,
+		check.PendingCauseKind, check.PendingCauseDetail, check.Last, check.ClosedAt, string(check.Outcome),
+	)
+	if err != nil {
+		return fmt.Errorf("put production check of %s: %w", check.Issue, err)
+	}
+	return nil
+}
+
+func (s *Postgres) OpenProductionChecks(ctx context.Context, tx pgx.Tx) ([]ProductionCheck, error) {
+	return openProductionChecks(ctx, tx, "", "list the open production checks")
+}
+
+func (s *Postgres) OpenProductionChecksOfTree(ctx context.Context, tx pgx.Tx, tree string) ([]ProductionCheck, error) {
+	return openProductionChecks(ctx, tx, tree, fmt.Sprintf("list the open production checks of tree %s", tree))
+}
+
+// openProductionChecks is every open check, of tree when tree is not "", oldest opened first.
+func openProductionChecks(ctx context.Context, tx pgx.Tx, tree, describe string) ([]ProductionCheck, error) {
+	rows, err := tx.Query(ctx, "select "+productionCheckColumns+` from production_checks
+		where closed_at is null and ($1::text = '' or tree = $1::text) order by opened_at, issue`, tree)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", describe, err)
+	}
+	defer rows.Close()
+	open := []ProductionCheck{}
+	for rows.Next() {
+		check, err := scanProductionCheck(rows)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", describe, err)
+		}
+		open = append(open, *check)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", describe, err)
+	}
+	return open, nil
+}
+
+func scanProductionCheck(row scanner) (*ProductionCheck, error) {
+	var check ProductionCheck
+	var outcome *string
+	if err := row.Scan(&check.Issue, &check.Project, &check.Tree, &check.Repo, &check.Number, &check.MergeSHA, &check.OpenedAt, &check.BoundAt,
+		&check.Looks, &check.LookOpen, &check.LookWakeAt, &check.LastWakeKind, &check.LastWakeDetail, &check.LastWakeAt,
+		&check.PendingCauseKind, &check.PendingCauseDetail, &check.Last, &check.ClosedAt, &outcome); err != nil {
+		return nil, err
+	}
+	if outcome != nil {
+		check.Outcome = CheckOutcome(*outcome)
+	}
+	return &check, nil
 }
 
 func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error) {

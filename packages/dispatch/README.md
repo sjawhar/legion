@@ -14,13 +14,15 @@ repository-to-project settings page at `/settings`; TanStack Query and SSE keep
 the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
-Conversation, Children, and Artifacts tabs; the Spec document renders and edits through
-`@legion/proof-editor`, with Yjs presence and margin-linked marks. The margin holds Comments and
-Pinned. Each issue-owned anchored comment thread is one card with flat replies, inline reply and
-author-edit controls, mark-aligned cross-hover, and resolved history behind `Resolved (N)`.
-Project-document thread replies are handled by the margin-by-owner surface. Below the `xl`
-breakpoint, navigation is a drawer and the margin is a bottom sheet; opening a thread uses a
-full-height view with a bottom-pinned composer. Controls use 44 px minimum touch targets.
+Conversation, Children, Artifacts, and Activity tabs; the Conversation lists one card per
+conversation and the Activity tab holds the issue's whole event history. The Spec document
+renders and edits through `@legion/proof-editor`, with Yjs presence and margin-linked marks. The
+margin holds Comments and Pinned. Each issue-owned anchored comment thread is one card with flat
+replies, inline reply and author-edit controls, mark-aligned cross-hover, and resolved history
+behind `Resolved (N)`. Project-document thread replies are handled by the margin-by-owner
+surface. Below the `xl` breakpoint, navigation is a drawer and the margin is a bottom sheet;
+opening a thread uses a full-height view with a bottom-pinned composer. Controls use 44 px
+minimum touch targets.
 
 ## Development
 
@@ -31,7 +33,7 @@ bun run dev
 bun run build:web
 bun run typecheck
 bun run lint
-bun test
+bun run test
 ```
 
 `bun run build:web` produces `web/dist` for the Dispatch server. `bun run dev`

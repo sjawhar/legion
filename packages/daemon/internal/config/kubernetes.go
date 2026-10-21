@@ -33,7 +33,7 @@ type Kubernetes struct {
 	// StorageClass is the issue volumes' class; required, because the cluster has no default.
 	StorageClass string
 	// IssueVolume is each issue's volume's size, a Kubernetes quantity, one volume per issue (the
-	// controller's pod owns one of its own); 20Gi when the file sets none.
+	// controller's pod owns one of its own); 50Gi when the file sets none.
 	IssueVolume string
 	// Kubeconfig is the credentials file the daemon's client reads; "" means in-cluster
 	// credentials. Context names the context in it to use, "" for its current context.
@@ -49,12 +49,15 @@ type Kubernetes struct {
 	// every Legion pod is Guaranteed and bursts past nothing; at the defaults a six-role issue pod
 	// sums to 3 CPU and 19 GiB. A request below its limit makes the role's pod Burstable.
 	// EphemeralStorage bounds what the container writes to the node's disk — its root filesystem,
-	// which no volume backs: the role's $HOME, Oh My Pi's state home with its Chromium profiles and
-	// logs, the Go and Bun caches — since pods of unrelated trees share a node and one role filling
-	// the node's disk would put every pod on it under DiskPressure; a container past its own limit
-	// has its pod evicted, the offending issue's alone. EphemeralStorageRequest is what the scheduler
-	// fits to the node's allocatable ephemeral storage (its root volume), small by default so that it
-	// binds almost nothing.
+	// which no volume backs: the role's $HOME, with the image's own content under it, and whatever a
+	// recipe writes elsewhere under the home directory (the temporary directory, the cache and data
+	// homes and bun's install cache are on the issue's volume under the scratch its roles share,
+	// the two Go caches one pair beside it, and each role's state home its own directory there) —
+	// since pods of unrelated trees share a node and one role filling the node's disk would put
+	// every pod on it under DiskPressure; a container past its own limit has its pod evicted, the
+	// offending issue's alone.
+	// EphemeralStorageRequest is what the scheduler fits to the node's allocatable ephemeral
+	// storage (its root volume), small by default so that it binds almost nothing.
 	Resources map[claim.Role]RoleResources
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
@@ -76,7 +79,41 @@ type Kubernetes struct {
 	// PluginsFromBinary is whether Plugins was filled from the binary's linked pair rather than
 	// read from the file; false while Plugins holds the file's own setting or is nil.
 	PluginsFromBinary bool
+	// Setup is `runtime.kubernetes.setup`: the argv every role's container runs before each start
+	// of its Oh My Pi, after a stale-plugin relaunch's install and with the environment and working
+	// directory Oh My Pi gets; Oh My Pi starts only once it exits 0. Nil when the file sets none.
+	Setup []string
+	// RepositoryCache is `runtime.kubernetes.repository_cache`, settled: the file's members where it
+	// sets them and the defaults (DefaultRepositoryCache) for the rest, field by field.
+	RepositoryCache RepositoryCacheConfig
 }
+
+// RepositoryCacheConfig is `runtime.kubernetes.repository_cache`: the volume each repository's
+// cache owns (a Kubernetes quantity), how many minutes between its fetches from GitHub, how many
+// hours the cache of a repository the mapping no longer names is kept before the orphan sweep
+// deletes it with its volume, and its one container's reservation, in a role's shape and settled as
+// a role's: cpu and memory limits, each requested in full unless a lower request is set, and its
+// ephemeral storage a limit over a request.
+type RepositoryCacheConfig struct {
+	Volume         string
+	RefreshMinutes int
+	RetainHours    int
+	Resources      RoleResources
+}
+
+// defaultRepositoryCache is the cache when the file sets none of it: a 20Gi volume, enough for one
+// repository's bare clone and sized on its own rather than against an issue's volume, fetched
+// every ten minutes, kept a week after its repository leaves the mapping; one CPU and 4Gi,
+// each requested in full, for a process whose daily `git repack -a -d` of a large repository wants
+// the memory, and the roles' 1Gi request over a 2Gi limit on the node's disk, since the clone lives
+// on the volume.
+var defaultRepositoryCache = RepositoryCacheConfig{
+	Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
+	Resources: RoleResources{CPU: "1", CPURequest: "1", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
+}
+
+// DefaultRepositoryCache is the repository cache's settled configuration when the file sets none.
+func DefaultRepositoryCache() RepositoryCacheConfig { return defaultRepositoryCache }
 
 // PluginsConfig is `runtime.kubernetes.plugins`: the pi-legion and pi-envoy sources a
 // stale-plugin relaunch installs, each an exact semver version, an absolute tarball path, or an
@@ -141,11 +178,14 @@ func below(request, limit string) bool {
 // since it starts one Oh My Pi at a time and runs no lane, and a probe sized as a role could not
 // boot on a full pool.
 // The ephemeral-storage limit bounds the role's writes to the node's disk (the container's root
-// filesystem: $HOME, the state home, the Go and Bun caches a build fills), 20Gi for the two roles
-// that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it to
-// the node's allocatable ephemeral storage — its root volume, which nobody has sized for these
-// pods — and a small request binds scheduling to almost nothing. An operator who knows the root
-// volume raises the request so the scheduler reserves disk.
+// filesystem: $HOME, with the image's own content under it, and whatever a recipe writes elsewhere
+// under the home directory; the temporary directory, the cache and data homes and bun's install
+// cache are on the issue's volume under the scratch the issue's roles share, the two Go caches one
+// pair beside it, and each role's state home its own directory there), 20Gi for the two roles
+// that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it
+// to the node's allocatable ephemeral storage — its root volume, which nobody has sized for
+// these pods — and a small request binds scheduling to almost nothing. An operator who knows the
+// root volume raises the request so the scheduler reserves disk.
 var defaultResources = map[claim.Role]RoleResources{
 	claim.RoleArchitect:   {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 	claim.RolePlanner:     {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
@@ -179,7 +219,7 @@ type PodConfig struct {
 const (
 	kubernetesKey      = "runtime.kubernetes"
 	podKey             = kubernetesKey + ".pod"
-	defaultIssueVolume = "20Gi"
+	defaultIssueVolume = "50Gi"
 	// poolLabel is the node label that selects the Legion pool. The runtime sets it on every pod,
 	// and the cluster's admission policy requires its value.
 	poolLabel = "legion.dev/pool"
@@ -372,7 +412,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"role_profiles", "agent_secrets", "plugins")
+		"role_profiles", "agent_secrets", "plugins", "repository_cache", "setup")
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +473,87 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Plugins, err = readPlugins(fields["plugins"]); err != nil {
 		return nil, err
 	}
+	if block.Setup, err = readSetup(fields["setup"]); err != nil {
+		return nil, err
+	}
+	if block.RepositoryCache, err = readRepositoryCache(fields["repository_cache"]); err != nil {
+		return nil, err
+	}
 	return block, nil
+}
+
+// readSetup reads `runtime.kubernetes.setup`, an argv of non-empty strings (readStrings), nil when
+// absent. An empty list is refused: it names no command to run, and leaving the key out is how a
+// file runs none. A shell command is the argv [/bin/sh, -c, '<command>'].
+func readSetup(value *yaml.Node) ([]string, error) {
+	const key = kubernetesKey + ".setup"
+	if value == nil {
+		return nil, nil
+	}
+	argv, err := readStrings(value, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("%s must name a command: leave it out to run none", key)
+	}
+	return argv, nil
+}
+
+// readRepositoryCache reads `runtime.kubernetes.repository_cache`, settled: each member the file
+// sets, the default (DefaultRepositoryCache) for each it leaves out, its reservation field by field
+// as a role's is (settledRequest: a raised limit alone is requested in full). A zero volume, refresh
+// or retention is refused with the negatives, as no size and no interval, and a request past its
+// limit is refused naming both, as the API server would refuse the pod.
+func readRepositoryCache(value *yaml.Node) (RepositoryCacheConfig, error) {
+	const key = kubernetesKey + ".repository_cache"
+	settled := defaultRepositoryCache
+	if value == nil || value.Tag == "!!null" {
+		return settled, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return RepositoryCacheConfig{}, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "volume", "refresh_minutes", "retain_hours", "resources")
+	if err != nil {
+		return RepositoryCacheConfig{}, err
+	}
+	volume, err := readQuantity(fields["volume"], key+".volume")
+	if err != nil {
+		return RepositoryCacheConfig{}, err
+	}
+	settled.Volume = cmp.Or(volume, settled.Volume)
+	for _, minutes := range []struct {
+		field string
+		into  *int
+	}{{"refresh_minutes", &settled.RefreshMinutes}, {"retain_hours", &settled.RetainHours}} {
+		read, err := readPositiveInteger(fields[minutes.field], key+"."+minutes.field, 0)
+		if err != nil {
+			return RepositoryCacheConfig{}, err
+		}
+		if read != nil {
+			*minutes.into = *read
+		}
+	}
+	if resources := fields["resources"]; resources != nil {
+		field := key + ".resources"
+		if resources.Kind != yaml.MappingNode {
+			return RepositoryCacheConfig{}, fmt.Errorf("%s must be a mapping of cpu, memory and ephemeral storage", field)
+		}
+		parts, err := members(resources, field, "cpu", "cpu_request", "memory", "memory_request", "ephemeral_storage", "ephemeral_storage_request")
+		if err != nil {
+			return RepositoryCacheConfig{}, err
+		}
+		set, err := readRoleQuantities(parts, field)
+		if err != nil {
+			return RepositoryCacheConfig{}, err
+		}
+		settled.Resources = settleResources(set, settled.Resources)
+	}
+	if err := requestsUnderLimits(key+".resources", settled.Resources); err != nil {
+		return RepositoryCacheConfig{}, err
+	}
+	return settled, nil
 }
 
 // ReadPodFile reads a `runtime.kubernetes.pod` block kept in a file of its own, such as an
@@ -798,25 +918,11 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	}
 	block.Resources = DefaultResources()
 	for role, set := range file.Kubernetes.Resources {
-		settled := block.Resources[role]
-		block.Resources[role] = RoleResources{
-			CPU: cmp.Or(set.CPU, settled.CPU), CPURequest: settledRequest(set.CPURequest, set.CPU, settled.CPURequest),
-			Memory: cmp.Or(set.Memory, settled.Memory), MemoryRequest: settledRequest(set.MemoryRequest, set.Memory, settled.MemoryRequest),
-			EphemeralStorage:        cmp.Or(set.EphemeralStorage, settled.EphemeralStorage),
-			EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, settled.EphemeralStorageRequest),
-		}
+		block.Resources[role] = settleResources(set, block.Resources[role])
 	}
 	for _, role := range append(slices.Clone(claim.Roles), claim.RoleController) {
-		settled := block.Resources[role]
-		for _, bound := range []struct{ requestKey, request, limitKey, limit string }{
-			{"cpu_request", settled.CPURequest, "cpu", settled.CPU},
-			{"memory_request", settled.MemoryRequest, "memory", settled.Memory},
-			{"ephemeral_storage_request", settled.EphemeralStorageRequest, "ephemeral_storage", settled.EphemeralStorage},
-		} {
-			request, limit := resource.MustParse(bound.request), resource.MustParse(bound.limit)
-			if request.Cmp(limit) > 0 {
-				return fmt.Errorf("%s.resources.%s.%s %s exceeds %s %s", kubernetesKey, role, bound.requestKey, bound.request, bound.limitKey, bound.limit)
-			}
+		if err := requestsUnderLimits(kubernetesKey+".resources."+string(role), block.Resources[role]); err != nil {
+			return err
 		}
 	}
 	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
@@ -829,6 +935,33 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 // keeps the default's shape, whatever request it carries.
 func settledRequest(request, limit, defaultRequest string) string {
 	return cmp.Or(request, limit, defaultRequest)
+}
+
+// settleResources is the reservation set settled over defaults: each limit and ephemeral-storage
+// request set gives, else the default's; each cpu or memory request as settledRequest settles it.
+func settleResources(set, defaults RoleResources) RoleResources {
+	return RoleResources{
+		CPU: cmp.Or(set.CPU, defaults.CPU), CPURequest: settledRequest(set.CPURequest, set.CPU, defaults.CPURequest),
+		Memory: cmp.Or(set.Memory, defaults.Memory), MemoryRequest: settledRequest(set.MemoryRequest, set.Memory, defaults.MemoryRequest),
+		EphemeralStorage:        cmp.Or(set.EphemeralStorage, defaults.EphemeralStorage),
+		EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, defaults.EphemeralStorageRequest),
+	}
+}
+
+// requestsUnderLimits refuses a settled reservation whose cpu, memory or ephemeral-storage request
+// exceeds its limit, naming both keys under prefix, since the API server would refuse the pod.
+func requestsUnderLimits(prefix string, settled RoleResources) error {
+	for _, bound := range []struct{ requestKey, request, limitKey, limit string }{
+		{"cpu_request", settled.CPURequest, "cpu", settled.CPU},
+		{"memory_request", settled.MemoryRequest, "memory", settled.Memory},
+		{"ephemeral_storage_request", settled.EphemeralStorageRequest, "ephemeral_storage", settled.EphemeralStorage},
+	} {
+		request, limit := resource.MustParse(bound.request), resource.MustParse(bound.limit)
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("%s.%s %s exceeds %s %s", prefix, bound.requestKey, bound.request, bound.limitKey, bound.limit)
+		}
+	}
+	return nil
 }
 
 // secretDataKey is what Kubernetes accepts as a Secret's data key.
@@ -1030,18 +1163,9 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 				return nil, fmt.Errorf("%s.%s is gone: a role's reservation is its cpu and memory limits, with cpu_request and memory_request below them where set", field, gone)
 			}
 		}
-		var read RoleResources
-		for _, quantity := range []struct {
-			key    string
-			target *string
-		}{
-			{"cpu", &read.CPU}, {"cpu_request", &read.CPURequest},
-			{"memory", &read.Memory}, {"memory_request", &read.MemoryRequest},
-			{"ephemeral_storage", &read.EphemeralStorage}, {"ephemeral_storage_request", &read.EphemeralStorageRequest},
-		} {
-			if *quantity.target, err = readQuantity(fields[quantity.key], field+"."+quantity.key); err != nil {
-				return nil, err
-			}
+		read, err := readRoleQuantities(fields, field)
+		if err != nil {
+			return nil, err
 		}
 		if resources == nil {
 			resources = map[claim.Role]RoleResources{}
@@ -1049,6 +1173,26 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 		resources[role] = read
 	}
 	return resources, nil
+}
+
+// readRoleQuantities reads a reservation's six quantities from fields, the members of the mapping
+// at field: its cpu, memory and ephemeral-storage limits and requests, each empty where unset.
+func readRoleQuantities(fields map[string]*yaml.Node, field string) (RoleResources, error) {
+	var read RoleResources
+	for _, quantity := range []struct {
+		key    string
+		target *string
+	}{
+		{"cpu", &read.CPU}, {"cpu_request", &read.CPURequest},
+		{"memory", &read.Memory}, {"memory_request", &read.MemoryRequest},
+		{"ephemeral_storage", &read.EphemeralStorage}, {"ephemeral_storage_request", &read.EphemeralStorageRequest},
+	} {
+		var err error
+		if *quantity.target, err = readQuantity(fields[quantity.key], field+"."+quantity.key); err != nil {
+			return RoleResources{}, err
+		}
+	}
+	return read, nil
 }
 
 // checkKubernetesKeys refuses a file whose keys outside the block leave a pod unable to run, or
@@ -1067,7 +1211,7 @@ func checkKubernetesKeys(file fileConfig) error {
 		{"operator_token_file", file.OperatorTokenFile == nil, "legion claims presents this token, as legion controller start does under controller: operator"},
 		{"dispatch_url", file.DispatchURL == nil, "the workflow is what launches every pod"},
 		{"github_apps", file.GitHubApps == nil, "every pod's workspace is cloned with the implement App's token"},
-		{"projects", file.Projects == nil, "every pod's workspace is its project's repository"},
+		{"projects", file.Projects == nil, "every pod's workspace is a repository Dispatch maps to the daemon's project"},
 	} {
 		if rule.absent {
 			return fmt.Errorf("%s is required when runtime is kubernetes: %s", rule.key, rule.why)

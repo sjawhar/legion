@@ -32,7 +32,7 @@ operator_token_file: /var/run/legion/OPERATOR_TOKEN
 dispatch_url: https://dispatch.internal.example
 dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
-  LEGSMOKE: { repo: sjawhar/legion-smoke }
+  LEGSMOKE: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }
@@ -57,6 +57,12 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
     session_store: pvc
+    setup: [/bin/sh, -c, 'omp plugin marketplace add acme/agent-skills']
+    repository_cache:
+      volume: 50Gi
+      refresh_minutes: 5
+      retain_hours: 24
+      resources: {cpu: 2}
     scheduling:
       node_selector: {karpenter.k8s.aws/instance-family: m7i, zone: 4}
       tolerations:
@@ -104,6 +110,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		IssueVolume:  "30Gi",
 		Kubeconfig:   filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
 		Context:      "legion-daemon@example",
+		Setup:        []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
 		Scheduling: Scheduling{
 			NodeSelector: map[string]string{"karpenter.k8s.aws/instance-family": "m7i", "zone": "4"},
 			Tolerations: []Toleration{
@@ -142,6 +149,12 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 				{Name: "operator-creds", MountPath: "/etc/legion-operator/creds"},
 			},
 		},
+		// The cache's reservation sets cpu alone, requested in full; the rest is the default's,
+		// field by field.
+		RepositoryCache: RepositoryCacheConfig{
+			Volume: "50Gi", RefreshMinutes: 5, RetainHours: 24,
+			Resources: RoleResources{CPU: "2", CPURequest: "2", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
+		},
 	}}
 	if cfg.Runtime.Name != want.Name || cfg.Runtime.Kubernetes == nil {
 		t.Fatalf("Runtime = %+v, want %q with its block", cfg.Runtime, want.Name)
@@ -154,7 +167,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 }
 
-// What a block that sets only its required members settles to: the issue volume at 20Gi, every
+// What a block that sets only its required members settles to: the issue volume at 50Gi, every
 // role's reservation at the daemon's default (the six workflow roles and the controller, each with
 // a cpu and a memory, summing to 3 CPU and 19 GiB over an issue pod's six, and each with its
 // ephemeral-storage limit, 20Gi for the implementer and tester and 10Gi for the rest, over a 1Gi
@@ -173,7 +186,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		name      string
 		got, want any
 	}{
-		{"issue_volume", block.IssueVolume, "20Gi"},
+		{"issue_volume", block.IssueVolume, "50Gi"},
 		{"resources", block.Resources, map[claim.Role]RoleResources{
 			claim.RoleArchitect:   {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 			claim.RolePlanner:     {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
@@ -188,6 +201,11 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"context", block.Context, ""},
 		{"pod", block.Pod, PodConfig{}},
 		{"session_dsn_secret", block.SessionDSNSecret, ""},
+		{"setup", block.Setup, []string(nil)},
+		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
+			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
+			Resources: RoleResources{CPU: "1", CPURequest: "1", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !reflect.DeepEqual(tc.got, tc.want) {
@@ -246,6 +264,19 @@ func TestARoleCanRequestLessMemoryThanItsLimit(t *testing.T) {
 	}
 	if architect := cfg.Runtime.Kubernetes.Resources[claim.RoleArchitect]; architect.Burstable() {
 		t.Errorf("architect %+v reads Burstable, want the default's Guaranteed", architect)
+	}
+}
+
+// The repository cache's reservation settles as a role's: an explicit lower memory request is kept
+// under its limit, a raised cpu limit alone is requested in full, and the rest is the default's.
+func TestTheRepositoryCacheCanRequestLessMemoryThanItsLimit(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    repository_cache: {resources: {cpu: \"2\", memory: 16Gi, memory_request: 4Gi}}\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	want := RoleResources{CPU: "2", CPURequest: "2", Memory: "16Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"}
+	if got := cfg.Runtime.Kubernetes.RepositoryCache.Resources; got != want {
+		t.Errorf("the repository cache's reservation = %+v, want %+v", got, want)
 	}
 }
 
@@ -428,10 +459,75 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
-			// The runtime reads a zero volume as "use the default", so zero would be a silent 20Gi.
+			// The runtime reads a zero volume as "use the default", so zero would be a silent 50Gi.
 			name: "issue_volume zero",
 			body: kubernetesFile + "    issue_volume: 0\n",
 			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			name: "setup a string",
+			body: kubernetesFile + "    setup: omp plugin install agent-skills\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup a mapping",
+			body: kubernetesFile + "    setup: {command: omp}\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup a word that is no string",
+			body: kubernetesFile + "    setup: [omp, 3]\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup an empty word",
+			body: kubernetesFile + "    setup: [omp, \"\"]\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup naming no command",
+			body: kubernetesFile + "    setup: []\n",
+			want: "runtime.kubernetes.setup must name a command: leave it out to run none",
+		},
+		{
+			name: "repository_cache volume zero",
+			body: kubernetesFile + "    repository_cache: {volume: 0}\n",
+			want: "runtime.kubernetes.repository_cache.volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			name: "repository_cache retain_hours zero",
+			body: kubernetesFile + "    repository_cache: {retain_hours: 0}\n",
+			want: "runtime.kubernetes.repository_cache.retain_hours must be a positive integer",
+		},
+		{
+			name: "repository_cache refresh_minutes zero",
+			body: kubernetesFile + "    repository_cache: {refresh_minutes: 0}\n",
+			want: "runtime.kubernetes.repository_cache.refresh_minutes must be a positive integer",
+		},
+		{
+			name: "repository_cache an unknown member",
+			body: kubernetesFile + "    repository_cache: {size: 20Gi}\n",
+			want: "unknown key runtime.kubernetes.repository_cache.size",
+		},
+		{
+			name: "repository_cache not a mapping",
+			body: kubernetesFile + "    repository_cache: 20Gi\n",
+			want: "runtime.kubernetes.repository_cache must be a mapping",
+		},
+		{
+			name: "repository_cache ephemeral storage request past its limit",
+			body: kubernetesFile + "    repository_cache: {resources: {ephemeral_storage: 1Gi, ephemeral_storage_request: 2Gi}}\n",
+			want: "runtime.kubernetes.repository_cache.resources.ephemeral_storage_request 2Gi exceeds ephemeral_storage 1Gi",
+		},
+		{
+			name: "repository_cache memory request past its limit",
+			body: kubernetesFile + "    repository_cache: {resources: {memory: 4Gi, memory_request: 8Gi}}\n",
+			want: "runtime.kubernetes.repository_cache.resources.memory_request 8Gi exceeds memory 4Gi",
+		},
+		{
+			name: "repository_cache cpu request past the default limit",
+			body: kubernetesFile + "    repository_cache: {resources: {cpu_request: \"2\"}}\n",
+			want: "runtime.kubernetes.repository_cache.resources.cpu_request 2 exceeds cpu 1",
 		},
 		{
 			// The tree-volume layout's key (LEGION-632): refused naming the key that replaced it, not
@@ -744,8 +840,8 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "projects absent",
-			body: kubernetesWith("projects:\n  LEGSMOKE: { repo: sjawhar/legion-smoke }\n", ""),
-			want: "projects is required when runtime is kubernetes: every pod's workspace is its project's repository",
+			body: kubernetesWith("projects:\n  LEGSMOKE: {}\n", ""),
+			want: "projects is required when runtime is kubernetes: every pod's workspace is a repository Dispatch maps to the daemon's project",
 		},
 		{
 			name: "omp_invocation set",
@@ -1009,7 +1105,7 @@ nats_urls:
 dispatch_url: https://dispatch.internal.example
 dispatch_token_file: /tmp/stage4b/dispatch-token
 projects:
-  LEGSMOKE: { repo: sjawhar/legion-smoke }
+  LEGSMOKE: {}
 gates:
   design: off
 admission_cap: 2

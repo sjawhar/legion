@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -118,7 +119,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	replace := !live || (drifted && !installing) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
-		bound, err := r.launcherBound(bounded, s, pod, l.roles)
+		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {
 			return fail("read its pod's launcher bindings", err)
 		}
@@ -147,7 +148,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		if err := l.kind.provision(bounded, r, &l, s); err != nil {
 			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, boundRanOut(ctx, bounded, r.launchBound, err))
 		}
-		if err := r.writeLauncherSecrets(bounded, s, l); err != nil {
+		if err := r.writeLauncherSecrets(bounded, s, &l); err != nil {
 			return fail("write its launcher secrets", err)
 		}
 		template := r.podTemplate(l)
@@ -241,26 +242,43 @@ func boundRanOut(parent, bounded context.Context, bound time.Duration, err error
 // being deleted the wait's last Get, past its deadline, and the Get and Create after it (6); the
 // suspension patch (1); awaitPodGone's confirming Get, which may begin just before its deadline
 // (1); provision's retained-sessions store read, its token mint and its Secret upsert's Get,
-// Delete and Create (5); the Running patch (1); the stop of an earlier generation (1); the address
-// record patch (1); the Start frame (1). Per launcher role of the pod (relaunchRoleCalls, claim.Roles
-// for an issue pod, the most any pod has): launcherBound's Secret Get (1); writeLauncherSecrets'
-// credential mint and its upsert's Get, Delete and Create (4); bindLauncherSecrets' Get and Update,
-// and both again on a conflict (4).
+// Delete and Create (5), and its repository cache's ensure (cacheEnsureCalls); the Running patch
+// (1); the stop of an earlier generation (1); the address record patch (1); the Start frame (1).
+// Per launcher role of the pod (relaunchRoleCalls, claim.Roles for an issue pod, the most any pod
+// has): launcherBound's Secret Get (1); writeLauncherSecrets' credential mint and its upsert's Get,
+// Delete and Create (4); bindLauncherSecrets' Get and Update, and both again on a conflict (4).
 var relaunchCalls = relaunchPodCalls + relaunchRoleCalls*len(claim.Roles)
 
 const (
-	relaunchPodCalls  = 17
+	relaunchPodCalls  = 17 + cacheEnsureCalls
 	relaunchRoleCalls = 9
+	// cacheEnsureCalls is one ensure of a repository's cache (ensureRepositoryCache) at its most:
+	// ensureCacheSandbox's Get and Create, the Get after a Create that found the name taken, and
+	// for a Sandbox being deleted the wait's last Get and the Get and Create after it (6);
+	// writeCacheSecret's token mint, its Secret's Get, and its upsert's Get, Delete and Create (5);
+	// reconcileCachePod's suspension patch, awaitPodGone's confirming Get and the Running patch (3).
+	cacheEnsureCalls = 14
 )
 
 // launchBound is the longest one launch try may run once it holds its pod's launch turn, from the
 // runtime's boot timeout, ProvisionBound and termination grace (LaunchBound): the sum of a
 // replacing try's waits — ensureSandbox's wait for a Sandbox being deleted, awaitPodGone and
-// awaitNewPod, the boot timeout each; awaitRoleLauncher's backstop; the termination grace the
-// start frame has past the launcher deadline — and of its relaunchCalls calls at apiTimeout each.
+// awaitNewPod, the boot timeout each; provision's waits on its repository's cache (cacheWaits);
+// awaitRoleLauncher's backstop; the termination grace the start frame has past the launcher
+// deadline — and of its relaunchCalls calls at apiTimeout each.
 func launchBound(bootTimeout, provisionBound, terminationGrace time.Duration) time.Duration {
-	waits := 3*bootTimeout + launcherBackstop(bootTimeout, provisionBound) + terminationGrace
+	waits := 3*bootTimeout + cacheWaits(bootTimeout) + launcherBackstop(bootTimeout, provisionBound) + terminationGrace
 	return waits + time.Duration(relaunchCalls)*apiTimeout
+}
+
+// cacheWaits is the most a launch try's provision waits on its repository's cache: the cache's
+// turn (lockPod on its Sandbox), which at most one other ensure holds ahead of it in the worst case
+// — a launch of another of the repository's issues, or the sweep — with that ensure's two waits and
+// its cacheEnsureCalls calls, since an ensure after it finds the cache made; then this try's own
+// ensure's two waits, ensureCacheSandbox's for a cache Sandbox being deleted and
+// reconcileCachePod's awaitPodGone; then awaitCacheService. Each wait is the boot timeout.
+func cacheWaits(bootTimeout time.Duration) time.Duration {
+	return 2*bootTimeout + time.Duration(cacheEnsureCalls)*apiTimeout + 2*bootTimeout + bootTimeout
 }
 
 // launcherBackstop is await's own budget for a role launcher's wait (awaitRoleLauncher), given the
@@ -312,7 +330,7 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 		}
 		now := time.Now()
 		if !now.Before(deadline) {
-			return false, fmt.Errorf("timed out after %s waiting for %s", deadline.Sub(start), what)
+			return false, fmt.Errorf("timed out after %s waiting for %s%s", deadline.Sub(start), what, r.stillFetching(view.pod))
 		}
 		if provisioning(view.pod) {
 			if first.IsZero() {
@@ -334,6 +352,17 @@ func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Tim
 		return limit
 	}
 	return deadline
+}
+
+// stillFetching is what a launch that gives up on pod says of it while its workspace-fetch still
+// runs: so, with the state of the repository cache that fetch fills a fresh feed from
+// (fetchCacheState), since the fetch's own failure, which names why it ran so long, has not come.
+// Nothing for a pod past its fetch.
+func (r *Runtime) stillFetching(pod *corev1.Pod) string {
+	if status := initContainerStatus(pod, fetchContainer); status == nil || status.State.Running == nil {
+		return ""
+	}
+	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
 }
 
 // provisioning is whether pod is running one of its init containers, workspace-fetch or
@@ -555,34 +584,78 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
 // launcher's start command instead (launcherCommand). The Secret also carries the role's GitHub
-// credential, its gh hosts.yml and config.yml rendered from the role's App token
-// (Options.GitHubCredential), which its container projects at GHConfigDir; a mint that fails fails
-// the launch naming the role, as a provisioning-token mint does, since a pod whose gh holds no
-// token would start every role unable to reach GitHub.
-func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l launch) error {
+// credential, its gh bundle (gitHubBundles): each owner's hosts.yml and config.yml (GitHubHostsKey,
+// GitHubConfigKey) and the default owner (GitHubDefaultKey), which its container projects at
+// GHConfigDir.
+func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launch) error {
+	bundles, err := r.gitHubBundles(ctx, l)
+	if err != nil {
+		return err
+	}
 	for _, role := range l.roles {
 		token, err := launcherToken()
 		if err != nil {
 			return err
 		}
-		data := map[string][]byte{LauncherTokenFile: []byte(token)}
-		minting, cancel := call(ctx)
-		rendered, err := r.gitHubCredential(minting, role)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("write the github credential for %s: %w", role, err)
+		bundle := bundles[role]
+		data := map[string][]byte{LauncherTokenFile: []byte(token), GitHubDefaultKey: []byte(bundle.Default)}
+		for _, owner := range l.gitHubOwners {
+			rendered := bundle.Owners[owner]
+			data[GitHubHostsKey(owner)], data[GitHubConfigKey(owner)] = []byte(rendered.Hosts), []byte(rendered.Config)
 		}
-		data[GitHubHostsKey], data[GitHubConfigKey] = []byte(rendered.Hosts), []byte(rendered.Config)
 		if err := r.upsertSecret(ctx, corev1.Secret{
-			ObjectMeta: r.secretMeta(s, l, roleSecretName(s.Name, role)),
+			ObjectMeta: r.secretMeta(s, *l, roleSecretName(s.Name, role)),
 			Type:       corev1.SecretTypeOpaque,
 			Data:       data,
 		}); err != nil {
 			return err
 		}
-		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
+		if bundle.Default == "" {
+			r.log.Info("sandbox runtime: no GitHub owner to act for; the role's gh acts as nobody", "sandbox", s.Name, "role", role)
+			continue
+		}
+		written := bundle.Owners[bundle.Default]
+		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", written.App,
+			"expiresAt", written.ExpiresAt, "owners", l.gitHubOwners)
 	}
 	return nil
+}
+
+// gitHubBundles mints each launcher role's gh bundle for the issue's repository's owner
+// (Options.GitHubCredential) and records the bundle's owners and default on l, which the pod's gh
+// volumes and every agent's GH_CONFIG_DIR are built from. Every role's bundle holds the same owners
+// and default, and one that does not fails the launch, as a mint that fails or a bundle Validate
+// refuses does, naming the role, since a pod whose gh holds no token would start every role unable
+// to reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
+// for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting as
+// nobody, as `legion controller start` does there, its bundle empty — no owner, no default — and
+// its gh directory an empty one (volumes).
+func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]ghconfig.Bundle, error) {
+	l.gitHubOwners, l.gitHubDefault = nil, ""
+	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
+	for i, role := range l.roles {
+		minting, cancel := call(ctx)
+		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository.Owner())
+		cancel()
+		switch {
+		case role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):
+			bundle, err = ghconfig.Bundle{}, nil
+		case err == nil:
+			err = bundle.Validate()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("write the github credential for %s: %w", role, err)
+		}
+		owners := bundle.OwnerNames()
+		if i == 0 {
+			l.gitHubOwners, l.gitHubDefault = owners, bundle.Default
+		} else if !slices.Equal(owners, l.gitHubOwners) || bundle.Default != l.gitHubDefault {
+			return nil, fmt.Errorf("write the github credential for %s: its owners %v (default %s) are not the pod's %v (default %s)",
+				role, owners, bundle.Default, l.gitHubOwners, l.gitHubDefault)
+		}
+		bundles[role] = bundle
+	}
+	return bundles, nil
 }
 
 // secretMeta is a pod's Secret's metadata: the pod's labels, the Sandbox as owner, and the

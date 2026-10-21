@@ -278,6 +278,14 @@ jobs:
               # tests/envoy-channel-server.test.ts holds claude-envoy's marketplace entry to no
               # version, so Claude Code tracks its commits.
               - '.claude-plugin/marketplace.json'
+              # The MCP server's bundle inlines the daemon client and handoff-commit lookup from
+              # pi-shared, and scripts/build.ts generates legion/ from pi-legion's agents and the
+              # skills the prepack script stages for it, so check-dist and
+              # tests/legion-plugin-fresh.test.ts go stale with any of them.
+              - 'packages/pi-shared/**'
+              - 'packages/pi-legion/agents/**'
+              - 'skills/**'
+              - 'scripts/pi-plugin-prepack.sh'
             # The private workspace package both Oh My Pi plugins import. Its tests stage each
             # plugin's skills through the prepack script and hold the two lists to a partition of
             # skills/ (test/skills-partition.test.ts).
