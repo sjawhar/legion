@@ -266,11 +266,17 @@ func TestAWithdrawalOfAMergeTheQueueFailedFitsOneDispatchMessage(t *testing.T) {
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})
+	// Failing runs until the reason alone is a tenth past record.MessagePostLimit, so the
+	// withdrawal is still cut whatever that constant is: a fixed count stops overrunning the cap
+	// the next time it moves, as the 40 runs written against 1,956 did when INFRA-45 took Dispatch's
+	// body cap to 32,000 and the limit derived from it to 31,956.
+	const failed = "the merge queue took pull request #42 out at READY's head head at 2026-10-16T05:10:00Z (failed_checks): its merge_group run on group-sha, the commit the queue built for it, failed: "
 	var runs []string
-	for i := range 40 {
-		runs = append(runs, fmt.Sprintf("integration-shard-%02d (failure, https://github.com/sjawhar/legion/actions/runs/700000%02d)", i, i))
+	reason := failed
+	for dispatch.MessageBodyLength(reason) <= record.MessagePostLimit+record.MessagePostLimit/10 {
+		runs = append(runs, fmt.Sprintf("integration-shard-%03d (failure, https://github.com/sjawhar/legion/actions/runs/700000%03d)", len(runs), len(runs)))
+		reason = failed + strings.Join(runs, "; ")
 	}
-	reason := "the merge queue took pull request #42 out at READY's head head at 2026-10-16T05:10:00Z (failed_checks): its merge_group run on group-sha, the commit the queue built for it, failed: " + strings.Join(runs, "; ")
 	applyRefusingNothing(t, pool, readyEngine(""), intake.MergeFailed{Issue: "LEGION-208", Number: 42, Head: "head", Reason: reason})
 	var body string
 	if err := pool.QueryRow(context.Background(), "select payload->>'body' from outbox where kind = 'dispatch_message'").Scan(&body); err != nil {
