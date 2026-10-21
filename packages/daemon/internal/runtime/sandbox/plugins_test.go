@@ -509,9 +509,10 @@ type startRun struct {
 
 // runStart renders and runs that argv. An installing run needs what the install itself needs:
 // /usr/bin/flock, which the rendered script names by that path, and a BUN_INSTALL_CACHE_DIR, which
-// the script reads with no default behind it — pinned under t.TempDir() here rather than inherited,
-// so the run never locks a cache anything else is installing out of.
-func runStart(t *testing.T, start, bin, bun string, plugins *runtime.PluginInstall, setup, agent []string) startRun {
+// the script reads with no default behind it. cache is that directory, for a caller that has
+// something to say about what is at it; the empty string pins it under t.TempDir() here rather
+// than inheriting it, so the run never locks a cache anything else is installing out of.
+func runStart(t *testing.T, start, bin, bun, cache string, plugins *runtime.PluginInstall, setup, agent []string) startRun {
 	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no /bin/sh in this environment")
@@ -520,6 +521,9 @@ func runStart(t *testing.T, start, bin, bun string, plugins *runtime.PluginInsta
 		requireFlock(t)
 	}
 	dir := t.TempDir()
+	if cache == "" {
+		cache = filepath.Join(dir, "cache")
+	}
 	argv := startArgv(filepath.Join(dir, "state"), 3, plugins, setup, agent, installLockWait(2*time.Second, 3))
 	if bun != "" {
 		argv[2] = strings.Replace(argv[2], "/usr/local/bin/bun", bun, 1)
@@ -529,7 +533,7 @@ func runStart(t *testing.T, start, bin, bun string, plugins *runtime.PluginInsta
 	cmd.Stdin = strings.NewReader("frame\n")
 	cmd.Env = append(os.Environ(),
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"BUN_INSTALL_CACHE_DIR="+filepath.Join(dir, "cache"),
+		"BUN_INSTALL_CACHE_DIR="+cache,
 	)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -574,7 +578,7 @@ func TestASucceedingSetupCommandRunsBeforeTheAgentInTheStartDirectory(t *testing
 	}
 	setupLog, agentLog := filepath.Join(dir, "setup.log"), filepath.Join(dir, "agent.log")
 	words := []string{"a b", "it's", "$HOME", "*", "--"}
-	got := runStart(t, start, dir, "", nil,
+	got := runStart(t, start, dir, "", "", nil,
 		recorder(setupLog, "setup-stdout", words...),
 		recorder(agentLog, "agent-stdout", "--mode", "rpc", "$PATH"))
 	if got.exit != 0 {
@@ -610,7 +614,7 @@ func TestAFailingSetupCommandNeverStartsTheAgent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			agentLog := filepath.Join(dir, "agent.log")
-			got := runStart(t, dir, dir, "", nil, tc.setup, recorder(agentLog, "agent-stdout"))
+			got := runStart(t, dir, dir, "", "", nil, tc.setup, recorder(agentLog, "agent-stdout"))
 			if got.exit != tc.exit {
 				t.Errorf("the wrapper exited %d, want %d:\n%s", got.exit, tc.exit, got.stderr)
 			}
@@ -648,7 +652,7 @@ func TestAnInstallRunsBeforeTheSetupCommandAndLeavesTheStartDirectory(t *testing
 	record := func(what string) []string {
 		return []string{"/bin/sh", "-c", `echo "$1 $(pwd)" >>"$0"`, order, what}
 	}
-	got := runStart(t, start, dir, filepath.Join(dir, "bun"), testPlugins(), record("setup"), record("agent"))
+	got := runStart(t, start, dir, filepath.Join(dir, "bun"), "", testPlugins(), record("setup"), record("agent"))
 	if got.exit != 0 {
 		t.Fatalf("the wrapper exited %d:\n%s", got.exit, got.stderr)
 	}
@@ -696,7 +700,7 @@ func TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent(t *testing.T) {
 				}
 			}
 			setupLog, agentLog := filepath.Join(dir, "setup.log"), filepath.Join(dir, "agent.log")
-			got := runStart(t, dir, dir, filepath.Join(dir, "bun"), plugins,
+			got := runStart(t, dir, dir, filepath.Join(dir, "bun"), "", plugins,
 				recorder(setupLog, "setup-stdout"), recorder(agentLog, "agent-stdout"))
 			if got.exit != tc.exit {
 				t.Errorf("the wrapper exited %d, want %d:\n%s", got.exit, tc.exit, got.stderr)
@@ -717,6 +721,109 @@ func TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent(t *testing.T) {
 				t.Errorf("stderr is %q, want the install's own failure %q", got.stderr, failMsg)
 			case got.stdout != "":
 				t.Errorf("the wrapper wrote %q to stdout, the shim's frame stream", got.stdout)
+			}
+		})
+	}
+}
+
+// An install makes its own cache directory on every attempt, and makes it only when what is at
+// the path is not one already. `/usr/bin/flock -w N -- <missing path> <cmd>` creates that path as
+// a 0-byte *regular file* and exits 0, so an operator reclaiming the issue's volume under a
+// running install leaves a file where the shared cache belongs; with the mkdir made once outside
+// the retried function, every later installing launch of that issue then dies at `mkdir: …
+// Already exists` under `set -eu`, before Oh My Pi starts, until a person removes the file by
+// hand — on a volume, where no CI run ever looks. The guard is `[ -d "$cache" ] || rm -f --
+// "$cache"` ahead of the mkdir, inside legion_install, and it has to stay exactly that narrow:
+// a cache that is a directory, or a symlink to one, is left as it stands, since emptying a filled
+// cache charges every role of the pod a cold install, which is the race the lock above it exists
+// to survive.
+//
+// Every case asserts observable state — the wrapper's exit, the file type at the cache path, the
+// bytes still inside it — rather than a line of the rendered script. The substring assertions in
+// TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript match the mkdir wherever in the block
+// it sits, which is how the one-way failure shipped; what runs here is the script the daemon
+// renders, with stand-ins for bun and node, never a retyped copy of it.
+func TestAnInstallRemakesAPoisonedCacheAndSparesARealOne(t *testing.T) {
+	// cached is what a filled cache holds; every byte of it has to outlive the install.
+	cached := map[string]string{"entry.txt": "cached bytes", "nested.json": "{\"v\":1}"}
+	fill := func(t *testing.T, dir string) string {
+		t.Helper()
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for name, body := range cached {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	for name, tc := range map[string]struct {
+		// prepare leaves the cache path as this case finds it and returns the directory whose
+		// contents must survive, or "" when the case starts with no cache worth keeping.
+		prepare func(t *testing.T, cache string) string
+		// symlink is whether the cache path itself must still be a symlink afterwards; every
+		// other case wants a directory there.
+		symlink bool
+	}{
+		"a regular file an interrupted flock left behind": {prepare: func(t *testing.T, cache string) string {
+			if err := os.WriteFile(cache, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		}},
+		"a cache already filled": {prepare: func(t *testing.T, cache string) string {
+			return fill(t, cache)
+		}},
+		"a symlink to a filled cache": {prepare: func(t *testing.T, cache string) string {
+			target := fill(t, cache+"-target")
+			if err := os.Symlink(target, cache); err != nil {
+				t.Fatal(err)
+			}
+			return target
+		}, symlink: true},
+		"no cache at all": {prepare: func(t *testing.T, cache string) string { return "" }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, file := range []string{"bun", "node"} {
+				if err := os.WriteFile(filepath.Join(dir, file), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cache := filepath.Join(dir, "cache")
+			kept := tc.prepare(t, cache)
+			agentLog := filepath.Join(dir, "agent.log")
+			got := runStart(t, dir, dir, filepath.Join(dir, "bun"), cache, testPlugins(),
+				nil, recorder(agentLog, "agent-stdout"))
+			if got.exit != 0 {
+				t.Fatalf("the wrapper exited %d with %s at the cache path, so every installing launch of this issue stays dead until a person clears it:\n%s", got.exit, name, got.stderr)
+			}
+			if _, err := os.Stat(agentLog); err != nil {
+				t.Errorf("Oh My Pi never started (%v), so this case says nothing about the install", err)
+			}
+			info, err := os.Lstat(cache)
+			if err != nil {
+				t.Fatalf("the cache path is gone after the install: %v", err)
+			}
+			switch {
+			case tc.symlink && info.Mode()&os.ModeSymlink == 0:
+				t.Errorf("the cache path is %s, want the symlink it was: the guard reaches past a cache it should leave alone", info.Mode().Type())
+			case !tc.symlink && !info.IsDir():
+				t.Errorf("the cache path is %s, want a directory: flock's lock inode is not a cache, and the next install dies on it", info.Mode().Type())
+			}
+			if kept == "" {
+				return
+			}
+			for file, want := range cached {
+				body, err := os.ReadFile(filepath.Join(kept, file))
+				if err != nil {
+					t.Errorf("the install took %s out of the cache (%v): every role of the pod pays a cold install for that", file, err)
+					continue
+				}
+				if string(body) != want {
+					t.Errorf("cached %s is %q, want the %q it held", file, body, want)
+				}
 			}
 		})
 	}

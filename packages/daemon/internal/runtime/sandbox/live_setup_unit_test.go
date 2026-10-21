@@ -903,7 +903,7 @@ func (r *setupRig) run(start string, agent []string) (string, []string) {
 	if err := os.Remove(r.marker); err != nil && !os.IsNotExist(err) {
 		r.t.Fatal(err)
 	}
-	got := runStart(r.t, start, r.bin, "", nil, liveSetup(setupRigRepository(r.t)), agent)
+	got := runStart(r.t, start, r.bin, "", "", nil, liveSetup(setupRigRepository(r.t)), agent)
 	if got.exit != 0 {
 		r.t.Fatalf("the wrapper exited %d: %s", got.exit, got.stderr)
 	}
