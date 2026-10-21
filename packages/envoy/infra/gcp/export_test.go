@@ -19,13 +19,23 @@ func CloudConfigOf(args *NatsHubArgs) (CloudConfig, string, error) {
 	return s.vm.document(), s.userData, nil
 }
 
+// DispatchRollingUpdate is the resolved rolling update's bounds, for the tests outside the package.
+type DispatchRollingUpdate struct {
+	MaxUnavailable int
+	MaxSurge       int
+}
+
 // DispatchSettings is the resolved Dispatch configuration the external tests assert without
-// exporting the component's internal representation.
+// exporting the component's internal representation. RollingUpdate is nil unless StrategyType is
+// RollingUpdate.
 type DispatchSettings struct {
 	DatabaseVersion    string
 	DatabaseTier       string
 	DeletionProtection bool
 	Namespace          string
+	Replicas           int
+	StrategyType       string
+	RollingUpdate      *DispatchRollingUpdate
 	ServeConfig        string
 }
 
@@ -35,13 +45,19 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 	if err != nil {
 		return DispatchSettings{}, err
 	}
-	return DispatchSettings{
+	settings := DispatchSettings{
 		DatabaseVersion:    s.databaseVersion,
 		DatabaseTier:       s.databaseTier,
 		DeletionProtection: s.deletionProtection,
 		Namespace:          s.namespace,
+		Replicas:           s.replicas,
+		StrategyType:       s.strategy.strategyType,
 		ServeConfig:        s.serveConfig,
-	}, nil
+	}
+	if rolling := s.strategy.rollingUpdate; rolling != nil {
+		settings.RollingUpdate = &DispatchRollingUpdate{MaxUnavailable: rolling.maxUnavailable, MaxSurge: rolling.maxSurge}
+	}
+	return settings, nil
 }
 
 // DispatchKubeconfig renders the component's stable exec-plugin kubeconfig for the golden test.

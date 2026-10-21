@@ -75,3 +75,16 @@ func TestConstructRefusesDispatchPlainInputFromAnotherResource(t *testing.T) {
 	require.ErrorContains(t, err, "hostname")
 	require.Empty(t, m.Types())
 }
+
+// replicas is a plain *int: Construct refuses another resource's output there, as it does for
+// every plain input, before anything registers.
+func TestConstructRefusesDispatchReplicasFromAnotherResource(t *testing.T) {
+	inputs := dispatchConstructInputs()
+	inputs["replicas"] = property.New(3.0).WithDependencies([]resource.URN{upstream})
+	for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+		inputs[key] = property.New("example").WithDependencies([]resource.URN{upstream})
+	}
+	m, _, err := constructDispatch(t, inputs, false)
+	require.ErrorContains(t, err, "replicas")
+	require.Empty(t, m.Types())
+}

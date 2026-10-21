@@ -34,7 +34,7 @@ events to the right session.
 | Envelope normalization | `internal/contracts/*.go`                 | generated contract + source-specific normalization |
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
 | Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*`, the AWS SDK's `AWS_*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
-| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
+| Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`); a migration runs while the build before it is still serving, which is what it may add and what it must split across two releases (`cmd/dispatch/README.md`, "Database migrations") |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once, and deploy runs' `created_at` once more under its own step; a pull request ships with the earliest-finishing successful production deploy whose run GitHub created after its merge (`delivery/containment.go`, `DeliveryRun.Created`) |
@@ -167,8 +167,11 @@ machine, inside the 9 s drain budget, though a slower load or a bigger burst cou
 to resume.
 
 `cmd/dispatch/shutdown.go` orders the process's shutdown inside `stopGrace` (30 s: ECS's default
-stop timeout, which Dispatch's task definition leaves unset, and `stop_grace_period` in
-`deploy/compose/dispatch.compose.yml`). Every open event stream ends at the signal through
+stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period` in
+`deploy/compose/dispatch.compose.yml`, and the pod `infra`'s `gcp:Dispatch` renders, whose
+`terminationGracePeriodSeconds` is this value plus its five-second pre-stop wait, which the
+kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the
+pod's budget stops covering it). Every open event stream ends at the signal through
 `api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them
 first, with no deadline of its own. The document service starts when they are done, or 11 s after
 the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with

@@ -21,6 +21,18 @@ const (
 	defaultDispatchDatabaseVersion = "POSTGRES_16"
 	defaultDispatchDatabaseTier    = "db-custom-1-3840"
 	defaultDispatchNamespace       = "dispatch"
+	defaultDispatchReplicas        = 1
+
+	// minDispatchReplicas is the fewest pods a workload of this component may run, and the count
+	// at which a Deployment must be recreated rather than rolled: two processes of one pod's kind
+	// must not overlap. It is what an unset replicas happens to default to, not the same rule.
+	minDispatchReplicas = 1
+
+	// dispatchStrategyRecreate stops every running pod before starting the new one;
+	// dispatchStrategyRollingUpdate starts new pods beside the old ones. dispatchStrategyFor picks
+	// between them.
+	dispatchStrategyRecreate      = "Recreate"
+	dispatchStrategyRollingUpdate = "RollingUpdate"
 )
 
 var (
@@ -58,6 +70,10 @@ type DispatchArgs struct {
 	// (another program owns the namespace).
 	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
 
+	// Replicas is the app Deployment's replica count, 1 by default. Above 1 the Deployment rolls
+	// its pods instead of being recreated.
+	Replicas *int `pulumi:"replicas,optional"`
+
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster namespace;
 	// the tailnet path (Tailscale Serve on 443) is unaffected either way.
@@ -66,7 +82,8 @@ type DispatchArgs struct {
 
 // dispatchSeededInput names the first plain string input that holds an nkey seed. No component
 // input takes an nkey seed here: each value reaches a cloud resource, a Kubernetes object, or the
-// pod configuration, so a seed would be disclosed or used as the wrong credential.
+// pod configuration, so a seed would be disclosed or used as the wrong credential. An int input,
+// such as replicas, cannot carry an nkey seed, so it takes no row here.
 func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	for _, value := range []struct {
 		input string
@@ -128,7 +145,38 @@ type dispatchSettings struct {
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
 	deletionProtection, existingNamespace       bool
+	replicas                                    int
+	strategy                                    dispatchStrategy
 	serveConfig                                 string
+}
+
+// dispatchRollingUpdate bounds a rolling update: how many of the wanted pods may be missing at
+// once, and how many may run above that count.
+type dispatchRollingUpdate struct {
+	maxUnavailable, maxSurge int
+}
+
+// dispatchStrategy is the app Deployment's update strategy. rollingUpdate is set only when
+// strategyType is dispatchStrategyRollingUpdate; a Recreate Deployment carries no such block.
+type dispatchStrategy struct {
+	strategyType  string
+	rollingUpdate *dispatchRollingUpdate
+}
+
+// dispatchStrategyFor turns a workload's replica count into its Deployment's update strategy. At
+// minDispatchReplicas two processes of that workload must never overlap, since a second
+// envoy-dispatch cannot bind the exclusive NATS push durable, so Recreate, which stops the old pod
+// before starting the new one, is the only safe strategy. Above that count the operator has
+// accepted the overlap and wants no gap in service, so the Deployment rolls: one new pod comes up
+// before any old one goes down.
+func dispatchStrategyFor(replicas int) dispatchStrategy {
+	if replicas <= minDispatchReplicas {
+		return dispatchStrategy{strategyType: dispatchStrategyRecreate}
+	}
+	return dispatchStrategy{
+		strategyType:  dispatchStrategyRollingUpdate,
+		rollingUpdate: &dispatchRollingUpdate{maxUnavailable: 0, maxSurge: 1},
+	}
 }
 
 // newDispatchSettings validates the component's plain inputs and renders the values known before
@@ -191,6 +239,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		databaseTier:       defaultDispatchDatabaseTier,
 		deletionProtection: true,
 		namespace:          defaultDispatchNamespace,
+		replicas:           defaultDispatchReplicas,
 	}
 	s.images.envoy = args.EnvoyImage
 	s.images.tailscale = args.TailscaleImage
@@ -212,6 +261,13 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if args.DeletionProtection != nil {
 		s.deletionProtection = *args.DeletionProtection
 	}
+	if args.Replicas != nil {
+		if *args.Replicas < minDispatchReplicas {
+			return dispatchSettings{}, fmt.Errorf("replicas %d must be at least %d", *args.Replicas, minDispatchReplicas)
+		}
+		s.replicas = *args.Replicas
+	}
+	s.strategy = dispatchStrategyFor(s.replicas)
 	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
 		if !namespaceRule.MatchString(*args.Namespace) {
@@ -224,8 +280,10 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("allowedNamespaces[%d] %q must be a DNS label", i, namespace)
 		}
 	}
-	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8766"}}}}}`,
-		s.hostname, s.tailnetDNSName)
+	// The tailnet node runs in a pod of its own now, so Serve proxies to the app's Service rather
+	// than to a container beside it. The Web key keeps the node's name and certificate domain.
+	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://%s:8766"}}}}}`,
+		s.hostname, s.tailnetDNSName, clusterLocal(s.hostname, s.namespace))
 	return s, nil
 }
 

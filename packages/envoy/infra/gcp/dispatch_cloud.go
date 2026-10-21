@@ -18,12 +18,13 @@ import (
 )
 
 type dispatchCloud struct {
-	cluster    *container.Cluster
-	instance   *sql.DatabaseInstance
-	password   *random.RandomPassword
-	signing    *random.RandomPassword
-	agentToken *random.RandomPassword
-	principal  pulumi.StringOutput
+	cluster       *container.Cluster
+	instance      *sql.DatabaseInstance
+	password      *random.RandomPassword
+	signing       *random.RandomPassword
+	agentToken    *random.RandomPassword
+	listenerToken *random.RandomPassword
+	principal     pulumi.StringOutput
 }
 
 func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption) (pulumi.ProviderResource, error) {
@@ -124,6 +125,13 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
+	// The listener binds 0.0.0.0 in a pod of its own, where its API refuses to start without a
+	// bearer, and its credential is its own, never a key of the Secret holding the database URL
+	// and the signing key.
+	listenerToken, err := random.NewRandomPassword(ctx, s.hostname+"-listener-token", &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
+	if err != nil {
+		return nil, err
+	}
 	_, err = sql.NewDatabase(ctx, s.hostname, &sql.DatabaseArgs{Instance: instance.Name, Name: pulumi.String("dispatch")}, child)
 	if err != nil {
 		return nil, err
@@ -141,5 +149,5 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, principal: principal}, nil
+	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal}, nil
 }

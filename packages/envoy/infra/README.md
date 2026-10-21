@@ -122,11 +122,15 @@ and on `PATH`.
 ## gcp:Dispatch
 
 `envoy-infra:gcp:Dispatch` deploys one private Autopilot cluster, its VPC and Cloud NAT, a
-private-IP Cloud SQL for PostgreSQL instance, and one Dispatch pod. The pod contains
-`envoy-dispatch`, `envoy-listener`, a userspace Tailscale native sidecar, and the Cloud SQL Auth
-Proxy native sidecar. Tailscale Serve is the tailnet ingress; in-cluster, a ClusterIP Service on
-port 8766 serves Dispatch's API to the namespaces `allowedNamespaces` names, and a NetworkPolicy
-refuses every other namespace.
+private-IP Cloud SQL for PostgreSQL instance, and three Deployments: the app `<hostname>`, which
+runs `envoy-dispatch` beside the Cloud SQL Auth Proxy native sidecar; the front door
+`<hostname>-tailnet`, the userspace Tailscale node that holds the hostname; and
+`<hostname>-listener`, which runs `envoy-listener` alone. Tailscale Serve on the front door is the
+tailnet ingress on port 443, and proxies to the app's ClusterIP Service on port 8766, which also
+serves Dispatch's API in-cluster to the namespaces `allowedNamespaces` names; a NetworkPolicy
+refuses every other namespace. The front door's SOCKS5 Service on port 1055 and the listener's
+Service on port 9020 are reachable only from the workloads their own policies name: the app and
+the listener may dial the proxy, and the app alone may dial the listener.
 
 | Resource | Purpose |
 | --- | --- |
@@ -134,9 +138,9 @@ refuses every other namespace.
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
-| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
-| ClusterIP Service and NetworkPolicy | Dispatch's API on port 8766, to the `allowedNamespaces` alone. |
-| Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
+| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount. |
+| Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone. |
+| Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. |
 
 ### Inputs
 
@@ -155,6 +159,16 @@ for a cluster that already exists: on a first apply the component creates the cl
 program can have made the namespace yet. `allowedNamespaces`, empty by default, names the
 in-cluster namespaces the NetworkPolicy admits on port 8766.
 
+`replicas` is the app Deployment's pod count, 1 by default; a value below 1 is refused by name
+before the component registers a resource. At 1 the app Deployment is recreated, stopping its pod
+before the next starts; above 1 it rolls, with `maxUnavailable: 0` and `maxSurge: 1`, so a new pod
+is ready before any old one goes down. The front door and the listener stay at one replica and are
+recreated whatever the count: one tailnet node holds the hostname and the state its single-use
+auth key left behind, and two listeners sharing one machine id never both bind its exclusive
+durable. There is no strategy, surge or front-door-replica input for that reason: the app's safe
+strategy follows from its replica count, and every value but one is wrong for the other two
+workloads.
+
 Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
 names, tags, image references, sign-in domains, namespaces, missing inputs, and nkey seeds in
 plain inputs before it registers a resource. It requires both `gcp` and `random` providers. It
@@ -164,20 +178,56 @@ running Pulumi needs `gke-gcloud-auth-plugin`.
 The generated `principal` output is the Kubernetes service account's Workload Identity principal.
 Before the first apply, the consumer grants that principal `roles/cloudsql.client` at project
 scope. The component itself grants that principal `roles/secretmanager.secretAccessor` only on the
-NATS seed secret. The pod's Kubernetes Role is limited to its Tailscale state Secret.
+NATS seed secret. The three Deployments share that one Kubernetes service account, whose Role is
+limited to the Tailscale state Secret.
 
-### The pod
+### The pods
 
-The Tailscale sidecar joins with the supplied tag, serves
-`https://<hostname>.<tailnetDnsName>`, and routes the pod's NATS clients through its SOCKS5 proxy.
-The Cloud SQL Auth Proxy listens only on `127.0.0.1:5432` with `--private-ip`. The two Envoy
-containers mount the NATS seed at `/var/run/secrets/envoy/nats-seed`; the seed remains outside
-Pulumi state.
+The front door is the pod with the tailnet node. Its one Tailscale container joins with the
+supplied tags, serves `https://<hostname>.<tailnetDnsName>` and proxies it to the app's Service,
+and offers tailnet egress as that node through its userspace SOCKS5 proxy, which binds
+`0.0.0.0:1055` now that its callers are pods of their own rather than containers beside it. The
+app and the listener reach the NATS hub at its tailnet name through that proxy's Service, and the
+policy admits those two alone, since whatever reaches the proxy leaves the cluster as this node.
 
-The deployment intentionally has no liveness probe for Dispatch because its health endpoint reads
-Cloud SQL. A rolling input or image update recreates its one pod and causes brief downtime. A
-region change replaces the component's networked resources. Keep `deletionProtection` enabled
-outside deliberate teardown-and-rebuild work: deleting the Cloud SQL instance deletes its backups.
+The app pod runs `envoy-dispatch` with the Cloud SQL Auth Proxy native sidecar, which listens only
+on `127.0.0.1:5432` with `--private-ip`. The listener pod runs `envoy-listener` alone, bound to
+`0.0.0.0:9020` rather than to loopback, so its API demands a bearer: the component generates one,
+keeps it in the Secret `<hostname>-listener`, and gives the same value to `envoy-dispatch` as
+`ENVOY_TOKEN`. Both Envoy containers mount the NATS seed at `/var/run/secrets/envoy/nats-seed`;
+the seed remains outside Pulumi state.
+
+The Deployments intentionally have no liveness probe for Dispatch because its health endpoint
+reads Cloud SQL. At one replica an input or image update recreates the app's one pod, which is a
+brief outage; so is every update of the front door or of the listener, at any replica count, since
+both are recreated, and a front-door recreate takes the app down with it: the app's readiness reads
+NATS, which reaches the hub only through that proxy, so thirty seconds later (`failureThreshold` 3
+at `periodSeconds` 10) every app replica fails readiness and leaves Service `<hostname>` too, and
+the in-cluster `allowedNamespaces` consumers lose the app for that window as well. It heals itself,
+since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no liveness probe restarts
+anything, and it is no regression, since the base ran one pod. Above one replica the app rolls
+instead: a new pod is ready before an old one stops, and a stopping pod keeps serving for five
+seconds after it is told to stop, which is the window its removal from routing has to propagate,
+and is what the pre-stop wait is for. The kubelet runs that wait inside the pod's one
+`terminationGracePeriodSeconds` and signals the container only once it returns, so the pod asks
+for 35 seconds: the five of the wait added to the thirty
+`envoy-dispatch`'s own shutdown is built for (`stopGrace` in
+`packages/envoy/cmd/dispatch/shutdown.go`) rather than taken out of them. Whoever tunes either
+number moves both, since a wait the grace period does not cover is paid for out of the server's
+drain, which spends its document service's reserve and kills a slow write mid-commit. Whether five
+seconds is enough to lose no request across a real release is unmeasured; the consuming stack's
+release measures it, with a poll every 250 milliseconds. A rolling update also runs the new image's
+migrations while the previous build is still serving, which bounds what a migration may change:
+"Database migrations" in `packages/envoy/cmd/dispatch/README.md` holds the rule. A region change
+replaces the component's networked resources. Keep `deletionProtection` enabled outside deliberate
+teardown-and-rebuild work: deleting the Cloud SQL instance deletes its backups.
+
+`envoy-dispatch` itself is not yet safe at more than one concurrent process: its two delivery
+consumers are exclusive push durables, so a second process logs a bind error for as long as it
+runs, its SSE broker and its live document rooms are per-process, its outbox publisher claims no
+row before it publishes, and several of its loops are written for the one process that runs them,
+so a second copy runs them again. The component carries the capability and leaves the default at
+1; raising a production deployment above it waits on that separate work.
 
 To inspect pending migrations before an image update, run the image with the deployment's service
 account and `DATABASE_URL` from its Secret:
