@@ -204,8 +204,8 @@ func DefaultResources() map[claim.Role]RoleResources {
 
 // PodConfig is `runtime.kubernetes.pod`, what the operator adds to every pod Legion runs, the image
 // probe's included, in the API's own types: variables and volume mounts for the agent's container,
-// the volumes they mount (each a Secret, a ConfigMap, or a projection of ServiceAccount tokens,
-// Secrets, and ConfigMaps), and the ServiceAccount the pods run as. It passes through as written:
+// the volumes they mount (each a Secret, a ConfigMap, a projection of ServiceAccount tokens,
+// Secrets, and ConfigMaps, a PersistentVolumeClaim, or an NFS export), and the ServiceAccount the pods run as. It passes through as written:
 // the loader refuses a shape no pod could carry, the Sandbox runtime a name or path of Legion's own
 // or the worker image's (sandbox.CheckPod), and the API server the rest when it creates the
 // image probe's pod, which carries it, at boot.
@@ -741,7 +741,7 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 	if err != nil {
 		return nil, err
 	}
-	if net.ParseIP(server) == nil && len(validation.IsDNS1123Subdomain(strings.ToLower(server))) != 0 {
+	if net.ParseIP(server) == nil && (len(validation.IsDNS1123Subdomain(strings.ToLower(server))) != 0 || numericLastLabel(server)) {
 		return nil, fmt.Errorf("%s.server %q must be an IP address or a DNS name, with no scheme, port, path or brackets", key, server)
 	}
 	exportPath, err := requiredString(fields["path"], key+".path", "")
@@ -752,6 +752,19 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 		return nil, fmt.Errorf("%s.path %s must be a clean absolute path", key, exportPath)
 	}
 	return &corev1.NFSVolumeSource{Server: server, Path: exportPath}, nil
+}
+
+// numericLastLabel reports whether host, not an IP address in Go's strict form, still ends in an
+// all-digit label or a 0x one: glibc's resolver reads `010.0.0.2`, `1.2.3` and `0x0a000002` as IPv4
+// addresses (inet_aton's octal, short and hexadecimal forms), so the node would mount another
+// address than the one written. No DNS name a server is reached by ends so.
+func numericLastLabel(host string) bool {
+	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
+	last := strings.ToLower(labels[len(labels)-1])
+	if strings.HasPrefix(last, "0x") {
+		return true
+	}
+	return last != "" && strings.Trim(last, "0123456789") == ""
 }
 
 // setCount is how many of names fields sets.

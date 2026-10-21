@@ -924,7 +924,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "unknown key runtime.kubernetes.pod.volumes[0].empty_dir",
 		},
 		{
-			name: "a host path, which gVisor and Autopilot both refuse",
+			name: "a host path, which Autopilot refuses",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: host, host_path: {path: /srv}}]\n",
 			want: "unknown key runtime.kubernetes.pod.volumes[0].host_path",
 		},
@@ -972,6 +972,21 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "an NFS server in brackets",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '[fd00::2]', path: /share}}]\n",
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "[fd00::2]" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server in inet_aton's octal form",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 010.0.0.2, path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "010.0.0.2" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server in inet_aton's short form",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 1.2.3, path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "1.2.3" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server in inet_aton's hexadecimal form",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 0x0a000002, path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "0x0a000002" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
 		},
 		{
 			name: "an NFS export with no path",

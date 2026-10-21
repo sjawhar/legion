@@ -914,27 +914,42 @@ Mounting arguments:  -t nfs ` + export + ` /var/lib/kubelet/pods/ea568681-eb15-4
 Output: mount.nfs: Connection timed out for ` + export + ` on /var/lib/kubelet/pods/ea568681-eb15-45a0-838d-dfbd9d6aefb4/volumes/kubernetes.io~nfs/` + volume
 	}
 	csi := `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = Internal desc = mount "/var/lib/kubelet/plugins/kubernetes.io/csi/filestore.csi.storage.gke.io/0a/globalmount" failed on node gk3-node: mount failed: exit status 32`
+	csiCode := func(code, desc string) string {
+		return `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = ` + code + ` desc = ` + desc
+	}
+	secretMissing := `MountVolume.SetUp failed for volume "pvc-1b2c" : fetching NodePublishSecretRef legion/smb-creds failed: kubernetes.io/csi: failed to find the secret smb-creds in the namespace legion with error: secrets "smb-creds" not found`
 	for _, testCase := range []struct {
 		name    string
 		volumes []corev1.Volume
 		message string
 		refused bool
 		want    []string
+		// pulledAfter records the kubelet's Pulling event after the FailedMount: every volume
+		// mounted since.
+		pulledAfter bool
 	}{
 		{"an NFS export that never answers", []corev1.Volume{route, nfs}, timedOut("nas", "10.0.0.2:/share"), true,
-			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}},
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false},
 		{"an NFS export the server refuses", []corev1.Volume{nfs},
 			`MountVolume.SetUp failed for volume "nas" : mount failed: exit status 32` + "\nOutput: mount.nfs: access denied by server while mounting 10.0.0.2:/share", true,
-			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}},
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false},
 		{"a claim's NFS volume, named by its PersistentVolume", []corev1.Volume{route, claim("team", "team-share")}, timedOut("team-pv", "10.0.0.9:/share"), true,
-			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}},
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false},
 		{"a claim's Filestore volume, through its CSI driver", []corev1.Volume{claim("team", "team-share")}, csi, true,
-			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}},
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false},
 		{"one of two claims' volumes", []corev1.Volume{claim("team", "team-share"), claim("cache", "build-cache")}, timedOut("pv-7", "10.0.0.9:/share"), true,
-			[]string{`cannot mount PersistentVolume "pv-7", bound to one of the claims runtime.kubernetes.pod.volumes gives volumes team, cache from`}},
+			[]string{`cannot mount PersistentVolume "pv-7", bound to one of the claims runtime.kubernetes.pod.volumes gives volumes team, cache from`}, false},
 		{"a share still waiting in the kubelet's summary", []corev1.Volume{nfs},
-			"Unable to attach or mount volumes: unmounted volumes=[nas], unattached volumes=[]: timed out waiting for the condition", false, nil},
-		{"a mount failure for a volume no share of the pod block can be", []corev1.Volume{route}, timedOut("elsewhere", "10.0.0.9:/share"), false, nil},
+			"Unable to attach or mount volumes: unmounted volumes=[nas], unattached volumes=[]: timed out waiting for the condition", false, nil, false},
+		{"a mount failure for a volume no share of the pod block can be", []corev1.Volume{route}, timedOut("elsewhere", "10.0.0.9:/share"), false, nil, false},
+		{"a CSI call the kubelet retries: Aborted", []corev1.Volume{claim("team", "team-share")}, csiCode("Aborted", "An operation with the given Volume ID projects/p/locations/l/instances/i/volumes/v already exists"), false, nil, false},
+		{"a CSI call the kubelet retries: DeadlineExceeded", []corev1.Volume{claim("team", "team-share")}, csiCode("DeadlineExceeded", "context deadline exceeded"), false, nil, false},
+		{"a CSI call the kubelet retries: Unavailable", []corev1.Volume{claim("team", "team-share")},
+			`MountVolume.SetUp failed for volume "pvc-1b2c" : rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial unix /var/lib/kubelet/plugins/filestore.csi.storage.gke.io/csi.sock: connect: connection refused"`, false, nil, false},
+		{"a CSI call the kubelet retries: ResourceExhausted", []corev1.Volume{claim("team", "team-share")}, csiCode("ResourceExhausted", "quota"), false, nil, false},
+		{"a share failure a later try cleared", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), false, nil, true},
+		{"a claim's CSI Secret missing, named by its PersistentVolume", []corev1.Volume{route, claim("team", "team-share")}, secretMissing, true,
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var mounts []corev1.VolumeMount
@@ -943,12 +958,22 @@ Output: mount.nfs: Connection timed out for ` + export + ` on /var/lib/kubelet/p
 			}
 			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Pod.Volumes, o.Pod.VolumeMounts = testCase.volumes, mounts }))
 			g.waits("ContainerCreating")
+			at := metav1.NewTime(rigNow.Add(-time.Minute))
 			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
 				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
 				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
-				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message,
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message, LastTimestamp: at,
 			}, metav1.CreateOptions{}); err != nil {
 				t.Fatal(err)
+			}
+			if testCase.pulledAfter {
+				if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+					ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".pull", Namespace: testNamespace},
+					InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+					Reason:         "Pulling", Type: corev1.EventTypeNormal, Message: `Pulling image "worker"`, LastTimestamp: metav1.NewTime(at.Add(time.Second)),
+				}, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			p := probeOptions(t)
 			p.Budget = unfinishedBudget
@@ -972,7 +997,7 @@ Output: mount.nfs: Connection timed out for ` + export + ` on /var/lib/kubelet/p
 
 // A probe pod whose operator claim is missing never reaches a node: the scheduler leaves it Pending,
 // PodScheduled=False Unschedulable, saying `persistentvolumeclaim "<name>" not found` (or `is being
-// deleted`), the message GKE Autopilot's scheduler gave a gVisor pod naming a claim that did not
+// deleted`, or `bound to non-existent persistentvolume "<pv>"`), the first of them the message GKE Autopilot's scheduler gave a gVisor pod naming a claim that did not
 // exist. That is a refusal naming the volume and the claim, given on the first pass whatever the
 // pod's age, and never a capacity wait: no node the pool adds places it. A claim the pod block does
 // not name is no operator's mistake and falls to the capacity rule, and so does a claim that exists
@@ -997,6 +1022,7 @@ func TestProbeImageRefusesAClaimThatIsNotThere(t *testing.T) {
 	}{
 		{"the claim not found", notFound, 0, true},
 		{"the claim being deleted", `0/3 nodes are available: persistentvolumeclaim "team-share" is being deleted.`, 0, true},
+		{"the claim's volume gone, past the boot timeout", `0/3 nodes are available: persistentvolumeclaim "team-share" bound to non-existent persistentvolume "team-pv".`, testOptions().BootTimeout + time.Second, true},
 		{"another claim not found", `0/3 nodes are available: persistentvolumeclaim "someone-else" not found. not found`, 0, false},
 		{"the claim not bound yet, past the boot timeout", "0/1 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found", testOptions().BootTimeout + time.Second, false},
 	} {

@@ -154,7 +154,7 @@ var settingsExcluded = map[string]string{
 	"Kubernetes.Context":            "the context inside the daemon's cluster credential file",
 	"Kubernetes.Pod":                "not a daemon setting: the operator's pod pieces, which every pod reads from its own spec and whose lists are Kubernetes API types with no legion.yaml-shaped rendering",
 	"PodConfig.Env":                 "runtime.kubernetes.pod: the operator's free text, delivered to every pod's spec",
-	"PodConfig.Volumes":             "runtime.kubernetes.pod: Kubernetes API types naming the operator's Secrets and ConfigMaps",
+	"PodConfig.Volumes":             "runtime.kubernetes.pod: Kubernetes API types naming the operator's Secrets, ConfigMaps, claims and NFS exports",
 	"PodConfig.VolumeMounts":        "runtime.kubernetes.pod: Kubernetes API types",
 	"PodConfig.ServiceAccount":      "runtime.kubernetes.pod: the operator's ServiceAccount, which every pod runs as and reads from its own spec",
 	"Kubernetes.PluginsFromBinary":  "derived: where the settled plugins pair came from, not a setting",
