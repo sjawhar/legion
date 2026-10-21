@@ -462,6 +462,72 @@ MD
 run_check "$root"
 check "bun run, bun test, bun build and npm view are no resolvers" "$(is "$status" 0)"
 
+echo "case: a runner behind an ordinary prefix word is still that runner"
+# Measured in a role container of this issue's own pod (worker image, bun 1.3.14, no
+# node_modules): `exec bunx biome --version`, `env FOO=1 bunx biome --version`,
+# `command bunx biome --version`, `nice -n 5 bunx biome --version` and
+# `bun --bun x biome --version` each answer 0.3.3 and exit 0 — the squat, exactly as the bare
+# spelling does. A prefix word changes nothing about what runs, and the gate already steps over
+# the bare `FOO=bar` assignment that `env FOO=bar` spells out, so a prefix must not be the one
+# place the silent green comes back.
+root=$(fixture shell-exec-bunx)
+cat >> "$root/scripts/release.sh" <<'SH'
+exec bunx biome check .
+SH
+run_check "$root"
+check "an exec'd bunx shell line fails" "$(is "$status" 1)"
+check "names its line" "$(contains "$out" 'scripts/release.sh:5:')"
+
+root=$(fixture shell-env-bunx)
+cat >> "$root/scripts/release.sh" <<'SH'
+env CI=1 bunx biome check .
+SH
+run_check "$root"
+check "an \`env\` that spells out an assignment the gate already steps over fails" \
+  "$(is "$status" 1)"
+check "names its line" "$(contains "$out" 'scripts/release.sh:5:')"
+
+root=$(fixture shell-nice-bunx)
+cat >> "$root/scripts/release.sh" <<'SH'
+nice -n 5 bunx biome check .
+SH
+run_check "$root"
+check "a niced bunx fails" "$(is "$status" 1)"
+check "names its line" "$(contains "$out" 'scripts/release.sh:5:')"
+
+root=$(fixture guide-command-bunx)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+command bunx biome check .
+```
+MD
+run_check "$root"
+check "a fenced \`command bunx\` fails" "$(is "$status" 1)"
+check "names the line inside the block" "$(contains "$out" 'AGENTS.md:4:')"
+
+root=$(fixture recipe-bun-flag-x)
+sed -i 's|    "lint": .*|    "lint": "bun --bun x biome check src/",|' \
+  "$root/packages/thing/package.json"
+run_check "$root"
+check "an option between \`bun\` and its \`x\` does not hide the runner" "$(is "$status" 1)"
+check "names the recipe's own line" "$(contains "$out" 'packages/thing/package.json:4:')"
+
+root=$(fixture prefixed-ordinary-commands)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+exec ./scripts/repo-tool.sh biome check .
+env CI=1 bun run lint .
+nice -n 5 bun test
+```
+MD
+run_check "$root"
+check "the same prefixes before the wrapper and before ordinary commands still pass" \
+  "$(is "$status" 0)"
+
 echo "case: a command the gate cannot read is refused, never waved through"
 root=$(fixture shell-expanded-tool)
 cat >> "$root/scripts/release.sh" <<'SH'
