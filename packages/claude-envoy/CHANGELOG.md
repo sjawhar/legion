@@ -24,6 +24,12 @@
   drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
   `dispatch read`.
 
+### Changed
+
+- The generated `legion/` plugin carries the new `thermonuclear-deep-review` and
+  `thermonuclear-code-quality` rubrics (see `packages/pi-legion/CHANGELOG.md`), and the README no
+  longer says the dotfiles plugin ships a copy.
+
 ### Added
 
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
