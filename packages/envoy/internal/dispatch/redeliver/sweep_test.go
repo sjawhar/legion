@@ -680,6 +680,7 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 // summary left closed out, production logged deliveries=65 with every count at zero for the hour
 // after all 65 were redelivered and delivered.
 func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
+	leases := redeliverTestLeases(t)
 	h := newHarness(t)
 	h.fail("guid-settled", http.StatusServiceUnavailable, time.Minute)
 	if got := outcome(h.sweep(redeliver.Options{}), "guid-settled"); got != redeliver.Redelivered {
@@ -695,7 +696,7 @@ func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.sweeper().Run(ctx, time.Hour)
+		h.sweeper().Run(ctx, time.Hour, leases)
 	}()
 	for deadline := time.Now().Add(10 * time.Second); h.logs.count("webhook redelivery sweep") == 0; {
 		if time.Now().After(deadline) {

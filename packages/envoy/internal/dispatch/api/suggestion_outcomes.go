@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -14,6 +15,12 @@ import (
 // write's caller can see; a minutes-scale interval also keeps the sweep's three passes, cheap as
 // they are (see below), off any tight loop in production.
 const SuggestionSweepInterval = time.Minute
+
+// suggestionOutcomeLease names the lease one pass of the outcome sweep runs under. Every pass is
+// idempotent, so a second process running one at the same moment would be correct; it would also
+// be the same three statements over the same rows for the same result, which is reason enough for
+// one process to do it.
+const suggestionOutcomeLease = "suggestion-outcomes"
 
 // Each pass below starts from write_suggestions filtered to outcome = 'ignored'
 // (write_suggestions_pending_source / write_suggestions_pending_target, both partial indexes:
@@ -149,7 +156,11 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 // write path entirely: whether the agent acted on a suggestion (cited it, or updated the
 // suggested issue directly) or overrode it (kept working on what it filed instead). It stops
 // when ctx is done.
-func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval time.Duration) {
+//
+// Each pass runs under suggestionOutcomeLease, so one process sweeps however many serve the
+// database; leases is required, as it is of every leased loop (cmd/dispatch exits at boot if the
+// lease pool cannot be opened).
+func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -157,9 +168,11 @@ func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, interval t
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
-				slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
-			}
+			duty.Exclusive(ctx, leases, suggestionOutcomeLease, func(ctx context.Context) {
+				if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
+					slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
+				}
+			})
 		}
 	}
 }

@@ -314,12 +314,39 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Two envoy-dispatch processes serve one Postgres and one NATS (INFRA-66), so each periodic
+	// maintenance loop below either runs once overall or is deliberately per-process. The ones
+	// that must run once overall take a named lease on this pool for the length of their pass
+	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
+	// it needs a pool the shared one's sixteen request connections are not spent on. A boot that
+	// cannot open it is a boot whose loops would each run everywhere, so it ends here.
+	//
+	// Deliberately NOT leased, in three classes:
+	//   - already claims its own work, so two processes never do one unit of it twice: the
+	//     embedding queue (embedqueue, `for update skip locked`), the task progress
+	//     reconciliation (`for no key update ... skip locked`), the outbox's own publish scan
+	//     (its claim window) and the delivery intakes (NATS's push-durable exclusivity, which
+	//     delivery.StartIntakes takes).
+	//   - per-process by design, because each serves this process's own connections or memory:
+	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
+	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
+	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
+	//     purpose), the event stream relay and the document rooms' timers.
+	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
+	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
+	leases, err := database.Pool.Leases()
+	if err != nil {
+		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
+		os.Exit(1)
+	}
+
 	if natsClient != nil {
 		go outbox.Run(ctx, outbox.Deps{
 			Store:     database,
 			Publisher: natsClient,
 			Broker:    broker,
 			Docs:      documentService,
+			Leases:    leases,
 		})
 	}
 	// embedqueue.Run no-ops when its own Deps.Embedder is nil, so this always starts: a later
@@ -342,7 +369,7 @@ func main() {
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval)
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -351,7 +378,7 @@ func main() {
 	// The references route serves each document mention's stored excerpt; this fills the ones no
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
-	go documentService.RunReferenceExcerptReconciliation(ctx)
+	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -360,17 +387,17 @@ func main() {
 	}
 	if sweeper != nil {
 		slog.Info("dispatch: redelivering the GitHub App webhook's failed deliveries", "client_id", appCfg.ClientID, "interval", redeliver.Interval)
-		go sweeper.Run(ctx, redeliver.Interval)
+		go sweeper.Run(ctx, redeliver.Interval, leases)
 	} else {
 		slog.Info("dispatch: webhook redelivery off: it needs NATS and the GitHub App private key")
 	}
 
-	go architecture.Run(ctx, appCtx.Architecture())
+	go architecture.Run(ctx, appCtx.Architecture(), leases)
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
 	// a connected client, exactly like the outbox above.
-	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
+	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx, leases)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a

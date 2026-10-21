@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -66,6 +67,12 @@ const (
 	referenceExcerptStaleWindow       = time.Hour
 )
 
+// referenceExcerptLease names the lease one reconciliation tick runs under. The excerpts it
+// stores are the same whichever process cuts them, and a mention is owed one until some process
+// does, so two processes reading the same batch of documents and writing the same rows is work
+// done twice for one result - and, because each tick claims nothing, the same documents twice.
+const referenceExcerptLease = "reference-excerpts"
+
 // RunReferenceExcerptReconciliation stores the excerpts of every document some of whose mentions
 // are owed one (refs.DriftedExcerpts): every mention indexed before migration 0092, each one
 // rebuild-refs inserts, and each a version write could not cut. One batch per tick, at start, then
@@ -75,36 +82,51 @@ const (
 // written by the binary a deploy replaces left behind, while both run; until a tick marks one,
 // GET /api/v1/references serves that older excerpt. A mention owed an excerpt is answered with
 // the document's name until this stores one.
-func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context) {
+func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	started := time.Now()
 	for {
-		if time.Since(started) < referenceExcerptStaleWindow {
-			if marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool); err != nil && ctx.Err() == nil {
-				slog.Error("dispatch: mark stale reference excerpts", "error", err)
-			} else if marked > 0 {
-				slog.Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
-			}
-		}
+		// A tick whose lease another process holds waits the full interval: that process is
+		// doing this work, and the drift it leaves is what the next tick to take the lease
+		// finds. leases is required, as it is of every leased loop.
 		wait := ReferenceExcerptReconcileInterval
-		documents, full, err := s.ReconcileReferenceExcerpts(ctx)
-		switch {
-		case ctx.Err() != nil:
-			return
-		case err != nil:
-			slog.Error("dispatch: reconcile reference excerpts", "error", err)
-		case full:
-			wait = referenceExcerptStep
-		}
-		if documents > 0 {
-			slog.Info("dispatch: reconciled reference excerpts", "documents", documents)
-		}
+		duty.Exclusive(ctx, leases, referenceExcerptLease, func(ctx context.Context) {
+			wait = s.reconcileExcerptTick(ctx, started)
+		})
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
 		}
 	}
+}
+
+// reconcileExcerptTick is one tick of the reconciliation - the stale marking its first
+// referenceExcerptStaleWindow after started does, and one batch - and returns how long to wait
+// before the next: referenceExcerptStep while a full batch says drift remains, the interval once
+// none does.
+func (s *Service) reconcileExcerptTick(ctx context.Context, started time.Time) time.Duration {
+	if time.Since(started) < referenceExcerptStaleWindow {
+		if marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool); err != nil && ctx.Err() == nil {
+			slog.Error("dispatch: mark stale reference excerpts", "error", err)
+		} else if marked > 0 {
+			slog.Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
+		}
+	}
+	wait := ReferenceExcerptReconcileInterval
+	documents, full, err := s.ReconcileReferenceExcerpts(ctx)
+	switch {
+	case ctx.Err() != nil:
+		return wait
+	case err != nil:
+		slog.Error("dispatch: reconcile reference excerpts", "error", err)
+	case full:
+		wait = referenceExcerptStep
+	}
+	if documents > 0 {
+		slog.Info("dispatch: reconciled reference excerpts", "documents", documents)
+	}
+	return wait
 }
 
 // ReconcileReferenceExcerpts runs one tick: it reads each document of one batch of drift as the

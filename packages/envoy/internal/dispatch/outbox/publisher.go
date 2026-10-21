@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -64,12 +65,21 @@ type Publisher interface {
 	Publish(contracts.Envelope) error
 }
 
+// documentCompactionLease names the lease the daily document compaction runs under. It walks
+// every document, so two envoy-dispatch processes compacting at the same moment is twice the work
+// for one result.
+const documentCompactionLease = "document-compaction"
+
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
 	Store     *store.Store
 	Publisher Publisher
 	Broker    *events.Broker
 	Docs      docs.API
+	// Leases is where the compaction tick takes documentCompactionLease (compactDocuments). It
+	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
+	// exits at boot if the lease pool cannot be opened.
+	Leases duty.Leases
 }
 
 // Run drains unpublished events at startup, after committed local events, and
@@ -103,11 +113,19 @@ func Run(ctx context.Context, deps Deps) {
 		case <-retry.C:
 			scan(ctx, deps)
 		case <-compact.C:
-			if err := deps.Docs.CompactAll(ctx); err != nil {
-				slog.Error("dispatch outbox: compact documents", "error", err)
-			}
+			compactDocuments(ctx, deps)
 		}
 	}
+}
+
+// compactDocuments runs the daily compaction of every document under documentCompactionLease, so
+// that one process does that walk however many serve the database.
+func compactDocuments(ctx context.Context, deps Deps) {
+	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, func(ctx context.Context) {
+		if err := deps.Docs.CompactAll(ctx); err != nil {
+			slog.Error("dispatch outbox: compact documents", "error", err)
+		}
+	})
 }
 
 func scan(ctx context.Context, deps Deps) {
