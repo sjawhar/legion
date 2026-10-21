@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-62",
+  "completed": "2026-10-21T01:05:00Z",
+  "decision": "changes_requested",
+  "round": 1,
+  "reviewedHead": "bfc7b95aa7c75d517a82992c264d8f5a349872f1",
+  "codeHead": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/README.md:203-205",
+      "description": "The operator README states the issue's outcome as fact — \"Above one replica the app rolls instead: a new pod is ready before an old one stops, and its readers see no gap\" — but the rendering does not support it. No pod template in this change carries a lifecycle/preStop (grep for `lifecycle` over packages/envoy/infra/gcp/ and the three goldens finds none), and cmd/dispatch/shutdown.go:88 calls server.Shutdown(context.Background()) as soon as SIGTERM arrives, which closes the listening socket at once while EndpointSlice removal is asynchronous, so a connection that lands on a terminating pod in the propagation window is reset. The tester recorded exactly this as unproven in .legion/INFRA-62/test.json (unproven[0] item 3 and unproven[1]'s closing sentence, which names this same README clause). Fix: either give envoy-dispatch a preStop delay and re-prove the rollout, or say what the rollout does guarantee (capacity is kept) and name the residual."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/gcp/dispatch_test.go:563-575",
+      "description": "TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces reads spec.ingress[0] alone, so in the allowedNamespaces shape the consuming stack actually uses (envoy, legion) nothing asserts that the front-door rule is still present. Replacing the append at dispatch_kube.go:344 with an assignment inside the `if len(args.AllowedNamespaces) > 0` block would keep the whole suite green while leaving Tailscale Serve unable to reach the app at any port — a total outage, invisible to CI, in the one configuration production runs. policyIngressPods (dispatch_test.go:521) requires len(ingress)==1 and so cannot cover this case. Acceptance 1 asks for the front-door arrangement asserted rather than described; it is asserted only at the default. Fix: assert both rules (count and the front-door peer) in that test."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/README.md:201-203",
+      "description": "The front-door recreate is described as \"Serve is down while the tailnet pod is replaced\", but the app's readiness reads NATS (cmd/dispatch/main.go:969, ok := databaseOK && (natsOK == nil || *natsOK)) and NATS reaches the hub only through that proxy, so every app replica fails its readiness probe and leaves Service <hostname> too. The in-cluster allowedNamespaces path goes down with Serve, not just the tailnet path. Self-healing (internal/bus/nats.go sets MaxReconnect = -1, and there is no liveness probe), and not a regression from the base, but the sentence understates the blast radius."
+    },
+    {
+      "severity": "minor",
+      "file": "pull request body, Verification/CI line",
+      "description": "The CI line attaches the wrong workflow names to the run ids: 39513347754 is `Legion Envoy and Contracts`, 39513347783 is `Tests`, and 39513347690 is `Docs` (gh run view at each id). The job lists and the head SHA are right; only the names are swapped."
+    },
+    {
+      "severity": "minor",
+      "file": "pull request body",
+      "description": "The body carries no `## Contract change census` though the change adds a refusal at a process boundary (`replicas %d must be at least %d`, dispatch.go:266, raised through the Construct RPC). Its population is empty — the input is new in this PR, so no existing consumer can reach the refusal, and no program in this repository sets DispatchArgs.Replicas — and the rollout is an immediate refusal, which is right because the value it closes (replicas 0) would take Dispatch to zero pods silently. Record that in a short census section rather than leaving it unstated."
+    }
+  ],
+  "ciRead": {
+    "requiredChecks": "The base branch envoy-infra-integration has no required status checks: `gh api repos/sjawhar/legion/rules/branches/envoy-infra-integration` returns no required_status_checks rule and `gh api repos/sjawhar/legion/branches/envoy-infra-integration` no .protection.required_status_checks (both reads succeeded, each empty).",
+    "ciHead": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938 — the head of the branch's newest pull_request runs (Tests 39513347783, Legion Envoy and Contracts 39513347754, Docs 39513347690, PR Title 39513347706), all four completed success.",
+    "checkRuns": "All 21 check-runs at 0ae5a902 are completed; 13 success (changes, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, dispatch, dispatch-memory, lint, test, typecheck, pr-title, build) and 8 skipped (deploy, pi-legion, contracts, envoy-plugin, pi-envoy, claude-envoy, envoy-client, pi-shared). None failed.",
+    "aboveCiHead": "gh api repos/sjawhar/legion/compare/0ae5a902...bfc7b95a lists only .legion/INFRA-62/implement.json and .legion/INFRA-62/test.json, so the code the checks stand for is the code under review."
+  },
+  "thermonuclear": {
+    "head": "bfc7b95aa7c75d517a82992c264d8f5a349872f1",
+    "deepReview": "No blocking correctness or security defect. Verified no issue: the listener bearer wired end to end (RandomPassword <h>-listener-token -> Secret <h>-listener/ENVOY_API_TOKEN -> listener ENVOY_API_TOKEN and app ENVOY_TOKEN -> internal/dispatch/envoy/client.go's Authorization: Bearer); /healthz and /metrics being auth-exempt widens nothing, since NetworkPolicy <h>-listener admits 9020 from app=<h> alone and the probe is exec on loopback; Tailscale Serve dialling a cluster DNS name is sound against upstream ipn/ipnlocal/serve.go (SystemDial, no loopback restriction on the TS_SERVE_CONFIG path); no deadlock or crash-loop in the DependsOn chain; Recreate vs RollingUpdate right per workload; nothing in the diff replaces a resource (name, namespace and selector of Deployment <h> unchanged). Two Medium findings raised, both carried into this review (the README's gapless claim and the cutover's two tailscaled processes, the latter already placed in INFRA-63's spec).",
+    "codeQuality": "Component contract followed (resolve -> require -> register, the refusal naming its input with both a resolver row and a Construct row, plain *int with its output-refusal test, goldens regenerated beside their tests). One major finding, carried as the fast-follow: the strategy rule (1 -> Recreate, above 1 -> RollingUpdate{0,1}) is encoded in four places — dispatchStrategy/dispatchRollingUpdate/dispatchStrategyFor in dispatch.go, deploymentStrategy in dispatch_kube.go, and DispatchRollingUpdate in export_test.go — with no branch anywhere switching on strategyType. Judged not blocking: it is duplication, not a defect, and the rendered-Deployment tests already pin both cases."
+  },
+  "threads": "0 review threads on the pull request at this head (gh api graphql reviewThreads: 0 nodes; gh api .../pulls/2089/reviews: 0). No bot thread to adjudicate. The only comment is the tester's own evidence post."
+}
