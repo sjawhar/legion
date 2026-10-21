@@ -40,10 +40,11 @@ changed its ephemeral-storage limits at least twice on 2026-10-20: the implement
 limit went to 4Gi at 22:30Z (that comment, which also records that a raise applies only to pods
 created after the apply), and every role's were rebalanced at 22:50Z
 (dispatch://INFRA-51/comment/a9f52454-8972-41ef-aa39-a161af45f020). A pod keeps the values it was
-created with, so a note's figure ages the moment an operator applies. Read your own container's
-limits rather than any number here: from inside, only the sandbox's counter is readable,
-`/sys/fs/cgroup/memory/memory.limit_in_bytes` (why it is the sandbox's is below), and the
-per-container limits are in the pod spec, which a role container cannot read.
+created with, so a note's figure ages the moment an operator applies. Your own container's limits
+are not readable from inside it: the only counter a role container can read is the sandbox's,
+`/sys/fs/cgroup/memory/memory.limit_in_bytes` (why it is the sandbox's and not a limit is below).
+They are in the pod spec, so the answer comes from whoever can read the cluster, or from the
+deployment's own record — the two comments above.
 
 ## What the limit charges
 
@@ -94,8 +95,9 @@ The rule is Kubernetes' own, not verified from inside this sandbox, which can se
 per-container counter: for a memory-backed `emptyDir`,
 "files you write count against the memory limit of the container that wrote them"
 (https://kubernetes.io/docs/concepts/storage/volumes/#emptydir). So treat the write as spending
-the role's own memory budget; the smallest role's memory budget may be well under a gigabyte, and a
-cache moved onto a tmpfs can exceed it.
+the role's own memory budget. The smallest memory limit recorded for a role is 1Gi — in Legion's
+defaults, in the recorded pod shape, and in the live post-apply pod read earlier in this
+paragraph — and a cache moved onto a tmpfs can exceed it.
 
 **`/tmp` is not the exception a reader expects.** A role container mounts no `/tmp`: the
 memory-backed `tmp` volume belongs to the `workspace-fetch` init container alone, as that
