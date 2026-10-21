@@ -653,6 +653,67 @@ check "with the default it used instead" "$(contains "$(field detail)" 'default 
 check "no marker is left" "$(is "$(exists "$marker")" false)"
 check_clean
 
+# run_bounded <seconds> <working directory> [NAME=value …]: run_setup under a wall-clock guard of
+# this harness's own, so a bound that does not bound fails its case in seconds instead of waiting
+# out the stub's `sleep 300`.
+run_bounded() {
+  local limit=$1
+  shift
+  local cwd=$1
+  shift
+  set +e
+  out=$(cd "$cwd" && timeout "$limit" env -i \
+    PATH="$case_root/bin:$PATH" \
+    HOME="$case_root/home" \
+    TMPDIR="$case_root/tmp" \
+    STUB_RECORD="$record" \
+    "$@" \
+    sh "$setup_script" 2>&1)
+  status=$?
+  set -e
+  # The stub's own sleep outlives a run the guard cut short; the record names its pid.
+  if [ -e "$record" ]; then
+    awk '/^pid: /{print $2}' "$record" | while read -r stub_pid; do
+      kill "$stub_pid" 2> /dev/null || true
+    done
+  fi
+}
+
+echo "case: a number too large for this shell is refused like any other shape"
+# `*[!0-9]*` passes every all-digit string, however long, and the two knobs then break in
+# different ways. Measured in a role container at this head: `LEGION_SETUP_BUDGET=9223372036854775808`
+# reaches dash's arithmetic as an out-of-range literal and the script dies `Illegal number`,
+# exit 2 — the one outcome this file's header promises it can never produce, since a non-zero
+# exit stops Oh My Pi, charges the launch a failure, and after three ends the claim in
+# worker-died. The hold is the other direction: `[ "$left" -le "$hold" ]` is dash's
+# `Illegal number` too, whose non-zero status takes the `|| left=$hold` branch, so
+# `timeout -k 5 <huge>` bounds nothing and the run holds the cache's lock past every bound —
+# measured still running at 25 s against a 3 s budget, with the daemon's own plugin install
+# waiting on that inode.
+for bad in 9223372036854775808 99999999999999999999; do
+  fixture "budget-too-large-$bad"
+  run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+    LEGION_SETUP_BUDGET="$bad" STUB_MODE=ok
+  check "LEGION_SETUP_BUDGET=$bad exits 0" "$(is "$status" 0)"
+  check "  and the packages are installed anyway" "$(is "$(calls)" 1)"
+  check "  the run tells the agent which setting it could not use" \
+    "$(contains "$(field detail)" "^LEGION_SETUP_BUDGET=$bad is not a whole number of seconds")"
+  check_clean
+done
+
+fixture lock-hold-too-large
+began=$(date +%s)
+run_bounded 25 "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=3 LEGION_SETUP_LOCK_HOLD=99999999999999999999 STUB_MODE=hang
+elapsed=$(($(date +%s) - began))
+echo "  the run took ${elapsed}s against a 3s budget and a refused hold"
+check "a hold too large for this shell still exits 0" "$(is "$status" 0)"
+check "the install was bounded after all" "$(at_most "$elapsed" 15)"
+check "no marker is left" "$(is "$(exists "$marker")" false)"
+check "and the run names the hold it could not use" \
+  "$(contains "$(field detail)" '^LEGION_SETUP_LOCK_HOLD=99999999999999999999 is not a whole number of seconds')"
+check_clean
+
 echo "case: a failing run tells the agent the setting before the log it already quotes"
 fixture setting-note-failed
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
