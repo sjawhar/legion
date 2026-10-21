@@ -2,35 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-69",
-  "completed": "2026-10-21T02:25:00Z",
-  "round": 3,
-  "decision": "changes_requested",
+  "completed": "2026-10-21T02:45:00Z",
+  "round": 4,
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:97-98",
-      "description": "'the smallest role's memory budget may be well under a gigabyte' is below anything in evidence, and the note states it as a hedge rather than a measurement. The smallest memory limit recorded anywhere for a role is 1Gi: Legion's defaultResources and golden/root.json give 1Gi to the architect, planner and merger, and dispatch://INFRA-51/comment/12ce8e6b-0e14-4ff4-9cb2-b48306b15906 reads a live issue pod created after the evening's applies with exactly 1Gi/1Gi/6Gi/6Gi/4Gi/1Gi, noting the stack sets no memory at all. The sub-gigabyte figure comes from 512Mi in dispatch://INFRA-51/comment/a9f52454, which is the ephemeral-storage rebalance - that comment opens on tester evictions ('exceeded its local ephemeral storage limit \"1Gi\"') and its 10Gi total is the per-pod ephemeral ceiling of dispatch://INFRA-31 - and I was the one who read it as memory in round 2. Rewrite to what is in evidence: the smallest memory limit recorded for a role is 1Gi, and a cache moved onto a tmpfs can exceed that. The warning keeps its force without a number nobody has measured for memory."
-    },
-    {
-      "severity": "important",
-      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:43-46",
-      "description": "'Read your own container's limits rather than any number here' is an instruction the note's own reader cannot carry out, and the rest of the same sentence says so: from inside, the only readable counter is the sandbox's /sys/fs/cgroup/memory/memory.limit_in_bytes (20,401,094,656 bytes here, equal to free -k's total, which the later paragraph warns against mistaking for a limit), and the per-container limits are in the pod spec, which needs cluster access. A note whose advice cannot be followed from where its reader sits is the defect class this file documents. Rewrite to say where the answer actually is - the pod spec, through whoever can read the cluster, or the deployment's own record - and to say plainly that it is not readable from inside the container."
-    }
-  ],
-  "roundTwoFindings": {
-    "perRoleNumbers": "Answered at 19f4e15c0b23 and accepted, with the correction that half of my round-2 finding was wrong: the 512Mi/4Gi/3Gi/1536Mi I cited from dispatch://INFRA-51/comment/a9f52454 are ephemeral storage, not memory. The head now names the defaults as defaults, names runtime.kubernetes.resources as what decides a pod, and cites comment 12ce8e6b for a live post-apply pod carrying exactly the default six memory values. Thread PRRT_kwDORFy7ds6ul7S8 carries that correction.",
-    "oneGiBClaim": "Fixed at 19f4e15c0b23 and accepted: 'The mechanism, once.' prints no number, the new dating paragraph records that this pod predates both applies and names the implementer's 4Gi at 22:30Z and the 22:50Z rebalance, and the clamp paragraph drops its hard-coded 1 GiB. Thread PRRT_kwDORFy7ds6ul7TA answered."
+  "keyFindings": [],
+  "roundThreeFindings": {
+    "smallestMemoryBudget": "Fixed at bb698199ab6e and accepted (thread PRRT_kwDORFy7ds6umTER): the hedge 'may be well under a gigabyte' is replaced by 'The smallest memory limit recorded for a role is 1Gi - in Legion's defaults, in the recorded pod shape, and in the live post-apply pod read earlier in this paragraph - and a cache moved onto a tmpfs can exceed it.' Those are the three sources I verified (defaultResources, golden/root.json, dispatch://INFRA-51/comment/12ce8e6b); no new figure was introduced, and the 512Mi stays in the ephemeral-storage record where it belongs.",
+    "readYourOwnLimits": "Fixed at bb698199ab6e and accepted (thread PRRT_kwDORFy7ds6umTEX): the unfollowable instruction is replaced by 'Your own container's limits are not readable from inside it: the only counter a role container can read is the sandbox's, /sys/fs/cgroup/memory/memory.limit_in_bytes (why it is the sandbox's and not a limit is below). They are in the pod spec, so the answer comes from whoever can read the cluster, or from the deployment's own record - the two comments above.' That is followable where the reader sits and keeps the two dated INFRA-51 records as the fallback."
   },
-  "verifiedAtHead": {
-    "head": "f5d5f12e67a3c4359939219c6f85c32e78696494",
-    "ciHead": "19f4e15c0b23e94967996d926e6aefbb9d3c147d",
-    "ci": "main's rulesets require lint, typecheck, test, pr-title; branch protection none. All four present, completed and success on the CI head's check-runs; compare 19f4e15c...f5d5f12e is 'ahead' listing only .legion/INFRA-69/implement.json and .legion/INFRA-69/test.json. The body's CI line names Tests 39529522921 and PR Title 39529556338, both read as success at that commit.",
-    "threads": "Five threads, all mine, all resolved; the three from round 1 carry my round-2 answers and the two from round 2 carry my round-3 answers. No bot threads.",
-    "e2eLines": "Both present; tester round 6 PASS at 2490b025dfe0 (code head 19f4e15c), handoff failed: 0, implementerProof verified.",
-    "thermonuclear": "Not run: one docs/solutions/ markdown file plus .legion/ handoffs, no runtime code.",
-    "ownChecks": "Read dispatch://INFRA-51/comment/12ce8e6b (live post-apply pod: memory request = limit 1Gi/1Gi/6Gi/6Gi/4Gi/1Gi, stack sets no memory, nodes at 99% of memory requests) and comment/a9f52454 again (its figures are the ephemeral-storage rebalance, 10Gi per-pod ceiling, after tester evictions naming the ephemeral limit), and comment/bf8035e7 (implementer to 4Gi at 22:30Z, other five at 1Gi, raise applies only to pods created after the apply). Earlier rounds' in-container measurements still stand at this head: no /tmp mount, the charged device set, df/du behaviour, free -k shared 132 -> 102,532 -> 132 KiB, cgroup v1 with only the sandbox-wide counter, kubectl refused and no ServiceAccount token."
+  "approval": {
+    "head": "the handoff head this push makes, which the submitted APPROVE names by SHA",
+    "codeHead": "bb698199ab6e001ba6d979cef5d959ce386567c8",
+    "ci": "main's rulesets require lint, typecheck, test, pr-title; branch protection none. All four present, completed and success on the code head's check-runs; compare bb698199...006b3636 is 'ahead' listing only .legion/INFRA-69/implement.json and .legion/INFRA-69/test.json. The body's CI line names Tests 39532164716 and PR Title 39532205199, both read success at that commit.",
+    "threads": "Seven threads, every one opened by me, all resolved by the implementer and each carrying my own answer; no bot threads, no finding standing.",
+    "e2eLines": "Both present: E2E (implementer) with its round-7 re-proof at bb698199ab6e, and E2E (tester) round 7 - PASS at 006b3636bdb1 with the note identical to the code head; tester handoff round 7, failed: 0, implementerProof verified.",
+    "thermonuclear": "Not run in any round: the diff is one docs/solutions/ markdown file plus .legion/ handoffs, no runtime code, no exported symbol, no process or package boundary change.",
+    "whatIVerifiedMyself": "Across the four rounds, in the reviewer container and on the forge: no /tmp line in /proc/mounts and /tmp, /home/legion, ~/.cache and ~/.local/state on one device against /legion, /legion/feed, the sessions directory, /home/legion/.config and the four /var/run/legion/* mounts; df / moving by the written size for a /tmp write and not for a /legion or tmpfs write; du blind only under -x; df -x refusing as --exclude-type; go env GOMODCACHE GOCACHE as printed; free -k shared 132 -> 102,532 -> 132 KiB for a 100 MiB tmpfs write; cgroup v1 with only the sandbox-wide counter (memory.limit_in_bytes 20,401,094,656 = free's total); kubectl refused and no ServiceAccount token, with live_operator_test.go asserting automountServiceAccountToken false; golden/root.json's six role containers, their mounts and their memory values; defaultResources and gkeEphemeralStorageClamped's doc comment; docs/kubernetes.md:1189 and :1703-1705; the Kubernetes emptyDir sentence verbatim on the live page; and the three INFRA-51 comments the note cites, each saying what the note credits it with.",
+    "planDeparture": "The in-place edit rather than skill://legion-retro's superseding file was judged once in round 1 and stands accepted: the rule governs a retro's durable output and guards against two trees editing one file in the same hour, while this issue's whole deliverable is that file, no other tree is editing it, and a successor would leave the wrong cause unmarked in the file other notes link to."
   }
 }
