@@ -13,36 +13,59 @@
 # check tool through `scripts/repo-tool.sh`", not "no `bunx`": the pinned check tools are `biome`,
 # `tsc`, `tsserver` and `playwright`, and the gate judges commands, never prose.
 #
+# A package runner is the vulnerable spelling, whatever it is called: `bunx`, `pnpx`, `npx` and
+# the two-word `bun x`, `npm exec`, `pnpm dlx` and `yarn dlx` all hand a bare name to a resolver
+# that reaches the registry. Measured on the worker image with no `node_modules`, `bun x biome
+# check .` and `npx biome check .` each exit 0 having checked nothing, and `--version` answers
+# `0.3.3` to both — the squat, not the Biome the lockfile pins; `bun x` is `bunx`'s own spelling
+# (one binary, one resolution) and the image ships `/usr/local/bin/npx` beside bun. `pnpm` and
+# `yarn` are on the list although no image here installs them today, because the rule is about
+# what a reader may be told to run, not about which runner happens to be on this month's PATH: a
+# guide outlives an image, and a runner added to one later must not open the hole again.
+#
 # `vite` and `astro` are deliberately not on that list: they are build recipes rather than the
 # checks this gate is about, no binary on the image shadows them, and a bare one in a `bun run`
 # recipe is already fail-closed, since Bun puts `node_modules/.bin` on the recipe's PATH and
-# nothing else answers the name. A `bunx vite` is still caught, by the `bunx` half of rule 1.
+# nothing else answers the name. A `bunx vite` is still caught, by the package-runner half of
+# rule 1.
 #
 # One tokenizer serves every rule, so a command is read the same way wherever it is written: a
 # command string is split into segments on `&&`, `||`, `;` and `|`; each segment's leading
-# brackets, braces, quotes, a prompt's `$` and any `FOO=bar` assignments are stepped over; and the
-# first word that remains is the command the shell would run. Quotes are stepped over rather than
+# brackets, braces, quotes, a prompt's `$ ` and any `FOO=bar` assignments are stepped over; and
+# the words that remain are the command the shell would run. Quotes are stepped over rather than
 # obeyed, so a command nested in `bash -c '… && bunx playwright …'` — how
 # `docs/site/media/broker/screenshots.sh` used to call Playwright — is judged like any other. A
-# segment whose first word is `bunx` is a problem whatever it names; a segment whose first word's
-# basename is one of the four tools is a problem; a segment whose first word ends in
-# `scripts/repo-tool.sh`, with any relative prefix, is correct whatever tool it names.
+# segment whose first word is a package runner is a problem whatever it names, judged by that
+# word's basename, so `/usr/local/bin/npx` and `./node_modules/.bin/bunx` are caught as a bare
+# `bunx` is; a segment whose first word's basename is one of the four tools is a problem; a
+# segment whose first word ends in `scripts/repo-tool.sh`, with any prefix, relative or expanded,
+# is correct whatever tool it names.
+#
+# What the tokenizer cannot read, it refuses. A first word carrying an unexpanded shell expansion
+# (`$name`, `${…}`, `$(…)` or a backtick substitution) may be the wrapper and may be `bunx`, and
+# a gate that waves through the shapes it cannot read hands back exactly the silent green this
+# gate exists to stop. So when such a segment also carries a pinned tool's name in a later word,
+# it is reported, named, and pointed at the exemption marker — spell the command out through the
+# wrapper, or say in the marker why it is safe. The rule is held to that shape, an unreadable
+# first word and a pinned tool in the same segment, so that it accuses no ordinary
+# `"$ROOT/scripts/release.sh" --dry-run` line.
 #
 # The gate fails, in code order:
 #
 #   1. a `scripts` value in any `package.json` (parsed as JSON, never grepped) whose segments
-#      invoke a pinned check tool outside the wrapper, or invoke `bunx` at all, reported at the
-#      line the recipe's own key sits on,
+#      invoke a pinned check tool outside the wrapper, invoke a package runner at all, or cannot
+#      be read for certain, reported at the line the recipe's own key sits on,
 #   2. a `run:` in any `.github/workflows/*.yml` or `*.yaml` (parsed as YAML with a line-recording
 #      loader) doing the same, each line of a multi-line `run:` judged on its own and reported at
 #      its own line where the loader's span gives it, otherwise at the step's,
 #   3. a command line in any `*.sh` outside `.github/scripts/`, or inside a fenced code block of
-#      the prescriptive markdown set — root `AGENTS.md` and `README.md`, `packages/*/AGENTS.md`
-#      and `packages/*/README.md`, `docs/site/README.md`, `docs/site/media/README.md`,
+#      the prescriptive markdown set — every `AGENTS.md` and every `README.md` at any depth,
 #      `skills/**/*.md`, `packages/claude-envoy/legion/skills/**/*.md`, `docs/solutions/**/*.md`,
-#      `docs/kubernetes.md`, `docs/deployment.md` — doing the same. Prose and inline code are
-#      never judged: a note may name `bunx biome` in a sentence or in backticks, because only a
-#      line inside a fenced block is a command someone runs,
+#      `docs/kubernetes.md`, `docs/deployment.md` — doing the same. Every guide at any depth,
+#      because a command prescribed in `packages/envoy/infra/AGENTS.md` binds its reader exactly
+#      as the root guide's does, and a set written depth by depth left fifteen of them unjudged.
+#      Prose and inline code are never judged: a note may name `bunx biome` in a sentence or in
+#      backticks, because only a line inside a fenced block is a command someone runs,
 #   4. an exemption that gives no reason. A fenced block whose immediately preceding non-blank
 #      line is `<!-- check-check-commands: allow <reason> -->` is not judged, and neither is a
 #      line ending `# check-check-commands: allow <reason>`; the reason is what makes the
@@ -113,15 +136,17 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 WRAPPER = "scripts/repo-tool.sh"
 MARKER = "check-check-commands: allow"
 PINNED_TOOLS = ("biome", "tsc", "tsserver", "playwright")
+# Every package runner, by the basename of the word that invokes it. One-word spellings first,
+# then the subcommand each multi-word spelling needs, so `bun run lint` and `npm view biome` —
+# ordinary commands that name no resolver — stay ordinary. `pnpm` and `yarn` are here although
+# no image installs them today: the rule is about what a guide may tell a reader to run.
+RESOLVERS = ("bunx", "pnpx", "npx")
+RESOLVER_SUBCOMMANDS = {"bun": "x", "npm": "exec", "pnpm": "dlx", "yarn": "dlx"}
 SKIP_DIRS = {".git", ".jj", "node_modules", ".venv", "vendor"}
 EXCLUDED_DIRS = ("docs/plans", "docs/superpowers", ".superpowers", ".github/scripts")
 GUIDES = (
-    "AGENTS.md",
-    "README.md",
-    "packages/*/AGENTS.md",
-    "packages/*/README.md",
-    "docs/site/README.md",
-    "docs/site/media/README.md",
+    "**/AGENTS.md",
+    "**/README.md",
     "skills/**/*.md",
     "packages/claude-envoy/legion/skills/**/*.md",
     "docs/solutions/**/*.md",
@@ -130,9 +155,15 @@ GUIDES = (
 )
 SEGMENT = re.compile(r"&&|\|\||[;|]")
 ENV_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-# Stepped over before the first word is read: a subshell's or group's opener, a quote, a prompt's
-# `$`, and a `${` that a variable path starts with.
-LEADING = " \t({}$\"'`"
+# Stepped over before the first word is read: a subshell's or group's opener, a brace and a
+# quote. A `$` is stepped over only when it is a prompt's — `$ bun run lint` in a guide — so a
+# word that an expansion begins stays whole for rule 3 instead of being read as the text after
+# the `$`.
+LEADING = " \t({}\"'"
+PROMPT = re.compile(r"^\$(?:\s|$)")
+# An unexpanded expansion anywhere in a word: `$name`, `${…}`, `$(…)`, `$1`, or a substitution in
+# backticks. What carries one, the gate cannot resolve to a command.
+EXPANSION = re.compile(r"\$\S|`")
 FENCE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 ALLOW_COMMENT = re.compile(rf"^<!--\s*{MARKER}(?P<reason>.*?)-->$")
 ALLOW_TRAILING = re.compile(rf"#\s*{MARKER}(?P<reason>[^#]*)$")
@@ -146,43 +177,78 @@ def one_line(value: object) -> str:
     return " ".join(str(value).split())
 
 
-def first_word(segment: str) -> str:
-    """The command a segment would run: brackets, quotes, a prompt's `$` and any `FOO=bar`
-    assignments are stepped over. Quotes are stepped over rather than obeyed, so the inner command
-    of `bash -c '… && bunx playwright …'` is read as a command of its own."""
-    text = segment.strip().lstrip(LEADING)
+def command_words(segment: str) -> list[str]:
+    """The words a segment would run, from its command onwards: brackets, quotes, a prompt's `$ `
+    and any `FOO=bar` assignments are stepped over. Quotes are stepped over rather than obeyed,
+    so the inner command of `bash -c '… && bunx playwright …'` is read as a command of its own.
+    Each word keeps the text that was written, an expansion included, because a word the gate
+    cannot read is itself something rule 3 reports."""
+    text = segment.strip()
     while True:
+        text = text.lstrip(LEADING)
+        if PROMPT.match(text):
+            text = text[1:]
+            continue
         words = text.split(None, 1)
         if not words:
-            return ""
-        word = words[0].strip("\"'`")
-        if not ENV_PREFIX.match(word):
-            return word
-        text = (words[1] if len(words) > 1 else "").lstrip(LEADING)
+            return []
+        if not ENV_PREFIX.match(words[0]):
+            return text.split()
+        text = words[1] if len(words) > 1 else ""
+
+
+def spoken(word: str) -> str:
+    """A word as the shell would name it: the quotes it was written inside are not part of it."""
+    return word.strip("\"'`")
+
+
+def runner_problem(spelling: str) -> str:
+    return (
+        f"runs `{one_line(spelling)}`, a package runner that resolves the name it is given from "
+        f"the npm registry rather than this repository's lockfile (with no `node_modules`, "
+        f"`{one_line(spelling)} biome` fetches a squatted package that checks nothing and exits "
+        f"0) — run `{WRAPPER} <tool>` instead"
+    )
 
 
 def offenders(command: str):
-    """Every segment of a command string that reaches a pinned check tool outside the wrapper,
-    as the sentence naming what is wrong with it (the segment's first word is quoted inside it).
-    One reading of what the shell would run serves a recipe, a workflow `run:` line, a shell line
-    and a fenced command line alike."""
+    """Every segment of a command string that reaches a pinned check tool outside the wrapper, or
+    that the tokenizer cannot read, as the sentence naming what is wrong with it (the segment's
+    own words are quoted inside it). One reading of what the shell would run serves a recipe, a
+    workflow `run:` line, a shell line and a fenced command line alike."""
     for segment in SEGMENT.split(command):
-        word = first_word(segment)
+        words = command_words(segment)
+        word = spoken(words[0]) if words else ""
         if not word or word.endswith(WRAPPER):
             continue
         tool = word.rsplit("/", 1)[-1]
-        if tool == "bunx":
-            yield (
-                f"runs `{one_line(word)}`, which resolves from the npm registry rather than this "
-                f"repository's lockfile (`bunx biome` there is a squatted package that checks "
-                f"nothing and exits 0) — run `{WRAPPER} <tool>` instead"
-            )
+        second = spoken(words[1]) if len(words) > 1 else ""
+        if tool in RESOLVERS:
+            yield runner_problem(word)
+        elif second == RESOLVER_SUBCOMMANDS.get(tool):
+            yield runner_problem(f"{word} {second}")
         elif tool in PINNED_TOOLS:
             yield (
                 f"runs `{one_line(word)}`, which is whatever PATH answers with (the worker image "
                 f"ships its own tsc), not the {tool} this repository pins — run "
                 f"`{WRAPPER} {tool}` instead"
             )
+        elif EXPANSION.search(words[0]):
+            named = next(
+                (
+                    later
+                    for later in (spoken(rest).rsplit("/", 1)[-1] for rest in words[1:])
+                    if later in PINNED_TOOLS
+                ),
+                "",
+            )
+            if named:
+                yield (
+                    f"cannot be read for certain: `{one_line(segment.strip())}` starts with a "
+                    f"shell expansion, so what it runs is not knowable here, and it names "
+                    f"`{named}` — spell the command out as `{WRAPPER} {named}`, or write "
+                    f"`{MARKER} <reason>` to say why what this expands to is safe"
+                )
 
 
 def judge(path: Path, number: int, text: str, context: str) -> None:

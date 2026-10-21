@@ -396,6 +396,115 @@ run_check "$root"
 check "a fenced 'npx biome' in AGENTS.md fails" "$(is "$status" 1)"
 check "names the line inside the block" "$(contains "$out" 'AGENTS.md:4:')"
 
+echo "case: every other spelling that hands a bare name to a resolver"
+# One binary or another, the resolution is the same: `pnpx`, `npm exec`, `pnpm dlx` and
+# `yarn dlx` each fetch what the registry serves for a name this repository pins. pnpm and yarn
+# are judged although no image here installs them — a guide outlives the image that reads it,
+# and the rule is about what a reader may be told to run.
+root=$(fixture workflow-pnpx)
+cat >> "$root/.github/workflows/ci.yaml" <<'YAML'
+      - run: pnpx tsc --noEmit
+YAML
+run_check "$root"
+check "a pnpx workflow step fails" "$(is "$status" 1)"
+check "names its line and the runner" \
+  "$(contains "$out" 'ci.yaml:10: this run: line runs `pnpx`, a package runner')"
+
+root=$(fixture shell-npm-exec)
+cat >> "$root/scripts/release.sh" <<'SH'
+npm exec -- biome check .
+SH
+run_check "$root"
+check "an npm exec shell line fails" "$(is "$status" 1)"
+check "names both words of the runner" \
+  "$(contains "$out" 'scripts/release.sh:5: this line runs `npm exec`, a package runner')"
+
+root=$(fixture guide-pnpm-dlx)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+pnpm dlx @biomejs/biome check .
+```
+MD
+run_check "$root"
+check "a fenced pnpm dlx fails" "$(is "$status" 1)"
+check "names the line inside the block" \
+  "$(contains "$out" 'AGENTS.md:4: this fenced command runs `pnpm dlx`')"
+
+root=$(fixture recipe-yarn-dlx)
+sed -i 's|    "lint": .*|    "lint": "yarn dlx biome check src/",|' "$root/packages/thing/package.json"
+run_check "$root"
+check "a yarn dlx recipe fails" "$(is "$status" 1)"
+check "names the recipe's own line" \
+  "$(contains "$out" 'packages/thing/package.json:4: the "lint" recipe runs `yarn dlx`')"
+
+root=$(fixture shell-npx-by-path)
+cat >> "$root/scripts/release.sh" <<'SH'
+/usr/local/bin/npx biome check .
+SH
+run_check "$root"
+check "a runner named by its path fails: the basename is what runs" "$(is "$status" 1)"
+check "names the path the line would run" \
+  "$(contains "$out" 'scripts/release.sh:5: this line runs `/usr/local/bin/npx`')"
+
+root=$(fixture ordinary-commands)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+bun run lint
+bun test
+bun build ./src/index.ts
+npm view biome version
+```
+MD
+run_check "$root"
+check "bun run, bun test, bun build and npm view are no resolvers" "$(is "$status" 0)"
+
+echo "case: a command the gate cannot read is refused, never waved through"
+root=$(fixture shell-expanded-tool)
+cat >> "$root/scripts/release.sh" <<'SH'
+"$TOOL" biome check .
+SH
+run_check "$root"
+check "an expansion that would run biome fails" "$(is "$status" 1)"
+check "names the segment it cannot read" \
+  "$(contains "$out" 'scripts/release.sh:5: this line cannot be read for certain: `"\$TOOL" biome check .`')"
+check "names the tool the segment carries" "$(contains "$out" 'it names `biome`')"
+check "offers the marker as the way to say why it is safe" \
+  "$(contains "$out" 'check-check-commands: allow <reason>')"
+
+root=$(fixture shell-expanded-harmless)
+cat >> "$root/scripts/release.sh" <<'SH'
+"$ROOT/scripts/release.sh" --dry-run
+${BUN} run lint
+SH
+run_check "$root"
+check "an expansion naming no pinned tool passes: the rule stays that narrow" "$(is "$status" 0)"
+
+root=$(fixture shell-expanded-exempt)
+cat >> "$root/scripts/release.sh" <<'SH'
+"$TOOL" biome check . # check-check-commands: allow TOOL is the wrapper, set above
+SH
+run_check "$root"
+check "an unreadable command exempted with a reason passes" "$(is "$status" 0)"
+
+echo "case: a guide nested deeper than a package's own top"
+root=$(fixture nested-guide)
+mkdir -p "$root/packages/envoy/infra"
+cat > "$root/packages/envoy/infra/AGENTS.md" <<'MD'
+# Infra
+
+```bash
+bunx biome check .
+```
+MD
+run_check "$root"
+check "an AGENTS.md three directories down is judged" "$(is "$status" 1)"
+check "names the line inside its block" \
+  "$(contains "$out" 'packages/envoy/infra/AGENTS.md:4: this fenced command runs `bunx`')"
+
 echo "case: rule 4 — an exemption that gives no reason"
 root=$(fixture exemption-empty-block)
 cat > "$root/AGENTS.md" <<'MD'
