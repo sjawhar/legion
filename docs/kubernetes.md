@@ -1234,24 +1234,51 @@ in six per-role copies of the Go build and module caches — an intermediate lay
 ever produced, since a role container at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
 no `BUN_INSTALL_CACHE_DIR`, and the Go pair is new on the volume here. The remedy for a volume
 near full is manual, because nothing prunes, and it accounts for every directory this layout
-creates, either on its delete list or in the two exemptions below it:
-`chmod -R u+w` and then delete `/legion/scratch/cache`, `/legion/scratch/tmp`,
-`/legion/scratch/bun/install/cache`, `/legion/go` and `/legion/uv`, which the issue's roles share.
-Two paths this layout creates are deliberately not in that list. The per-role
-`/legion/scratch/state/<role>` is Oh My Pi's logs, Chromium's profiles and the installed plugin
-generation rather than a cache, and is small — Oh My Pi's state-class directories (`run/daemons`,
-`logs`, `browser-profiles`, `reports`, `terminal-sessions`) hang under `$XDG_STATE_HOME/omp`, so
-they are that per-role path's and not the shared data home's. `/legion/scratch/data` is the
-shared `XDG_DATA_HOME`, the data-class directory of every tool a role runs, and it is exempt
-because nothing re-derives it: a cache, a temporary directory and an install cache are rebuilt by
-the next build or install, where what a tool stores in its data home is gone when it is deleted.
-Measure it before you touch it, and delete it only when it is the reason the volume is full.
-Do not leave `/legion/scratch/tmp`
-out of that list because a temporary directory sounds transient: it is this layout's own new
-failure mode, since a role at the merge base is told no `TMPDIR` at all and its temporaries died
-with the container, where here a killed build's residue lives as long as the issue does — one
-interrupted `go build` left **851 MB in a single `go-build*` tree** on this branch's volume, more
-than everything else the reclaim found. Delete them between turns, not under a running role: a
+creates: each is on the delete list or among the exemptions under it, and a test holds
+the two lists to what the runtime renders
+(`TestTheReclaimParagraphNamesEveryDirectoryTheRendererPutsOnTheIssueVolume`).
+
+Delete list — `chmod -R u+w` first, then remove, these being the paths the issue's roles share
+and the next build or install rebuilds:
+
+- `/legion/scratch/cache`
+- `/legion/scratch/tmp`
+- `/legion/scratch/bun/install/cache`
+- `/legion/go`
+- `/legion/uv/cache`
+
+Exempt, each for a reason the list above does not hold:
+
+- `/legion/scratch/state/<role>` — per-role, and Oh My Pi's logs, Chromium's profiles and the
+  installed plugin generation rather than a cache; small. Oh My Pi's state-class directories
+  (`run/daemons`, `logs`, `browser-profiles`, `reports`, `terminal-sessions`) hang under
+  `$XDG_STATE_HOME/omp`, so they are this path's and not the shared data home's.
+- `/legion/scratch/data` — the shared `XDG_DATA_HOME`, the data-class home of the tools that
+  honour it. Nothing re-derives it: the caches above are rebuilt by the next build or install,
+  where what a tool stores in its data home is gone when it is deleted.
+- `/legion/uv/python/<issue>` — the other half of uv's directory, exempt for that same reason
+  sharpened by a dependency: it holds the interpreters uv installed, and a project's `.venv` in
+  the issue's workspace, which this remedy does not delete, links to one of them, so removing it
+  leaves a virtual environment pointing at an interpreter that is gone. The cache half costs only
+  a download.
+
+Measure either of the last two before you touch it, and delete it only when it is the reason the
+volume is full.
+
+`/legion/scratch/tmp` is on the list but takes a different window, and it is the one path here
+whose only creator is a role's **next shim start**: `podsafety.EnsureScratch` makes the told
+directories once, as the shim starts Oh My Pi (`worker_shim.go`), and a role's shim lives across
+turns, so a `tmp` deleted under a live role stays gone until that role is relaunched. What a
+live role then does with it splits two ways, and the quiet half is the dangerous one: `mktemp -d`
+fails with exit 1, where Python's `tempfile` silently falls back to `/tmp` — which in a role
+container is the container's own filesystem, charged to the ephemeral-storage limit this whole
+layout exists to get out from under. So delete `tmp` with the role stopped, not merely between
+its turns; the rest of the list is reclaimable between turns, when no role is mid-build or
+mid-install. Do not leave it out of the list either, because a temporary directory sounds
+transient: a role at the merge base is told no `TMPDIR` at all and its temporaries died with the
+container, where here a killed build's residue lives as long as the issue does — one interrupted
+`go build` left **851 MB in a single `go-build*` tree** on this branch's volume, more than
+everything else the reclaim found. As for the rest: a
 role mid-build rebuilds what it loses, but deleting `$BUN_INSTALL_CACHE_DIR` under a role
 installing its plugin pair takes the `flock` inode with it, so a second role enters the critical
 section while the first is inside it and both fill one cold cache entry (measured: with no delete
