@@ -36,6 +36,9 @@ type JobIntake struct {
 	// leases is the pool bind takes the delivery-consumers lease on, so that one process at a
 	// time reconciles this durable's configuration (bindDurableConsumer).
 	leases duty.Leases
+	// throttle is this intake's own bind-poll state: how recently it reconciled its durable and
+	// how recently it said it was standing by for it (bindThrottle).
+	throttle *bindThrottle
 
 	// ctx is Run's context: every read a timer starts runs under it, so a stopped process stops them.
 	ctx context.Context
@@ -100,7 +103,8 @@ func (realJobClock) At(at time.Time, f func()) jobTimer { return time.AfterFunc(
 func newJobIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client, clock jobClock) *JobIntake {
 	return &JobIntake{
 		nats: natsClient, pool: pool, github: github, clock: clock, leases: leases,
-		ctx: context.Background(), pending: map[runKey]*pendingRun{},
+		throttle: &bindThrottle{},
+		ctx:      context.Background(), pending: map[runKey]*pendingRun{},
 		reads: make(chan struct{}, reconcilePartialConcurrency),
 	}
 }
@@ -146,9 +150,10 @@ func jobConsumerConfig() natsgo.ConsumerConfig {
 	}
 }
 
-// bind creates (on first run) or resumes the durable and subscribes to it.
+// bind creates (on first run) or resumes the durable and subscribes to it, throttling its own
+// reconciliation and standby line on this intake's own bindThrottle.
 func (j *JobIntake) bind(ctx context.Context) (*natsgo.Subscription, bindOutcome) {
-	return bindDurableConsumer(ctx, j.nats, j.leases, jobConsumerConfig(), j.deliver)
+	return bindDurableConsumer(ctx, j.nats, j.leases, j.throttle, jobConsumerConfig(), j.deliver)
 }
 
 // deliver acks a job message on receipt, then hands its payload to receive. Acking first is safe:

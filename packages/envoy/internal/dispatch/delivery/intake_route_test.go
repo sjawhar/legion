@@ -24,7 +24,6 @@ import (
 )
 
 func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
-	forgetConsumerReconciles(t)
 	pool, ctx := deliveryTestPool(t)
 	settings := seedDeliverySettings(t, ctx, pool)
 
