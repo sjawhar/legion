@@ -187,9 +187,16 @@ func installLockWait(boot time.Duration, intervals int) int {
 //     and says why, while the daemon is still watching it. Its scope is exactly that and no
 //     wider: flock is advisory and per-inode, which holds for the containers of one pod, sharing
 //     a kernel and an inode on the issue's volume, and not across pods, where two pods of two
-//     issues have two volumes and two inodes anyway. The directory is made (mkdir -p) before the
-//     lock is taken, so the lock's inode exists before anything fills the cache — EnsureScratch
-//     makes the cache root, but this script cannot assume the generation's turn order. The cache
+//     issues have two volumes and two inodes anyway. The directory is made (mkdir -p) inside
+//     legion_install, before each attempt's lock, so the lock's inode exists before anything
+//     fills the cache and so an attempt that found the directory gone remakes it — EnsureScratch
+//     makes the cache root, but this script cannot assume the generation's turn order, and an
+//     operator reclaiming the volume between turns may have deleted the cache under a running
+//     install. Made once before the retry, that shape is a one-way failure: flock creates a
+//     missing path as a *regular file* and exits 0, and every later installing launch of the
+//     issue then dies at `mkdir: File exists` under set -eu, before Oh My Pi starts, until a
+//     person removes it. Hence the mkdir inside, and the rm of a non-directory before it, which
+//     clears exactly that file and nothing a cache can legitimately be. The cache
 //     directory is $BUN_INSTALL_CACHE_DIR itself, with no default behind it: the runtime sets that
 //     variable for every role container (roleEnvironment, manifest.go; runtimeOwned refuses anyone
 //     else setting it, and TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes pins that the
@@ -212,8 +219,9 @@ func installBlock(stateHome string, generation uint64, plugins *runtime.PluginIn
   rm -rf -- %s/g*
   mkdir -p -- %s && cd -- %s
   cache="$BUN_INSTALL_CACHE_DIR"
-  mkdir -p -- "$cache"
   legion_install() {
+    [ -d "$cache" ] || rm -f -- "$cache"
+    mkdir -p -- "$cache"
     /usr/bin/flock -w %d -- "$cache" /usr/local/bin/bun add --backend=copyfile --exact %s %s
   }
   legion_install || legion_install \

@@ -1233,12 +1233,20 @@ written on reached **17 GiB of its 20, 3.0 GiB free** (01:32Z on 2026-10-21) wit
 in six per-role copies of the Go build and module caches — an intermediate layout no shipped image
 ever produced, since a role container at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
 no `BUN_INSTALL_CACHE_DIR`, and the Go pair is new on the volume here. The remedy for a volume
-near full is manual, because nothing prunes, and it names the directories this layout creates:
-`chmod -R u+w` and then delete `/legion/scratch/cache`, `/legion/scratch/bun/install/cache` and
-`/legion/go`, which the issue's roles share and which hold everything a build leaves — the
-per-role `/legion/scratch/state/<role>` is Oh My Pi's logs, Chromium's profiles and the installed
-plugin generation rather than a cache, and is small. Delete them between turns: a role mid-build
-rebuilds what it loses rather than failing, but a role mid-install of its plugin pair does not.
+near full is manual, because nothing prunes, and it names every directory this layout creates:
+`chmod -R u+w` and then delete `/legion/scratch/cache`, `/legion/scratch/tmp`,
+`/legion/scratch/bun/install/cache`, `/legion/go` and `/legion/uv`, which the issue's roles share.
+The per-role `/legion/scratch/state/<role>` is Oh My Pi's logs, Chromium's profiles and the
+installed plugin generation rather than a cache, and is small. Do not leave `/legion/scratch/tmp`
+out of that list because a temporary directory sounds transient: it is this layout's own new
+failure mode, since a role at the merge base is told no `TMPDIR` at all and its temporaries died
+with the container, where here a killed build's residue lives as long as the issue does — one
+interrupted `go build` left **851 MB in a single `go-build*` tree** on this branch's volume, more
+than everything else the reclaim found. Delete them between turns, not under a running role: a
+role mid-build rebuilds what it loses, but deleting `$BUN_INSTALL_CACHE_DIR` under a role
+installing its plugin pair takes the `flock` inode with it, so a second role enters the critical
+section while the first is inside it and both fill one cold cache entry (measured: with no delete
+the second waits the full bound; with the directory deleted and remade mid-install it does not).
 (The 5.5 GiB a reclaim returned on this branch's own volume came out of six per-role copies under
 the intermediate layout above, not out of these paths.) The `chmod` is not caution — the go
 command writes every extracted
