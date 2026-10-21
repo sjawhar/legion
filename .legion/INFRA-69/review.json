@@ -2,32 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-69",
-  "completed": "2026-10-21T02:05:00Z",
-  "round": 2,
+  "completed": "2026-10-21T02:25:00Z",
+  "round": 3,
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:29-30,71-80",
-      "description": "The note prints Legion's defaultResources numbers as this deployment's standing budgets, and the deployment changed both before this head was written. Ephemeral storage: 'Each container of an issue pod is held to 1 GiB ... on this deployment' holds for five roles, but the implementer - the role every eviction event named - has had request = limit 4Gi since agent-infra #79 went live at 2026-10-20T22:30Z (dispatch://INFRA-51/comment/bf8035e7-9c34-4dcd-b3d7-4b787f815a1a: 'raises only the implementer's ephemeral storage: request and limit go to 4Gi. The other five roles stay at 1Gi'). Memory: the paragraph answering round 1 states 1Gi for architect/planner/merger, 4Gi reviewer, 6Gi implementer/tester, which is defaultResources and golden/root.json; this deployment replaced all six at 22:50Z with 512Mi architect/planner/merger, 4Gi implementer, 3Gi tester, 1536Mi reviewer (dispatch://INFRA-51/comment/a9f52454-8972-41ef-aa39-a161af45f020, proven there on a replaced pod). So the note's closing clause 'on a 1Gi role that is a smaller budget than the disk it was avoiding' understates the hazard by half, and a reader sizing a write off either number is wrong in both directions. This pod predates both applies ('the raise applies only to pods created after the apply'), so every in-pod figure the note carries is genuine for it - what is wrong is presenting the repository's defaults as what a reader's own container has. Fix by attributing: the defaults, what this pod carried when measured, and what the deployment sets now, with the two comments cited; the mechanism and the measurements stand unchanged."
+      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:97-98",
+      "description": "'the smallest role's memory budget may be well under a gigabyte' is below anything in evidence, and the note states it as a hedge rather than a measurement. The smallest memory limit recorded anywhere for a role is 1Gi: Legion's defaultResources and golden/root.json give 1Gi to the architect, planner and merger, and dispatch://INFRA-51/comment/12ce8e6b-0e14-4ff4-9cb2-b48306b15906 reads a live issue pod created after the evening's applies with exactly 1Gi/1Gi/6Gi/6Gi/4Gi/1Gi, noting the stack sets no memory at all. The sub-gigabyte figure comes from 512Mi in dispatch://INFRA-51/comment/a9f52454, which is the ephemeral-storage rebalance - that comment opens on tester evictions ('exceeded its local ephemeral storage limit \"1Gi\"') and its 10Gi total is the per-pod ephemeral ceiling of dispatch://INFRA-31 - and I was the one who read it as memory in round 2. Rewrite to what is in evidence: the smallest memory limit recorded for a role is 1Gi, and a cache moved onto a tmpfs can exceed that. The warning keeps its force without a number nobody has measured for memory."
+    },
+    {
+      "severity": "important",
+      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:43-46",
+      "description": "'Read your own container's limits rather than any number here' is an instruction the note's own reader cannot carry out, and the rest of the same sentence says so: from inside, the only readable counter is the sandbox's /sys/fs/cgroup/memory/memory.limit_in_bytes (20,401,094,656 bytes here, equal to free -k's total, which the later paragraph warns against mistaking for a limit), and the per-container limits are in the pod spec, which needs cluster access. A note whose advice cannot be followed from where its reader sits is the defect class this file documents. Rewrite to say where the answer actually is - the pod spec, through whoever can read the cluster, or the deployment's own record - and to say plainly that it is not readable from inside the container."
     }
   ],
-  "roundOneFindings": {
-    "attribution": "Fixed at abac0eb5af69 and verified at 89b81ed8bbb0: the Evidence section credits dispatch://INFRA-51/comment/0ce1448c with the planner container's 22:20Z reading and its own numbers (device 83, .config 56, state 97, /legion 87, du -sx / 42 MB), which is what that comment says, and attributes the 114/118/56/128/130/124 figures to this issue's implementer container and this pull request. Thread PRRT_kwDORFy7ds6uk1jB answered and accepted.",
-    "memoryCaveat": "Answered at abac0eb5af69, corrected at 89b81ed8bbb0: the paragraph after the not-charged list records that a write to the three in-memory emptyDirs is resident memory and ends in an OOM kill, measured with free -k's shared column. Thread PRRT_kwDORFy7ds6uk1jG answered; the per-role limit numbers it brought with it are this round's finding.",
-    "relatedIssues": "Fixed at abac0eb5af69: \"sjawhar/legion#2088\" is the last related_issues entry. Thread PRRT_kwDORFy7ds6uk1jJ answered and accepted.",
-    "reviewerCorrection": "Round 1's second finding cited /sys/fs/cgroup/memory.current as its instrument. That path does not exist here - this sandbox is cgroup v1 (ls /sys/fs/cgroup gives cpu, cpuacct, cpuset, devices, job, memory, pids; find finds no memory.current) and the round-1 command fell through to memory/memory.usage_in_bytes, which is the sandbox's counter (memory.limit_in_bytes 20,401,094,656 bytes = free -k's total 19,922,944 KiB), not the container's. The hazard stood; the instrument named did not. Corrected in the PR body, in the round-1 inline comment, and recorded here, superseding the citation in review.json at commit 568499f7."
+  "roundTwoFindings": {
+    "perRoleNumbers": "Answered at 19f4e15c0b23 and accepted, with the correction that half of my round-2 finding was wrong: the 512Mi/4Gi/3Gi/1536Mi I cited from dispatch://INFRA-51/comment/a9f52454 are ephemeral storage, not memory. The head now names the defaults as defaults, names runtime.kubernetes.resources as what decides a pod, and cites comment 12ce8e6b for a live post-apply pod carrying exactly the default six memory values. Thread PRRT_kwDORFy7ds6ul7S8 carries that correction.",
+    "oneGiBClaim": "Fixed at 19f4e15c0b23 and accepted: 'The mechanism, once.' prints no number, the new dating paragraph records that this pod predates both applies and names the implementer's 4Gi at 22:30Z and the 22:50Z rebalance, and the clamp paragraph drops its hard-coded 1 GiB. Thread PRRT_kwDORFy7ds6ul7TA answered."
   },
   "verifiedAtHead": {
-    "head": "ff2724281a9f9e8633970f846442c65f85756d14",
-    "ciHead": "89b81ed8bbb031a72b39c5989163b7d7dba65346",
-    "ci": "Required set from main's rulesets: lint, typecheck, test, pr-title (branch protection carries none). All four present, completed and success on the CI head's check-runs; compare 89b81ed8...ff272428 is 'ahead' listing only .legion/INFRA-69/implement.json and .legion/INFRA-69/test.json. The body's CI line names Tests 39526172890 and PR Title 39526175521 at that same commit.",
-    "threads": "Three threads, all opened by me in round 1, all resolved by the implementer at abac0eb5af69, each now carrying my round-2 reply; no bot threads.",
-    "e2eLines": "Both present: E2E (implementer) and E2E (tester) round 5 - PASS at 95db6701d664 (code head 89b81ed8), tester handoff round 5 failed: 0, implementerProof verdict verified.",
-    "thermonuclear": "Not run: the diff is one docs/solutions/ markdown file plus .legion/ handoffs, no runtime code.",
-    "ownChecks": "go env GOMODCACHE GOCACHE prints /home/legion/go/pkg/mod and /home/legion/.cache/go-build; free -k shared 132 -> 102,532 -> 132 KiB around a 100 MiB dd into /var/run/legion/private, exactly the 100 MiB written; ls /sys/fs/cgroup gives cpu cpuacct cpuset devices job memory pids and no memory.current; memory/memory.limit_in_bytes 20,401,094,656 = free's total; kubectl get --raw /api answers 'connection to the server localhost:8080 was refused' and /var/run/secrets/kubernetes.io does not exist; live_operator_test.go asserts the operator ServiceAccount and automountServiceAccountToken false and execs the pod for the token file; golden/root.json carries memory request = limit 1Gi/1Gi/6Gi/6Gi/4Gi/1Gi for the six roles, matching the note's citation of it; the Kubernetes emptyDir page carries the quoted sentence verbatim ('files you write count against the memory limit of the container that wrote them'); the planner comment 0ce1448c says what the Evidence section now credits it with."
+    "head": "f5d5f12e67a3c4359939219c6f85c32e78696494",
+    "ciHead": "19f4e15c0b23e94967996d926e6aefbb9d3c147d",
+    "ci": "main's rulesets require lint, typecheck, test, pr-title; branch protection none. All four present, completed and success on the CI head's check-runs; compare 19f4e15c...f5d5f12e is 'ahead' listing only .legion/INFRA-69/implement.json and .legion/INFRA-69/test.json. The body's CI line names Tests 39529522921 and PR Title 39529556338, both read as success at that commit.",
+    "threads": "Five threads, all mine, all resolved; the three from round 1 carry my round-2 answers and the two from round 2 carry my round-3 answers. No bot threads.",
+    "e2eLines": "Both present; tester round 6 PASS at 2490b025dfe0 (code head 19f4e15c), handoff failed: 0, implementerProof verified.",
+    "thermonuclear": "Not run: one docs/solutions/ markdown file plus .legion/ handoffs, no runtime code.",
+    "ownChecks": "Read dispatch://INFRA-51/comment/12ce8e6b (live post-apply pod: memory request = limit 1Gi/1Gi/6Gi/6Gi/4Gi/1Gi, stack sets no memory, nodes at 99% of memory requests) and comment/a9f52454 again (its figures are the ephemeral-storage rebalance, 10Gi per-pod ceiling, after tester evictions naming the ephemeral limit), and comment/bf8035e7 (implementer to 4Gi at 22:30Z, other five at 1Gi, raise applies only to pods created after the apply). Earlier rounds' in-container measurements still stand at this head: no /tmp mount, the charged device set, df/du behaviour, free -k shared 132 -> 102,532 -> 132 KiB, cgroup v1 with only the sandbox-wide counter, kubectl refused and no ServiceAccount token."
   }
 }
