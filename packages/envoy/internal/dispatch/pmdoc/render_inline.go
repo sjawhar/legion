@@ -79,8 +79,10 @@ type lineCandidate struct {
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
 // alone can still pair into a mark the text never had, or break one it has: GFM reads a single
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
-// across a hard break, around a reference or inside a link label. Linkify continues a bare URL
-// into the text written right after it, which a backslash escape had stopped as written. A mark's
+// across a hard break, around a reference or inside a link label. A bare URL's text, escapes
+// included, can read back as another URL, and linkify continues one into the text written right
+// after it unless that text opens with trailing punctuation and then an end, or, for a URL the
+// tokenizer refuses and goldmark's parser reads, an escape. A mark's
 // delimiter run beside punctuation inside it and a letter outside it opens or closes nothing
 // (`**Which here?**Careful.`). A run whose text holds any of these is read back after it is
 // written, and when it does not come back as written it is written again in each spelling
@@ -107,7 +109,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
-	bareURL := textAfterBareURL(nodes, context.tableCell)
+	bareURL := writesBareURL(nodes, context.tableCell)
 	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
 	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
 		return
@@ -147,20 +149,24 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 }
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
-// text it escapes, whether it escapes the character after each bare URL (endsBareURL), whether
-// a mark the next text still carries stays open around that text's other marks (keepingOpen), and
-// whether a letter beside a delimiter run that punctuation stands inside is a character reference
+// text it escapes, whether it escapes the character after each bare URL goldmark's parser reads
+// (endsBareURL), whether it writes each bare URL the tokenizer reads (literalLength) as an autolink
+// (`<href>`, whose text both parsers read as written and whose `>` ends it), whether a mark the
+// next text still carries stays open around that text's other marks (keepingOpen), and whether a
+// letter beside a delimiter run that punctuation stands inside is a character reference
 // (flanking).
 type runSpelling struct {
 	escapes      delimiterEscapes
 	afterBareURL bool
+	angleURLs    bool
 	keepOpen     bool
 	flanking     bool
 }
 
 // respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
 // in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
-// then each again with the character after a bare URL escaped.
+// then each again with the character after a bare URL escaped, then each with every bare URL the
+// tokenizer reads written as an autolink.
 func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 	escapes := []delimiterEscapes{delimitersAsRuled}
 	if held != delimitersAsRuled {
@@ -169,12 +175,12 @@ func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 		}
 	}
 	var spellings []runSpelling
-	for _, afterBareURL := range []bool{false, true} {
-		if afterBareURL && !bareURL {
+	for _, url := range []runSpelling{{}, {afterBareURL: true}, {angleURLs: true}} {
+		if url != (runSpelling{}) && !bareURL {
 			continue
 		}
 		for _, delimiters := range escapes {
-			spelling := runSpelling{escapes: delimiters, afterBareURL: afterBareURL, keepOpen: keepOpen}
+			spelling := runSpelling{escapes: delimiters, afterBareURL: url.afterBareURL, angleURLs: url.angleURLs, keepOpen: keepOpen}
 			if spelling != (runSpelling{}) {
 				spellings = append(spellings, spelling)
 			}
@@ -204,11 +210,14 @@ func keepingOpen(active, marks, following []Mark) []Mark {
 	return ordered
 }
 
-// textAfterBareURL reports whether nodes write text right after a bare URL, which linkify can
-// continue into that text's first character.
-func textAfterBareURL(nodes []*Node, escapePipes bool) bool {
-	for index := 1; index < len(nodes); index++ {
-		if followsBareURL(nodes, index, escapePipes) {
+// writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink, isBareWWWLink),
+// which linkify reads again from the text alone.
+func writesBareURL(nodes []*Node, escapePipes bool) bool {
+	for _, node := range nodes {
+		if node.Type != "text" {
+			continue
+		}
+		if marks := visibleMarks(node.Marks); isBareURLLink(node, marks, escapePipes) || isBareWWWLink(node, marks, escapePipes) {
 			return true
 		}
 	}
@@ -216,13 +225,15 @@ func textAfterBareURL(nodes []*Node, escapePipes bool) bool {
 }
 
 // followsBareURL reports whether nodes[index] is text outside any link written right after a bare
-// URL (isBareURLLink), whose link linkify reads again from the text alone.
+// URL (isBareURLLink) that goldmark's parser reads, since the tokenizer refuses it
+// (literalLength): goldmark ends a URL at a backslash, where the tokenizer reads one into it.
 func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
 	if index == 0 || nodes[index].Type != "text" || nodeHasMark(nodes[index], "link") {
 		return false
 	}
 	previous := nodes[index-1]
-	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes)
+	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes) &&
+		literalLength(previous.Text) == 0
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes by
@@ -243,7 +254,7 @@ func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader i
 // where the flanking rules can keep the run from opening or closing.
 func delimiterBesidePunctuation(nodes []*Node, escapePipes bool) bool {
 	for index, node := range nodes {
-		if node.Type != "text" || !hasDelimiterMark(writtenMarks(node, escapePipes)) {
+		if node.Type != "text" || !hasDelimiterMark(writtenMarks(node, escapePipes, true)) {
 			continue
 		}
 		if index > 0 && nodes[index-1].Type == "text" && flankingNeutral(firstRune(node.Text)) ||
@@ -310,6 +321,15 @@ func opensBeforePunctuation(nodes []*Node, index int, next, following []Mark) bo
 	return flankingNeutral(firstRune(nodes[index+1].Text))
 }
 
+// wwwMayFollow reports whether the markdown written so far ends where the browser editor's
+// tokenizer begins a www URL, and Go's guard reads one (literalURLFollows): at a line's head, or
+// after a space, a tab, `(`, `*`, `_`, `[`, `]` or `~`. After any other character the editor reads
+// a www URL by another rule than Go's, so a www link is written as an explicit link there.
+func (r *renderer) wwwMayFollow() bool {
+	written := r.b.Bytes()
+	return len(written) == 0 || strings.IndexByte("\n \t(*_[]~", written[len(written)-1]) >= 0
+}
+
 // writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
 // mark and at once opened one written with the same delimiter character, which the parser reads as
 // one run.
@@ -323,49 +343,77 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		}
 		switch n.Type {
 		case "text":
-			next := writtenMarks(n, escapePipes)
-			hasLink := containsMark(visibleMarks(n.Marks), "link")
-			var following []Mark
-			if index+1 < len(nodes) {
-				following = writtenMarks(nodes[index+1], escapePipes)
-			}
-			if spelling.keepOpen {
-				next = keepingOpen(active, next, following)
+			wwwBare := !spelling.angleURLs
+			// A www link is written bare only where the character written before it is one a www
+			// URL may follow (wwwMayFollow); elsewhere its marks are written again with the link.
+			// The rollback restores everything closing and opening marks changes: the bytes, the
+			// open marks, the position, and the renderer's open code fence and link label verdict.
+			before, beforeActive, beforePosition, beforeFused := r.b.Len(), active, position, fused
+			beforeFence, beforePadded, beforeLabel := r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets
+			bareHere := wwwBare
+			var next, following []Mark
+			var common int
+			var flankFirst bool
+			for {
+				next = writtenMarks(n, escapePipes, bareHere)
+				following = nil
 				if index+1 < len(nodes) {
-					var after []Mark
-					if index+2 < len(nodes) {
-						after = writtenMarks(nodes[index+2], escapePipes)
-					}
-					following = keepingOpen(next, following, after)
+					following = writtenMarks(nodes[index+1], escapePipes, wwwBare)
 				}
+				if spelling.keepOpen {
+					next = keepingOpen(active, next, following)
+					if index+1 < len(nodes) {
+						var after []Mark
+						if index+2 < len(nodes) {
+							after = writtenMarks(nodes[index+2], escapePipes, wwwBare)
+						}
+						following = keepingOpen(next, following, after)
+					}
+				}
+				common = sharedMarks(active, next)
+				for i := len(active) - 1; i >= common; i-- {
+					r.closeInlineMark(active[i], escapePipes)
+				}
+				if common < len(active) && common < len(next) && markDelimiter(active[common]) != 0 && markDelimiter(active[common]) == markDelimiter(next[common]) {
+					fused = true
+				}
+				// A delimiter run the marks just closed, with nothing opened after it, stands
+				// before this text's first character.
+				flankFirst = spelling.flanking && len(active) != common && len(next) == common && r.closesAfterPunctuation() && !flankingNeutral(firstRune(n.Text))
+				for _, mark := range next[common:] {
+					r.openInlineMark(mark, nodes, index)
+				}
+				if position.atLineStart && (len(active) != common || len(next) != common) {
+					position.afterMarker = true
+				}
+				if !bareHere || !isBareWWWLink(n, visibleMarks(n.Marks), escapePipes) || r.wwwMayFollow() {
+					break
+				}
+				r.b.Truncate(before)
+				active, position, fused, bareHere = beforeActive, beforePosition, beforeFused, false
+				r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets = beforeFence, beforePadded, beforeLabel
 			}
-			common := sharedMarks(active, next)
-			for i := len(active) - 1; i >= common; i-- {
-				r.closeInlineMark(active[i], escapePipes)
-			}
-			if common < len(active) && common < len(next) && markDelimiter(active[common]) != 0 && markDelimiter(active[common]) == markDelimiter(next[common]) {
-				fused = true
-			}
-			// A delimiter run the marks just closed, with nothing opened after it, stands before
-			// this text's first character.
-			flankFirst := spelling.flanking && len(active) != common && len(next) == common && r.closesAfterPunctuation() && !flankingNeutral(firstRune(n.Text))
-			for _, mark := range next[common:] {
-				r.openInlineMark(mark, nodes, index)
-			}
-			if position.atLineStart && (len(active) != common || len(next) != common) {
-				position.afterMarker = true
-			}
+			hasLink := containsMark(visibleMarks(n.Marks), "link")
 			active = next
-			if isAngleURLLink(n, visibleMarks(n.Marks), escapePipes) {
+			marks := visibleMarks(n.Marks)
+			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 {
 				// An autolink's text is literal to both parsers, so it takes no escape.
 				r.writeSyntax("<" + n.Text + ">")
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
 			}
+			if isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 || bareHere && isBareWWWLink(n, marks, escapePipes) {
+				// The tokenizer reads a bare URL's bytes as they are written, a backslash among
+				// them, so its text takes no escape either. A www URL begins only after some
+				// characters; where its run does not read back, the angleURLs spelling writes it as
+				// an explicit link.
+				r.writeSyntax(n.Text)
+				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
+				continue
+			}
 			flankLast := spelling.flanking && opensBeforePunctuation(nodes, index, next, following) && !flankingNeutral(lastRune(n.Text))
-			// The brackets rule follows the marks actually written, not hasLink: a bare URL's
-			// link mark is stripped above, and its text must keep its own brackets so linkify
-			// reads the whole href. The verdict itself was taken when the link opened.
+			// The brackets rule follows the marks actually written, not hasLink: an autolink's
+			// link mark is stripped above. The verdict itself was taken when the link opened.
 			label := labelBracketsNone
 			if containsMark(next, "link") {
 				label = r.labelBrackets

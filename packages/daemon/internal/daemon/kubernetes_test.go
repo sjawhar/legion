@@ -116,7 +116,7 @@ func TestAKubernetesDaemonRefusesAClusterWithoutAgentSandboxBeforeItsBoot(t *tes
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, cfg, quietLogger(), overrides{clock: stillClock{}, listen: heldListen})
+	err := run(ctx, cfg, Build{}, quietLogger(), overrides{clock: stillClock{}, listen: heldListen})
 	if err == nil {
 		t.Fatal("the daemon booted on a cluster without Agent Sandbox")
 	}
@@ -180,7 +180,7 @@ func TestAKubernetesDaemonRefusesALegacyPerClaimSandboxBeforeItOpensItsStore(t *
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, cfg, quietLogger(), overrides{clock: stillClock{}, listen: heldListen})
+	err := run(ctx, cfg, Build{}, quietLogger(), overrides{clock: stillClock{}, listen: heldListen})
 	if err == nil || !strings.Contains(err.Error(), "legacy issue Sandbox "+legacy) {
 		t.Fatalf("boot = %v, want the refusal naming the legacy Sandbox %s", err, legacy)
 	}
@@ -207,7 +207,7 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, cfg, quietLogger(), o)
+	err := run(ctx, cfg, Build{}, quietLogger(), o)
 	if err == nil || !strings.Contains(err.Error(), "the plugin declares contract 3") {
 		t.Fatalf("boot = %v, want the image probe's refusal", err)
 	}
@@ -236,7 +236,7 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, cfg, logger, o) }()
+	go func() { done <- run(ctx, cfg, Build{}, logger, o) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -383,7 +383,7 @@ func TestOpenSupervisionAdvertisesAdvertiseHostNotTheWildcardBind(t *testing.T) 
 	o.workflowTokens, o.githubAPI = &workflowTokenRecorder{}, repositoriesGitHub(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, cfg, quietLogger(), o) }()
+	go func() { done <- run(ctx, cfg, Build{}, quietLogger(), o) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -508,6 +508,34 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 	}
 	if controller := opts.Resources[claim.RoleController]; reflect.DeepEqual(probe.Resources, controller) {
 		t.Errorf("the image probe carries the controller's reservation %+v; it must carry its own", controller)
+	}
+}
+
+// runtime.kubernetes.setup reaches sandbox.Options unchanged: every role's launcher receives this
+// argv, while leaving the setting out keeps the runtime setup-free.
+func TestKubernetesSetupReachesTheSandboxRuntime(t *testing.T) {
+	cfg := config.Config{Project: "TEST", Projects: map[string]config.Project{"TEST": {}}}
+	k := config.Kubernetes{
+		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
+		StorageClass: "gp2", IssueVolume: "20Gi", Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
+	}
+	want := []string{"/bin/sh", "-c", "omp plugin install agent-skills"}
+	k.Setup = want
+	opts, err := sandboxOptions(cfg, k, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	if !slices.Equal(opts.Setup, want) {
+		t.Errorf("Options.Setup = %q, want %q", opts.Setup, want)
+	}
+
+	k.Setup = nil
+	opts, err = sandboxOptions(cfg, k, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions without setup: %v", err)
+	}
+	if len(opts.Setup) != 0 {
+		t.Errorf("Options.Setup = %q without runtime.kubernetes.setup, want none", opts.Setup)
 	}
 }
 

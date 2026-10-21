@@ -265,6 +265,9 @@ type Issue struct {
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
 	Slot        *SlotView                `json:"slot,omitempty"`
+	// Check is the issue's open production check, the work after its close (record.ProductionCheck):
+	// present only while the check is open, and absent once it closed or while none was opened.
+	Check *CheckView `json:"check,omitempty"`
 }
 
 // MarshalJSON keeps `workers` an object on the wire for an issue that has no worker yet.
@@ -368,6 +371,34 @@ type GateView struct {
 type SlotView struct {
 	Index      int       `json:"index"`
 	AdmittedAt time.Time `json:"admittedAt"`
+}
+
+// CheckView is an issue's open production check as the state shows it: the repository, pull
+// request and merge commit the check looks for in production (MergeCommit is empty until the first
+// build compare fills it for a pull request merged before the daemon recorded merge commits), when
+// it opened, how many looks the implementer has taken and whether the latest is still open, what
+// woke the latest look (LastWake, absent before the first look wakes), the check's bound
+// (NextWakeAt: the moment its last look starts, which is the one wake the record promises; the
+// deploy and build wakes before it are events, not timers), and whether the last look has started.
+type CheckView struct {
+	Repo        string         `json:"repo"`
+	PullRequest int            `json:"pullRequest"`
+	MergeCommit string         `json:"mergeCommit"`
+	OpenedAt    time.Time      `json:"openedAt"`
+	Looks       int            `json:"looks"`
+	LookOpen    bool           `json:"lookOpen"`
+	LastWake    *CheckWakeView `json:"lastWake,omitempty"`
+	NextWakeAt  time.Time      `json:"nextWakeAt"`
+	Last        bool           `json:"last"`
+}
+
+// CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
+// `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`), Detail the
+// cause's own detail (the run and its completion, or the build's commit), and At when.
+type CheckWakeView struct {
+	Kind   string    `json:"kind"`
+	Detail string    `json:"detail"`
+	At     time.Time `json:"at"`
 }
 
 // PendingStatusWrite is a Dispatch-status effect the outbox has not finished, due now or backing off

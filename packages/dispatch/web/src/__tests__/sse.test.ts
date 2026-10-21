@@ -384,6 +384,14 @@ const eventsByType: Record<EventType, readonly Event[]> = {
       reason: "released",
     }),
   ],
+  "issue.deployed": [
+    event("issue.deployed", {
+      repo: "acme/widgets",
+      number: 501,
+      run_id: 900,
+      completed_at: "2024-01-01T02:10:00Z",
+    }),
+  ],
   "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
   "artifact.version": [
     event("artifact.version", { artifact_id: "artifact-1" }),

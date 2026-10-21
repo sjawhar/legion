@@ -96,7 +96,7 @@ func workflowTransitionRequired(from phase.Phase, trigger TriggerKind) bool {
 	case TriggerReviewApproved, TriggerReviewRejected:
 		return from == phase.Reviewing
 	case TriggerChecksRed:
-		return from == phase.Testing || from == phase.Reviewing || from == phase.Retro || from == phase.Merging || from == phase.AwaitingMerge
+		return from == phase.Testing || from == phase.Reviewing || from == phase.Accepting || from == phase.Retro || from == phase.Merging || from == phase.AwaitingMerge
 	case TriggerRetroCompleted:
 		return from == phase.Retro
 	case TriggerReady:
@@ -104,7 +104,7 @@ func workflowTransitionRequired(from phase.Phase, trigger TriggerKind) bool {
 	case TriggerPullRequestMerged:
 		return from == phase.AwaitingMerge
 	case TriggerSignOff:
-		return from == phase.ProductionCheck
+		return from == phase.Accepting
 	case TriggerBackward:
 		return len(requiredBackwardTargets(from)) != 0
 	default:
@@ -113,7 +113,7 @@ func workflowTransitionRequired(from phase.Phase, trigger TriggerKind) bool {
 }
 
 func requiredBackwardTargets(from phase.Phase) []phase.Phase {
-	ordered := []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.ProductionCheck}
+	ordered := []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging}
 	for index, candidate := range ordered {
 		if candidate == from {
 			return ordered[:index]

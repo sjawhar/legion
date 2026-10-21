@@ -437,15 +437,48 @@ test("inbox agent filters round-trip through the query string and ignore unknown
   expect(parseInboxSearch("?agent=&section=later")).toEqual({});
 });
 
-test("inbox view round-trips through the query string and ignores unknown views", () => {
-  expect(buildInboxPath({ view: "everyone" })).toBe("/?view=everyone");
-  expect(buildInboxPath({ agent: "s1", view: "mine" })).toBe("/?agent=s1&view=mine");
-  expect(parseInboxSearch("?view=everyone")).toEqual({ view: "everyone" });
-  expect(parseInboxSearch("?view=mine&section=needs-you")).toEqual({
+test("inbox assignee filters round-trip as repeated query parameters, after the other filters", () => {
+  const route = { assignees: ["ana@example.com", "bo@example.com", "unassigned"] };
+  const path = buildInboxPath(route);
+  expect(path).toBe("/?assignee=ana%40example.com&assignee=bo%40example.com&assignee=unassigned");
+  expect(parseInboxSearch(path.slice(1))).toEqual(route);
+  expect(buildInboxPath({ agent: "s1", assignees: ["unassigned"], section: "needs-you" })).toBe(
+    "/?agent=s1&section=needs-you&assignee=unassigned"
+  );
+  expect(parseInboxSearch("?agent=s1&section=needs-you&assignee=unassigned")).toEqual({
+    agent: "s1",
+    assignees: ["unassigned"],
     section: "needs-you",
-    view: "mine",
   });
-  expect(parseInboxSearch("?view=theirs")).toEqual({});
+});
+
+// `everyone` is how the cleared filter survives a reload: an absent `assignee` is the default,
+// the reader's own work, so clearing the filter has to be written down.
+test("the cleared inbox filter is `assignee=everyone` and an empty one leaves the field absent", () => {
+  expect(buildInboxPath({ assignees: [] })).toBe("/?assignee=everyone");
+  expect(parseInboxSearch("?assignee=everyone")).toEqual({ assignees: [] });
+  expect(parseInboxSearch("?assignee=everyone&assignee=+")).toEqual({ assignees: [] });
+  expect(parseInboxSearch("?assignee=everyone&assignee=ana%40example.com")).toEqual({
+    assignees: ["ana@example.com"],
+  });
+  expect(parseInboxSearch("?assignee=")).toEqual({});
+  expect(parseInboxSearch("?view=mine&section=needs-you")).toEqual({ section: "needs-you" });
+});
+
+test("inbox assignees fold case and spaces, drop duplicates, keep order, and keep unknowns", () => {
+  expect(parseInboxSearch("?assignee=+Ana%40Example.com+&assignee=ana%40example.com")).toEqual({
+    assignees: ["ana@example.com"],
+  });
+  expect(
+    parseInboxSearch(
+      "?assignee=bo%40example.com&assignee=ana%40example.com&assignee=bo%40example.com"
+    )
+  ).toEqual({ assignees: ["bo@example.com", "ana@example.com"] });
+  // Nothing refuses an email the page does not list: the split is client-side, so it just
+  // matches no row.
+  expect(parseInboxSearch("?assignee=Nobody%40Example.com")).toEqual({
+    assignees: ["nobody@example.com"],
+  });
 });
 
 // The shell reserves its right gutter from this, and `features/margin/Margin.tsx` renders from

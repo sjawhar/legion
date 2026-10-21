@@ -93,10 +93,12 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 			continue
 		}
 		// current is the phase the start that would wake the claim names; the architect's names none.
+		// A sub-architect on a child in accepting is no phase worker either: RoleFor answers the tree's
+		// architect there, which the first case already took.
 		var current phase.Phase
 		switch {
 		case claim.IsTreeArchitect(c.Role, issue.Key, issue.Tree):
-		case RoleFor(workingPhase(issue)) == c.Role:
+		case c.Role != claim.RoleArchitect && RoleFor(workingPhase(issue)) == c.Role:
 			if c.State == supervise.StateSuspended && c.SuspendedBy.ByRule() {
 				continue
 			}

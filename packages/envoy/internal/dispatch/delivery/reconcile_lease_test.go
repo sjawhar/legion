@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 )
 
 // Every reconcile pass searches and lists GitHub against one installation's rate limit, so one
@@ -17,7 +18,7 @@ func TestAReconcilePassWhoseLeaseIsHeldElsewhereAsksGitHubNothing(t *testing.T) 
 	leases := deliveryTestLeases(t, pool)
 	seedDeliverySettings(t, ctx, pool)
 	fake := newFakeGitHub(t)
-	reconcile := NewReconcile(pool, fake.newTestClient())
+	reconcile := NewReconcile(pool, fake.newTestClient(), events.NewBroker())
 
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)

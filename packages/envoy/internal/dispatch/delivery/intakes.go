@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -21,7 +22,8 @@ const (
 // StartIntakes runs Intake and JobIntake until ctx is cancelled, each on a bus client of its own
 // that connect opens under the name it is given (dispatch-intake, dispatch-job-intake). It connects
 // both before it returns, and returns the error of a connect that fails with neither intake
-// started. Without the GitHub App neither intake reads anything, so neither connects.
+// started. Without the GitHub App neither intake reads anything, so neither connects. broker is the
+// server's event broker, through which Intake appends issue.deployed (RecordDeployedEvents).
 //
 // The returned stop waits for both intakes' Runs, which return once ctx is cancelled, then closes
 // both clients. It does not wait for a message still in an intake's handler: deliver runs on the
@@ -37,7 +39,7 @@ const (
 // taken on the pool's lease connections, so that two envoy-dispatch processes never reconcile one
 // durable against each other. A pool that cannot open those connections is returned as the error,
 // with neither intake started: an intake that could not take the lease would reconcile nothing.
-func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client) (stop func(), err error) {
+func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client, broker *events.Broker) (stop func(), err error) {
 	if github == nil {
 		slog.Info("dispatch delivery: no GitHub App key — the intakes are idle")
 		return func() {}, nil
@@ -56,7 +58,7 @@ func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, e
 		return nil, fmt.Errorf("connect the job intake: %w", err)
 	}
 	var running sync.WaitGroup
-	running.Go(func() { newIntake(intakeClient, pool, leases, github).Run(ctx) })
+	running.Go(func() { newIntake(intakeClient, pool, leases, github, broker).Run(ctx) })
 	running.Go(func() { newJobIntake(jobClient, pool, leases, github, realJobClock{}).Run(ctx) })
 	return sync.OnceFunc(func() {
 		running.Wait()

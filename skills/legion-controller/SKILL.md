@@ -269,9 +269,9 @@ leans on `External links:`, and the label row is the one that never depends on h
 
 - `OPEN`: work in flight. Skip it; the issue stays where it is.
 - `MERGED`: the change landed. Take nothing and set nothing: an issue Legion ran is already skipped
-  by the `Legion ran it without the label now on it` row, and the daemon moves such an issue to its
-  production check itself on the merge event; one Legion did not run is someone's finished work with
-  the issue left open. Skip it and name it in your summary
+  by the `Legion ran it without the label now on it` row, and the daemon closes such an issue
+  itself on the merge event (its implementer's production check follows the close); one Legion did
+  not run is someone's finished work with the issue left open. Skip it and name it in your summary
   (`<KEY>: pull request <url> merged, the issue is still todo`) so a person closes it.
 - `CLOSED` (not merged): someone abandoned the change. Skip it and name it in your summary; the
   issue's owner decides what follows. For an issue Legion runs, the daemon tells its architect
@@ -448,7 +448,7 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
    whoever launched you writes from the daemon's own configuration, says
    `gates.design: root-issues`. Under `gates.design: off` nobody approves a design, so drop "and
    its design approval" (and "or its design approval") from the sentence. An unassigned root
-   still runs; the architect's asks wait in every Inbox's Unassigned band.
+   still runs; its architect's asks reach no default Inbox list, only the `Unassigned` filter.
 
 ## Backlog eligibility
 

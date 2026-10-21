@@ -360,7 +360,7 @@ func TestANoticeToAnArchitectStoppedWithItsFinishedTreeIsNotSentAgain(t *testing
 			publisher := &holderPublisher{}
 			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
 				project: "legion", now: time.Now}
-			notice := record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.ProductionCheck, Summary: "checked in production"}
+			notice := record.Notice{Kind: "phase-finished", Role: claim.RoleReviewer, Phase: phase.Reviewing, Summary: "approved the head"}
 			report := laneReport{"evt-exception", "delivery_failed", architectTopic(t, "LEGION-1"), "phase-finished on LEGION-2", notice, "legion-outbox:78", "ses_arch"}
 
 			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {

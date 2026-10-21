@@ -79,6 +79,8 @@ export function eventDescription(event: Event): string {
         : `Claim taken from ${actorLabel(event.payload.previous_claim.actor)}`;
     case "issue.released":
       return event.payload.reason === "closed" ? "Claim released on close" : "Claim released";
+    case "issue.deployed":
+      return `Deployed by run ${event.payload.run_id}`;
     case "artifact.created":
       return `Added ${event.payload.artifact.name}`;
     case "artifact.approved":

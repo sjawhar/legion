@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -50,22 +51,39 @@ func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
 	}
 }
 
-// A bare URL ends where linkify stops, and a backslash escape stops it: `https://x.com/a\_b` reads
-// as the link `https://x.com/a` and the text `_b`. The renderer keeps that escape wherever the
-// character would otherwise continue the URL, so the document is stored as written and reads back
-// as it was read, rather than the link growing over the text on every write.
-func TestRenderKeepsTheEscapeThatEndsABareURL(t *testing.T) {
-	for _, char := range "!\"#$%&'()+,-./:;=>?@[]^_`{}~" {
-		markdown := "see https://x.com/a\\" + string(char) + "b c\n"
+// A backslash inside a bare URL is the URL's, as GFM and the browser editor's parser read it:
+// `https://x.com/a\_b` links `https://x.com/a\_b` whole. The renderer writes a bare URL's bytes as
+// they are, so the document is stored as written and reads back as it was read, in both parsers;
+// a URL holding a parenthesis, a backtick or `>`, which no bare URL is written with, is written as
+// a link both read back.
+func TestRenderKeepsABackslashInsideABareURL(t *testing.T) {
+	const chars = "!\"#$%&'()+,-./:;=>?@[]^_`{}~"
+	var markdowns []string
+	for _, char := range chars {
+		markdowns = append(markdowns, "see https://x.com/a\\"+string(char)+"b c\n")
+	}
+	readings := engineReadings(t, markdowns)
+	for index, markdown := range markdowns {
 		doc, err := Parse(markdown)
 		if err != nil {
 			t.Fatalf("Parse(%q) = %v", markdown, err)
+		}
+		url := strings.TrimSuffix(strings.TrimPrefix(markdown, "see "), " c\n")
+		if got, want := inlineSummary(doc.Children[0]), fmt.Sprintf("text %q | text %q link %s | text %q", "see ", url, url, " c"); got != want {
+			t.Errorf("Parse(%q) = %s, want %q linked whole", markdown, got, url)
+		}
+		if engine := readings[index]; engine == nil || !engine.Equal(doc) {
+			got, _ := engine.JSON()
+			t.Errorf("the engine reads %q as %s, not as Go does", markdown, got)
 		}
 		rendered, err := Render(doc)
 		if err != nil {
 			t.Fatalf("Render(Parse(%q)) = %v", markdown, err)
 		}
-		if rendered != markdown {
+		if back, err := Parse(rendered); err != nil || !back.Equal(doc) {
+			t.Errorf("Render(Parse(%q)) = %q, which reads back otherwise (%v)", markdown, rendered, err)
+		}
+		if !strings.ContainsRune("()`>", rune(chars[index])) && rendered != markdown {
 			t.Errorf("Render(Parse(%q)) = %q, want it as written", markdown, rendered)
 		}
 		if _, err := ParseForWrite(markdown, nil); err != nil {

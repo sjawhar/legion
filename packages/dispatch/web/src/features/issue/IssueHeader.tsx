@@ -52,7 +52,7 @@ import {
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { ApprovalChip } from "../doc/ApprovalChip";
-import { waitingOnYou } from "../inbox/BlockedOnYou";
+import { waitingOnHuman } from "../inbox/BlockedOnYou";
 import { issueStatuses, openIssueStatuses, statusLabel } from "../project/board-model";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
@@ -226,7 +226,7 @@ export function IssueHeader({
   // The detail carries waiting_on on every open ask; a response without it cannot say whose
   // turn it is, so the indicator stays off rather than shown wrong.
   const knowsWhoseTurn = openAsks.every((ask) => ask.waiting_on !== undefined);
-  const waitingForHuman = waitingOnYou(openAsks);
+  const waitingForHuman = waitingOnHuman(openAsks);
   const waitingOnAgents = openAsks.length - waitingForHuman.length;
   const whoseTurn =
     openAsks.length === 0 || !knowsWhoseTurn

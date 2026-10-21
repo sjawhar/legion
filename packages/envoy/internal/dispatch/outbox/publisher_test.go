@@ -128,6 +128,68 @@ func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
 	}
 }
 
+// TestRunPublishesTheDeployedEventOnTheIssueSubject: issue.deployed, which the delivery timeline
+// appends with a system actor (delivery.RecordDeployedEvents), is quiet (Notify false) and still
+// publishes on the issue's own subject, notifications.dispatch.issue.<KEY>.issue.deployed, as
+// every issue event does: the Legion daemon's intake reads it there. The issue's route is not a
+// destination, since nobody is woken by it.
+func TestRunPublishesTheDeployedEventOnTheIssueSubject(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	route := "role:legion-controller-x"
+	seedIssue(t, database, "T-1", &route)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "issue.deployed",
+		Actor:    model.Actor{Kind: "system", ID: "delivery-timeline"},
+		Payload: map[string]any{
+			"repo": "acme/widgets", "number": 501, "run_id": 900, "completed_at": "2024-01-01T02:10:00Z",
+		},
+	})
+	if event.Notify {
+		t.Fatal("issue.deployed by the system actor must not notify")
+	}
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "issue.deployed publication", func() bool {
+		return publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	if len(items) != 1 {
+		t.Fatalf("published %d envelopes, want the issue subject alone: %#v", len(items), items)
+	}
+	item := items[0]
+	if item.Source != "dispatch" || item.Topic != "notifications.dispatch.issue.T-1.issue.deployed" {
+		t.Fatalf("source/topic = (%q, %q), want dispatch on notifications.dispatch.issue.T-1.issue.deployed", item.Source, item.Topic)
+	}
+	if item.PayloadSummary != "T-1 issue deployed" {
+		t.Fatalf("payload summary = %q", item.PayloadSummary)
+	}
+	if err := item.Validate(); err != nil {
+		t.Fatalf("published envelope does not validate: %v", err)
+	}
+	var payload struct {
+		model.Event
+		Payload struct {
+			Repo        string `json:"repo"`
+			Number      int    `json:"number"`
+			RunID       int64  `json:"run_id"`
+			CompletedAt string `json:"completed_at"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+		t.Fatalf("decode event payload: %v", err)
+	}
+	if payload.ID != event.ID || payload.Seq != event.Seq || payload.Type != "issue.deployed" || payload.Actor != event.Actor || payload.Notify {
+		t.Fatalf("payload event = %#v, want id=%d seq=%d type=issue.deployed actor=%#v notify=false", payload.Event, event.ID, event.Seq, event.Actor)
+	}
+	if payload.Payload.Repo != "acme/widgets" || payload.Payload.Number != 501 || payload.Payload.RunID != 900 || payload.Payload.CompletedAt != "2024-01-01T02:10:00Z" {
+		t.Fatalf("event payload = %+v, want acme/widgets#501 shipped by run 900 at 2024-01-01T02:10:00Z", payload.Payload)
+	}
+}
+
 func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

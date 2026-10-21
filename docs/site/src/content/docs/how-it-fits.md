@@ -124,11 +124,14 @@ only where an event goes; what to do about it is the coordinator's and the agent
    version, and Dispatch publishes the approval on Envoy. The coordinator opens the design gate.
 5. The planner, implementer, tester and reviewer take the change in turn. A review that requests
    changes sends it back to the implementer, and through the tester again.
-6. Once the reviewer approves, the retrospective runs. The merger then sends `READY`, which the
-   daemon accepts once no required check has failed or is missing, and posts on the issue.
+6. Once the reviewer approves, the architect reads the evidence and accepts the change (or sends
+   it back), and the retrospective runs. The merger then sends `READY`, which the daemon accepts
+   once no required check has failed or is missing, and posts on the issue.
 7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
-8. The implementer drives the change in production and records what it observed on the pull
-   request and the issue. The architect signs off, and the issue is Done.
+   The merge closes the issue: it is Done.
+8. After the close, once the deploy carries the merge, the implementer drives the change in
+   production and records what it observed on the pull request; Dispatch's `issue.deployed` event
+   is what wakes it for that look.
 
 Read on in [Legion](/legion/legion/), [Dispatch](/legion/dispatch/) and the
 [Secrets Broker](/legion/broker/).

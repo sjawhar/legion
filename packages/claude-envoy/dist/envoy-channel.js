@@ -36247,6 +36247,16 @@ var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
+var IssueDeployedEventPayloadSchema = exports_external.strictObject({
+  repo: exports_external.string(),
+  number: exports_external.number().int().positive(),
+  run_id: exports_external.number().int().positive(),
+  completed_at: exports_external.iso.datetime()
+});
+var DispatchServerStartedPayloadSchema = exports_external.strictObject({
+  commit: exports_external.string().min(1),
+  started_at: exports_external.iso.datetime()
+});
 var DispatchEventSchema = exports_external.object({
   issue_key: exports_external.string().nullable(),
   artifact_id: exports_external.string().nullish(),
@@ -43843,11 +43853,11 @@ var LEGION_WORKFLOW_PHASES = [
   "implementing",
   "testing",
   "reviewing",
+  "accepting",
   "retro",
   "merging",
   "awaiting_merge",
   "integrating",
-  "production_check",
   "done",
   "held"
 ];
@@ -43857,10 +43867,10 @@ var LEGION_PHASE_BACKWARD_TARGETS = [
   "implementing",
   "testing",
   "reviewing",
+  "accepting",
   "retro",
   "merging",
   "awaiting_merge",
-  "production_check",
   "done",
   "held"
 ];
@@ -43934,6 +43944,22 @@ var legionSlotView = exports_external.strictObject({
   admittedAt: timestamp,
   lentTo: issueKey.optional()
 });
+var legionCheckWakeView = exports_external.strictObject({
+  kind: nonEmptyString,
+  detail: exports_external.string(),
+  at: timestamp
+});
+var legionCheckView = exports_external.strictObject({
+  repo: nonEmptyString,
+  pullRequest: exports_external.number().int().positive(),
+  mergeCommit: exports_external.string(),
+  openedAt: timestamp,
+  looks: exports_external.number().int().nonnegative(),
+  lookOpen: exports_external.boolean(),
+  lastWake: legionCheckWakeView.optional(),
+  nextWakeAt: timestamp,
+  last: exports_external.boolean()
+});
 var legionPendingStatusWrite = exports_external.strictObject({
   issue: nonEmptyString,
   payload: exports_external.record(exports_external.string(), exports_external.unknown()),
@@ -43965,7 +43991,8 @@ var legionIssue = exports_external.strictObject({
   workers: exports_external.partialRecord(exports_external.enum(LEGION_ROLES), legionPhaseView),
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
-  slot: legionSlotView.optional()
+  slot: legionSlotView.optional(),
+  check: legionCheckView.optional()
 });
 var daemonInfo = exports_external.strictObject({
   project: nonEmptyString,
@@ -44137,7 +44164,7 @@ var LegionHandoffCompleteRequest = exports_external.strictObject({
   summary: nonEmptyString,
   verdict: exports_external.string(),
   ready: exports_external.boolean(),
-  commit: nonEmptyString
+  commit: nonEmptyString.optional()
 });
 var LegionIssueStatusRequest = exports_external.strictObject({
   grantId: nonEmptyString,
@@ -44157,7 +44184,8 @@ var LegionWaveReleaseRequest = exports_external.strictObject({
 var LegionPhaseBackwardRequest = exports_external.strictObject({
   grantId: nonEmptyString,
   to: exports_external.enum(LEGION_PHASE_BACKWARD_TARGETS),
-  reason: nonEmptyString
+  reason: nonEmptyString,
+  issue: nonEmptyString.optional()
 });
 var LegionPhaseRetryRequest = exports_external.strictObject({
   grantId: nonEmptyString,
@@ -46792,7 +46820,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 32
+  daemonApiVersion: 34
 };
 
 // src/channel-forwarder.ts
@@ -47731,10 +47759,13 @@ var PhaseOpArguments = exports_external.discriminatedUnion("op", [
   operation("read_record", { issue: requiredString("read_record", "issue") }),
   operation("handoff_complete", {
     summary: requiredString("handoff_complete", "summary"),
-    verdict: exports_external.enum(["pass", "fail"], { error: "handoff_complete's verdict is pass or fail" }).optional(),
+    verdict: exports_external.enum(["pass", "pending", "fail"], {
+      error: "handoff_complete's verdict is pass, pending or fail"
+    }).optional(),
     ready: exports_external.boolean({ error: "handoff_complete's ready is true or false" }).optional()
   }),
   operation("request_backward_move", {
+    issue: exports_external.string().optional(),
     to: exports_external.enum(LEGION_PHASE_BACKWARD_TARGETS, {
       error: (issue2) => typeof issue2.input === "string" && issue2.input.trim() !== "" ? `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}` : "request_backward_move requires to"
     }),
@@ -47769,10 +47800,10 @@ function phaseOpParameters(zod) {
 }
 var PHASE_OP_SENTENCES = {
   readRecord: "read_record returns the record of `issue` from the daemon's state. ",
-  requestBackwardMove: "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. "
+  requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " + "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail from the tester alone " + "(the daemon refuses a verdict from any other role), `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " + "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " + "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " + "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " + "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " + "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -47808,8 +47839,27 @@ async function executePhaseOp(runtime, input) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
     case "handoff_complete": {
-      const { phase } = recordFrom(await daemon.state(), claim.issue);
-      const commit = await runtime.handoffCommit(phase, claim.role);
+      const record3 = recordFrom(await daemon.state(), claim.issue);
+      if (claim.role === "implementer" && record3.phase === "done") {
+        if (record3.check !== undefined) {
+          if (args.verdict === undefined) {
+            throw new Error("handoff_complete on a production check names a verdict of pass, pending or fail");
+          }
+          if (args.ready === true) {
+            throw new Error("handoff_complete on a production check is no READY: leave ready out");
+          }
+        }
+        return daemon.handoffComplete({
+          grantId: await mintClaimGrant(daemon, claim),
+          summary: args.summary,
+          verdict: args.verdict ?? "",
+          ready: false
+        });
+      }
+      if (args.verdict === "pending") {
+        throw new Error("handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's");
+      }
+      const commit = await runtime.handoffCommit(record3.phase, claim.role);
       return daemon.handoffComplete({
         grantId: await mintClaimGrant(daemon, claim),
         summary: args.summary,
@@ -47818,13 +47868,24 @@ async function executePhaseOp(runtime, input) {
         commit
       });
     }
-    case "request_backward_move":
+    case "request_backward_move": {
+      let issue2;
+      if (claim.role === "architect") {
+        if (args.issue === undefined || args.issue.trim() === "") {
+          throw new Error("request_backward_move requires issue");
+        }
+        issue2 = args.issue;
+      } else if (args.issue !== undefined && args.issue !== claim.issue) {
+        throw new Error(`a phase worker moves only its own issue ${claim.issue}, not ${args.issue}`);
+      }
       await daemon.phaseBackward({
         grantId: await mintClaimGrant(daemon, claim),
         to: args.to,
-        reason: args.reason
+        reason: args.reason,
+        ...issue2 === undefined ? {} : { issue: issue2 }
       });
       return {};
+    }
   }
 }
 

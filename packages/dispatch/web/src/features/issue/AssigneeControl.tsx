@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
-import { api } from "../../api/client";
+import { usersQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { badgeLow, badgePrimary } from "../../theme/classes";
 import { badgeSelectBadge, badgeSelectOverlay, badgeSelectWrapper } from "./badge-select";
@@ -31,12 +31,7 @@ export function AssigneeControl({
   issueKey: string;
 }): ReactNode {
   const [wanted, setWanted] = useState(false);
-  const users = useQuery({
-    enabled: wanted,
-    queryKey: ["users"],
-    queryFn: () => api.listUsers(),
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const users = useQuery({ ...usersQuery(), enabled: wanted });
   const want = () => setWanted(true);
   const write = useIssueAssignee(issueKey);
   const logins = (users.data ?? []).map((user) => user.login);

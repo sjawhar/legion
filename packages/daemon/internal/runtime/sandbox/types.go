@@ -91,7 +91,7 @@ type Options struct {
 	// StorageClass is the issue volumes' class. Required: production has no default class.
 	StorageClass string
 	// IssueVolume is each issue volume's size, positive; the daemon's configuration supplies its
-	// default (runtime.kubernetes.issue_volume, 20Gi).
+	// default (runtime.kubernetes.issue_volume, config.defaultIssueVolume when the file sets none).
 	IssueVolume resource.Quantity
 	Scheduling  Scheduling
 	// Resources are each role's container requirements, the controller's included: the daemon
@@ -159,10 +159,19 @@ type Options struct {
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
+	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv every role's
+	// container runs before each start of its Oh My Pi — after a stale-plugin relaunch's install,
+	// in the container's working directory and with the environment Oh My Pi gets — through the
+	// start wrapper (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
+	Setup []string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
+	// RegistrationIntervals is worker_boot_registration_deadline_intervals: BootTimeout times it is
+	// the registration deadline the daemon retires an unregistered role at, and the bound the
+	// runtime sizes the plugin install lock's wait against (installLockWait, plugins.go).
+	RegistrationIntervals int
 	// BusyBackoff is the first wait before a launch's request the API server answered overloaded is
 	// sent again, doubled for each such answer after it up to 32 times (resend, backoff.Wait), which
 	// BootTimeout bounds.

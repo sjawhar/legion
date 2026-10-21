@@ -294,6 +294,7 @@ func (d *blockingDispatch) MessageBodiesSince(context.Context, string, time.Time
 func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -447,6 +448,7 @@ func (d *refusingDispatch) MessageBodiesSince(context.Context, string, time.Time
 func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
@@ -481,6 +483,7 @@ func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) (
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }

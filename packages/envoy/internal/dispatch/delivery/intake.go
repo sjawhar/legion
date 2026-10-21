@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -40,12 +41,14 @@ var ompSessionTrailer = regexp.MustCompile(`(?m)^Omp-Session:\s*(\S+)\s*$`)
 // both are unexported in their own packages and this package does not depend on either.
 var issueKeyCandidate = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*\b`)
 
-// Intake wires the NATS consumer to the database and the GitHub App client. StartIntakes builds it,
-// and only with the App configured.
+// Intake wires the NATS consumer to the database, the GitHub App client and the event broker the
+// issue.deployed events go through (RecordDeployedEvents). StartIntakes builds it, and only with
+// the App configured.
 type Intake struct {
 	nats   *bus.Client
 	pool   *store.Pool
 	github *githubapp.Client
+	events *events.Broker
 	// leases is the pool bind takes the delivery-consumers lease on, so that one process at a
 	// time reconciles this durable's configuration (bindDurableConsumer).
 	leases duty.Leases
@@ -53,8 +56,8 @@ type Intake struct {
 
 // newIntake builds an Intake on natsClient, a connected client StartIntakes opens for it alone,
 // reconciling its durable under a lease it takes on leases.
-func newIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client) *Intake {
-	return &Intake{nats: natsClient, pool: pool, github: github, leases: leases}
+func newIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client, broker *events.Broker) *Intake {
+	return &Intake{nats: natsClient, pool: pool, github: github, events: broker, leases: leases}
 }
 
 // Run binds the durable consumer and processes GitHub events until ctx is cancelled. Idle until a
@@ -166,6 +169,10 @@ var settingsPollInterval = 30 * time.Second
 // a pull request that was not merged or another repository's run as well. A payload that is not a
 // JSON object, a kind that is not a string, and a handled kind's payload holding anything but
 // strings are errMalformedPayload.
+//
+// An envelope whose handler stored a fact the issue.deployed rule reads (a pull request's row, a
+// run, its jobs) ends with recordDeployed, whether or not the handler then failed: a run written
+// before its jobs fetch failed may still be the run that shipped a pull request stored earlier.
 func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw string) (handled bool, err error) {
 	if raw == "" {
 		return false, nil
@@ -180,7 +187,7 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw stri
 			return false, fmt.Errorf("%w: kind: %w", errMalformedPayload, err)
 		}
 	}
-	var handle func(context.Context, DeliverySettings, map[string]string) error
+	var handle func(context.Context, DeliverySettings, map[string]string) (bool, error)
 	switch kind {
 	case "pr":
 		handle = in.handlePullRequestEnvelope
@@ -190,27 +197,48 @@ func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw stri
 		return false, nil
 	}
 	payload, err := flatPayload(fields)
+	var wrote bool
 	if err == nil {
-		err = handle(ctx, settings, payload)
+		wrote, err = handle(ctx, settings, payload)
+	}
+	if wrote {
+		in.recordDeployed(ctx, settings)
 	}
 	return true, err
+}
+
+// recordDeployed writes the issue.deployed of every pull request the envelope just handled may have
+// shipped or completed (RecordDeployedEvents). A failure is logged and does not fail the envelope,
+// which is acknowledged as every handled envelope is: the reconcile records at the end of every
+// pass too, so a row this call could not write gets its event within five minutes.
+func (in *Intake) recordDeployed(ctx context.Context, settings DeliverySettings) {
+	written, err := RecordDeployedEvents(ctx, in.pool, settings, in.events, time.Now())
+	if err != nil {
+		slog.Error("dispatch delivery: record issue.deployed after an envelope", "error", err)
+	}
+	if written > 0 {
+		slog.Info("dispatch delivery: recorded issue.deployed", "events", written, "by", "intake")
+	}
 }
 
 // routeWorkflowEnvelope hands a workflow run to handleWorkflowEnvelope as the run kind its file is
 // configured as. The runs this slice records are the deploy repository's own: another repository's
 // run of a file with the same path is not one of them, and routing it would fetch a run this slice
 // never stores. A run of a file neither setting names is not fetched either.
-func (in *Intake) routeWorkflowEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) error {
+func (in *Intake) routeWorkflowEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) (bool, error) {
 	if payload["repo"] != settings.DeployRepo {
-		return nil
+		return false, nil
 	}
 	switch payload["path"] {
 	case settings.DeployWorkflowPath:
 		return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
 	case settings.PRChecksWorkflowPath:
-		return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
+		// A pr_checks run is no part of the shipping rule (shippingRunJoin reads deploy runs
+		// alone), so storing one can ship nothing: the envelope ends with no deployed pass.
+		_, err := in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
+		return false, err
 	default:
-		return nil
+		return false, nil
 	}
 }
 
@@ -537,27 +565,29 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) 
 // handlePullRequestEnvelope processes one `kind:"pr"` envelope. Only a merge (action "closed",
 // merged "true") does anything; author and excluded-repository checks run on the envelope's own
 // fields first, with no GitHub call, so a merge by anyone outside the population costs nothing.
-func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) error {
+// It reports whether it stored the pull request's row: a row it deleted, a pull request outside
+// the population, ships with nothing.
+func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) (wrote bool, err error) {
 	if payload["kind"] != "pr" || payload["action"] != "closed" || payload["merged"] != "true" {
-		return nil
+		return false, nil
 	}
 	repoFull := payload["repo"]
 	number, err := strconv.Atoi(payload["number"])
 	if err != nil {
-		return fmt.Errorf("merged-PR envelope: malformed number %q: %w", payload["number"], err)
+		return false, fmt.Errorf("merged-PR envelope: malformed number %q: %w", payload["number"], err)
 	}
 	author := payload["author"]
 
 	if containsString(settings.ExcludedRepos, repoFull) {
-		return nil
+		return false, nil
 	}
 	if !containsString(settings.PopulationAuthors, author) {
-		return nil
+		return false, nil
 	}
 
 	owner, repo, err := splitRepo(repoFull)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	fetched, fetchErr := FetchPullRequest(ctx, in.github, owner, repo, number)
@@ -566,10 +596,10 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 		// payload); without it we cannot tell whether this PR belongs in the population at all,
 		// so nothing is written here. The reconcile's merged-PR search will find and complete
 		// this PR on its own within five minutes.
-		return fmt.Errorf("complete merged PR %s#%d: %w", repoFull, number, fetchErr)
+		return false, fmt.Errorf("complete merged PR %s#%d: %w", repoFull, number, fetchErr)
 	}
 	if fetched.MergedAt == nil {
-		return fmt.Errorf("merged-PR envelope for %s#%d, but GitHub reports it unmerged", repoFull, number)
+		return false, fmt.Errorf("merged-PR envelope for %s#%d, but GitHub reports it unmerged", repoFull, number)
 	}
 
 	raw := RawPullRequest{Repo: repoFull, Number: number, Title: fetched.Title, Author: fetched.Author, Labels: fetched.Labels, MergedAt: *fetched.MergedAt}
@@ -578,13 +608,16 @@ func (in *Intake) handlePullRequestEnvelope(ctx context.Context, settings Delive
 		// IsTaskPR's "neither label" error: a deploy-repo PR GitHub's own classifier workflow has
 		// not labelled yet. Surfaced, not guessed; the reconcile retries this PR's label on its
 		// next pass.
-		return fmt.Errorf("classify %s#%d: %w", repoFull, number, err)
+		return false, fmt.Errorf("classify %s#%d: %w", repoFull, number, err)
 	}
 	if !isPopulation {
-		return DeletePullRequest(ctx, in.pool, repoFull, number)
+		return false, DeletePullRequest(ctx, in.pool, repoFull, number)
 	}
 
-	return completePullRequest(ctx, in.pool, in.github, owner, repo, repoFull, number, fetched)
+	if err := completePullRequest(ctx, in.pool, in.github, owner, repo, repoFull, number, fetched); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // completePullRequest finishes writing one merged pull request's complete row -- session
@@ -639,41 +672,42 @@ func liveIntakeWindow() TimeWindow {
 // an arbitrary envelope naming any repo/run_id/conclusion/timing, and this is the one place a
 // forged value could otherwise rewrite a real run's stored facts. A run row is written whatever
 // its current state (so an in-progress run appears before it concludes, per CONTRACT.md); jobs
-// are fetched and written only once GitHub reports the run concluded.
-func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliverySettings, kind DeliveryRunKind, payload map[string]string) error {
+// are fetched and written only once GitHub reports the run concluded. It reports whether it stored
+// the run, with or without its jobs.
+func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliverySettings, kind DeliveryRunKind, payload map[string]string) (wrote bool, err error) {
 	if payload["kind"] != "workflow" {
-		return nil
+		return false, nil
 	}
 	repoFull := payload["repo"]
 	owner, repo, err := splitRepo(repoFull)
 	if err != nil {
-		return err
+		return false, err
 	}
 	runID, err := strconv.ParseInt(payload["run_id"], 10, 64)
 	if err != nil {
-		return fmt.Errorf("workflow envelope: malformed run_id %q: %w", payload["run_id"], err)
+		return false, fmt.Errorf("workflow envelope: malformed run_id %q: %w", payload["run_id"], err)
 	}
 
 	fetched, err := FetchWorkflowRun(ctx, in.github, owner, repo, runID)
 	if err != nil {
-		return fmt.Errorf("verify run %d against GitHub: %w", runID, err)
+		return false, fmt.Errorf("verify run %d against GitHub: %w", runID, err)
 	}
 
 	if err := UpsertRun(ctx, in.pool, StoredRun(repoFull, kind, fetched)); err != nil {
-		return fmt.Errorf("upsert run %d: %w", runID, err)
+		return false, fmt.Errorf("upsert run %d: %w", runID, err)
 	}
 
 	if fetched.CompletedAt == nil {
-		return nil
+		return true, nil
 	}
 	fetchedJobs, err := ListWorkflowRunJobs(ctx, in.github, owner, repo, runID)
 	if err != nil {
 		// The run row is already written; the reconcile's own run listing fetches this run's
 		// jobs too and will complete them.
-		return fmt.Errorf("fetch jobs of run %d: %w", runID, err)
+		return true, fmt.Errorf("fetch jobs of run %d: %w", runID, err)
 	}
 	jobs := RunJobs(repoFull, runID, fetchedJobs, settings.Production())
-	return UpsertRunJobs(ctx, in.pool, repoFull, runID, jobs, JobsComplete(jobs))
+	return true, UpsertRunJobs(ctx, in.pool, repoFull, runID, jobs, JobsComplete(jobs))
 }
 
 // commitMessagePayload is one element of GET /repos/{owner}/{repo}/pulls/{number}/commits,

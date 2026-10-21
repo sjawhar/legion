@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -53,7 +54,7 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	}
 	t.Cleanup(natsClient.Close)
 
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), client)
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), client, events.NewBroker())
 	startIntake(t, intake)
 
 	envelopeFields := map[string]string{
@@ -122,7 +123,7 @@ func TestIntakeAcksAKindItDoesNotRecordWithoutLoggingOrWriting(t *testing.T) {
 	logs := captureLogs(t)
 	fake := newFakeGitHub(t)
 	natsClient := intakeTestClient(t)
-	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient()))
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
 	awaitBoundDurable(t, natsClient)
 
 	checks, err := json.Marshal(cistore.Summary{
@@ -177,7 +178,7 @@ func TestIntakeAcksAnEnvelopeWithNoPayloadSilently(t *testing.T) {
 	logs := captureLogs(t)
 	fake := newFakeGitHub(t)
 	natsClient := intakeTestClient(t)
-	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient()))
+	startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
 	awaitBoundDurable(t, natsClient)
 
 	publishGitHubEnvelope(t, natsClient, contracts.GithubSubject("unknown", "unknown", "comment"), "")
@@ -213,7 +214,7 @@ func TestIntakeLogsAMalformedEnvelopeOfAKindItRecords(t *testing.T) {
 			logs := captureLogs(t)
 			fake := newFakeGitHub(t)
 			natsClient := intakeTestClient(t)
-			startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient()))
+			startIntake(t, newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker()))
 			awaitBoundDurable(t, natsClient)
 
 			publishGitHubEnvelope(t, natsClient, envelope.topic, envelope.payload)
@@ -257,7 +258,7 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 	})
 
 	natsClient := intakeTestClient(t)
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient())
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker())
 	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
@@ -326,7 +327,7 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 	})
 
 	natsClient := intakeTestClient(t)
-	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient())
+	intake := newIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker())
 	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 

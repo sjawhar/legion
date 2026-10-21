@@ -136,6 +136,35 @@ func populatedState() State {
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
 				},
 			},
+			// LEGION-207 merged and closed; its production check is open at its second look, woken by
+			// Dispatch's issue.deployed, its implementer working that look in the kept pod.
+			"LEGION-207": {
+				Key:           "LEGION-207",
+				Generation:    2,
+				Phase:         phase.Done,
+				Status:        "done",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers: map[claim.Role]PhaseView{
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Rounds: 1},
+				},
+				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
+					Number:         1239,
+					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+					ReviewDecision: "approved",
+				},
+				Check: &CheckView{
+					Repo:        "acme/widgets",
+					PullRequest: 1239,
+					MergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
+					OpenedAt:    time.Date(2026, 9, 22, 8, 40, 12, 0, time.UTC),
+					Looks:       2,
+					LookOpen:    true,
+					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},
+					NextWakeAt:  time.Date(2026, 10, 6, 8, 40, 12, 0, time.UTC),
+				},
+			},
 		},
 		// LEGION-208's lifecycle lane is running row 801; the supervise row queued after it came due
 		// two and a half minutes ago and waits behind it (record.Store.HeldRows).

@@ -7,7 +7,7 @@ import {
   textMutedOnSurface,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import type { InboxRoute, InboxView } from "../refs/routes";
+import type { InboxRoute } from "../refs/routes";
 import { DIALOG_SCOPE } from "../shell/keymap";
 import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
 import { Inbox } from "./Inbox";
@@ -18,15 +18,17 @@ import { Inbox } from "./Inbox";
  * underneath never unmounts the page beneath it - the drawer itself closes instead
  * (`useCloseOnNavigation`), which is also what "open the item" from inside it does.
  *
- * Its Mine/Everyone choice is its own `useState`, never the URL: `Inbox`'s `filter`/`onViewChange`
+ * Its assignee filter is its own `useState`, never the URL: `Inbox`'s `filter`/`onAssigneesChange`
  * exist exactly so a peek embedded on, say, the Agents page does not navigate it to `/` the
- * moment someone toggles the view. `keymapScope={DIALOG_SCOPE}` puts its j/k/Enter/Escape
+ * moment someone picks a person. `keymapScope={DIALOG_SCOPE}` puts its j/k/Enter/Escape
  * bindings on the scope a dialog anywhere on the stack exclusively consults, instead of the
  * standalone page's `inbox` scope, which a dialog's keydown handling never reaches.
  */
 export function InboxDrawer({ onClose, open }: { onClose: () => void; open: boolean }): ReactNode {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const [view, setView] = useState<InboxView>("mine");
+  // `undefined` is the reader alone, the same default the page reads from an address without
+  // `?assignee=`.
+  const [assignees, setAssignees] = useState<readonly string[] | undefined>(undefined);
   const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open });
   useCloseOnNavigation(open, onClose);
 
@@ -34,7 +36,7 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
     return null;
   }
 
-  const filter: InboxRoute = { view };
+  const filter: InboxRoute = { assignees };
 
   return (
     <>
@@ -58,7 +60,7 @@ export function InboxDrawer({ onClose, open }: { onClose: () => void; open: bool
             Close
           </button>
         </div>
-        <Inbox filter={filter} keymapScope={DIALOG_SCOPE} onViewChange={setView} />
+        <Inbox filter={filter} keymapScope={DIALOG_SCOPE} onAssigneesChange={setAssignees} />
       </aside>
     </>
   );

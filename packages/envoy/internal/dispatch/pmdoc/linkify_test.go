@@ -41,6 +41,47 @@ func TestLinkifyGuardLinksWhatGoldmarkLinks(t *testing.T) {
 	}
 }
 
+// literalURL answers a URL at each offset of a line as a fresh read would, through the two records
+// that keep a line linear: the domain read from an earlier trigger (literalDomains), which a www
+// literal starting inside it reads again with its own underscores and dots, and a trail run
+// already found to continue the URL (literalTrail).
+func TestLiteralURLReadsEachOffsetAsAFreshRead(t *testing.T) {
+	for _, test := range []struct {
+		line string
+		want map[int]int // offset → the URL's length, 0 for none; offsets not listed are checked against a fresh read only
+	}{
+		{"_www.a_www.a_www.ab", map[int]int{1: 0, 7: 0, 13: 6}},
+		{"www.a_b.c.d www.d", map[int]int{0: 11, 12: 5}},
+		{"www.x_y.z.com/q", map[int]int{0: 15}},
+		{"www.a.b_c.d", map[int]int{0: 0}},
+		{"https://x.test/a)\"; b", map[int]int{0: 16}},
+		{"https://x.test/(a)) b", map[int]int{0: 18}},
+		{"https://x.test/a&amp;&amp;) b", map[int]int{0: 16}},
+		{"https://x.test/a&amp;x b", map[int]int{0: 22}},
+		{"https://x.test/a.,;:!?'\"_~*)x b", map[int]int{0: 29}},
+		{"https://x.test/a.,;:!?'\"_~*) b", map[int]int{0: 16}},
+		{"https://x.test/a](b) https://x.test/c]x", map[int]int{0: 16, 21: 18}},
+		{"HTTPS://X.TEST/Y www.", map[int]int{0: 16, 17: 0}},
+	} {
+		line := []byte(test.line)
+		shared := &literalDomains{from: -1, end: -1}
+		for offset := range len(line) {
+			if !literalURLPrefix(line[offset:]) {
+				continue
+			}
+			shared.base = offset
+			got, _, _ := literalURL(line[offset:], shared)
+			fresh, _, _ := literalURL(line[offset:], &literalDomains{from: -1, end: -1, base: offset})
+			if got != fresh {
+				t.Errorf("%q at %d: %d with the line's record, %d read fresh", test.line, offset, got, fresh)
+			}
+			if want, ok := test.want[offset]; ok && got != want {
+				t.Errorf("%q at %d: length %d, want %d", test.line, offset, got, want)
+			}
+		}
+	}
+}
+
 func inlineSummary(paragraph *Node) string {
 	var parts []string
 	for _, node := range paragraph.Children {

@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The pod's init containers: workspace-fetch, the one that holds the provisioning token and
@@ -87,7 +88,10 @@ var runtimeOwned = map[string]bool{
 	"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
 	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
 	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
+	"GIT_CONFIG_COUNT": true, "GIT_CONFIG_KEY_0": true, "GIT_CONFIG_VALUE_0": true,
+	"GIT_CONFIG_KEY_1": true, "GIT_CONFIG_VALUE_1": true, "GIT_CONFIG_KEY_2": true, "GIT_CONFIG_VALUE_2": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+	"TMPDIR": true, "GOCACHE": true, "GOMODCACHE": true, "BUN_INSTALL_CACHE_DIR": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
 	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
@@ -660,13 +664,15 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 	return env
 }
 
-// The XDG base directories, at the standard offsets from the image's HOME. The config, cache and
-// data homes are the same in the workspace-init and main containers; the state home is
-// xdgStateHome itself in workspace-init and a role's own directory under it in each role container
-// (roleStateHome). The config home is the pod's shared in-memory volume: jj keeps a repository's
-// `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
-// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads. It
-// starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
+// The XDG base directories, at the standard offsets from the image's HOME: what the issue pod's
+// workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role
+// container is told none of the three home-directory ones: its cache and data homes are the
+// issue's scratch's, shared with every other role of the pod, its state home its own directory
+// under that scratch (roleEnvironment), and the config home alone is shared with workspace-init.
+// The config home is the pod's shared in-memory volume: jj keeps a repository's `--repo`
+// configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
+// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads.
+// It starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
 const (
 	xdgConfigHome = podHome + "/.config"
 	xdgCacheHome  = podHome + "/.cache"
@@ -674,30 +680,82 @@ const (
 	xdgStateHome  = podHome + "/.local/state"
 )
 
-// xdgEnvironment is the four XDG base directories with stateHome as the state home.
-func xdgEnvironment(stateHome string) []corev1.EnvVar {
+// xdgEnvironment is the four XDG base directories on the image's HOME: what the issue pod's
+// workspace-init is told (initEnvironment), the one container of a pod told any of them besides
+// the role containers — workspace-fetch is told none (fetchEnvironment), and neither is the
+// controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role container is
+// told none of them but the config home; its cache and data homes are the issue's scratch's and
+// its state home its own directory there (roleEnvironment).
+func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
 		{Name: "XDG_CACHE_HOME", Value: xdgCacheHome},
 		{Name: "XDG_DATA_HOME", Value: xdgDataHome},
-		{Name: "XDG_STATE_HOME", Value: stateHome},
+		{Name: "XDG_STATE_HOME", Value: xdgStateHome},
 	}
 }
 
-// roleStateHome is the XDG_STATE_HOME a role's agent is told, `<xdgStateHome>/<role>`: a state home
-// of its own in a pod whose role containers share the network namespace and the workspace path.
-// Oh My Pi keeps its browser broker's lock under its state root
-// (`run/daemons/<hash of the workspace's real path>/broker.pid`), taken as an abstract unix socket
-// named from the lock path, and an abstract socket name is one name across every container of the
-// pod; with one state root the first role's lock would block every other role's broker, and their
-// `browser.open` would fail while `broker.sock` sits on the first container's own filesystem. The
-// shim makes Oh My Pi's profile directory under it before Oh My Pi starts
-// (podsafety.EnsureStateHome), since Oh My Pi reads the variable only where that directory exists.
-// It is a path on the container's own filesystem rather than the role's in-memory state volume
-// (StateDir), so Chromium's `browser-profiles` and Oh My Pi's logs are not charged to the pod's
-// memory.
+// scratchRoot is the issue's scratch, on the issue's volume, which every role launcher mounts
+// whole at TreeRoot: the four directories every role container of the pod is told the same one of
+// (roleEnvironment) and `state`, which holds one state home per role (roleStateHome).
+const scratchRoot = TreeRoot + "/scratch"
+
+// roleEnvironment is where a role container's agent puts what it writes without being told where:
+// its temporary directory, the three XDG homes a tool caches under, and the three tool caches that
+// resolve to a path of their own (Go's build and module caches, bun's install cache). Every one of
+// them is on the issue's volume, where neither the gigabyte of ephemeral storage the container is
+// admitted with nor the pod's memory bounds it: a bun install cache alone is 1.4 GB for this
+// repository, and charging it to the container's filesystem is what GKE Autopilot evicted issue
+// pods for. All but the state home are the issue's, one directory every role of it is told the
+// same: the temporary directory, the cache and data homes and bun's install cache directly under
+// scratchRoot, and the two Go caches (goBuildCache, goModCache), as uv's cache already was
+// (uvCacheDir). A directory per role is what this replaces, by the human's decision of
+// 2026-10-20: the roles of an issue already share the pod, the issue's volume whole, the one
+// workspace they all work in, the sessions directory, uv's Pythons and cache and the two Go
+// caches, and each can read and write what the others write, so a cache per role bought an
+// isolation the pod does not have and cost a copy of every cache per role. Bun hardlinks out of
+// its install cache into whatever it installs for (LEGION-198, where that hardlinking was first
+// met), and the issue's roles share one checkout — workspace.Location names the repository and
+// the issue, never a role — so a file edited in place inside node_modules is already in the
+// packages every role runs from, whatever we do about caches. XDG_STATE_HOME alone stays the
+// role's own (roleStateHome), and for a mechanism rather than caution: Oh My Pi names its browser
+// broker's lock from the state root, the name is an abstract unix socket, and an abstract socket
+// name is one name across every container of the pod, so one state home would block every role's
+// broker but the first. Only the config home is neither the issue's scratch nor the role's: it
+// stays the pod's shared in-memory volume (xdgConfigHome), where workspace-init writes the jj
+// configuration the agents' jj reads. Every directory here outlives the pod, so a later pod of
+// the issue reuses what an earlier one downloaded and built.
+func roleEnvironment(role claim.Role) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
+		{Name: "XDG_CACHE_HOME", Value: scratchRoot + "/cache"},
+		{Name: "XDG_DATA_HOME", Value: scratchRoot + "/data"},
+		{Name: "XDG_STATE_HOME", Value: roleStateHome(role)},
+		{Name: "TMPDIR", Value: scratchRoot + "/tmp"},
+		{Name: "GOCACHE", Value: goBuildCache},
+		{Name: "GOMODCACHE", Value: goModCache},
+		{Name: "BUN_INSTALL_CACHE_DIR", Value: scratchRoot + "/bun/install/cache"},
+	}
+}
+
+// roleStateHome is the XDG_STATE_HOME a role's agent is told, `/legion/scratch/state/<role>`: the
+// one directory of the issue's scratch that is the role's own rather than the issue's, in a pod
+// whose role containers share the network namespace, the workspace path and the rest of that
+// scratch. Oh My Pi keeps its browser broker's lock under its state root (`run/daemons/<hash of
+// the workspace's real path>/broker.pid`), taken as an abstract unix socket named from the lock
+// path, and an abstract socket name is one name across every container of the pod; with one state
+// root the first role's lock would block every other role's broker, and their `browser.open` would
+// fail while `broker.sock` sits on the first container's own filesystem. The per-role homes hang
+// under one `state` directory so that the shared and the per-role halves of the scratch stay
+// visibly apart and no role's name can collide with a shared directory's. The shim makes Oh My
+// Pi's profile directory under it before Oh My Pi starts (podsafety.EnsureStateHome), since Oh My
+// Pi reads the variable only where that directory exists. It is on the issue's volume, which is
+// neither the pod's memory nor the gigabyte of ephemeral storage the container is admitted with,
+// so Oh My Pi's logs, Chromium's `browser-profiles` and the plugin generation an installing launch
+// puts there (plugins.go) are charged to neither — and, unlike both, the state home now outlives
+// the pod.
 func roleStateHome(role claim.Role) string {
-	return xdgStateHome + "/" + string(role)
+	return scratchRoot + "/state/" + string(role)
 }
 
 // uv's settings in the worker container, which the pod's environment hands the image's uv.
@@ -724,6 +782,30 @@ const (
 func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
+
+// The go command's two caches in the role containers, which roleEnvironment hands every role of
+// the issue the same pair of.
+const (
+	// goBuildCache is the GOCACHE every role container of an issue is told and goModCache its
+	// GOMODCACHE, both on the issue's volume beside the workspaces and uv's cache, and both shared
+	// by the issue's roles rather than split per role. Each holds content addressed by its hash,
+	// and the roles of one issue may fill them at once: of the build cache `go help cache` says
+	// "The cache is safe for concurrent invocations of the go command", and what reaches the
+	// module cache is a module zip or go.mod the go command has verified against a known hash
+	// (`go help module-auth`) in a directory it then makes read-only, which only `go build
+	// -modcacherw` leaves writable. They are the issue's rather than the tree's because each issue
+	// has a volume of its own; a pair is 751 MiB of build cache and 375 MiB of module cache for this
+	// repository, so the six roles of an issue pod with a pair each would hold five redundant
+	// copies, about 5.5 GiB of the issue's volume spent on nothing. They keep their own place at
+	// `/legion/go`, beside the workspaces rather than under the issue's scratch (scratchRoot),
+	// where they were the issue's one pair before the rest of the scratch became the issue's too.
+	// The state home is the one directory of that scratch no two roles share: Oh My Pi's browser
+	// broker takes its lock as an abstract unix socket named from a path under the state home, one
+	// name across every container of the pod, so one state home would block every role's broker
+	// but the first (roleStateHome).
+	goBuildCache = TreeRoot + "/go/build"
+	goModCache   = TreeRoot + "/go/mod"
+)
 
 // fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, the mounted
 // provisioning token, and, for an issue pod, its repository's cache — its address, which resolves
@@ -758,7 +840,7 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
 	}
-	return append(env, xdgEnvironment(xdgStateHome)...)
+	return append(env, xdgEnvironment()...)
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
@@ -803,11 +885,14 @@ func (r *Runtime) LaunchBound() time.Duration {
 // does not mount: Oh My Pi refuses to start on an unreadable URL file, so that generation fails
 // rather than keeping files. None of them repeats another: the runtime refuses a spec naming one
 // of its own (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or
-// a spec's. XDG_STATE_HOME is the role's own (roleStateHome), carried to the role's shim by the
-// start command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
+// a spec's. The temporary directory, XDG homes and tool caches are the issue volume's
+// (roleEnvironment) — the issue's scratch and its Go caches, which every role of it is told the
+// same of, but the state home, which is the role's own — carried to the role's shim by the start
+// command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
 // API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the
-// issue's volume leads PATH.
+// issue's volume leads PATH. The GIT_CONFIG pairs are the GitHub credential of every git the role
+// runs, in the issue's clone or outside it (gitCredentialEnv).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -832,6 +917,7 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
+	env = append(env, gitCredentialEnv()...)
 	if broker := r.agentSecrets; broker != nil {
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
@@ -839,7 +925,7 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	if spec.Role == claim.RoleController {
 		add(slackChannelsVariable, r.slackChannelsValue())
 	}
-	env = append(env, xdgEnvironment(roleStateHome(spec.Role))...)
+	env = append(env, roleEnvironment(spec.Role)...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})
@@ -859,6 +945,36 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	if r.sessionDSNKey != "" {
 		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
 		add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
+	}
+	return env
+}
+
+// gitCredentialPairs are the git configuration entries gitCredentialEnv sets: the helper for
+// https://github.com reset, then set to `legion git-credential` (workspace.GitHubCredentialHelper),
+// and credential.useHttpPath on for github.com, so git hands the helper the path whose owner picks
+// the token.
+var gitCredentialPairs = [][2]string{
+	{"credential.https://github.com.helper", ""},
+	{"credential.https://github.com.helper", workspace.GitHubCredentialHelper},
+	{"credential.https://github.com.useHttpPath", "true"},
+}
+
+// gitCredentialEnv is gitCredentialPairs as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n> and
+// GIT_CONFIG_VALUE_<n>, which git reads after every configuration file, as it reads `-c`. Every git
+// a role process runs then answers https://github.com from the role's gh files, in the issue's
+// clone or outside it: a clone the setup command makes (runtime.kubernetes.setup: Oh My Pi's
+// marketplace clone among them), or a repository an agent clones for itself. The reset drops every
+// helper a configuration file names for github.com, the image's or a repository's, and the helper
+// it sets is the one the issue's clone already names, so git in the clone asks what it asked
+// before. Any other host is left to the configuration files. `legion git-credential` answers only
+// an owner of the project, from that owner's directory of LEGION_GH_OWNERS_DIR (ghAgentEnv), and
+// `legion gh` adds its own entry after these (withGitHubUseHTTPPath, cmd/legion/gh.go).
+func gitCredentialEnv() []corev1.EnvVar {
+	env := []corev1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: strconv.Itoa(len(gitCredentialPairs))}}
+	for i, pair := range gitCredentialPairs {
+		env = append(env,
+			corev1.EnvVar{Name: "GIT_CONFIG_KEY_" + strconv.Itoa(i), Value: pair[0]},
+			corev1.EnvVar{Name: "GIT_CONFIG_VALUE_" + strconv.Itoa(i), Value: pair[1]})
 	}
 	return env
 }

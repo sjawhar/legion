@@ -83,6 +83,20 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
   // Alice has replied to the second ask, so its next move is the Planner's.
   const answered = await createAsk(issue.key, { question: "Second" }, asPlanner);
   await createComment(issue.key, { ask_id: answered.id, body: "Which release?" });
+  // The same two turns on an issue Bob holds: the card's first number is Alice's own work, so
+  // neither of these is in it, while the second counts what waits on the Planner whoever holds
+  // the issue.
+  const theirs = await createIssue(
+    { project: "CORE", title: "Bob's agent work" },
+    { login: "bob" }
+  );
+  await createAsk(theirs.key, { question: "Third" }, asPlanner);
+  const theirsAnswered = await createAsk(theirs.key, { question: "Fourth" }, asPlanner);
+  await createComment(
+    theirs.key,
+    { ask_id: theirsAnswered.id, body: "Bob replied." },
+    { login: "bob" }
+  );
   // The Reviewer's only Dispatch activity is newer than anything the Planner did: recency alone
   // would list it first.
   await createComment(
@@ -199,12 +213,19 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await plannerCard.getByRole("button", { name: "Copy session title Planner" }).click();
     await expect.poll(copied).toEqual(["planner-session", "Planner"]);
 
-    // One pill per side of the turn: the asks waiting on the viewer, then the asks the viewer
-    // has replied to; a card with no open asks shows neither.
+    // One pill per side of the turn, each counted in its own right: what waits on the reader
+    // themselves - a question whose next move is a person's, on an issue assigned to them - and
+    // what waits on the session, on anybody's issue. A card with no open asks shows neither.
     const needsYou = plannerCard.getByRole("link", { name: "Needs you 1" });
     await expect(needsYou).toHaveAttribute("href", "/?agent=planner-session&section=needs-you");
-    const waitingOnAgent = plannerCard.getByRole("link", { name: "Waiting on agent 1" });
-    await expect(waitingOnAgent).toHaveAttribute("href", "/?agent=planner-session");
+    const waitingOnAgent = plannerCard.getByRole("link", { name: "Waiting on agent 2" });
+    // The Inbox opens on the reader's own work, and these two questions are on two people's
+    // issues, so the link clears the filter: nothing it counted is left out of the list it
+    // opens (the rows are counted below, where it is followed).
+    await expect(waitingOnAgent).toHaveAttribute(
+      "href",
+      "/?agent=planner-session&assignee=everyone"
+    );
     await expect(plannerCard.getByText(/^Open asks/)).toHaveCount(0);
     // Every card carries the Open action; what this card must not carry is a whose-turn pill.
     await expect(
@@ -257,19 +278,33 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
       path: testInfo.outputPath(`agents-expanded-${width}.png`),
     });
 
+    // Each pill's number is the number of rows the list its link opens holds. Needs you opens
+    // the reader's own questions waiting on them, from this session: its one row.
+    await needsYou.click();
+    await expect(page).toHaveURL(/\/\?agent=planner-session&section=needs-you$/);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
+    await expect(page.getByText("First", { exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(plannerCard.getByRole("link", { name: "Needs you 1" })).toBeVisible();
+
+    // Waiting on agent opens this session's questions with the filter cleared, where the two it
+    // counted are both listed - Bob's included - under the band it named.
     await waitingOnAgent.click();
-    await expect(page).toHaveURL(/\/\?agent=planner-session$/);
+    await expect(page).toHaveURL(/\/\?agent=planner-session&assignee=everyone$/);
     const inbox = page.locator("main");
     const chip = inbox.getByRole("link", { name: "Clear agent filter" });
     await expect(chip).toHaveText("Asks from Planner · clear");
-    await expect(inbox.getByText("First", { exact: true })).toBeVisible();
+    await expect(inbox.locator('[data-inbox-section="agent"]')).toHaveCount(2);
     await expect(inbox.getByText("Second", { exact: true })).toBeVisible();
+    await expect(inbox.getByText("Fourth", { exact: true })).toBeVisible();
+    await expect(inbox.getByText("First", { exact: true })).toBeVisible();
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`inbox-agent-filter-${width}.png`),
     });
+    // Clearing the agent keeps the filter the pill arrived with.
     await chip.click();
-    await expect(page).toHaveURL(/\/$/);
+    await expect(page).toHaveURL(/\/\?assignee=everyone$/);
     await expect(inbox.getByRole("link", { name: "Clear agent filter" })).toHaveCount(0);
   } finally {
     await alice.close();

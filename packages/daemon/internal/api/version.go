@@ -244,4 +244,48 @@ package api
 // state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
 // its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
 // `retainedUntil`, which a plugin at 31 reads with a strict schema that knows neither.
-const DaemonAPIVersion = 32
+//
+// 33: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
+// production check is work after the close. The phase enum gains `accepting` (between `reviewing`
+// and `retro`, the architect's `sign_off` phase, a backward target too) and loses
+// `production_check`; the issue record on GET /legion/v1/state gains `check` (api.CheckView), the
+// issue's open production check with its repository, pull request, merge commit, looks, last wake
+// and bound, absent once it closes; `HandoffCompleteRequest.commit` becomes optional, since the
+// implementer's report on a look of that check (`handoff_complete` on a done issue whose check is
+// open) pushes nothing, and its `verdict` gains `pending` beside `pass` and `fail`;
+// `PhaseBackwardRequest` gains an optional `issue`, which the architect's grant, serving its whole
+// tree, names the issue it returns from `accepting` with. A 32 plugin's strict reader refuses a
+// state carrying `check` or the phase `accepting`, and its `handoff_complete` requires a commit the
+// check report has none of, so the boot gate and `legion probe-image` refuse the mixed pair. (This
+// branch took 30, then 31 when main landed sjawhar/legion#1986 at 30 and released pi-legion
+// v10.8.3 declaring it; main then landed sjawhar/legion#2005 at 31 and released pi-legion v10.9.0
+// declaring it, then sjawhar/legion#2009 at 32 and released pi-legion v10.10.0 declaring it, each
+// without these shapes, so this branch takes the number above it, as the collision note says.)
+//
+// 34: sjawhar/legion INFRA-31 -- the roles of an issue share one scratch on the issue's volume,
+// `/legion/scratch` (scratchRoot), and the values `mainEnvironment` sets name its directories:
+// every role container of a pod, a workflow role's and the controller's, is told the same
+// `TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME` and `BUN_INSTALL_CACHE_DIR` —
+// `/legion/scratch/{tmp,cache,data,bun/install/cache}` — and the same `GOCACHE` and `GOMODCACHE`,
+// `/legion/go/build` and `/legion/go/mod` beside the workspaces, as `UV_CACHE_DIR` already was.
+// `TMPDIR`, `BUN_INSTALL_CACHE_DIR`, `GOCACHE` and `GOMODCACHE` are new names; `XDG_CACHE_HOME`
+// and `XDG_DATA_HOME` move off the image's home directory. The Go pair is shared because both
+// hold content addressed by its hash and the roles of one issue may fill them at once, and a pair
+// is 751 MiB of build cache and 375 MiB of module cache for this repository, so the five
+// redundant copies would be about 5.5 GiB spent on nothing. `XDG_STATE_HOME`, whose
+// `/home/legion/.local/state/<role>` entry 18 declared, is the one directory of the scratch that
+// stays the role's own, `/legion/scratch/state/<role>`: Oh My Pi names its browser broker's lock
+// from the state root, the name is an abstract unix socket, and an abstract socket name is one
+// name across every container of the pod, so one state home would block every role's broker but
+// the first. `XDG_CONFIG_HOME` is unchanged, the pod's shared in-memory volume `workspace-init`
+// writes the agents' jj configuration in, and the issue pod's `workspace-init`, the one init
+// container told any XDG home, keeps every value it had. These directories are on the volume
+// rather than the gigabyte of ephemeral storage the container is admitted with, which the tools'
+// caches overran: GKE Autopilot evicted the pod. The volume a project's issues get by default is
+// 50Gi (`runtime.kubernetes.issue_volume`). The pane and pod environment is the surface this
+// contract names, and four of these names are the runtime's alone (`runtimeOwned`), which a spec
+// or an operator's pod env is now refused for setting, so the boot gate and `legion probe-image`
+// hold the daemon and the plugin to the same list. (This branch took 33; main then landed
+// LEGION-781 at 33 and released pi-legion v10.16.0 declaring it, without these shapes, so this
+// branch takes the number above it, as the collision note says.)
+const DaemonAPIVersion = 34
