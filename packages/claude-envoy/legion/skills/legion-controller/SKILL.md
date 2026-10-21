@@ -338,7 +338,7 @@ While you are registered, the daemon's `tick` gives you a turn at least every
 `controller_wake_interval_seconds`. After the turn's own work, read the report issue with
 `dispatch read`, and post when its `Events:` show no `message.created` from today.
 
-**What.** One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters,
+**What.** One `dispatch message --issue <report KEY> --body-file -` of at most 32,000 characters,
 written as `skill://dispatch`'s "Writing for the human" says: every issue by its key and title,
 every pull request by its URL.
 

@@ -98,7 +98,7 @@ person, that is an ask, and nothing else reaches their Inbox.
 The server holds every write to a size, and refuses rather than truncates:
 
 - an ask's question is at most 800 characters, with at most eight options;
-- a comment or message body is at most 2,000 characters;
+- a comment or message body is at most 32,000 characters;
 - a Markdown document is at most 1 MiB, and any other file at most 25 MiB.
 
 To show a picture inline, pass its local path with `--image` on `dispatch message`,
