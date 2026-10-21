@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-791",
+  "completed": "2026-10-21T17:12:02Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2096",
+  "round": 1,
+  "reviewedHead": "a72da8f92bb8c2b66e4d2648d42488b8717c2320",
+  "codeHead": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 1,
+  "ci": {
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "ciHead": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
+    "checkRuns": "lint, typecheck, test, pr-title all completed/success at 9b1a38ef (Tests run 39634012985, PR Title runs 39634012975 and 39634724197); the PR body's CI line names those runs at that commit",
+    "compareOnlyLegionSince": true
+  },
+  "proofLines": {
+    "implementer": "present: real legion binary over embedded Postgres in the implementer's pod, command, observation, head 9b1a38ef, negative controls (a)-(d)",
+    "tester": "present: independent instance, the implementer's predicates re-run, second file shape, head 9b1a38ef, negative controls (a)-(c); verified the implementer's proof by driving the same surface"
+  },
+  "thermonuclear": "pair run once at a72da8f9 (code 9b1a38ef): deep-review 1 Important Security[secret] (URL userinfo emitted verbatim on the unauthenticated route), 2 hardening Minors, 1 doc-comment Minor, 1 guard-transitivity Minor; code-quality 1 Important (same userinfo exposure), 1 Important (settingsClassifiedTypes hand list non-transitive), one Fast-follow",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/api/settings.go:199,216-218",
+      "description": "Security[secret]: daemon_url, envoy_url, every nats_urls entry and dispatch_url are emitted verbatim on the unauthenticated GET /legion/v1/state, and URL userinfo is where the loader itself tells operators to put NATS/Envoy credentials (config.go:774-783 'use URL userinfo or a secret for credentials'; docs/kubernetes.md:1432-1434). The repository already treats userinfo on these same four keys as a credential that never lands where anyone can read it (runtime/sandbox/addresses.go:28-31, namedURL:317-330 renders `xxxxx@`). No guard catches it: settingsForbiddenKeys keys on names, settingsFixturePlanted on planted literals, the fixture's URLs carry no userinfo, Stage 1's sweep greps BEGIN|PRIVATE KEY|postgres:// only. Fix: strip or mask userinfo before emitting (one helper; the sandbox package's convention is `scheme://xxxxx@host`), plant a userinfo URL in settingsFixtureFile and its password in settingsFixturePlanted so the byte sweep proves it, and add a userinfo marker to Stage 1's jq sweep. agent_secrets.url is already safe (kubernetes.go:275 refuses userinfo at load)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/api/settings_test.go:15-37,157-176",
+      "description": "The leak gate's claim is false one level down: settings_test.go:15 says settingsClassifiedTypes is 'config.Config and every type reachable from it', and settings.go:16-17 and the PR body sell the allowlist on 'a Config field added later fails TestSettingsOfClassifiesEveryConfigField', but the test only iterates the hand list (:159); a new nested config struct type (`Config.Vault VaultConfig{Token string}`) needs one row for Config.Vault and then every field of VaultConfig is unclassified and invisible until someone adds the type. The list is complete today (18 of 18, the tester's scratch walk). Fix: derive the set by walking reflect from config.Config through pointer/slice/map/array element types, collecting every struct whose PkgPath is the config package, and fail on a reachable type the walk did not classify."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "The pull request makes `settings` a required member of the strict LegionStateResponse and of api.State (a process boundary) and carries no `## Contract change census` (the reviewer role text; docs/solutions/legion/a-strict-schemas-new-required-field-is-censused-across-every-parser-rigs-and-stand-ins-included-LEGION-578.md). The migration itself is complete (re-run at the head: the schema's readers are pi-shared/src/daemon-client.ts, pi-legion/scripts/skill-scenarios/daemon-standin.ts (migrated), the four regenerated fixtures, the two pi-legion test literals (migrated), the claude-envoy dist bundle (rebuilt); the three contract declarers and version.json agree at 35; scripts/e2e jq reads are additive), so the body must carry the census with each hit's disposition and the rollout (an immediate refusal: the boot gate's contract 34/35 mismatch)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/api/settings.go:26",
+      "description": "The comment says `admission.cap` beside admission_cap is 'the live one', but both are the same cfg.AdmissionCap (daemon.go:1376, :1616) and nothing reloads it; an incident reader comparing the two will infer a live/file split that does not exist."
+    }
+  ],
+  "notProvenRisk": [
+    "The route's reachability beyond Legion's own pods is the deployment's NetworkPolicy, which this repository does not ship; the served block now describes the deployment's topology (namespace, image digest, scheduling, GitHub App ids and installation ids, broker URL and audience) to anything that reaches the daemon's API port.",
+    "The daemon/image lockstep at contract 35 (a daemon at 35 refuses an image at 34 at its boot gate) was not exercised in this round; the production check will be the first run of it."
+  ],
+  "fastFollow": "settingsEmitted's values (settings_test.go:41-126) are prose nothing asserts, so a renamed JSON tag rots them silently while wantTop (:219-228) repeats the same key names; reduce the table to a key set or assert each value against the marshalled keys. The settings fixture consts and loaders live in state_golden_test.go (:30-156) though settings_test.go is their principal consumer."
+}
