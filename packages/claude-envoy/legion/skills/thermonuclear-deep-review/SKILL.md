@@ -23,11 +23,11 @@ Report only issues in code that the PR adds or modifies. Exception: unchanged co
    - dashboards, SLOs, saved queries, downstream parsers
 
    If you cannot find a consumer, say so. Never assume that none exists. A change that removes its own alarm is the highest severity here, because it also removes the signal that would catch it.
-3. **Developer experience.** Find changes to how developers run or build the code locally. Examples: where or how the code reads secrets, new or renamed environment variables, remapped ports or networking, new scripts that a function needs. Not a break: a new alternative way to run or build, or a new package-manager dependency. Exception: a dependency that needs a step outside the usual workflow, such as a manual install from a website or app store, is a break.
+3. **Developer experience.** Find changes to how developers run or build the code locally. Examples: where or how the code reads secrets, new or renamed environment variables, remapped ports or networking. A new script that must run for a feature to keep working is also a change. Not a break: a new alternative way to run or build, or a new package-manager dependency. Exception: a dependency that needs a step outside the usual workflow, such as a manual install from a website or app store, is a break.
 4. **Feature leaks.** Trace each feature flag or internal-only check and its callers. Do not let a gated feature leak.
 5. **Intended breakage.** An intended, well-constrained high-risk effect is not a defect. Report it when its scope or consequences are unclear, or when it removes a safeguard or feature gate.
 6. **PR body claims.** Attack each safety or correctness claim in the PR body, not only the diff. Only a reviewer told to attack a claim finds a wrong one. Attack these first:
-   - Order, not coverage: after a pipeline sanitizes, can any later pass recreate what the sanitizer neutralized?
+   - Order, not coverage: after a pipeline sanitizes, can any later pass create or recreate what the sanitizer neutralized?
    - A severity that relies on a third party's formatting is a dependency, not a mitigation. Rate it as that bet, and fix it, do not only disclose it.
 
 ## Security Guidelines
