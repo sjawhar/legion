@@ -15,6 +15,12 @@ the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
 migrations"), then starts HTTP serving. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
+A migration must leave the release before it able to read and write the
+schema, since two processes serve one database through a rolling update: a
+change expands in one release and contracts in the next, and one that cannot
+be written that way is deployed with no server of the earlier release running
+(README "Database migrations" and "Running more than one process";
+`internal/dispatch/store/README.md`).
 `envoy-dispatch census` (`cmd/dispatch/census.go`, `store.Census` over
 `pgmigrate.Census`) is a deployment's pre-deploy census of the migrations the
 database has not applied, read-only, run before the service rolls (README
