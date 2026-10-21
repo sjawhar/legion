@@ -2,55 +2,51 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T01:20:00Z",
+  "completed": "2026-10-21T02:05:00Z",
   "decision": "changes_requested",
-  "round": 9,
-  "note": "A new round rather than a continuation: the conflict merge f714cec148b6 changed the fingerprint, which I had pre-committed to treating as a new round whichever way it came out. The head also moved under me while the round was open — my task named adae6dc7c4ca and the implementer pushed 0e21bab7d988 and 29e65d8f33b7 during it — so this review is of 29e65d8f33b7, the head as it stands, not the head I was handed.",
+  "round": 10,
+  "note": "My task named 9b8c6ccc50bd; the head moved to d52ae9dc58b4 while the round was open (78e350969a26 rewrote the paragraph this round is about). I re-read the head immediately before writing rather than after being handed the task — the rule I wrote after the last time this happened — and reviewed d52ae9dc58b4.",
   "critical": 0,
   "important": 1,
   "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:1221",
-      "description": "The sentence that tells an operator what this change needs applied is false for the deployments this repository tells them to build, and it is false in the direction that matters: it says no deployment edit is needed. 'this change raises issue_volume's default from 20Gi to 50Gi — a default every project takes rather than a line of one deployment, so the apply this change needs is the image digest alone, with no deployment edit.' The default reaches only a file that sets nothing: config/kubernetes.go:428 is `block := &Kubernetes{IssueVolume: defaultIssueVolume}`, overridden by any explicit value. This repository's own example writes the line — deploy/kubernetes/daemon/legion.yaml.example:69 is `issue_volume: 50Gi` with the comment '50Gi is the default', and docs/kubernetes.md:1135 shows it written too — so a deployment stood up from either carries its own line, which today says 20Gi, and takes no new default at all. Separately, the size rides in the Sandbox's VolumeClaimTemplates and is evaluated when the Sandbox is created, and an issue's Sandbox outlives its pods, so every issue already running keeps the volume it was created with whatever the configuration says. The consequence is the one this issue exists to stop, arriving quietly: the digest is pinned, the caches move onto a 20Gi volume, nothing prunes /legion/scratch, and the kubelet eviction that used to name the offending container is gone — the same paragraph says so four lines later. This is not the 50Gi number, which is the human's and out of scope; it is whether the mitigation reaches production, and the doc actively tells the operator not to look. One sentence fixes it: a deployment that sets runtime.kubernetes.issue_volume keeps its own value and must raise it before the digest is pinned, and a volume already created for a running issue keeps its size. The operator check belongs beside the pod.env check the architect already ran."
+      "file": "docs/kubernetes.md:1233",
+      "description": "The clause written to answer my previous finding introduced a new false one, in the same operator-facing paragraph and in the direction that costs the operator the action. It reads 'which fits once the duplication is gone, and does not before it' and concludes 'So what was filling the disk is the duplication, and the already-running volumes fit because it is being removed.' Two things make that false, and I derived both from the files rather than carrying them. First, nothing removes it: fourteen lines above, the same paragraph says 'Nothing prunes /legion/scratch: it grows for the life of the issue, across every pod of it', and that is what the code does — EnsureScratch only makes directories, and the one rm in the rendered wrapper is `rm -rf -- <root>/g*` for plugin generations. The 5.5 GiB the paragraph cites as returned came back because a person deleted a role's copy by hand. Second, and worse for the general case: a production volume never held the duplication being described. At the merge base 2127101bddff the runtime sets a role container no GOCACHE, no GOMODCACHE and no BUN_INSTALL_CACHE_DIR at all — the only TMPDIR it sets is fetchEnvironment's, the fetch container's own — and xdgCacheHome is podHome + '/.cache', the container's filesystem. So the 17 GiB with 14 GiB of per-role Go caches is this branch's own issue volume under an intermediate per-role layout that no shipped image ever produced. After the apply an already-running volume does not lose duplication; it gains the shared scratch. The operational consequence is the one the paragraph then disarms: an operator reading 'the already-running volumes fit because it is being removed' takes no step on an issue already near its 20 GiB, and the next sentence tells them the failure mode is silent. The fix is to drop the causal clause and keep the arithmetic, which is a complete argument on its own — 2.1 to 2.7 GiB measured on live volumes plus the shared layout's 8.5 GiB worst case stays inside 20 — and to mark the 17 GiB as this branch's own workspace under a layout no release shipped. If an operator does have an issue near full, the true remedy is deleting its stale /legion/scratch/<role> directories by hand, which is worth the sentence the false one occupies."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/capabilities/image.go:251",
-      "description": "flock is declared on PATH and required at an absolute path, so the declaration does not cover the failure it was added to prevent. The rendered install runs /usr/bin/flock by absolute path (plugins.go:211), while the toolchain row asserts onPath(img, …, 'flock') — presence anywhere on PATH — and the Dockerfile's build-time probe is `flock --version`, also a PATH lookup. An image whose base ships flock somewhere other than /usr/bin passes the apt line, the build probe, the toolchain capability and the probe Sandbox, and then fails every installing launch with the shell's 'not found': the exact fleet-wide outcome the declaration exists to catch, which image.go:245-250 and worker.Dockerfile:478-484 both say in as many words. Latent rather than live, since Debian's util-linux puts it at /usr/bin today, which is also why it is minor. Either assert the absolute path the script uses, or render the script with the path the capability found."
+      "file": "pull request #2085 body",
+      "description": "Two entries of the body's Not proven / risk list are mine, are marked 'Open as the round's finding', and are both answered at this head — and one of them carries the sentence I already conceded was wrong. Entry 24 still says the shipped example and docs:1135 write 20Gi; both read 50Gi at this head, which is the error I owned to the architect and which has now survived into the artifact a merger and an operator read before pinning a digest. Entry 25 still says flock is declared on PATH and nothing refuses an image that moved it; worker.Dockerfile's final step now refuses exactly that. Every other closed finding in that list carries a strikethrough and 'Fixed and resolved'; these two do not. I am fixing them in this round rather than reporting them, since they are my lines, and recording them here because the record should show that the false sentence outlived its own correction by a round."
     }
   ],
   "fixedThisRound": {
-    "subshellFailurePath": "The one thing I said the merge raised that nobody had asked is now pinned, and the pin is real. I had already run the rendered shape myself on sh, dash and bash before the test existed: a failed install exits 1, the setup block does not run and the agent is never exec'd, so `set -e` does propagate the subshell's exit. TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent (plugins_test.go:669) now holds it, with the succeeding case as a control in the same test so the absent markers cannot prove nothing. I ran the mutation the architect specified rather than reading it: with `exit 1` deleted from the install's failure branch the test fails four ways at once — 'the wrapper exited 0, want 1', 'the setup command ran after a failed install: the install's subshell exit did not end the wrapper', the same for the agent, and 'the wrapper wrote \"agent-stdout\" to stdout, the shim's frame stream'. Restored, workspace unchanged.",
-    "mergeIntegrity": "Both sides survived, checked by name rather than by count: this branch's requireFlock, bunInstallArgs's pinned cache under t.TempDir(), TestTwoRenderedInstallsSerialiseOnTheSharedBunCache with its lockless control and five-attempt Fatalf, TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline with its hand-computed cases and queue clause, queuedInstalls and installBudget, and the non-test pieces — the flock line with its derived -w, the cache read with no default, the mkdir -p before the lock; and main's setup-command tests and its startScript/startArgv shape. The lock wait reaches the rendered script: it threads startArgv -> startScript -> installBlock and renders as `-w %d`."
+    "flockPath": "Answered, and better than either option I offered. Rather than loosening the script or threading a field, the image's final build step now resolves `flock` and refuses anything but /usr/bin/flock — `flock=\"$(command -v flock)\"; test \"$flock\" = /usr/bin/flock` — beside the existing git, legion and gh pins, so the declaration and the use are held to one path at build time. I confirmed the step is in the final stage and the last RUN in the file, that `set -eu` makes a mismatch abort the build rather than warn, and that the only looseness runs the safe way: an image keeping /usr/bin/flock but shadowing it earlier on PATH fails the build though the absolute call would have worked.",
+    "volumeReach": "The first half of my finding is answered: the paragraph now says the new size reaches volumes created after the apply and no others, that it rides in the Sandbox's volumeClaimTemplates evaluated at claim creation, and that an issue's Sandbox outlives its pods. That part is accurate and is what I asked for. The clause added around it is the finding above."
   },
   "ci": {
-    "verdict": "three of four required checks green at the code head; `test` still running, which a request for changes does not wait on",
+    "verdict": "two of four required checks green at the code head; lint and test still running, which a request for changes does not wait on",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
-    "read": "Read with per_page=100 and --paginate: lint, typecheck and pr-title completed and success; test in_progress at the time of writing. gh api compare 0e21bab7d988...29e65d8f33b7 prints true for all paths under .legion/. A request for changes stands whatever CI says at the handoff head, so I did not hold the round for it; an approval would have had to wait."
+    "ciHead": "78e350969a2620f8507d1ff801f6e94bc76a484d",
+    "read": "Read with per_page=100 and --paginate: typecheck and pr-title completed and success; lint and test in_progress at the time of writing. At the previous code head 86baa18af5f7 all four were green. gh api compare 78e350969a26...d52ae9dc58b4 prints true for all paths under .legion/. An approval would have had to wait for all four; a request for changes stands whatever CI says, and I am saying which it was rather than letting a summary imply four."
   },
-  "thermonuclear": {
-    "ranAt": "adae6dc7c4ca3a732e316978e698efcbfaecb0d5, the head my task named, before the implementer's push moved it",
-    "deepReview": "Judged the merge clean and raised both of my findings, which I then verified myself from the files rather than carrying. Its reads worth keeping: the union took both structures without dropping a hunk on either side, and every correction this branch made over six rounds survives at this head — the MiB/GiB figures, the /tmp and home-directory charging premise, Playwright under the shared cache home, the floor exception, the five-redundant-copies saving.",
-    "codeQuality": "Approve, nothing earning a round. Its one note is that bunInstallArgs and runStart are two harnesses doing the same stubbing — but both predate this pull request at the merge base, so the duplication is main's rather than the merge's, and it belongs with the carried scratch.go fast-follow. It confirms no comment in plugins.go still names installScript, which no longer exists, and that installLockWait's and installBlock's blocks were both rewritten for the new shape."
-  },
-  "verifiedByRunning": [
-    "The rendered wrapper's failure path on sh, dash and bash before the test existed: outer exit 1, setup block not reached, agent not exec'd.",
-    "The new test's mutation: `exit 1` deleted from the install's failure branch, four distinct failures. Restored, workspace clean.",
-    "The 50Gi reachability, read from config/kubernetes.go:428 and the two places the example writes the line, rather than taken from a report.",
-    "The flock declaration's shape, read from image.go:251 against plugins.go:211."
+  "verifiedByReading": [
+    "The merge base's manifest.go: no GOCACHE, GOMODCACHE or BUN_INSTALL_CACHE_DIR for a role container, the only TMPDIR being fetchEnvironment's, and xdgCacheHome at podHome + '/.cache' — which is what makes the duplication claim false for a production volume.",
+    "docs/kubernetes.md:1220 against :1233, fourteen lines apart in one paragraph.",
+    "The Dockerfile's flock pin, its stage, its position as the last RUN, and its failure mode.",
+    "The two body lines of my own, read at this head rather than remembered."
   ],
+  "methodNote": "Both of this round's facts I derived from the files at the head before asserting them, after conceding last round that I had carried a subagent's sentence into a review without checking output I already had. The rule I am applying: the value in my sentence must appear verbatim in output I can point at in this session. The thermonuclear pair found both of this round's items first; what is mine is that I re-derived each before filing it.",
   "threads": {
-    "roundEight": 0,
-    "note": "Round 8's review carried no inline comments — its single finding was the conflict, which is a property of the pull request rather than of a line — so there was no thread to answer. No bot has opened one."
+    "roundNine": 2,
+    "note": "Both answered and resolved by the implementer; replies posted at this head."
   },
   "fastFollow": [
     "The scratch.go extraction from manifest.go, which should collapse the rationale now restated across about fifteen sites rather than relocate it, and fold the state home's regained mount assertions into one helper with the sibling test's copy; bunInstallArgs and runStart's shared stubbing belongs in the same pass.",
     "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
-    "The drift fence's reverse walk over every role rather than one rendered spec: no gap today, since every variable the runtime sets under /legion enumerates to exactly ten and none is kind-specific.",
-    "A test for configure's refusal of a non-positive RegistrationIntervals, safe to defer only while the loader's positive-count key and installLockWait's one-second floor both stand."
+    "The drift fence's reverse walk over every role rather than one rendered spec.",
+    "A test for configure's refusal of a non-positive RegistrationIntervals, safe only while the loader's positive-count key and installLockWait's one-second floor both stand."
   ],
   "forTheMerger": {
     "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the review body.",
@@ -58,8 +54,8 @@
       "The default check-runs page is 30 and these commits carry 25 to 39; read with per_page=100 and --paginate or required names fall off it.",
       "A push that carries code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
       "A required workflow can have many runs on one head, because pr-title fires on every pull-request edit; the newest decides, and a run cancelled because a later one superseded it leaves no verdict rather than a red one.",
-      "While a pull request is CONFLICTING, GitHub runs no `on: pull_request` workflow for any of its activity, so nothing gets CI until the conflict is cured — which is what the forward merge at f714cec148b6 cured.",
-      "The non-required `dispatch` lane has rarely settled on this branch, and envoy-smoke was red at one earlier head on a live envoy-infra listener step this diff cannot reach."
+      "While a pull request is CONFLICTING, GitHub runs no `on: pull_request` workflow for any of its activity.",
+      "The non-required `dispatch` and `dispatch-memory` lanes have rarely settled on this branch."
     ]
   }
 }
