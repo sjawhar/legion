@@ -388,19 +388,22 @@ def split_comment(line: str) -> tuple[str, str]:
     begins a word and stands outside quotes ends the command, so everything from there is the
     comment — the one place the exemption marker is honoured, since a marker quoted inside a
     string is part of the word it sits in and exempts nothing. The split happens before the
-    segments are split, so a `;` or a `|` written inside a comment starts no segment of its
-    own.
+    segments are split, so a `;` or a `|` written inside a comment starts no segment of its own.
 
-    A quote that never closes was no quote: `echo don't # bunx biome check .` is an apostrophe
-    inside an unquoted word, a line the shell would refuse to run as written, and reading its
-    tail as one endless string would hide the comment the reader plainly sees — and with it the
-    marker, where the comment carries one. So a line left inside a quote is read again with that
-    character ordinary."""
+    A line whose quotes do not balance is judged **whole**: this gate reads one line at a time
+    and a quote opened here may close three lines down (`jq '` … `'`, a `bash -c \"` body, a
+    heredoc's text), so an unbalanced quote is ordinary rather than broken — but where the
+    quoting ends is also where the comment begins, and a gate that guesses at that drops
+    everything after the first `#`. `echo \"a # b && bunx biome check .` was the shape: its `#`
+    is string content to a reader and a comment to a guess, and the `bunx` after it was a
+    command the gate then never saw. So nothing is taken from the second reading but the
+    comment, which is where the marker may be: the command is the whole line, and a tool named
+    anywhere in it is reported. `echo don't # bunx biome check .` is reported for that reason —
+    the author quotes the apostrophe, or writes the marker to say why the line is safe."""
     command, comment, unclosed = scan_comment(line, "\"'")
     if not unclosed:
         return command, comment
-    command, comment, _ = scan_comment(line, "\"'".replace(unclosed, ""))
-    return command, comment
+    return line, scan_comment(line, "\"'".replace(unclosed, ""))[1]
 
 
 def basename(word: str) -> str:
@@ -505,7 +508,10 @@ def judge(path: Path, number: int, text: str, context: str) -> None:
     """Judges one command line, honouring the exemption its comment carries. The marker is read
     from the comment `split_comment` finds and from nowhere else, so a line that quotes the
     marker inside a string exempts nothing it goes on to run. An exemption with no reason is
-    reported instead: the reason is the whole of what makes it reviewable."""
+    reported instead: the reason is the whole of what makes it reviewable. A line whose quotes
+    do not balance is judged whole rather than split at a `#` this gate cannot place, so nothing
+    of it goes unread.
+    """
     command, comment = split_comment(text.rstrip())
     exemption = ALLOW_TRAILING.search(comment)
     if exemption:
@@ -729,12 +735,29 @@ def prompted(lines: list[str], start: int, fence: str) -> bool:
     (`docs/site/src/content/docs/broker/guides/run-locally.md`), and in such a block the
     commands are the prompted lines: the rest is output, and reporting it would be a report that
     is simply untrue. A session block that carries no prompt is a list of commands under a
-    session label, with no convention to read, so it is judged line by line like any other."""
+    session label, with no convention to read, so it is judged line by line like any other.
+
+    A block that never closes has no 'it' for that convention to run to, so a prompt inside one
+    concludes nothing: this answers False, and every line to the end of the file is judged as it
+    would be under no session label at all. Concluding from the prompt instead made an unclosed
+    session block skip every unprompted line after it — the lines of a later, correctly fenced
+    block among them — which is this gate answering green for a file it stopped reading.
+
+    A fence line carrying an info string inside the block answers False for the same reason. To
+    CommonMark it is content, since only a bare fence closes one, so a guide that forgot a
+    closing fence reads as one session block swallowing every block after it — and the writer of
+    ```` ```sh ```` under an open ```` ```console ```` plainly meant a block of commands. Where
+    the two readings differ this gate takes the one that judges more, as it does everywhere it
+    cannot be certain."""
+    found = False
     for text in lines[start:]:
-        if closes_fence(FENCE.match(text), fence):
+        match = FENCE.match(text)
+        if closes_fence(match, fence):
+            return found
+        if match:
             return False
         if PROMPT.match(text.strip()):
-            return True
+            found = True
     return False
 
 

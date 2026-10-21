@@ -939,12 +939,26 @@ check "a backslash-escaped quote does not end the string, so the \`&&\` after it
 check "names the line and the runner" \
   "$(contains "$out" 'scripts/release.sh:5: this line runs `bunx`, a package runner')"
 
+# A line whose quotes do not balance is judged whole, so the gate reads every word of it rather
+# than guessing where its comment begins: this one is reported, and the author quotes the
+# apostrophe or writes the marker. Nothing of a line this gate cannot split goes unread.
 root=$(fixture comment-unclosed-quote)
 cat >> "$root/scripts/release.sh" <<'SH'
 echo don't # bunx biome check .
 SH
 run_check "$root"
-check "an apostrophe opening a quote that never closes leaves the comment a comment" \
+check "an apostrophe opening a quote that never closes leaves nothing of the line unjudged" \
+  "$(is "$status" 1)"
+check "naming the tool the guess would have hidden" \
+  "$(contains "$out" 'scripts/release.sh:5: this line names `biome`')"
+
+root=$(fixture comment-unclosed-quote-ordinary)
+cat >> "$root/scripts/release.sh" <<'SH'
+jq -r '.items[]
+awk '
+SH
+run_check "$root"
+check "and an unbalanced quote that is only a multi-line command passes, as 92 scripts here do" \
   "$(is "$status" 0)"
 
 root=$(fixture comment-escaped-quote-exempt)
@@ -1154,5 +1168,42 @@ run_check "$root"
 check "a block exemption with no reason is reported" "$(is "$status" 1)"
 check "the whole of the sentence it gets" \
   "$(contains "$out" 'AGENTS.md:3: this exemption gives no reason — write `<!-- check-check-commands: allow <reason> -->`')"
+
+echo "case: a session block that never closes judges every line after it"
+# `prompted` concluded from the first prompt it saw, whether or not the block ever closed, so an
+# unclosed session block set the prompts-only skip for every line to the end of the file — the
+# lines of a later, correctly fenced block among them. A gate that stops reading a file and
+# answers green for it is this issue's own defect, in the gate built to end it.
+root=$(fixture fence-session-unclosed)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```console
+$ bun run lint .
+output
+
+bunx biome check .
+MD
+run_check "$root"
+check "a block with no closing fence has no convention to read" "$(is "$status" 1)"
+check "so its unprompted line is judged" \
+  "$(contains "$out" 'AGENTS.md:7: this fenced command runs `bunx`')"
+
+root=$(fixture fence-session-unclosed-then-block)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```console
+$ bun run lint .
+output
+
+```sh
+bunx biome check .
+```
+MD
+run_check "$root"
+check "and a fence a writer opened under it ends the convention too" "$(is "$status" 1)"
+check "naming the command in the block they meant to open" \
+  "$(contains "$out" 'AGENTS.md:8: this fenced command runs `bunx`')"
 
 summary "check-check-commands.sh"
