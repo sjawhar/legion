@@ -58,10 +58,16 @@ found both one round earlier and had no failing channel for a defect it could st
 measure. Passing them cost an implementing round, a test round and a review round to reach the same
 two sentences.
 
-Two structural notes from the same record, for whoever tunes the gate. The tester's pass/fail is
-measurement-shaped, so on a documentation deliverable a precise prose finding has nowhere to go but
-a note to the next role; binding the tester to fail on any sentence whose support it cannot locate
-would have ended this issue three rounds earlier. And the architect's standing authority to cut the
-offending paragraph to its two measured sentences — granted after round 4, when that paragraph was
-already the locus of the defects — went unspent through three further rounds. A standing cut exists
-to be spent at the round it is granted for.
+Two structural notes from the same record, for whoever tunes the gate.
+
+**The gap is in the phase contract, not in the tester's judgement.** A tester's verdict is
+measurement-shaped, so a defect it can state precisely but cannot measure has no failing channel
+and becomes a note to the next role; the next tester will hesitate at exactly the same place for
+exactly the same reason. Bind the tester to fail on any sentence whose support it cannot locate
+and this issue ends three rounds earlier.
+
+**A standing cut is spent at the round it is granted for, or it is not a cut.** The architect
+granted a standing authority to cut the offending paragraph after round 4, when that paragraph was
+already the locus of the defects, and then answered each of its next three defects with another
+instruction instead — which is the behaviour the cut existed to stop. That was a decision not
+taken, not an authority unused.
