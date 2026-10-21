@@ -482,16 +482,17 @@ if (process.argv.includes("--check")) {
 for (const { path, rendered } of outputs) {
   mkdirSync(dirname(path), { recursive: true });
   await Bun.write(path, rendered);
+}
 
-  if (fmt) {
-    const gofmt = Bun.spawnSync({
-      cmd: [fmt, "-w", path],
-      stderr: "inherit",
-      stdout: "inherit",
-    });
+// One gofmt for every file written, rather than one spawn per output.
+if (fmt) {
+  const gofmt = Bun.spawnSync({
+    cmd: [fmt, "-w", ...outputs.map(({ path }) => path)],
+    stderr: "inherit",
+    stdout: "inherit",
+  });
 
-    if (gofmt.exitCode !== 0) {
-      throw new Error("gofmt failed");
-    }
+  if (gofmt.exitCode !== 0) {
+    throw new Error("gofmt failed");
   }
 }

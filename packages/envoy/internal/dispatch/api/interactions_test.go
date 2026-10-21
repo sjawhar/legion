@@ -525,24 +525,14 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 	}
 
 	overCapBody := strings.Repeat("a", contracts.DispatchBodyMax+1)
-	overCapMessage := fmt.Sprintf(
-		"body is 1 characters over the %d-character limit (%d/%d)",
-		contracts.DispatchBodyMax,
-		contracts.DispatchBodyMax+1,
-		contracts.DispatchBodyMax,
-	)
 	tooLongComment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": overCapBody, "actor": sessionActor(),
 	})
-	if tooLongComment.Code != http.StatusBadRequest || !strings.Contains(tooLongComment.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongComment.Body.String(), overCapMessage) {
-		t.Fatalf("comment cap: status=%d body=%s", tooLongComment.Code, tooLongComment.Body.String())
-	}
+	assertCapExceeded(t, "comment cap", tooLongComment, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
 	tooLongMessage := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
 		"body": overCapBody, "actor": sessionActor(),
 	})
-	if tooLongMessage.Code != http.StatusBadRequest || !strings.Contains(tooLongMessage.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongMessage.Body.String(), overCapMessage) {
-		t.Fatalf("message cap: status=%d body=%s", tooLongMessage.Code, tooLongMessage.Body.String())
-	}
+	assertCapExceeded(t, "message cap", tooLongMessage, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
 }
 
 func TestAskAnswerAcceptsFreeTextAloneOrWithSelection(t *testing.T) {

@@ -19,6 +19,8 @@ func TestBodiesAreCappedOnEveryWriteRoute(t *testing.T) {
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "CAP", "Body cap", "before")
 	edited := createThreadComment(t, handler, issue.Key, map[string]any{"body": "before the edit"}, "alice")
+	atCap := strings.Repeat("a", contracts.DispatchBodyMax)
+	overCap := overCapCases(contracts.DispatchBodyMax)
 
 	for name, route := range map[string]struct {
 		accepted int
@@ -40,7 +42,6 @@ func TestBodiesAreCappedOnEveryWriteRoute(t *testing.T) {
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			atCap := strings.Repeat("a", contracts.DispatchBodyMax)
 			accepted := route.send(atCap)
 			if accepted.Code != route.accepted {
 				t.Fatalf("a body of %d units: status=%d body=%.300s, want %d", len16(atCap), accepted.Code, accepted.Body.String(), route.accepted)
@@ -51,7 +52,7 @@ func TestBodiesAreCappedOnEveryWriteRoute(t *testing.T) {
 			if written != atCap {
 				t.Fatalf("the body written back is %d units, want the %d sent", len16(written), contracts.DispatchBodyMax)
 			}
-			for caseName, test := range overCapCases(contracts.DispatchBodyMax) {
+			for caseName, test := range overCap {
 				t.Run(caseName, func(t *testing.T) {
 					assertCapExceeded(t, name, route.send(test.text), "body", test.length, contracts.DispatchBodyMax, "")
 				})

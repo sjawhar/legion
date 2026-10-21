@@ -2,6 +2,7 @@ import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject } from "./api";
+import { bodyOf } from "./bodies";
 import { barAction, composer, openSpec, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -16,15 +17,6 @@ import { asUser } from "./users";
 // `maxLength` is applied to it and React's `onChange` runs on the result, exactly as for a reader
 // pasting a long body. Typing 32,000 characters key by key would take minutes and would exercise
 // no part of the component that this does not.
-
-/** A body of exactly `length` UTF-16 units whose text changes along its whole span. */
-function bodyOf(length: number): string {
-  let text = "";
-  for (let line = 0; text.length < length; line += 1) {
-    text += `${line}: the quick brown fox jumps over the lazy dog\n`;
-  }
-  return text.slice(0, length);
-}
 
 test.beforeEach(async () => {
   await resetDatabase();

@@ -17,6 +17,7 @@ import {
   listComments,
   listIssueMessages,
 } from "./api";
+import { bodyOf } from "./bodies";
 import { resetDatabase } from "./seed";
 
 // INFRA-45: `dispatch comment` and `dispatch message` post a body of exactly DISPATCH_BODY_MAX
@@ -72,16 +73,6 @@ function runDispatch(args: readonly string[], home: string): Promise<CliRun> {
   child.once("error", finished.reject);
   child.once("close", (code) => finished.resolve({ code: code ?? -1, stdout, stderr }));
   return finished.promise;
-}
-
-/** A body of exactly `length` UTF-16 units whose text changes along its whole span, so a body the
- *  command, the server or the read-back cut anywhere fails the equality, not only its length. */
-function bodyOf(length: number): string {
-  let text = "";
-  for (let line = 0; text.length < length; line += 1) {
-    text += `${line}: the quick brown fox jumps over the lazy dog\n`;
-  }
-  return text.slice(0, length);
 }
 
 /** The id in `Posted comment <id>` / `Posted message <id> (dispatch://...)`. */

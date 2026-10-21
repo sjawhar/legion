@@ -7,6 +7,7 @@ import {
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
+  overCapMessage,
   PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
   type SearchResult,
@@ -445,7 +446,7 @@ describe("executeDispatchTool", () => {
         fetchImpl
       )
     ).rejects.toThrow(
-      "question plus ref is 21 characters over the 800-character limit (821/800); shorten the question or drop the ref"
+      `question plus ref ${overCapMessage(821, 800)}; shorten the question or drop the ref`
     );
   });
 
@@ -618,7 +619,7 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      `--body is 1 characters over the ${DISPATCH_BODY_MAX}-character limit (${DISPATCH_BODY_MAX + 1}/${DISPATCH_BODY_MAX})`,
+      `--body ${overCapMessage(DISPATCH_BODY_MAX + 1, DISPATCH_BODY_MAX)}`,
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
@@ -1447,7 +1448,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      `- --query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
+      `- --query ${overCapMessage(length, SEARCH_QUERY_MAX)}; search with a short phrase of a few words, not a passage\n`
     );
     expect(requests).toBe(0);
   });
