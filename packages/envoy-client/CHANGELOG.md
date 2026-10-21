@@ -4,20 +4,28 @@
 
 ### Fixed
 
-- `dispatch read` refuses to name an issue's document, before any request: `--artifact` without
-  `--project` is refused with `read <artifact> with dispatch doc-read --issue KEY --artifact
-  <artifact>`, and a `--ref` to an issue's document (`dispatch://KEY/spec`,
-  `dispatch://KEY/artifact/<slug>[@vN]`) with `dispatch doc-read --ref <ref>`. An issue read
-  prints the issue's summary whatever document it names, so `dispatch read --issue KEY --artifact
-  spec.md` used to print that summary in place of the spec without a word.
-- An ask or comment on an issue's document may be addressed through the document,
-  `dispatch://KEY/artifact/<slug>/comment/<id>` (and `/ask/<id>`), as a project document's always
-  could. `dispatch read` and `resolve-comment` match a prefix id among that document's comments or
-  asks (its approval request included); `dispatch ask --ref` cites it as `dispatch://KEY/<kind>/<id>`,
-  the form Dispatch indexes; `resolve-ask`, `edit-ask` and `follow` take its id as they take
-  `dispatch://KEY/ask/<id>`'s. The read used to refuse it with the grammar and a second, wrong
-  `issue is required; supply issue or set LEGION_ISSUE`. A `--ref` that parses as no reference is
-  now refused with the grammar alone, and `LEGION_ISSUE` never stands in for it.
+- `dispatch read` of an issue's document prints the document's summary, as it does for a project
+  document: `Document:`, the `Issue:` it belongs to, `Reference:`, `Versions:`, its approval, and
+  the document's `Referenced by:` and `Links:`. That covers `--issue KEY --artifact X`, `--ref
+  dispatch://KEY/spec` or `dispatch://KEY/artifact/<slug>[@vN]`, and the links `dispatch search`
+  returns for a document hit. It used to print the issue's summary in the document's place
+  without a word, and refused a versioned ref with `unknown flag --version`.
+- Every command that takes an owner refuses, before any request, arguments that name two owners
+  or that it would drop, naming the spelling that does each: `--issue` beside a ref on another
+  issue or a project document; `--project` beside an issue ref; `--artifact` beside a ref to
+  another document; `--version` beside a ref at another version; `dispatch read --artifact`
+  beside a ref to an ask, comment, message, log or children; a versioned ref on `comment`,
+  `suggest` or `doc-edit`, which act on the live document; `dispatch comment` naming an issue's
+  document without `--quote`, and `dispatch ask` naming one without `--anchor`, which posted on
+  the issue; and `--artifact` beside a different `anchor.artifact` on `dispatch ask`. `comment`,
+  `suggest`, `doc-edit` and `doc-read` refuse a `dispatch://KEY/log` or `dispatch://KEY/children`
+  ref, which `doc-read` read as the spec. `dispatch ask --ref` takes a document ref as the
+  citation alone, so it no longer picks the document the ask anchors in.
+- `dispatch://KEY/artifact/<slug>/comment/<id>` (or `/ask/<id>`) is refused with one problem
+  naming `dispatch://KEY/comment/<id>`, the only address Dispatch gives such an item, by `read`,
+  `resolve-comment`, `resolve-ask`, `edit-ask` and `follow`. `dispatch read` used to add a wrong
+  `issue is required; supply issue or set LEGION_ISSUE`. A `--ref` that parses as no reference
+  is refused with the grammar alone, and `LEGION_ISSUE` never stands in for it.
 - A `dispatch` write ends with `(not subscribed to KEY; envoy_subscribe …)` only when the Envoy
   listener's record of the session's topics holds none that receives every event on the issue or
   document (`subscriptionCovers`, the listener's wildcard rule). It used to end every write that

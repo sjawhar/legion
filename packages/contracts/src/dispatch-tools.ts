@@ -664,8 +664,7 @@ export const dispatchToolSpecs = [
       comment: z
         .string()
         .describe(
-          "Comment id (uuid), or a dispatch://KEY/comment/<id>, " +
-            "dispatch://KEY/artifact/<slug>/comment/<id> or " +
+          "Comment id (uuid), or a dispatch://KEY/comment/<id> or " +
             "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " +
             "8+ character id prefix that is unique on its owner."
         ),
@@ -1072,10 +1071,10 @@ export const dispatchToolSpecs = [
     name: "dispatch_read",
     example: { issue: "DSP-1" },
     description:
-      "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " +
+      "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " +
       "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " +
-      "or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
-      "reply to it (they belong to no issue). " +
+      "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
+      "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
@@ -1097,15 +1096,10 @@ export const dispatchToolSpecs = [
       artifact: z
         .string()
         .describe(
-          "Project document artifact id, slug, or filename, with project only; an issue's documents are dispatch doc-read's."
+          "Document artifact id, slug, or filename: one of the issue's, or a project document."
         )
         .optional(),
-      ref: z
-        .string()
-        .describe(
-          "Optional dispatch:// reference to an issue, its log or children, an ask, comment, or message, or a project document; an ask or comment on a document may be addressed through it (dispatch://KEY/artifact/<slug>/comment/<id>)."
-        )
-        .optional(),
+      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       message: z
         .string()
         .describe(

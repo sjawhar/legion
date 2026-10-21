@@ -18,7 +18,7 @@ dispatch search --query 'reviewer threads OR review comments'
 ```
 
 - No hits: drop a word before you add one. Try two or three wordings (the component's name, the symptom, the fix) before you conclude that nothing exists.
-- Open each hit that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`). The parent's children and the `Components:` line show where the rest of the work is.
+- Open each hit that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`; a document hit names its issue on `Issue:`). The parent's children and the `Components:` line show where the rest of the work is.
 
 ## What to do with what you find
 

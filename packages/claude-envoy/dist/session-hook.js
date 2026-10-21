@@ -14216,7 +14216,7 @@ var dispatchToolSpecs = [
     example: { comment: "01234567-0000-4000-8000-000000000001" },
     description: "Resolve a review comment thread once it has been addressed - typically your own comment " + "after the document was fixed. Any session or human may resolve any open comment on an " + "open issue or project document; reopening a resolved comment is human-only (the dashboard). " + "Not for asks: use dispatch resolve-ask.",
     arguments: (z2) => ({
-      comment: z2.string().describe("Comment id (uuid), or a dispatch://KEY/comment/<id>, " + "dispatch://KEY/artifact/<slug>/comment/<id> or " + "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " + "8+ character id prefix that is unique on its owner.")
+      comment: z2.string().describe("Comment id (uuid), or a dispatch://KEY/comment/<id> or " + "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " + "8+ character id prefix that is unique on its owner.")
     }),
     strict: true
   },
@@ -14370,12 +14370,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
-      artifact: z2.string().describe("Project document artifact id, slug, or filename, with project only; an issue's documents are dispatch doc-read's.").optional(),
-      ref: z2.string().describe("Optional dispatch:// reference to an issue, its log or children, an ask, comment, or message, or a project document; an ask or comment on a document may be addressed through it (dispatch://KEY/artifact/<slug>/comment/<id>).").optional(),
+      artifact: z2.string().describe("Document artifact id, slug, or filename: one of the issue's, or a project document.").optional(),
+      ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
       message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional()
     }),
     validation: readValidation
@@ -15659,23 +15659,10 @@ function parseDispatchRef(ref) {
       artifact: artifact2
     };
   }
-  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
+  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
   if (!issueReference)
     return null;
-  const [
-    ,
-    issue2,
-    spec,
-    log,
-    children,
-    artifact,
-    version2,
-    documentItemKind,
-    documentItemID,
-    ask,
-    comment,
-    message
-  ] = issueReference;
+  const [, issue2, spec, log, children, artifact, version2, ask, comment, message] = issueReference;
   if (!issue2 || version2 !== undefined && Number(version2) < 1)
     return null;
   const owner = { kind: "issue", issue: issue2 };
@@ -15685,11 +15672,6 @@ function parseDispatchRef(ref) {
     return { owner, kind: "log", id: log };
   if (children)
     return { owner, kind: "children", id: children };
-  if (artifact && documentItemID !== undefined) {
-    if (documentItemKind !== "ask" && documentItemKind !== "comment")
-      return null;
-    return { owner, kind: documentItemKind, id: documentItemID, artifact };
-  }
   if (artifact) {
     return {
       owner,
@@ -16564,8 +16546,7 @@ function messageIdOf(value) {
 }
 var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 function refOwnerName(ref) {
-  const owner = ref.owner.kind === "issue" ? ref.owner.issue : ref.owner.project;
-  return ref.artifact === undefined ? owner : `${owner}/${ref.artifact}`;
+  return ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
 }
 async function resolveIdPrefix(tool, kind, id, ownerName, list) {
   const fullID = normalizeUUID(id);
@@ -16662,14 +16643,14 @@ function argumentProblems(tool, args) {
     case "dispatch_follow": {
       const ask = optionalString(args, "ask");
       if (ask?.startsWith("dispatch://") && parseDispatchRef(ask)?.kind !== "ask") {
-        problems.push(askIdProblem);
+        problems.push(documentItemProblem(ask) ?? askIdProblem);
       }
       break;
     }
     case "dispatch_resolve_comment": {
       const comment = optionalString(args, "comment");
       if (comment?.startsWith("dispatch://") && parseDispatchRef(comment)?.kind !== "comment") {
-        problems.push(commentIdProblem);
+        problems.push(documentItemProblem(comment) ?? commentIdProblem);
       }
       break;
     }
@@ -16693,11 +16674,6 @@ function argumentProblems(tool, args) {
       const message = optionalString(args, "message");
       if (message !== undefined && messageIdOf(message) === undefined) {
         problems.push("message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference");
-      }
-      const artifact = optionalString(args, "artifact");
-      if (message === undefined && artifact !== undefined && args.project === undefined) {
-        const issue2 = optionalString(args, "issue") ?? "<KEY>";
-        problems.push(`dispatch read takes artifact only with project, and reads an issue's summary, not its documents: read ${artifact} with dispatch doc-read --issue ${issue2} --artifact ${artifact}`);
       }
       break;
     }
@@ -16773,18 +16749,74 @@ function dispatchRefFromUrl(value, serverUrl) {
 var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
-  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message")
+  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children") {
     return;
+  }
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
   const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
-  const documentArgument = ref.artifact !== undefined ? ` and artifact ${ref.artifact}` : documentTool ? " and artifact <the document's slug>" : "";
-  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project}${documentArgument}`;
+  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : `a ${ref.kind}`;
-  const actsOn = ref.owner.kind === "issue" ? ref.owner.issue : owner;
-  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${actsOn} and drop the ${ref.kind}: ${fix}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : `a ${ref.kind}`;
+  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
+}
+var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
+function documentItemProblem(value) {
+  const match = value.match(documentItemPattern);
+  if (match === null)
+    return;
+  const [, issue2, kind, id] = match;
+  return `${value} names ${kind === "ask" ? "an ask" : "a comment"} through its document, which Dispatch does not address; name it dispatch://${issue2}/${kind}/${id}`;
+}
+function ownerConflictProblems(tool, args, ref, refText) {
+  const problems = [];
+  const command = `dispatch ${commandName(tool)}`;
+  const issue2 = optionalString(args, "issue");
+  const project = optionalString(args, "project");
+  const artifact = optionalString(args, "artifact");
+  const version2 = optionalNumber(args, "version");
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" ? ref.id : undefined;
+  if (ref !== null && refText !== undefined) {
+    const refOwner = ref.owner.kind === "issue" ? ref.owner.issue : refOwnerName(ref);
+    if (issue2 !== undefined && (ref.owner.kind !== "issue" || canonicalExternalIssueRef(issue2) !== ref.owner.issue)) {
+      problems.push(`issue ${issue2} and ref ${refText} name two owners; --ref ${refText} alone acts on ${refOwner}, and --issue ${issue2} alone acts on ${issue2}`);
+    }
+    if (project !== undefined && ref.owner.kind === "issue") {
+      problems.push(`project ${project} and ref ${refText} name two owners; --ref ${refText} alone acts on ${refOwner}, and --project ${project}${artifact === undefined ? "" : ` --artifact ${artifact}`} alone acts on that project document`);
+    }
+    if (tool !== "dispatch_ask" && project === undefined && artifact !== undefined && refDocument !== undefined && artifact !== refDocument) {
+      const owner = ref.owner.kind === "issue" ? `--issue ${ref.owner.issue}` : `--project ${ref.owner.project}`;
+      problems.push(`artifact ${artifact} and ref ${refText} name two documents; --ref ${refText} alone names ${refDocument}, and ${owner} --artifact ${artifact} names ${artifact}`);
+    }
+    if (tool === "dispatch_read" && project === undefined && artifact !== undefined && ref.owner.kind === "issue" && ref.kind !== "issue" && refDocument === undefined) {
+      problems.push(`ref ${refText} names no document, so dispatch read would read it and drop artifact ${artifact}: drop --artifact to read the ref, or read the document with --issue ${ref.owner.issue} --artifact ${artifact}`);
+    }
+    if (version2 !== undefined && ref.version !== undefined && version2 !== ref.version) {
+      problems.push(`version ${version2} and ref ${refText} name two versions; name the version once`);
+    }
+    if (ref.version !== undefined && (tool === "dispatch_comment" || tool === "dispatch_suggest" || tool === "dispatch_doc_edit")) {
+      problems.push(`${command} acts on the live document, so the version ref ${refText} names would be dropped: drop its @v${ref.version}`);
+    }
+  }
+  const projectOwned = project !== undefined || ref?.owner.kind === "project";
+  if (tool === "dispatch_comment" && !projectOwned && optionalString(args, "quote") === undefined) {
+    const document = artifact ?? refDocument;
+    if (document !== undefined) {
+      problems.push(`${command} posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`);
+    }
+  }
+  if (tool === "dispatch_ask") {
+    const anchor = asObject(args.anchor);
+    const anchorArtifact = anchor === null ? undefined : optionalString(anchor, "artifact");
+    if (!projectOwned && artifact !== undefined && anchor === null) {
+      problems.push(`${command} opens the ask on the issue unless anchor quotes a document, so artifact ${artifact} would be dropped: add --anchor-json '{"quote": "<exact text>"}' to ask about a passage of it, or drop --artifact`);
+    }
+    if (artifact !== undefined && anchorArtifact !== undefined && anchorArtifact !== artifact) {
+      problems.push(`artifact ${artifact} and anchor.artifact ${anchorArtifact} name two documents; name the document once`);
+    }
+  }
+  return problems;
 }
 var toolSchemas = new Map;
 function toolSchema(tool) {
@@ -16820,23 +16852,18 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
     }
     ref = parseDispatchRef(refText);
     if (ref === null) {
-      problems.push(tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem);
-    } else if (tool === "dispatch_read" && ref.owner.kind === "issue" && (ref.kind === "spec" || ref.kind === "artifact")) {
-      problems.push(`ref ${refText} names a document on ${ref.owner.issue}, and dispatch read reads an issue's summary, not its documents: read it with dispatch doc-read --ref ${refText}`);
-      return { args, ref, owner: null };
+      problems.push(documentItemProblem(refText) ?? (tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem));
     } else {
       const inner = innerRefProblem(tool, ref, refText);
       if (inner !== undefined)
         problems.push(inner);
-      if (ref.owner.kind === "issue" && ref.artifact !== undefined && (ref.kind === "ask" || ref.kind === "comment")) {
-        args = { ...args, ref: refTarget(ref, ref.kind, ref.id) };
-      }
     }
   }
   const issueArgument = args.issue;
   const projectArgument = args.project;
   const artifactArgument = args.artifact;
-  const versionArgument = args.version;
+  const versionFromRef = tool === "dispatch_doc_read" && args.version === undefined ? ref?.version : undefined;
+  const refVersion = versionFromRef === undefined ? {} : { version: versionFromRef };
   if (issueArgument !== undefined && projectArgument !== undefined) {
     problems.push("exactly one of issue and project is required");
   }
@@ -16852,7 +16879,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
       args: {
         ...args,
         ...artifactArgument === undefined && refDocument !== undefined ? { artifact: refDocument } : {},
-        ...versionArgument === undefined && ref?.version !== undefined ? { version: ref.version } : {}
+        ...refVersion
       },
       ref,
       owner: { kind: "project", project: projectArgument }
@@ -16864,7 +16891,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
         ...args,
         project: ref.owner.project,
         ...artifactArgument === undefined ? { artifact: ref.artifact ?? ref.id } : {},
-        ...versionArgument === undefined && ref.version !== undefined ? { version: ref.version } : {}
+        ...refVersion
       },
       ref,
       owner: ref.owner
@@ -16876,8 +16903,8 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
       args: {
         ...args,
         ...issue3 === undefined ? {} : { issue: issue3 },
-        ...artifactArgument === undefined && (ref?.kind === "spec" || ref?.kind === "artifact") ? { artifact: ref.id } : {},
-        ...versionArgument === undefined && ref?.version !== undefined ? { version: ref.version } : {}
+        ...artifactArgument === undefined && tool !== "dispatch_ask" && (ref?.kind === "spec" || ref?.kind === "artifact") ? { artifact: ref.id } : {},
+        ...refVersion
       },
       ref,
       owner: issue3 === undefined ? null : { kind: "issue", issue: issue3 }
@@ -16967,22 +16994,6 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     throw new Error(documentReferenceProblem(artifactReference ?? "spec", issue2.artifacts, "issue"));
   }
   return { owner, issue: issue2, artifact };
-}
-async function refComments(client, ref) {
-  if (ref.owner.kind === "issue" && ref.artifact === undefined) {
-    return client.getComments(ref.owner.issue);
-  }
-  const { artifact } = await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true });
-  return ref.owner.kind === "issue" ? client.getComments(ref.owner.issue, artifact.id) : client.getArtifactComments(artifact.id);
-}
-async function refAsks(client, ref) {
-  if (ref.owner.kind === "issue" && ref.artifact === undefined) {
-    return client.listIssueAsks(ref.owner.issue);
-  }
-  const { artifact } = await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true });
-  if (ref.owner.kind === "project")
-    return client.getArtifactAsks(artifact.id, "all");
-  return (await client.listIssueAsks(ref.owner.issue)).filter((ask) => ask.anchor?.artifact_id === artifact.id || ask.block_artifact?.id === artifact.id || ask.approval?.artifact_id === artifact.id);
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, use) {
@@ -17621,7 +17632,9 @@ async function executeDispatchTool(input) {
   const exec = input.exec ?? defaultExec;
   const problems = [];
   const ownerArguments = await resolveOwnerArguments(input.tool, input.args, input.cwd, env, exec, input.config.publicUrl === undefined ? [configUrl] : [configUrl, input.config.publicUrl], problems);
-  const ownerMissing = issueFreeTools[input.tool] !== true && ownerArguments.owner === null;
+  const conflicts = issueFreeTools[input.tool] === true ? [] : ownerConflictProblems(input.tool, input.args, ownerArguments.ref, optionalString(ownerArguments.args, "ref"));
+  problems.push(...conflicts);
+  const ownerMissing = issueFreeTools[input.tool] !== true && (ownerArguments.owner === null || conflicts.length > 0);
   const schema = toolSchema(input.tool);
   const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
   if (!parsed.success) {
@@ -18016,12 +18029,13 @@ async function executeDispatchTool(input) {
       const ref = reference.startsWith("dispatch://") ? parseDispatchRef(reference) : null;
       let id = reference;
       let document;
-      if (ref?.owner.kind === "project") {
+      if (ref?.owner.kind === "issue") {
+        const issueKey = ref.owner.issue;
+        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getComments(issueKey));
+      } else if (ref !== null) {
         const artifact = (await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })).artifact;
         document = artifact;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getArtifactComments(artifact.id));
-      } else if (ref !== null) {
-        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => refComments(client, ref));
       }
       const comment = await client.resolveComment(id, actor);
       const { label, details } = await commentOwnerResult(client, comment, document);
@@ -18446,7 +18460,7 @@ ${trailer.join(`
       }
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, () => refAsks(client, ref));
+        const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
         const askRef = refTarget(ref, "ask", askRead.ask.id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(askTexts(askRead)),
@@ -18460,7 +18474,7 @@ ${trailer.join(`
       }
       if (ownerArguments.ref?.kind === "comment") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => refComments(client, ref));
+        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveDocument(ref.owner, ref.artifact)).artifact.id));
         const comment = await client.getComment(id);
         const commentRef = refTarget(ref, "comment", id);
         const [pictures3, graph2] = await Promise.all([
@@ -18489,21 +18503,28 @@ ${trailer.join(`
           ...showImages(pictures3)
         };
       }
-      if (documentOwner().kind === "project") {
-        const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
-        const documentRef = dispatchDocumentRef(resolved.artifact.project, resolved.artifact.slug);
+      const documentReference = optionalString(args, "artifact");
+      if (documentOwner().kind === "project" || documentReference !== undefined) {
+        const resolved = await resolveDocument(documentOwner(), documentReference);
+        const { artifact } = resolved;
+        const ownerKey = resolved.issue?.key ?? artifact.project;
+        const documentRef = dispatchDocumentRef(ownerKey, artifact.slug);
+        const approval = approvalLine(artifact);
         return {
           text: [
-            `Document: ${resolved.artifact.project} / ${resolved.artifact.name}`,
+            `Document: ${ownerKey} / ${artifact.name}`,
+            ...resolved.issue === undefined ? [] : [
+              `Issue: ${resolved.issue.key} [${resolved.issue.status}] ${resolved.issue.title}`
+            ],
             `Reference: ${documentRef}`,
-            `Versions: ${resolved.artifact.versions.length}`,
-            ...approvalLine(resolved.artifact) === undefined ? [] : [approvalLine(resolved.artifact)],
+            `Versions: ${artifact.versions.length}`,
+            ...approval === undefined ? [] : [approval],
             ...await graphSections(client, documentRef)
           ].join(`
 `),
           details: {
-            project: resolved.artifact.project,
-            document: documentLabel(resolved.artifact.project, resolved.artifact.slug)
+            ...resolved.issue === undefined ? { project: artifact.project } : { issue: resolved.issue.key },
+            document: documentLabel(ownerKey, artifact.slug)
           }
         };
       }
