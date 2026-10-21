@@ -1170,6 +1170,48 @@ func TestAdminInterestsHandler_GetBySession(t *testing.T) {
 	}
 }
 
+// A GET answers 404 only for a session the registry holds no key for. A read NATS did not serve
+// is a 503: the dispatch command reads a 404 as "subscribed to nothing" and says so on a write, so
+// a NATS failure answered 404 would have it tell the session something nobody knows.
+func TestAdminInterestsHandler_GetAnswers404OnlyForAnUnknownSession(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to create registry: %v", err)
+	}
+	if _, err := registry.Upsert(store.Interest{SessionID: "ses_known", MachineID: "test-machine", Dir: "/test"},
+		[]string{contracts.AgentSubject("ses_known")}); err != nil {
+		t.Fatalf("failed to upsert interest: %v", err)
+	}
+	handler := adminInterestsHandler(registry)
+	get := func(sessionID string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/interests/"+sessionID, nil))
+		return rec
+	}
+
+	if rec := get("ses_unknown"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown session with NATS up: status %d %s, want 404", rec.Code, rec.Body.String())
+	}
+
+	// The registry's cache still answers a session it holds; a cache miss must read NATS, which
+	// is now gone.
+	waitFor(t, time.Second, "the watcher to cache ses_known", func() bool {
+		return get("ses_known").Code == http.StatusOK
+	})
+	client.Close()
+	if rec := get("ses_known"); rec.Code != http.StatusOK {
+		t.Fatalf("cached session with NATS down: status %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec := get("ses_unknown"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unknown session with NATS down: status %d %s, want 503", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 	registry := setupAdminTestRegistry(t, map[string][]string{
 		"ses_delete_target": {"notifications.test.>"},
