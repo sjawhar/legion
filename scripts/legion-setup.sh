@@ -173,31 +173,47 @@ exit_if_installed() {
 
 exit_if_installed
 
-# One install per workspace at a time: an issue pod runs a container per role, each with this
-# workspace as its working directory, and two bun installs writing one node_modules leave neither.
-# The lock file is created before the redirection, because a redirection that fails on `exec` ends
-# a non-interactive shell with a status of its own.
-if ! : > "$state/install.lock" 2> /dev/null; then
-  echo "legion setup: cannot write $state/install.lock; leaving the install to the agent" >&2
-  exit 0
-fi
-exec 9> "$state/install.lock"
-flock -w "$lock_wait" 9
-status=$?
-if [ "$status" -ne 0 ]; then
-  echo "legion setup: another install held $state/install.lock for more than ${lock_wait}s" >&2
-  write_report lock-timeout "$status" \
-    "another install held $state/install.lock for more than ${lock_wait}s"
-  exit 0
-fi
+# The install is serialised on the cache directory itself and retried once, following Legion's own
+# plugin install (packages/daemon/internal/runtime/sandbox/plugins.go), which runs in this same
+# container moments before this script and takes the same lock. Filling a cold entry of a bun
+# install cache is not concurrency-safe: concurrent installs against one empty
+# BUN_INSTALL_CACHE_DIR leave several exiting 1 with
+# `ENOENT: failed copying files from cache to destination`, and the race is the cold entry's fill
+# rather than the install out of it. The cache is what every role of the issue shares, so locking
+# it also keeps two roles from writing one node_modules — a lock file of our own beside the marker
+# would do the second and not the first. flock is advisory and per-inode, which is exactly the
+# scope wanted: the containers of one pod share a kernel and that inode on the issue's volume, and
+# two pods of two issues have two volumes anyway. The directory is remade inside each attempt,
+# with a non-directory of that name removed first, because flock creates a missing path as a
+# regular file and exits 0, which would leave every later run dying on `mkdir: File exists`.
+# `/usr/bin/flock` by absolute path, as plugins.go names it, and the worker image's build is held
+# to that exact path.
+LOCK_BUSY=199
 
-# The holder may have been installing exactly this lock's packages and just finished.
-exit_if_installed
+install_once() {
+  [ -d "$cache" ] || rm -f -- "$cache"
+  mkdir -p -- "$cache" 2> /dev/null
+  BUN_INSTALL_CACHE_DIR="$cache" /usr/bin/flock -w "$1" -E "$LOCK_BUSY" -- "$cache" \
+    timeout -k 5 "$2" bun install --frozen-lockfile > "$log" 2>&1
+}
 
 echo "legion setup: installing this bun.lock's packages into $workspace" >&2
-BUN_INSTALL_CACHE_DIR="$cache" timeout -k 5 "$install_timeout" bun install --frozen-lockfile \
-  > "$log" 2>&1
+started=$(date +%s)
+install_once "$lock_wait" "$install_timeout"
 status=$?
+
+# The retry is for the cold-entry race alone, and it is given what is left of this run's whole
+# budget — the lock wait plus the install timeout — so a second attempt cannot push the script
+# past the registration deadline it shares with the role's launch.
+if [ "$status" -ne 0 ] && [ "$status" -ne "$LOCK_BUSY" ] &&
+  grep -q 'ENOENT: failed copying files from cache to destination' "$log" 2> /dev/null; then
+  remaining=$((lock_wait + install_timeout - ($(date +%s) - started)))
+  if [ "$remaining" -gt 10 ]; then
+    echo "legion setup: the cache was filled under this install; retrying once" >&2
+    install_once "$remaining" "$remaining"
+    status=$?
+  fi
+fi
 # The log's last lines on stderr too, so the role container's log holds what bun said: stdout
 # first, or the 2> would be the fd it was pointed at.
 tail -n 20 "$log" >&2 2> /dev/null
@@ -209,14 +225,22 @@ if [ "$status" -eq 0 ]; then
   exit 0
 fi
 
-# 124 is the timeout above; 137 is a SIGKILL, which on a 1 Gi role is the kernel reclaiming the
-# install's memory — a working outcome, since the next role to start installs again.
+# 199 is flock's own, set by -E above: another install of this issue holds the cache and this role
+# will not wait it out, since a failure must not hold the work up. 124 is the install timeout; 137
+# is a SIGKILL, which on a 1 Gi role is the kernel reclaiming the install's memory — a working
+# outcome, since the next role to start installs again.
 case "$status" in
+  "$LOCK_BUSY") reason=lock-timeout ;;
   124) reason=install-timeout ;;
   137) reason=install-killed ;;
   *) reason=install-failed ;;
 esac
 rm -f "$marker" 2> /dev/null
+if [ "$reason" = lock-timeout ]; then
+  echo "legion setup: another install held $cache for more than ${lock_wait}s" >&2
+  write_report lock-timeout "$status" "another install held $cache for more than ${lock_wait}s"
+  exit 0
+fi
 echo "legion setup: bun install exited $status ($reason); starting the agent without it" >&2
 write_report "$reason" "$status" "$(tail -c "$detail_bytes" "$log" 2> /dev/null)"
 exit 0

@@ -1447,11 +1447,17 @@ only while `node_modules/.bin/biome` is there too, so a forward merge that moves
 installs again and a deleted tree cannot skip the install forever. A workspace outside the
 `/workspaces/` layout falls back to `<workspace>/.legion-setup`, which `.gitignore` holds.
 
-Every path of it ends `exit 0`, the failures included, because the non-zero exit above would stop
+The install runs under `/usr/bin/flock` on the cache directory itself, as the plugin install
+above does and for the same reason: filling a cold entry of a bun install cache is not
+concurrency-safe, and the roles of an issue share one cache, so a plugin install in this same
+container moments earlier and another role's setup both meet it. A first attempt that died with
+`ENOENT: failed copying files from cache to destination` is retried once, within what is left of
+this run's budget. Every path of it ends `exit 0`, the failures included, because the non-zero
+exit above would stop
 the agent from starting over an install it could have run without. It bounds itself twice —
-`LEGION_SETUP_LOCK_WAIT` (90 s) for another role's install of the same workspace, then
+`LEGION_SETUP_LOCK_WAIT` (90 s) waiting for whoever holds that cache, then
 `LEGION_SETUP_INSTALL_TIMEOUT` (180 s) for the install itself, 270 s in the worst case inside the
-360 s registration deadline, against a measured 54 s for the first install of 1,986 packages and
+360 s registration deadline, the retry included, against a measured 54 s for the first install of 1,986 packages and
 about 0.3 s when they are already there — and whatever went wrong (an unreachable registry, a lock
 file that moved under the frozen install, a timeout, the kernel's OOM kill of a 1 Gi role's
 install) it writes `$LEGION_STATE_DIR/legion-setup-report.json` and exits 0, leaving no marker, so

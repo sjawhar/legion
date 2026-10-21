@@ -81,6 +81,21 @@ fail)
   printf 'error: h\xc3\xa9llo \xe2\x9c\x93 is not ascii\n'
   exit 1
   ;;
+cold-race)
+  # The cold-entry race Legion's own plugin install met (plugins.go): the first attempt dies
+  # filling the cache, the second, against the cache the other install just filled, succeeds. The
+  # counter is a file, since each attempt is a new process.
+  attempts="$STUB_RECORD.attempts"
+  printf 'x' >> "$attempts"
+  if [ "$(wc -c < "$attempts")" -eq 1 ]; then
+    echo 'error: ENOENT: failed copying files from cache to destination'
+    exit 1
+  fi
+  mkdir -p node_modules/.bin
+  printf '#!/bin/sh\necho 2.3.5\n' > node_modules/.bin/biome
+  chmod 755 node_modules/.bin/biome
+  echo "stub bun: installed 1986 packages"
+  ;;
 killed) kill -9 $$ ;;
 hang) exec sleep 300 ;;
 esac
@@ -218,12 +233,12 @@ check "the marker is the new lock's cksum" "$(is "$(cat "$marker")" "$(cksum < "
 check "which is not the one before the merge" "$(is "$(is "$(cat "$marker")" "$first")" false)"
 check_clean
 
-echo "case: another role's install holds the lock"
+echo "case: another install of this issue holds the cache"
 fixture lock-held
-mkdir -p "$state"
+mkdir -p "$cache"
 ready="$case_root/holder-ready"
 (
-  exec 9> "$state/install.lock"
+  exec 9< "$cache"
   flock 9
   : > "$ready"
   exec sleep 30
@@ -235,7 +250,7 @@ for _ in $(seq 200); do
   fi
   sleep 0.05
 done
-check "the holder took the lock" "$(exists "$ready")"
+check "the holder took the cache's lock" "$(exists "$ready")"
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
   LEGION_SETUP_LOCK_WAIT=1 STUB_MODE=ok
 kill "$holder" > /dev/null 2>&1 || true
@@ -246,10 +261,22 @@ check "a report names the lock" "$(is "$(field reason)" 'lock-timeout')"
 check "no marker is left" "$(is "$(exists "$marker")" false)"
 check_clean
 
+echo "case: another install filled the cache under this one (the cold-entry race)"
+fixture cold-race
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  STUB_MODE=cold-race
+check "exits 0" "$(is "$status" 0)"
+check "the install is retried once" "$(is "$(calls)" 2)"
+check "and the retry is announced" "$(contains "$out" 'retrying once')"
+check "the marker is written after the retry" "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
+check "no report is left" "$(is "$(exists "$report")" false)"
+check_clean
+
 echo "case: the install fails"
 fixture install-failed
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=fail
 check "exits 0 anyway" "$(is "$status" 0)"
+check "the install is not retried, since this is not the cache race" "$(is "$(calls)" 1)"
 check "the failure reaches the role container's log" "$(contains "$out" 'bun install exited 1')"
 check "the report names the failure" "$(is "$(field reason)" 'install-failed')"
 check "and carries the status" "$(is "$(field exitStatus)" 1)"
