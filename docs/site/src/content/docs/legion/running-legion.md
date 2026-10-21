@@ -104,8 +104,12 @@ on the same repositories.
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
 - **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod carries a
   cpu and memory limit with a request no greater than it, and bounds its ephemeral storage — the
-  node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go and Bun caches a
-  build fills — with a per-role limit over a smaller request. A role's reservation is
+  node's disk its root filesystem writes to: `$HOME`, with the image's own content under it, and
+  whatever a recipe writes elsewhere under the home directory, the issue's temporary directory,
+  cache and data homes and bun install cache being one set its roles share on the issue's volume
+  instead, each role's state home its own directory there, and the two Go caches one pair on that
+  volume shared by the issue's roles —
+  with a per-role limit over a smaller request. A role's reservation is
   `runtime.kubernetes.resources.<role>` (`cpu` and `memory` the limits, `cpu_request` and
   `memory_request` what the scheduler reserves of them, `ephemeral_storage` the disk limit,
   `ephemeral_storage_request` what the scheduler reserves of it, each optional, each request at most
@@ -154,8 +158,9 @@ on the same repositories.
   under `controller: daemon`, the controller's pod are counted; `admission_cap` bounds roots alone,
   a tree of N children runs N+1 pods, and an issue pod the pool cannot place stays `Pending` until
   the daemon reads it dead and, once its launch failures run out, fails the claim.
-- **A namespace and a storage class.** Each issue's volume (`issue_volume`, 20Gi by default; the
-  daemon-launched controller's pod owns one too) comes from `storage_class`, which is required.
+- **A namespace and a storage class.** Each issue's volume (`issue_volume`, 50Gi by default, raised
+  from 20Gi with the shared scratch; the daemon-launched controller's pod owns one too) comes from
+  `storage_class`, which is required.
 - **Pod Security.** Pods run under the `restricted` profile: user 1000, no privilege escalation, all
   capabilities dropped, the `RuntimeDefault` seccomp profile, and no automounted API token.
 - **A ServiceAccount for the agents' pods**, named in `runtime.kubernetes.pod.service_account`

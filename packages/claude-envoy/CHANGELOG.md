@@ -46,7 +46,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 33, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 34, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -66,6 +66,18 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 34 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-31): under the Kubernetes runtime the roles of an issue now share one scratch on the
+  issue's volume, and the daemon tells every role container of a pod the same temporary directory,
+  cache home, data home and bun install cache under it (`/legion/scratch/tmp`,
+  `/legion/scratch/cache`, `/legion/scratch/data` and `/legion/scratch/bun/install/cache`), and
+  the same Go build and module caches, one pair for the issue on that volume beside the
+  workspaces (`GOCACHE=/legion/go/build` and `GOMODCACHE=/legion/go/mod`), names the runtime did
+  not set before. The container's own gigabyte of ephemeral storage no longer bounds any of them.
+  The state home is the one directory a role keeps to itself, `/legion/scratch/state/<role>`,
+  since Oh My Pi's browser broker lock is an abstract unix socket named from the state root and
+  such a name is one across every container of a pod. Nothing this plugin reads or writes moved;
+  a session of it registers with a daemon at 34.
 - The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
   (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
   references and `dispatch <command> --help`; a blind comparison of old and new text on each
