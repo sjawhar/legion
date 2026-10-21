@@ -2,43 +2,51 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T03:55:00Z",
+  "completed": "2026-10-21T04:05:00Z",
   "proof": [
     {
-      "criterion": "Every directory this layout puts on the issue volume is accounted for in the reclaim paragraph — on the delete list or in an exemption that says why — and the paragraph no longer contradicts its own sizing sentence.",
-      "surface": "docs/kubernetes.md's issue_volume paragraph, enumerated against the renderer rather than against itself.",
+      "criterion": "Every directory this layout puts on the issue volume is accounted for in the reclaim paragraph — on the delete list or in an exemption — and the claim is checkable against the renderer rather than asserted.",
+      "surface": "docs/kubernetes.md's issue_volume paragraph, enumerated against the code that renders the paths.",
       "command": "grep -n 'scratchRoot + \"' packages/daemon/internal/runtime/sandbox/manifest.go; grep -n 'UV_' packages/daemon/internal/runtime/sandbox/podkind.go; for p in /legion/scratch/cache /legion/scratch/data /legion/scratch/tmp '/legion/scratch/state/<role>' /legion/scratch/bun/install/cache /legion/go /legion/uv; do sed -n '1228,1262p' docs/kubernetes.md | grep -cF -- \"$p\"; done",
-      "observed": "The renderer's set is cache, data, tmp, state/<role>, bun/install/cache (manifest.go:731-737, 758), the Go pair under /legion/go and uv's /legion/uv (podkind.go:194-196). Each of the seven appears in the paragraph: five on the delete list (cache, tmp, bun/install/cache, /legion/go, /legion/uv), two exempted below it — the per-role state home, and /legion/scratch/data, named as the shared XDG_DATA_HOME and as the one path a rebuild cannot restore, with the instruction to measure it first and delete it only when it is the reason the volume is full. The claim sentence now says it accounts for every directory either on the list or in the two exemptions, so the sentence and the sizing sentence's 'one data home' agree about what exists.",
-      "headSha": "5c6d3ada654e",
-      "negativeControl": "The count above is the control and it is what failed before this round: `/legion/scratch/data` returned 0 at the previous head, under a sentence claiming the set was complete. Re-running it after any future change to roleEnvironment is how the claim stays checkable — a path added to the renderer and not to the paragraph returns 0 again."
+      "observed": "The renderer's set is cache, data, tmp, state/<role>, bun/install/cache (manifest.go:731-737, 758), the Go pair under /legion/go and uv's /legion/uv (podkind.go:194-196). All seven appear in the paragraph: five on the delete list, two in the exemptions below it. The claim sentence reads 'accounts for every directory this layout creates, either on its delete list or in the two exemptions below it', which that loop checks.",
+      "headSha": "3beee3e6d2c1",
+      "negativeControl": "The same loop returned 0 for /legion/scratch/data at the head before round 19, under a sentence claiming the set was complete — so the control is known to fail when the paragraph drifts from the renderer."
     },
     {
-      "criterion": "The between-turns rule states what the install block does not fix, so an operator is not left believing the delete is safe under a running install.",
-      "surface": "The same paragraph, read against the tester's round-18 measurements of the rendered block.",
+      "criterion": "The data home's exemption rests on a reason the code supports, and the state-class directories are attributed to the path that actually holds them.",
+      "surface": "podsafety.go's EnsureStateHome contract and this volume, read against the exemption sentence.",
+      "command": "sed -n '137,140p' packages/daemon/internal/podsafety/podsafety.go; ls -d /legion/scratch/state/*/omp; du -sh /legion/scratch/data",
+      "observed": "podsafety.go:137-140 places Oh My Pi's state-class directories — run/daemons, logs, browser-profiles, reports, terminal-sessions — under $XDG_STATE_HOME/omp, with the parenthesis 'sessions are data-class'. The volume agrees: /legion/scratch/state/<role>/omp exists for the roles that have run, and /legion/scratch/data is 4.0K. The exemption now says the state home holds those directories (as the paragraph already exempted it for) and that /legion/scratch/data is the shared XDG_DATA_HOME, the data-class directory of every tool a role runs, exempt because nothing re-derives it: a cache, a temporary directory and an install cache are rebuilt by the next build or install, where what a tool stores in its data home is gone when deleted. No size claim is made.",
+      "headSha": "3beee3e6d2c1",
+      "negativeControl": "The superseded sentence is the control, and it is what the code refutes: it said Oh My Pi puts its whole profile root under $XDG_DATA_HOME/omp, which would have made the data home the profile root and the state home redundant — contradicted by podsafety.go:137-140 and by the directories on this volume. The 4.0K reading is deliberately not used as evidence either way: these pods run the merge-base layout and are told no XDG_DATA_HOME at all."
+    },
+    {
+      "criterion": "The between-turns rule states the limit of what the install block fixes, so the operator is not left believing a delete is safe under a running install.",
+      "surface": "The same paragraph, against the tester's round-18 measurements of the rendered block.",
       "command": "read docs/kubernetes.md's between-turns sentence at this head",
-      "observed": "It now says a lock whose inode is unlinked protects nothing, so the mutual exclusion is still lost under a delete mid-install (the tester's control: B enters at 886.599 while A is inside until 888.599, against a serialised control), and that what each attempt's mkdir and non-directory removal buys is that the damage stops at that install instead of leaving a regular file that fails every later installing launch until a person clears it.",
-      "headSha": "5c6d3ada654e",
-      "negativeControl": "The tester's run of this head's block from an already-poisoned path exits 0 — the fix repairs a volume the old shape had already broken — while the old block from the same fixture exits 1 at `mkdir: File exists`, and this head's block with only the `rm -f` guard removed fails the regular-file case again. Those two controls, chosen to fail differently, are what keep the sentence's credit on the guard rather than on the move."
+      "observed": "It says a lock whose inode is unlinked protects nothing, so the mutual exclusion is still lost under a delete mid-install (the tester measured B entering at 886.599 while A was inside until 888.599, against a serialised control), and that what each attempt's mkdir and non-directory removal buys is that the damage stops at that install rather than leaving a regular file that fails every later installing launch until a person clears it.",
+      "headSha": "3beee3e6d2c1",
+      "negativeControl": "The tester ran this head's block from an already-poisoned path: exit 0, where the old block from the same fixture exits 1 at `mkdir: File exists`, and this head's block with only the `rm -f` guard removed fails the regular-file case again."
     },
     {
-      "criterion": "Nothing else moved: this is a documentation round, so the code proofs of the previous head stand unre-run.",
+      "criterion": "Nothing else moved: both rounds above this head are documentation, so the code proofs stand unre-run.",
       "surface": "The round's diff and the repository's own text check.",
       "command": "jj diff --stat; bash .github/scripts/check-private-names.sh",
-      "observed": "One file, docs/kubernetes.md. `check-private-names: no file or path names the private deployment repository or the company …` over 4693 files. No Go file, test, Dockerfile or workflow is touched, so `go test ./internal/runtime/sandbox/` (`ok … 136.563s`) and the install-block proofs at 054a8de75719 carry to this head.",
-      "headSha": "5c6d3ada654e",
-      "negativeControl": "If the round had touched code, the diff stat would name it; the stat is the check, and it names one markdown file."
+      "observed": "One file, docs/kubernetes.md, in each of 5c6d3ada654e and 3beee3e6d2c1. `check-private-names: no file or path names the private deployment repository or the company …` over 4694 files. No Go file, test, Dockerfile or workflow is touched since 054a8de75719, where `go test ./internal/runtime/sandbox/` was `ok … 136.563s` and `gofmt -l` silent.",
+      "headSha": "3beee3e6d2c1",
+      "negativeControl": "The diff stat is the check and it names one markdown file; a code change would appear there."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md — /legion/scratch/data exempted with its reason, the completeness claim made checkable against the renderer, and the between-turns sentence given the limit of what the install block fixes."
+    "docs/kubernetes.md — /legion/scratch/data exempted with a reason the code supports, the state-class directories attributed to the per-role state home, no size claim, the completeness claim made enumerable, and the between-turns sentence given the limit of what the install block fixes."
   ],
   "trickyParts": [
-    "The data home is exempted rather than listed because it is not re-derivable: Oh My Pi relocates its whole profile root to $XDG_DATA_HOME/omp where that directory exists, so a delete costs stored state rather than a rebuild. It is also the one unlisted path that can grow without bound, which is why the exemption tells the operator to measure it rather than to ignore it."
+    "The data home is exempt because nothing re-derives it, not because Oh My Pi's profile root lives there. $XDG_STATE_HOME/omp holds the state-class directories (podsafety.go:137-140); the data home is the data-class one. Anyone editing this paragraph again should read those four lines rather than the paragraph's own history."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Three rounds in a row on one paragraph, each a sentence that was true when written and false against the system it described: the remedy pointing at the intermediate per-role layout, the set missing tmp and uv, the set missing data under a claim of completeness. What finally made it checkable was not more care but a different kind of sentence — one whose claim can be enumerated against the renderer ('accounts for every directory this layout creates, either on its delete list or in the two exemptions below it') rather than asserted. A prose claim that cannot be mechanically checked against the code it describes will drift again.",
-    "The pull request body carried a false sentence of the architect's about a lost file, inferred from jj's operation log. It is corrected in place rather than deleted, because that section is what the merger quotes into READY and a silent removal leaves the inference in the record's history with nothing marking it wrong."
+    "Four rounds in a row on one paragraph, each a sentence true of something other than what it described. The last one is the sharpest and it was the architect's: it ruled the exemption and supplied its reason, and the reason — the omp profile root under $XDG_DATA_HOME — was the one clause nobody derived, because it came from the role whose rulings the others have no standing to doubt. My enumeration control caught the structure (is every rendered path accounted for) and could not catch a false reason attached to a correctly-exempted path. A claim's structure and a claim's grounds need separate checks.",
+    "What finally made the completeness claim hold was its form rather than more care: 'accounts for every directory this layout creates, either on its delete list or in the two exemptions below it' is checkable by a seven-line loop, where 'names the directories this layout creates' could only be asserted. A prose claim that cannot be mechanically enumerated against the code it describes will drift again, however carefully it is written."
   ]
 }
