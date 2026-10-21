@@ -4,8 +4,10 @@
 //
 // Writes count (default 8000) distinct one-block documents as {"id", "md"} lines, each a URL
 // built from a scheme, a host, a path and trailing punctuation, with a character before it and
-// text after it, placed in a paragraph, a table cell, bold, a quote, a list item or between words.
-// The same arguments write the same file.
+// text after it, placed in a paragraph, a table cell, bold, a quote, a list item or between words;
+// then a quarter as many with the URL written as an explicit link to itself (a www URL to
+// `http://` and itself), which holds trees a bare URL cannot make, such as a www link right after
+// a code span or inline HTML. The same arguments write the same file.
 import { writeFileSync } from "node:fs";
 
 const [output, countArgument] = process.argv.slice(2);
@@ -113,5 +115,16 @@ for (let attempt = 0; lines.length < count && attempt < count * 10; attempt++) {
   if (seen.has(markdown)) continue;
   seen.add(markdown);
   lines.push(JSON.stringify({ id: `url-${lines.length}`, md: markdown }));
+}
+const linkAfters = [...afters, "é", "\\b", "|x", ".x"];
+const explicit = lines.length + Math.floor(count / 4);
+for (let attempt = 0; lines.length < explicit && attempt < count * 10; attempt++) {
+  const url = pick(schemes) + pick(hosts) + pick(paths);
+  const href = /^www\./i.test(url) ? `http://${url}` : url;
+  const text = `${pick(befores)}[${url}](<${href}>)${pick(linkAfters)}`;
+  const markdown = `${pick(forms).replace("{}", text)}\n`;
+  if (seen.has(markdown)) continue;
+  seen.add(markdown);
+  lines.push(JSON.stringify({ id: `link-${lines.length}`, md: markdown }));
 }
 writeFileSync(output, `${lines.join("\n")}\n`);

@@ -273,30 +273,55 @@ func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 	}
 }
 
-// A www link is written as its bare text only where its run reads it back so: a www URL begins only
-// after whitespace, `(`, `*`, `_`, `[`, `]`, `~` or a head, so one right after a quote, as the
-// browser editor can hold it, is written as an explicit link, which both parsers read back, and so
-// is every other www link of its run (runSpelling.angleURLs).
+// A www link is written as its bare text only where the browser editor's tokenizer and Go's guard
+// both read it from that text: right after a line's head, a space, a tab, `(`, `*`, `_`, `[`, `]`
+// or `~`, and only when its text opens with no email address. Anywhere else - after a quote, a code
+// span, inline HTML or a link - it is written as an explicit link, which both parsers read back as
+// the tree, where the bare text would read in the editor as a longer link or an email.
 func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 	link := func(text string) *Node {
 		return &Node{Type: "text", Text: text, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://" + text, "title": nil}}}}
 	}
-	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
-		{Type: "text", Text: `see "`}, link("www.a.test"), {Type: "text", Text: `" and `}, link("Www.b.test"), {Type: "text", Text: "."},
-	}}}}
-	const want = "see \"[www.a.test](http://www.a.test)\" and [Www.b.test](http://Www.b.test).\n"
-	rendered, err := Render(doc)
-	if err != nil {
-		t.Fatal(err)
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	code := func(value string) *Node { return &Node{Type: "text", Text: value, Marks: []Mark{{Type: "inlineCode"}}} }
+	html := func(value string) *Node { return &Node{Type: "html", Attrs: Attrs{"value": value}} }
+	tests := []struct {
+		name   string
+		inline []*Node
+		want   string
+	}{
+		{"after a quote, and after a space", []*Node{text(`see "`), link("www.a.test"), text(`" and `), link("Www.b.test"), text(".")},
+			"see \"[www.a.test](http://www.a.test)\" and Www.b.test.\n"},
+		{"text opening with an email", []*Node{text("see "), link("www.x@y.com"), text(" b")},
+			"see [www.x@y.com](http://www.x@y.com) b\n"},
+		{"after inline HTML, before a letter outside ASCII", []*Node{html("<b>"), link("www.a.test"), text("é")},
+			"<b>[www.a.test](http://www.a.test)é\n"},
+		{"after a code span, before a backslash", []*Node{code("c"), link("www.a.test"), text(`\b`)},
+			"`c`[www.a.test](http://www.a.test)\\b\n"},
+		{"after a link", []*Node{link("www.a.test"), link("www.b.test"), text("|x")},
+			"[www.a.test](http://www.a.test)[www.b.test](http://www.b.test)|x\n"},
 	}
-	if rendered != want {
-		t.Fatalf("Render = %q, want %q", rendered, want)
+	rendered := make([]string, len(tests))
+	docs := make([]*Node, len(tests))
+	for index, test := range tests {
+		docs[index] = &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: test.inline}}}
+		markdown, err := Render(docs[index])
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		rendered[index] = markdown
 	}
-	reading := engineReadings(t, []string{rendered})[0]
-	if back, err := Parse(rendered); err != nil || !back.Equal(StripAnchorMarks(doc)) || reading == nil || !reading.Equal(back) {
-		got, _ := back.JSON()
-		engine, _ := reading.JSON()
-		t.Fatalf("%q reads back in Go as %s (%v), in the engine as %s", rendered, got, err, engine)
+	readings := engineReadings(t, rendered)
+	for index, test := range tests {
+		if rendered[index] != test.want {
+			t.Errorf("%s: Render = %q, want %q", test.name, rendered[index], test.want)
+		}
+		back, err := Parse(rendered[index])
+		if err != nil || !back.Equal(StripAnchorMarks(docs[index])) || readings[index] == nil || !readings[index].Equal(back) {
+			got, _ := back.JSON()
+			engine, _ := readings[index].JSON()
+			t.Errorf("%s: %q reads back in Go as %s (%v), in the engine as %s", test.name, rendered[index], got, err, engine)
+		}
 	}
 }
 

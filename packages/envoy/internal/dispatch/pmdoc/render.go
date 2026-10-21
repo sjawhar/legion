@@ -705,7 +705,7 @@ func isBareAutolink(value string) bool {
 		return false
 	}
 	if length := literalLength(value); length != 0 {
-		return length == len(value) && !strings.HasPrefix(strings.ToLower(value), "www.")
+		return length == len(value) && !(len(value) >= len("www.") && strings.EqualFold(value[:len("www.")], "www."))
 	}
 	if strings.ContainsAny(value, "()") || !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
@@ -714,9 +714,10 @@ func isBareAutolink(value string) bool {
 }
 
 // isBareWWWLink reports whether node is a www link, its href `http://` and its text, that the
-// tokenizer reads whole from that text (literalLength), which is written as the bare text where its
-// run reads back so (inlineWithEscapes) and as an explicit link otherwise (runSpelling.angleURLs):
-// a www literal begins only after whitespace, `(`, `*`, `_`, `[`, `]`, `~` or a head.
+// tokenizer reads whole from that text (literalLength), which is written as the bare text where the
+// character before it is one a www URL follows (renderer.wwwMayFollow) and its run reads back so
+// (inlineWithEscapes), and as an explicit link otherwise (runSpelling.angleURLs). Text whose run of
+// email characters from its start reaches an `@` is not one: the editor reads it as an email.
 func isBareWWWLink(node *Node, marks []Mark, escapePipes bool) bool {
 	for _, mark := range marks {
 		if mark.Type != "link" {
@@ -726,7 +727,23 @@ func isBareWWWLink(node *Node, marks []Mark, escapePipes bool) bool {
 		title, _ := mark.Attrs["title"].(string)
 		value := node.Text
 		return title == "" && href == "http://"+value && len(value) > len("www.") && strings.EqualFold(value[:len("www.")], "www.") &&
-			!strings.ContainsAny(value, " \t\n<>`") && !(escapePipes && strings.Contains(value, "|")) && literalLength(value) == len(value)
+			!strings.ContainsAny(value, " \t\n<>`") && !(escapePipes && strings.Contains(value, "|")) && !opensEmail(value) &&
+			literalLength(value) == len(value)
+	}
+	return false
+}
+
+// opensEmail reports whether the run of email address characters (`+`, `-`, `.`, `_`, letters and
+// digits) value opens with reaches an `@`, where the editor's parser tries an email first.
+func opensEmail(value string) bool {
+	for index := range len(value) {
+		switch c := value[index]; {
+		case c == '@':
+			return true
+		case isASCIIAlphaNumeric(c) || c == '+' || c == '-' || c == '.' || c == '_':
+		default:
+			return false
+		}
 	}
 	return false
 }

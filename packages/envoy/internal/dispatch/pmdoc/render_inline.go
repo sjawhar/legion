@@ -321,6 +321,15 @@ func opensBeforePunctuation(nodes []*Node, index int, next, following []Mark) bo
 	return flankingNeutral(firstRune(nodes[index+1].Text))
 }
 
+// wwwMayFollow reports whether the markdown written so far ends where the browser editor's
+// tokenizer begins a www URL, and Go's guard reads one (literalURLFollows): at a line's head, or
+// after a space, a tab, `(`, `*`, `_`, `[`, `]` or `~`. After any other character the editor reads
+// a www URL by another rule than Go's, so a www link is written as an explicit link there.
+func (r *renderer) wwwMayFollow() bool {
+	written := r.b.Bytes()
+	return len(written) == 0 || strings.IndexByte("\n \t(*_[]~", written[len(written)-1]) >= 0
+}
+
 // writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
 // mark and at once opened one written with the same delimiter character, which the parser reads as
 // one run.
@@ -335,38 +344,52 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		switch n.Type {
 		case "text":
 			wwwBare := !spelling.angleURLs
-			next := writtenMarks(n, escapePipes, wwwBare)
-			hasLink := containsMark(visibleMarks(n.Marks), "link")
-			var following []Mark
-			if index+1 < len(nodes) {
-				following = writtenMarks(nodes[index+1], escapePipes, wwwBare)
-			}
-			if spelling.keepOpen {
-				next = keepingOpen(active, next, following)
+			// A www link is written bare only where the character written before it is one a www
+			// URL may follow (wwwMayFollow); elsewhere its marks are written again with the link.
+			before, beforeActive, beforePosition, beforeFused := r.b.Len(), active, position, fused
+			bareHere := wwwBare
+			var next, following []Mark
+			var common int
+			var flankFirst bool
+			for {
+				next = writtenMarks(n, escapePipes, bareHere)
+				following = nil
 				if index+1 < len(nodes) {
-					var after []Mark
-					if index+2 < len(nodes) {
-						after = writtenMarks(nodes[index+2], escapePipes, wwwBare)
-					}
-					following = keepingOpen(next, following, after)
+					following = writtenMarks(nodes[index+1], escapePipes, wwwBare)
 				}
+				if spelling.keepOpen {
+					next = keepingOpen(active, next, following)
+					if index+1 < len(nodes) {
+						var after []Mark
+						if index+2 < len(nodes) {
+							after = writtenMarks(nodes[index+2], escapePipes, wwwBare)
+						}
+						following = keepingOpen(next, following, after)
+					}
+				}
+				common = sharedMarks(active, next)
+				for i := len(active) - 1; i >= common; i-- {
+					r.closeInlineMark(active[i], escapePipes)
+				}
+				if common < len(active) && common < len(next) && markDelimiter(active[common]) != 0 && markDelimiter(active[common]) == markDelimiter(next[common]) {
+					fused = true
+				}
+				// A delimiter run the marks just closed, with nothing opened after it, stands
+				// before this text's first character.
+				flankFirst = spelling.flanking && len(active) != common && len(next) == common && r.closesAfterPunctuation() && !flankingNeutral(firstRune(n.Text))
+				for _, mark := range next[common:] {
+					r.openInlineMark(mark, nodes, index)
+				}
+				if position.atLineStart && (len(active) != common || len(next) != common) {
+					position.afterMarker = true
+				}
+				if !bareHere || !isBareWWWLink(n, visibleMarks(n.Marks), escapePipes) || r.wwwMayFollow() {
+					break
+				}
+				r.b.Truncate(before)
+				active, position, fused, bareHere = beforeActive, beforePosition, beforeFused, false
 			}
-			common := sharedMarks(active, next)
-			for i := len(active) - 1; i >= common; i-- {
-				r.closeInlineMark(active[i], escapePipes)
-			}
-			if common < len(active) && common < len(next) && markDelimiter(active[common]) != 0 && markDelimiter(active[common]) == markDelimiter(next[common]) {
-				fused = true
-			}
-			// A delimiter run the marks just closed, with nothing opened after it, stands before
-			// this text's first character.
-			flankFirst := spelling.flanking && len(active) != common && len(next) == common && r.closesAfterPunctuation() && !flankingNeutral(firstRune(n.Text))
-			for _, mark := range next[common:] {
-				r.openInlineMark(mark, nodes, index)
-			}
-			if position.atLineStart && (len(active) != common || len(next) != common) {
-				position.afterMarker = true
-			}
+			hasLink := containsMark(visibleMarks(n.Marks), "link")
 			active = next
 			marks := visibleMarks(n.Marks)
 			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 {
@@ -375,7 +398,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
 			}
-			if isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 || wwwBare && isBareWWWLink(n, marks, escapePipes) {
+			if isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 || bareHere && isBareWWWLink(n, marks, escapePipes) {
 				// The tokenizer reads a bare URL's bytes as they are written, a backslash among
 				// them, so its text takes no escape either. A www URL begins only after some
 				// characters; where its run does not read back, the angleURLs spelling writes it as
