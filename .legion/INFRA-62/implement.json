@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-62",
-  "completed": "2026-10-21T06:05:00Z",
-  "round": "review round 2 — the reviewer's two important findings answered: the coupling between the pod's grace period and cmd/dispatch's stopGrace is now enforced by a test on the side that owns the constant, and the README puts the five seconds where it belongs. The rendering is unchanged this round: the three pod goldens and the Serve golden are byte-identical, so the proofs below that read the rendering stand at the head they name.",
+  "completed": "2026-10-21T08:05:00Z",
+  "round": "review round 3 — the architect's settled decision to delete the mirrored stopGrace landed whole (it was lost in transit, not declined: the process died around 04:22Z, the workspace was recreated and the re-sent task carried round 1's text, so the only durable copy readable was the round-2 handoff, where the item stood as the reviewer's batched minor), both comments that stated the Kubernetes ordering backwards are corrected, the two clauses that over-promised the guard now say what it asserts, and the guard's own truncation is gone. No rendering moved: the three pod goldens and the Serve golden are byte-identical, so the proofs that read the rendering stand at the heads they name.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2089",
-  "head": "8f9cfe58d18d355d7f5d1bb14d90e30ec4589680",
+  "head": "123048deebc052cdb878399af3b81fd61ae1dcec",
   "base": "envoy-infra-integration at ba3f6b7e2bbf0a8119bd8b597980904f3b4ab6e2",
   "proof": [
     {
@@ -79,6 +79,30 @@
       "observed": "The sentence now reads: a stopping pod keeps serving for five seconds after it is told to stop, which is the window its removal from routing has to propagate, and is what the pre-stop wait is for. The rest of the paragraph is unchanged, including the sentence three later saying whether five seconds is enough across a real release is unmeasured — which is only actionable on this reading.",
       "headSha": "8f9cfe58d18d355d7f5d1bb14d90e30ec4589680",
       "negativeControl": "bash .github/scripts/check-private-names.sh passed over the whole tree (4365 files), so the rewritten prose names no private host, company or repository; and the component's own tests are unchanged and green, since no rendering moved with it."
+    },
+    {
+      "criterion": "Review round 3: one relation, one enforced claim. The mirrored const dispatchServerStopGrace = 30 in the infra module — a hand-copy of a number owned by another module, checked by nothing — is deleted now that the guard holds the relation from the side that can read stopGrace.",
+      "surface": "The two test files themselves and the language server: gopls references on toInt's declaration, cross-checked with codegraph's callers, then both modules' suites.",
+      "command": "gopls references ./gcp/dispatch_test.go:559:6 ; cd packages/envoy && go test -p 1 -count=1 -run 'TestDispatchPodGracePeriodCoversStopGrace' ./cmd/dispatch/ ; cd ../envoy/infra && go test -p 1 -count=1 -run 'Dispatch|Construct' ./gcp/",
+      "observed": "gopls returned three references to toInt, all inside TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown, and codegraph named that one caller; the constant, that test and toInt are gone. TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates stays, spelling its own wait of 5 and the literal 35, with a comment naming packages/envoy/cmd/dispatch/pod_grace_period_test.go as where the inequality lives; the golden pin stays. pod_grace_period_test.go's own comment no longer claims the infra module mirrors stopGrace by hand. Both suites green.",
+      "headSha": "123048deebc052cdb878399af3b81fd61ae1dcec",
+      "negativeControl": "The deletion is not free-standing: the surviving test read the constant, so the build fails if the literal is not spelled in its place — which is what makes this one change rather than a tidy-up. The guard itself was re-run at this head and still fails when stopGrace rises."
+    },
+    {
+      "criterion": "Review round 3: the comments stated the Kubernetes ordering backwards, which made the pre-stop wait pointless as described and contradicted the README the previous round made honest.",
+      "surface": "packages/envoy/infra/gcp/dispatch_kube.go's comment above the hook and packages/envoy/infra/gcp/dispatch_test.go's doc comment on the surviving test — the two places a reader of the component meets the model, where the next person retunes these five seconds against INFRA-63's measured release.",
+      "command": "jj diff --git packages/envoy/infra/gcp/dispatch_kube.go packages/envoy/infra/gcp/dispatch_test.go",
+      "observed": "Both now say what the README says: the control plane takes the pod out of its EndpointSlice as soon as the deletion timestamp appears, concurrently with the kubelet beginning graceful termination — the pre-stop hook first, SIGTERM once it returns — and that removal then has to reach every node's proxy and Tailscale Serve, so the sleep runs alongside the propagation and is sized to outlast it. Each comment keeps its own conclusion: why the pod asks for 35, why the two values are coupled, why only the app's container waits.",
+      "headSha": "123048deebc052cdb878399af3b81fd61ae1dcec",
+      "negativeControl": "No rendering moved with the wording: the three pod goldens and the Serve golden are byte-identical at this head and the component's suite is green, so the correction is to the text alone and the earlier rendering proofs stand."
+    },
+    {
+      "criterion": "Review round 3: the guard's own soundness and the two sentences that over-promised it. It asserts that the pod's budget covers stopGrace, not that the two never drift, and its int comparison truncated a sub-second raise.",
+      "surface": "packages/envoy/cmd/dispatch's own test binary against the rendered pod's golden, and the two sentences an editor reads first (shutdown.go's stopGrace comment and packages/envoy/AGENTS.md's row).",
+      "command": "cd packages/envoy && go test -p 1 -count=1 -run 'TestDispatchPodGracePeriodCoversStopGrace' ./cmd/dispatch/",
+      "observed": "The comparison is now time.Duration(grace-wait)*time.Second < stopGrace and the message formats stopGrace itself; both clauses read 'pod_grace_period_test.go fails when the pod's budget stops covering it', which is what the assertion does — it fires when stopGrace rises, the grace period falls or the sleep grows, and is deliberately silent when the pod's grace alone is raised. Green at this head.",
+      "headSha": "123048deebc052cdb878399af3b81fd61ae1dcec",
+      "negativeControl": "The edit that used to slip through now fails: with stopGrace at 30*time.Second + 500*time.Millisecond the guard reports `… leaving its shutdown 30 seconds where stopGrace in packages/envoy/cmd/dispatch/shutdown.go builds it for 30.5s …`, where the truncating comparison passed. 30 s was restored byte-identically and the guard re-run green before the push."
     }
   ],
   "objectInventory": [
