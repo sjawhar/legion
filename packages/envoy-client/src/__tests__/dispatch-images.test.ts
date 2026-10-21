@@ -199,7 +199,7 @@ describe("sending pictures", () => {
     );
 
     expect((failure as ToolInputError).problems).toEqual([
-      `question plus ref plus 1 picture ${overCapMessage(801, 800)}; shorten the question, drop the ref or send fewer pictures`,
+      "question plus ref plus 1 picture is 1 characters over the 800-character limit (801/800); shorten the question, drop the ref or send fewer pictures",
     ]);
     expect(server.uploads).toEqual([]);
   });

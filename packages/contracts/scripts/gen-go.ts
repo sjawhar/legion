@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
@@ -454,7 +454,13 @@ if (process.argv.includes("--check")) {
   if (fmt === null) {
     throw new Error("gen-go --check needs gofmt: the committed files are gofmt-formatted");
   }
-  for (const { path, rendered } of outputs) {
+  // GEN_GO_CHECK_ROOT points the comparison at copies of the outputs under another root, laid out
+  // by their repository-relative paths, so a test can check a copy instead of a tracked file.
+  // Unset, `--check` compares the committed files.
+  const checkRoot = process.env.GEN_GO_CHECK_ROOT;
+  const repoRoot = resolve(import.meta.dir, "../../..");
+  for (const { path: output, rendered } of outputs) {
+    const path = checkRoot ? resolve(checkRoot, relative(repoRoot, output)) : output;
     const gofmt = Bun.spawnSync({
       cmd: [fmt],
       stdin: new TextEncoder().encode(rendered),

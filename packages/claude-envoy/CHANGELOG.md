@@ -37,6 +37,13 @@
 
 ### Changed
 
+- The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
+  carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
+  `message` bodies and `issue-update`'s closing `reason` accept that many characters, and their
+  descriptions say so. Nothing gates the skew: a bundle of this release against a Dispatch server
+  still on 2,000 lets an agent compose a longer body and take a `400 CAP_EXCEEDED` from the
+  server, so install it after that server is deployed (`packages/envoy/CHANGELOG.md` has the
+  rollout order).
 - The generated `legion/` plugin carries the new `thermonuclear-deep-review` and
   `thermonuclear-code-quality` rubrics (see `packages/pi-legion/CHANGELOG.md`), and the README no
   longer says the dotfiles plugin ships a copy.

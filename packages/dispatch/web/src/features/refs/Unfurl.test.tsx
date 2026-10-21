@@ -339,7 +339,8 @@ test("isBareReferenceBody accepts only whitespace-joined bare references", () =>
 test(`isBareReferenceBody reads ${DISPATCH_BODY_MAX}-character bodies of repeated schemes in one pass`, () => {
   const start = performance.now();
   for (const scheme of ["http://", "https://", "dispatch://"]) {
-    // Two units short of the cap: the ` x` and `\nx` each case appends reach it exactly.
+    // The repeat leaves room for the two units the ` x` and `\nx` cases append, so every body
+    // here is at or just under the cap.
     const references = scheme.repeat(Math.floor((DISPATCH_BODY_MAX - 2) / scheme.length));
     expect(isBareReferenceBody(`${references} x`)).toBe(false);
     expect(isBareReferenceBody(`${references}\nx`)).toBe(false);
