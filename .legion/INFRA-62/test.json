@@ -2,72 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-62",
-  "completed": "2026-10-21T05:55:00Z",
-  "round": 5,
-  "head": "dc38d0a37bcdbb7ca0f34aa1314265608a0074e2",
-  "codeHead": "123048deebc052cdb878399af3b81fd61ae1dcec",
+  "completed": "2026-10-21T06:30:00Z",
+  "round": 6,
+  "head": "25d21fe90e509d83c862a7c622d81a75ffd58c61",
+  "codeHead": "b889f4f818b3ebeca3fbd6899008b2a6363353f8",
   "verdict": "pass",
+  "scope": "One line of documentation: the resource table's Deployments row now reads 35 seconds instead of 30. No Go file, no golden and no test is in the diff, so nothing the earlier rounds proved can have moved, and none of it was re-run — the test for a number raised in one place and not searched for is the search.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "This round's three entries (10, 11, 12) were each driven in a scratch copy of this head fetched from GitHub, never in the workspace, and the nine before them are carried by the fact that the component's rendering is byte-identical to the rendering verified in rounds 3 and 4 — all 35 objects. The deletion was checked for what it could have cost rather than for what it removed: with the component's grace lowered to 30 and the golden regenerated with it, both surviving sides fail, so the inequality's cover is not lost. The guard still fires on a whole-second raise of stopGrace and now also on the sub-second raise that used to slip through its truncating comparison. The two comments state the Kubernetes ordering as the Pod lifecycle documentation does, and the two backlinks now claim what the assertion actually does.",
-    "verifiedEntries": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-    "rejectedEntries": []
+    "how": "The diff is that one line and nothing else (jj diff --stat: packages/envoy/infra/README.md, 1 insertion, 1 deletion). The number it now states is what the component renders — dispatch_kube.go:312 `TerminationGracePeriodSeconds: pulumi.Int(35)` and testdata/dispatch-pod.golden:177 `\"terminationGracePeriodSeconds\": 35` — and agrees with the same file's own paragraph at :213. The clause sits inside the app's clause, before the front door and listener clause, which is right: neither of those two pods renders a grace period at all (dispatch-tailnet-pod.golden and dispatch-listener-pod.golden carry no such field), so the row does not claim 35 for them."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 3, the architect's settled deletion: with the guard in place the mirrored const dispatchServerStopGrace, the inequality test that read it and toInt go — and what they covered must still be covered.",
-      "surface": "A scratch copy of this head (GitHub tarball of dc38d0a37bcd), so the thing under test is the shipped file: the component's own suite in packages/envoy/infra and the guard in packages/envoy/cmd/dispatch, run against a regression that the deleted test used to be one of the catchers of.",
-      "command": "in the scratch tree: go test -p 1 -count=1 -run TestDispatchPodGracePeriodCoversStopGrace ./cmd/dispatch/ and cd infra && go test -p 1 -count=1 -run 'TestDispatchAppPod|TestDispatchPodMatchesGolden' ./gcp/ — once as shipped, once with TerminationGracePeriodSeconds lowered to 30 in dispatch_kube.go and the golden regenerated with it, once restored; and grep -rn 'dispatchServerStopGrace|func toInt' over packages/",
-      "observed": "As shipped both are ok. Neither name survives anywhere in the tree, and lint, envoy-go and envoy-infra-go are success at this code head, so nothing referenced them. The surviving infra test spells its own 5 and 35 and names pod_grace_period_test.go as where the inequality lives; the guard reads stopGrace itself rather than a copy of it.",
-      "headSha": "dc38d0a37bcdbb7ca0f34aa1314265608a0074e2",
-      "negativeControl": "With the component's grace lowered to 30 and the golden regenerated with it — the regression the deleted test shared — both remaining sides fail: TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates with 'expected: int(35)', and the guard with 'asks for 30 seconds … leaving its shutdown 25 seconds where stopGrace … builds it for 30s'. Restored, both are green and the five touched files are byte-identical to this head's by sha256."
-    },
-    {
-      "criterion": "Review round 3: the guard's own soundness — a sub-second raise of stopGrace must not slip through — and the two backlinks must claim what the assertion does rather than more.",
-      "surface": "The same scratch copy, with stopGrace edited to the exact value the reviewer named, and the two sentences read at this head.",
-      "command": "edit stopGrace to 30*time.Second + 500*time.Millisecond, then to 45*time.Second, each followed by go test -p 1 -count=1 -run TestDispatchPodGracePeriodCoversStopGrace ./cmd/dispatch/, then restore; read packages/envoy/cmd/dispatch/shutdown.go:19 and packages/envoy/AGENTS.md:173",
-      "observed": "The comparison is now time.Duration(grace-wait)*time.Second < stopGrace and the message formats the duration, so 30.5s is reported as itself rather than truncated to 30. Both backlinks now read 'pod_grace_period_test.go fails when the pod's budget stops covering it', which is what the assertion does — it fires when stopGrace rises, the grace falls or the sleep grows, and is deliberately silent when the pod's grace alone is raised, the one direction that is not dangerous.",
-      "headSha": "dc38d0a37bcdbb7ca0f34aa1314265608a0074e2",
-      "negativeControl": "Both raises fail, and the first is the edit that used to pass: at stopGrace = 30s500ms the guard reports 'leaving its shutdown 30 seconds where stopGrace … builds it for 30.5s', and at 45 s 'builds it for 45s'. 30 s restored, the file byte-identical to the shipped one and the test green again."
-    },
-    {
-      "criterion": "Review round 3: the comments that justify the pre-stop wait must state the Kubernetes ordering as it is — removal from routing runs concurrently with termination, not after the signal — since the backwards version makes the wait look pointless.",
-      "surface": "The two comments at this head, read against the authoritative sequence in the Kubernetes Pod lifecycle documentation.",
-      "command": "read packages/envoy/infra/gcp/dispatch_kube.go:290-305 and packages/envoy/infra/gcp/dispatch_test.go:505-520; compare with kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle, Pod termination",
-      "observed": "Both now say the control plane takes the pod out of its EndpointSlice as soon as the deletion timestamp appears, concurrently with the kubelet beginning graceful termination — the hook first, SIGTERM once it returns — and that the removal then has to reach every node's proxy and Tailscale Serve, so the sleep runs alongside the propagation and is sized to outlast it. That is what the documentation says: 'At the same time as the kubelet is starting graceful shutdown of the Pod, the control plane evaluates whether to remove that shutting-down Pod from EndpointSlice objects', with the hook run before the TERM signal. The README sentence corrected in round 4 agrees with both.",
-      "headSha": "dc38d0a37bcdbb7ca0f34aa1314265608a0074e2",
-      "negativeControl": "No rendering moved with the prose: the tester's per-object diff of the plugin's Construct output against the previous round reports no difference in any of the 35 objects, so nothing rode in with the correction."
-    },
-    {
-      "criterion": "Everything rounds 1 to 4 proved still holds at this head: the rolling update above one replica, the unchanged behaviour at one, the front-door arrangement, the replicas input and its refusals, the migration rule, and the guard.",
-      "surface": "The plugin rebuilt by the tester from this tree and driven through its own Construct RPC server by the tester's own harness, diffed object by object against the rendering recorded in round 4; and CI's own lanes at this code head.",
-      "command": "go build the tester's dump program against this workspace; ./head/dump; diff the per-object map against the previous round's",
-      "observed": "RENDERING IDENTICAL to the previous round, all 35 objects, as the diff predicts: this round touches AGENTS.md, two comments, the guard's comparison and the deleted test, and no file the component renders from. envoy-infra-go and envoy-go are both success at this code head, which is the component's suite and the guard green in CI.",
-      "headSha": "dc38d0a37bcdbb7ca0f34aa1314265608a0074e2",
-      "negativeControl": "The same per-object diff caught the one field that moved in round 3 (terminationGracePeriodSeconds 30 → 35) and reports none here. The full ./gcp/ suite run locally fails only TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot, the two that need mkfs.ext4 on the machine; they fail on the base too and are green in CI's envoy-infra-go, which is success here."
+      "criterion": "Review round 4's finding, and the class behind it: a number raised in one place must be raised everywhere that file — and the tree's live documentation — states it for this pod.",
+      "surface": "The tree at this head, searched rather than read: every mention of a grace period or of a bare 30 or 35 seconds in the operator file, then across the repository's documentation.",
+      "command": "jj diff -r b889f4f818b3 --stat; grep -n 'grace\\|30-second\\|35-second\\|thirty\\|stopGrace' packages/envoy/infra/README.md; grep -rn 'terminationGracePeriodSeconds\\|termination grace period' --include=*.md --include=*.go --include=*.golden packages/envoy; grep -rn 'termination grace\\|grace period' --include=*.md over the whole repository",
+      "observed": "Inside `## gcp:Dispatch` (README.md:122-277) exactly two places state this pod's grace period, :143 and :213, and both now say 35 with the same five-plus-thirty reason. The file's other seconds are not this pod's: :204 is the readiness window (`failureThreshold` 3 at `periodSeconds` 10, correctly thirty seconds), and :294, :297 and :410 are inside `## host:Listener` (from :278), a Docker container on a host with its own `stopTimeout`, health check and watchdog timer. Across packages/envoy the only places carrying this pod's number are dispatch_kube.go:312, the golden at :177, the pair assertion, and the two prose backlinks, all 35 or deriving from stopGrace. So the class is one row wide, not wider.",
+      "headSha": "25d21fe90e509d83c862a7c622d81a75ffd58c61",
+      "negativeControl": "The same searches do turn up one more '30 s' for this pod, and it is deliberately left: docs/plans/2026-10-14-dispatch-gcp-plan.md:98, which reads 'one Deployment of one replica, strategy Recreate, termination grace 30 s … containers envoy-dispatch, envoy-listener (Dispatch's ENVOY_URL is http://127.0.0.1:9020), the Tailscale container'. That is the whole pre-change arrangement this issue replaces, in a dated plan document — human-authored design history, which the repository's own guide says is not a Legion artifact. Editing it would falsify the history rather than fix a stale fact, so it stays; this is recorded here so the next reader of that line knows it was found and judged, not missed."
     }
   ],
+  "notRerun": "The guard, the deletion and the rendering were proved in rounds 4 and 5 and cannot have moved under a documentation line: the guard driven in three directions (stopGrace at 45 s, at 30 s 500 ms, and the pod's grace lowered with its golden), the deleted inequality's cover proved by reproducing the regression it used to catch, and the per-object diff of all 35 rendered objects unchanged twice. The diff at this head touches one Markdown line, and envoy-infra-go and envoy-go are both success at this code head.",
   "ciRead": {
-    "codeHead": "123048deebc052cdb878399af3b81fd61ae1dcec",
-    "runs": "Tests 39549708653 success; Docs 39549708280 success; PR Title 39550153789 success; Legion Envoy and Contracts 39549708301 failure — within it build, changes, dispatch-memory, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, lint, test and typecheck all success, and `dispatch` failure. envoy-go success is the guard green in CI; envoy-infra-go success is the component's suite green there. No CI lane was re-run by the tester.",
-    "redLaneNotThisChange": "`dispatch` fails on the same single dashboard test as at the last three heads — `a cold Inbox hydrates every ask thread from its one list response` — which is dispatch://INFRA-76. This change touches no file under packages/dispatch, and main carries the same failure, so a forward merge would not clear it.",
+    "codeHead": "b889f4f818b3ebeca3fbd6899008b2a6363353f8",
+    "runs": "build, changes, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, lint, pr-title, test and typecheck all success; dispatch-memory still in progress at the read; `dispatch` failure. No CI lane was re-run by the tester, and the tester ran no test this round: the round's subject is prose.",
+    "redLaneNotThisChange": "`dispatch` fails on the same single dashboard test as at the last four heads — `a cold Inbox hydrates every ask thread from its one list response` — which is dispatch://INFRA-76. This change touches one Markdown line; main carries the same failure, so a forward merge would not clear it, and the architect's standing instruction is not to touch it.",
     "consequence": "It blocks arming, not this phase; the fix belongs to INFRA-76."
   },
   "previousRounds": [
-    { "round": 1, "verdict": "pass", "codeHead": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938", "where": "This file at bfc7b95aa7c7 and https://github.com/sjawhar/legion/pull/2089#issuecomment-6304835958: the base-to-head object diff, the arrangement, the schema and the SDK." },
+    { "round": 1, "verdict": "pass", "codeHead": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938", "where": "This file at bfc7b95aa7c7 and https://github.com/sjawhar/legion/pull/2089#issuecomment-6304835958." },
     { "round": 2, "verdict": "fail", "codeHead": "f8ec21dfc724e27e1b75c84ba4ff763902708436", "where": "This file at c5a4ae303a65: the pre-stop wait charged to the server's shutdown, and a head id that was not a commit." },
-    { "round": 3, "verdict": "pass", "codeHead": "6e01eacc6cca024498b267bd3a5eece355b4beb1", "where": "This file at c4568c00d87d: grace 35 = 5 + 30, with the pre-fix tree still failing the inequality." },
-    { "round": 4, "verdict": "pass", "codeHead": "8f9cfe58d18d355d7f5d1bb14d90e30ec4589680", "where": "This file at 496d24b99d39: the guard proved to fire in both directions, and proved to run in envoy-go." }
+    { "round": 3, "verdict": "pass", "codeHead": "6e01eacc6cca024498b267bd3a5eece355b4beb1", "where": "This file at c4568c00d87d: grace 35 = 5 + 30." },
+    { "round": 4, "verdict": "pass", "codeHead": "8f9cfe58d18d355d7f5d1bb14d90e30ec4589680", "where": "This file at 496d24b99d39: the guard fires in both directions and runs in envoy-go." },
+    { "round": 5, "verdict": "pass", "codeHead": "123048deebc052cdb878399af3b81fd61ae1dcec", "where": "This file at 17d94f0d3255: the deletion costs no cover, the truncation case now fails, the ordering matches the Kubernetes documentation." }
   ],
   "unproven": [
-    "Unchanged and still INFRA-63's, since no pod in Legion reaches a cluster or the consuming stack's state: Tailscale Serve resolving the app's cluster DNS name under TS_USERSPACE=true; the cutover's two tailscaled processes against one state Secret, with the consuming program still minting the tailnet key Reusable: false; the front door's unmeasured 100m/128Mi reservation; and whether a release loses no request — which is the measurement that decides whether five seconds of pre-stop wait outlasts the propagation it now correctly runs alongside.",
-    "The reviewer's own minor stands: 35 s is a floor rather than a cover, since the kubelet charges the hook's elapsed time — the sleep plus the CRI exec overhead — against the one grace period, leaving envoy-dispatch a little under 30 s. The design's five-second reserve absorbs it and the tightest pinned case is the 27 s lock; nothing here measures the overhead."
+    "Unchanged since round 1 and still INFRA-63's: Tailscale Serve resolving the app's cluster DNS name under TS_USERSPACE=true; the cutover's two tailscaled processes against one state Secret, with the consuming program still minting the tailnet key Reusable: false; the front door's unmeasured 100m/128Mi reservation; and whether a release loses no request, which is what decides whether five seconds of pre-stop wait outlasts the propagation it runs alongside.",
+    "The reviewer's standing minor: 35 s is a floor rather than a cover, since the kubelet charges the hook's elapsed time — the sleep plus the CRI exec overhead — against the one grace period."
   ],
   "observations": [
-    "The deletion left the coupling better held than before, not merely smaller: the surviving pair assertion pins what the component renders, the golden pins it byte for byte, and the one inequality lives on the side that can read stopGrace rather than copy it. The control that lowers the component's grace and regenerates the golden fails on both sides, which is the shape a reader should expect — the renderer's tests catch the rendering, the server's test catches the relation.",
-    "Commit provenance stayed clean: 123048de is authored and committed by the implement App."
+    "The row now carries its reason as well as its number ('a five-second pre-stop wait and the thirty seconds envoy-dispatch's shutdown is built for'), so the next person to change either value meets the coupling in the operator table too, not only in the code and the guard."
   ],
-  "scrubEvidence": "Not applicable: this issue's acceptance criteria call for no environment or secret-scrub evidence. The rendering is byte-identical to the previous round's."
+  "scrubEvidence": "Not applicable: this issue's acceptance criteria call for no environment or secret-scrub evidence, and this round changes one line of prose."
 }
