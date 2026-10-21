@@ -115,12 +115,19 @@ func startPair(t *testing.T, env map[string]string) *dispatchPair {
 }
 
 // databaseURL is the connection string a process is started with: the database storetest cloned
-// for this test, as its pool's configuration names it.
+// for this test, as its pool's configuration names it. The credential is written through
+// url.UserPassword when the pool carries a password, since CI's Postgres takes one
+// (DISPATCH_TEST_DATABASE_URL) where a trust-authenticated development server does not, and a URL
+// built without it is refused with SQLSTATE 28P01 before the process can serve anything.
 func (p *dispatchPair) databaseURL(t *testing.T) string {
 	t.Helper()
 	config := p.database.Pool.Config().ConnConfig
+	credential := url.User(config.User).String()
+	if config.Password != "" {
+		credential = url.UserPassword(config.User, config.Password).String()
+	}
 	return fmt.Sprintf("postgres://%s@%s:%d/%s?sslmode=disable",
-		config.User, config.Host, config.Port, config.Database)
+		credential, config.Host, config.Port, config.Database)
 }
 
 // other is the process of the pair that is not one.
