@@ -57,6 +57,7 @@ A spec is the design conversation with the human, written down. It starts as the
 - **Rewrite a changed point. Do not append.** The decision block stays as the record. Versions keep the history.
 - **No placeholders**: no TBD, TODO or hedging. An open item is a decision block or a two-lane contract you settle over Envoy. Or it is a technical decision your lane makes where the work happens, outside the spec.
 - **No progress**: no status, timestamps, "Update HH:MMZ" sections, PR lists or handoff notes.
+- **Repeated measurements** (hourly counts, a fleet table) go in one artifact that you edit in place, linked once from the spec. Never post them as ask replies or as new spec rows.
 - **No commentary**: never call it a draft, version or turn, preview a later version, describe a correction, or narrate the exchange.
 
 Before a version goes out, read it as the human will. No two passages conflict, each point has one reading, and each decision block passes the phone test.
