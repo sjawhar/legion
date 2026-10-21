@@ -30,11 +30,22 @@ func (linkify) Extend(m goldmark.Markdown) {
 // not by goldmark's pattern, which ends a URL elsewhere: it keeps a `"`, `'`, `;`, `]` or `_`
 // ending the URL and a `)` after an earlier trimmed character inside it, and stops at a backslash,
 // an asterisk or a character outside ASCII, where GFM's extended autolink ends a URL only at
-// whitespace or `<` and leaves out the trailing punctuation before it. It begins where that
-// tokenizer begins one (literalURLFollows) and goldmark asks an inline parser: after whitespace or
-// ASCII punctuation, and at the head of a line or of the text after another inline node. goldmark
-// asks after no letter, digit or character outside ASCII, so a URL right after a digit or a
-// curly quote, which the editor links, stays text here.
+// whitespace or `<` and leaves out the trailing punctuation before it. The guard is asked where
+// goldmark's parser is (after whitespace, `*`, `_`, `~` or `(`, and at the head of a line or of the
+// text after another inline node, when that head is no punctuation), and a URL begins there or after
+// a run of punctuation no inline parser reads (plainPunctuation, such as the `"` of
+// `"https://…"`), where that tokenizer begins one (literalURLFollows). Asked at no other character,
+// goldmark ends no text anywhere else, so the tree and its weight are goldmark's.
+//
+// The editor's parser also links, through mdast-util-gfm-autolink-literal's transform over the
+// decoded text the tokenizer left, a URL the tokenizer refuses before its domain (a host opening
+// with `-` or `.`, or a www URL where the text after another inline node begins) and a URL after
+// any whitespace or punctuation of the decoded text: after a letter and punctuation (`x;https://`),
+// at a head that is punctuation (a line or a table cell opening `"https://`), after an escaped
+// character or a character reference. The markdown does not say what that decoded text is, or
+// goldmark asks no parser there, so there the guard reads as goldmark's parser reads, or reads
+// nothing. A domain the tokenizer refuses (an underscore in one of its last two parts) is refused
+// here too, as the transform refuses it.
 //
 // goldmark's parser, triggered at every space, `*`, `_`, `~` and `(`, scans forward over email
 // local-part characters to the next `@` before it knows there is no email there: on a line of
@@ -70,6 +81,10 @@ type linkifyLine struct {
 }
 
 var (
+	// linkifyProtocols are the openings goldmark's parser reads a URL from by its own pattern, which
+	// the guard gives it where the tokenizer refuses the URL before its domain. `ftp:` is not among
+	// them, since the editor links no ftp URL.
+	linkifyProtocols = [][]byte{[]byte("http:"), []byte("https:"), []byte("www.")}
 	// emailLocal marks the bytes goldmark's util.FindEmailIndex reads as an email's local part
 	// (its emailTable); linkify_test.go holds the two to the same set. A line opening with `ftp:`
 	// reaches no `@` through them, so goldmark's parser never reads its URL.
@@ -81,48 +96,31 @@ var (
 	}()
 )
 
-// linkifyTriggers is where the guard is asked: at whitespace and a line's head (` `), as goldmark's
-// parser is, and at every ASCII punctuation character, which a URL may follow, but `&`, `#`, `;` and
-// `\`. goldmark ends the text before each character it asks a parser about, and the reader decodes
-// character references one text at a time, so a reference split there would not be decoded.
-var linkifyTriggers = func() []byte {
-	triggers := []byte{' '}
-	for c := byte('!'); c <= '~'; c++ {
-		if isASCIIPunctuation(c) && !strings.ContainsRune(`&#;\`, rune(c)) {
-			triggers = append(triggers, c)
-		}
-	}
-	return triggers
-}()
-
-func (g *linkifyGuard) Trigger() []byte { return linkifyTriggers }
+func (g *linkifyGuard) Trigger() []byte { return g.inner.Trigger() }
 
 func (g *linkifyGuard) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
 	if pc.IsInLinkLabel() {
 		return nil
 	}
 	line, segment := block.PeekLine()
-	c := line[0]
-	goldmarks := !isASCIIPunctuation(c) || c == '*' || c == '_' || c == '~' || c == '('
 	if segment.Padding != 0 {
-		if !goldmarks {
-			return nil
-		}
 		return g.inner.Parse(parent, block, pc)
 	}
-	if url, ok := g.literalURLNode(parent, block, pc, line, segment); ok {
+	if url, handled := literalURLNode(parent, block, pc, line, segment); handled {
 		return url
 	}
-	if !goldmarks {
-		// goldmark's parser is not asked here.
-		return nil
-	}
+	c := line[0]
 	start := segment.Start
 	rest := line
 	// The parser skips the trigger where it is not a line head, as its Parse does.
 	if c == ' ' || c == '*' || c == '_' || c == '~' || c == '(' {
 		start++
 		rest = rest[1:]
+	}
+	for _, protocol := range linkifyProtocols {
+		if bytes.HasPrefix(rest, protocol) {
+			return g.inner.Parse(parent, block, pc)
+		}
 	}
 	if len(rest) == 0 || util.IsPunct(rest[0]) {
 		return nil
@@ -166,38 +164,31 @@ func (g *linkifyGuard) line(source []byte, from, stop int, pc parser.Context) *l
 
 func (g *linkifyGuard) CloseBlock(parent ast.Node, pc parser.Context) {}
 
-// literalURLNode reads the URL that begins after the trigger opening line, or at line's start where
-// that is no trigger, as an autolink, appending the trigger before it as text. It reports false
-// where no URL begins there; nil where the browser editor's parser reads none from that beginning.
-// That parser reads a URL its tokenizer refuses there again from the text it leaves (textURL);
-// where the markdown cannot say what that text is, the URL is read as goldmark's parser reads it.
-func (g *linkifyGuard) literalURLNode(parent ast.Node, block text.Reader, pc parser.Context, line []byte, segment text.Segment) (ast.Node, bool) {
-	// The guard sends a line whose segment carries padding to goldmark's parser, so line is the
-	// source's bytes from segment.Start.
-	start, rest, previous, trigger := segment.Start, line, block.PrecendingCharacter(), 0
+// literalURLNode reads the URL that begins after the trigger opening line (or at line's start, a
+// head goldmark asks at) and the run of plainPunctuation after it, as an autolink, appending what
+// comes before it as text. It reports handled false where no URL begins there by the tokenizer's
+// rules short of its domain, and nil where the tokenizer refuses the URL's domain.
+func literalURLNode(parent ast.Node, block text.Reader, pc parser.Context, line []byte, segment text.Segment) (url ast.Node, handled bool) {
+	skipped, previous := 0, block.PrecendingCharacter()
 	if c := line[0]; util.IsSpace(c) || isASCIIPunctuation(c) {
-		start, rest, previous, trigger = start+1, line[1:], rune(c), 1
+		skipped, previous = 1, rune(c)
 	}
-	if !literalURLPrefix(rest) {
+	for skipped < len(line) && plainPunctuation(line[skipped]) {
+		previous = rune(line[skipped])
+		skipped++
+	}
+	start, rest := segment.Start+skipped, line[skipped:]
+	if !literalURLPrefix(rest) || !literalURLFollows(previous, rest[3] == '.') {
 		return nil, false
 	}
-	length, www := 0, false
-	if literalURLFollows(previous, rest[3] == '.') {
-		length, www = literalURL(rest, literalDomainsOf(pc, start, segment.Stop))
-	}
+	length, www, domainRefused := literalURL(rest, literalDomainsOf(pc, start, segment.Stop))
 	if length == 0 {
-		var decided bool
-		if length, www, decided = textURL(rest); !decided {
-			return g.inner.Parse(parent, block, pc), true
-		}
+		return nil, domainRefused
 	}
-	if length == 0 {
-		return nil, true
-	}
-	if trigger != 0 {
+	if skipped != 0 {
 		ast.MergeOrAppendTextSegment(parent, segment.WithStop(start))
 	}
-	block.Advance(trigger + length)
+	block.Advance(skipped + length)
 	link := ast.NewAutoLink(ast.AutoLinkURL, ast.NewTextSegment(text.NewSegment(start, start+length)))
 	if www {
 		link.Protocol = []byte("http")
@@ -205,34 +196,11 @@ func (g *linkifyGuard) literalURLNode(parent ast.Node, block text.Reader, pc par
 	return link, true
 }
 
-// readsURLAt reports whether linkifyGuard reads a URL from value[start:], text written outside a
-// link, read to its line's end: at the text's start, whose character before the writer does not
-// judge, or after a character the guard is asked at (linkifyTriggers) that is whitespace or ASCII
-// punctuation, but `[`, which opens a link label, where the guard reads nothing. Where textURL
-// cannot decide, goldmark's parser reads no URL with a scheme in another case than lowercase, and
-// a www URL there is left as main wrote it.
-func readsURLAt(value string, start int) bool {
-	var previous rune = '\n'
-	if start > 0 {
-		previous = rune(value[start-1])
-		if c := value[start-1]; !(util.IsSpace(c) || isASCIIPunctuation(c)) || strings.IndexByte(`&#;\[`, c) >= 0 {
-			return false
-		}
-	}
-	rest := []byte(value[start:])
-	if end := bytes.IndexByte(rest, '\n'); end >= 0 {
-		rest = rest[:end]
-	}
-	if !literalURLPrefix(rest) {
-		return false
-	}
-	if literalURLFollows(previous, rest[3] == '.') {
-		if length, _ := literalURL(rest, &literalDomains{from: -1, end: -1}); length > 0 {
-			return true
-		}
-	}
-	length, _, _ := textURL(rest)
-	return length > 0
+// plainPunctuation reports whether c is ASCII punctuation no inline parser of the readers reads
+// (elementInlineCounter's triggers, `&` and `\`, which open references and escapes, and `|`), which
+// text can hold before a URL.
+func plainPunctuation(c byte) bool {
+	return isASCIIPunctuation(c) && strings.IndexByte("*_~(`[]!<&\\|", c) < 0
 }
 
 // literalURLFollows reports whether the tokenizer begins a URL after previous, the character before
@@ -246,84 +214,6 @@ func literalURLFollows(previous rune, www bool) bool {
 	return strings.ContainsRune(" \t\n\r(*_[]~", previous)
 }
 
-// textURL is the length of the URL mdast-util-gfm-autolink-literal's transform reads from the text
-// opening with rest, and whether it is a www URL; or 0 where it reads none. The browser editor's
-// parser runs that transform over the text its tokenizer left, so it links a URL the tokenizer
-// refused: a host opening with `-` or `.`, a www URL after a character other than whitespace, `(`,
-// `*`, `_`, `[`, `]` or `~`, and `www.` ending a paragraph. The transform reads a URL after
-// whitespace, punctuation or the start of a text, which every place the guard is asked satisfies.
-//
-// It reads decoded text, where escapes and character references are their characters and any
-// other markup has ended the text, and the guard reads markdown: where the URL's markdown holds a
-// backslash, `&`, `*`, `~`, a backtick, `<`, `[`, `]`, `!` or an underscore beside punctuation or
-// whitespace, which may be markup, it reports that it cannot decide (decided false).
-func textURL(rest []byte) (length int, www, decided bool) {
-	// (https?:\/\/|www(?=\.))([-.\w]+)([^ \t\r\n]*), in any case.
-	var protocol int
-	switch {
-	case len(rest) >= 8 && bytes.EqualFold(rest[:8], []byte("https://")):
-		protocol = 8
-	case len(rest) >= 7 && bytes.EqualFold(rest[:7], []byte("http://")):
-		protocol = 7
-	case len(rest) >= 4 && bytes.EqualFold(rest[:4], []byte("www.")):
-	default:
-		return 0, false, true
-	}
-	www = protocol == 0
-	domainEnd := protocol
-	for domainEnd < len(rest) && (isASCIIAlphaNumeric(rest[domainEnd]) || strings.IndexByte("-._", rest[domainEnd]) >= 0) {
-		domainEnd++
-	}
-	if domainEnd == protocol || www && domainEnd == len("www") || !textURLDomain(string(rest[protocol:domainEnd])) {
-		return 0, false, true
-	}
-	end := domainEnd
-	for end < len(rest) && strings.IndexByte(" \t\r\n", rest[end]) < 0 {
-		end++
-	}
-	for index := protocol; index < end; index++ {
-		c := rest[index]
-		if strings.IndexByte("\\&*~`<[]!", c) >= 0 ||
-			c == '_' && (index == 0 || index+1 == end || !isASCIIAlphaNumeric(rest[index-1]) || !isASCIIAlphaNumeric(rest[index+1])) {
-			return 0, false, false
-		}
-	}
-	// splitUrl: trailing `!"&'),.:;<>?]}` leave the URL, but for each `)` closing a `(` before it.
-	url := end
-	for url > protocol && strings.IndexByte(`!"&'),.:;<>?]}`, rest[url-1]) >= 0 {
-		url--
-	}
-	opened, closed := bytes.Count(rest[:url], []byte("(")), bytes.Count(rest[:url], []byte(")"))
-	for trail := url; opened > closed; closed++ {
-		next := bytes.IndexByte(rest[trail:end], ')')
-		if next < 0 {
-			break
-		}
-		url, trail = trail+next+1, trail+next+1
-	}
-	if url == protocol {
-		return 0, false, true
-	}
-	return url, www, true
-}
-
-// textURLDomain is the transform's isCorrectDomain: at least two dot-separated parts, and neither
-// of the last two, where not empty, holding an underscore or no letter or digit.
-func textURLDomain(domain string) bool {
-	parts := strings.Split(domain, ".")
-	if len(parts) < 2 {
-		return false
-	}
-	for _, part := range parts[len(parts)-2:] {
-		if part != "" && (strings.Contains(part, "_") || strings.IndexFunc(part, func(char rune) bool {
-			return char < utf8.RuneSelf && isASCIIAlphaNumeric(byte(char))
-		}) < 0) {
-			return false
-		}
-	}
-	return true
-}
-
 // literalURLPrefix reports whether text opens as a www or http(s) autolink literal does, in any
 // case: `www.`, or a protocol of letters ending in a colon.
 func literalURLPrefix(text []byte) bool {
@@ -334,37 +224,38 @@ func literalURLPrefix(text []byte) bool {
 
 // literalURL is the length in bytes of the www or http(s) autolink literal at the start of text, as
 // micromark-extension-gfm-autolink-literal's tokenizer reads one, and whether it is a www literal,
-// whose href takes an `http://` before it; or 0 where that tokenizer reads none. text ends where its
-// line does. A protocol is `http` or `https` in any case followed by `://` and a character neither
-// whitespace, a control character nor punctuation; then come the domain and the path.
-func literalURL(text []byte, domains *literalDomains) (int, bool) {
+// whose href takes an `http://` before it; or 0 where that tokenizer reads none, reporting whether
+// it refused the domain rather than what comes before it. text ends where its line does. A protocol
+// is `http` or `https` in any case followed by `://` and a character neither whitespace, a control
+// character nor punctuation; then come the domain and the path.
+func literalURL(text []byte, domains *literalDomains) (length int, www, domainRefused bool) {
 	if !literalURLPrefix(text) {
-		return 0, false
+		return 0, false, false
 	}
-	www := text[3] == '.'
+	www = text[3] == '.'
 	at := 0
 	if !www {
 		at = bytes.IndexByte(text, ':') + 1
 		if !bytes.HasPrefix(text[at:], []byte("//")) {
-			return 0, false
+			return 0, false, false
 		}
 		at += 2
 		if at == len(text) {
-			return 0, false
+			return 0, false, false
 		}
 		if char, _ := utf8.DecodeRune(text[at:]); char < ' ' || char == 0x7f || literalEnd(char) || literalPunctuation(char) {
-			return 0, false
+			return 0, false, false
 		}
 	} else if len(text) == len("www.") {
 		// The paragraph ends after the `www.`; a line ending would be something after it.
-		return 0, false
+		return 0, false, false
 	}
 	trail := literalTrail{text: text}
 	end, ok := domains.read(text, at, &trail)
 	if !ok {
-		return 0, false
+		return 0, false, true
 	}
-	return literalPath(text, end, &trail), www
+	return literalPath(text, end, &trail), www, false
 }
 
 // literalDomains is the record of the last domain read on a line (tokenizeDomain), for every later

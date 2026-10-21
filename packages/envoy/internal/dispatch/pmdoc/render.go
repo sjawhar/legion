@@ -695,8 +695,11 @@ func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 
 // isBareAutolink reports whether a link whose text is its href can be written as that bare text for
 // linkify to link again. A backtick in it would be written escaped, and linkify reads the escape's
-// backslash into the URL, so such a link is written as an autolink (isAngleURLLink). One ending in
-// punctuation linkify leaves out of a URL before an end (literalTrail) is never read back whole.
+// backslash into the URL, so such a link is written as an autolink (isAngleURLLink). The tokenizer
+// must read it whole (literalLength): one ending in punctuation the tokenizer leaves out of a URL
+// before an end (literalTrail) is never read back whole. One the tokenizer refuses outright, such as
+// a host opening with `-`, goldmark's parser reads (linkifyGuard), and it is held to goldmark's
+// rule.
 func isBareAutolink(value string) bool {
 	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
@@ -704,8 +707,20 @@ func isBareAutolink(value string) bool {
 	if strings.ContainsAny(value, " \t\n()<>`") {
 		return false
 	}
-	last := rune(value[len(value)-1])
-	return !literalTrailPunctuation(last) && last != ']'
+	if length := literalLength(value); length != 0 {
+		return length == len(value)
+	}
+	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
+}
+
+// literalLength is the length of the URL the browser editor's tokenizer reads from value, or 0. A
+// bare URL it reads is written as its bytes are: the tokenizer reads a URL's escapes and
+// references as written. goldmark's parser, which reads one the tokenizer refuses, keeps them as
+// written too, but the editor reads such a URL from decoded text, so its text is escaped as other
+// text is.
+func literalLength(value string) int {
+	length, _, _ := literalURL([]byte(value), &literalDomains{from: -1, end: -1})
+	return length
 }
 
 // isAngleURLLink reports whether node is a link whose text is its href, holding a backtick, which

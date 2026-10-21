@@ -271,3 +271,64 @@ func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 		}
 	}
 }
+
+// The browser editor's parser links a URL in decoded text, after an escape or a character
+// reference, which Go's parser, reading markdown, does not. Each row is markdown and whether Go and
+// the engine read it alike, so a change to either reading shows here: the divergences that remain
+// (a URL after a letter and `;`, `#` or `&`, after an escaped character, at a line opening with a
+// quote, a lowercase scheme written `http\:`, and a URL inside a www URL the transform reads) are
+// recorded as differing, and the writer keeps a plain-text `www.` and an uppercase scheme
+// unescaped, so they read as links in both, where an escape would leave Go reading text and the
+// engine a link.
+func TestURLReadingsBesideEscapesAgreeWhereRecorded(t *testing.T) {
+	tests := []struct {
+		markdown string
+		agree    bool
+	}{
+		{"see www\\.x.test b\n", false},
+		{"see HTTP\\://x.test b\n", false},
+		{"see http\\://x.test b\n", false},
+		{"x;https://x.test b\n", false},
+		{"x#https://x.test b\n", false},
+		{"x&https://x.test b\n", false},
+		{"\\*https://x.test b\n", false},
+		{"\\(www.x.test b\n", false},
+		{"\"www.a.test/?u=https://b.test\"\n", false},
+		{"\"https://x.test\" b\n", false},
+		{"see \"https://x.test\" and 'https://y.test'.\n", true},
+		{"see www.x.test b\n", true},
+		{"see HTTP://x.test b\n", true},
+	}
+	plain := func(text string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}}}
+	}
+	written := map[string]string{}
+	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
+		markdown, err := Render(plain(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		written[text] = markdown
+	}
+	markdowns := make([]string, 0, len(tests)+len(written))
+	for _, test := range tests {
+		markdowns = append(markdowns, test.markdown)
+	}
+	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
+		markdowns = append(markdowns, written[text])
+	}
+	readings := engineReadings(t, markdowns)
+	for index, markdown := range markdowns {
+		agree := true
+		if index < len(tests) {
+			agree = tests[index].agree
+		}
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q) = %v", markdown, err)
+		}
+		if got := readings[index] != nil && doc.Equal(readings[index]); got != agree {
+			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: %v", markdown, inlineSummary(doc.Children[0]), inlineSummary(readings[index].Children[0]), agree)
+		}
+	}
+}

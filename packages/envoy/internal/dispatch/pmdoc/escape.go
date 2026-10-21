@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
@@ -33,8 +34,8 @@ type escapeContext struct {
 	textLineStart int
 	// tableCell reports whether pipes are cell syntax here.
 	tableCell bool
-	// urlSchemes reports whether a URL's opening would autolink: outside a link, and not in a bare
-	// URL, which must stay as written for the parser to linkify it again.
+	// urlSchemes reports whether a URL scheme's colon would autolink: outside a link, and not in
+	// a bare URL, which must stay as written for the parser to linkify it again.
 	urlSchemes bool
 	// label is the verdict on the brackets of the link label the text belongs to.
 	label labelBrackets
@@ -46,6 +47,10 @@ type escapeContext struct {
 	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
 	// the run they are in does not read back with them as written (inlineWithEscapes).
 	delimiters delimiterEscapes
+	// afterBareURL reports whether the text is written right after a bare URL, which linkify would
+	// continue into its first character, because the run does not read back with that character
+	// as written (inlineWithEscapes).
+	afterBareURL bool
 	// heading reports whether the text is a heading's.
 	heading bool
 	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
@@ -62,9 +67,18 @@ type escapeContext struct {
 	flankFirst, flankLast bool
 }
 
+// endsBareURL reports whether the character is ASCII punctuation opening text written right after
+// a bare URL, which linkify would continue the URL into unless a backslash stops it.
+func endsBareURL(offset int, char rune, context escapeContext) bool {
+	return offset == 0 && context.afterBareURL && char < utf8.RuneSelf && isASCIIPunctuation(byte(char))
+}
+
 // needsInlineEscape decides one character from the text alone.
 func needsInlineEscape(value string, offset int, char rune, context escapeContext) bool {
 	textLineStart := context.textLineStart
+	if endsBareURL(offset, char, context) {
+		return true
+	}
 	switch char {
 	case '\\':
 		// Before whitespace written as a reference, a backslash would escape its `&`; before a
@@ -119,9 +133,7 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 			offset+1 < len(value) && value[offset+1] == '\n' ||
 			offset == 0 && context.opener != 0 ||
 			offset+1 == len(value) && context.closer != 0
-	case '.':
-		return orderedListMarkerPunctuation(value, offset, textLineStart) || context.urlSchemes && wwwPrefixDot(value, offset)
-	case ')':
+	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, textLineStart)
 	default:
 		return false
@@ -145,8 +157,13 @@ func escaped(char rune) string {
 
 // textEscape is how the text writer spells an escaped character: a tilde as its numeric
 // reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
-// a backslash escapes it, and anything else as escaped spells it.
-func textEscape(char rune) string {
+// a backslash escapes it, and anything else as escaped spells it - except the character that ends
+// a bare URL (endsBareURL), which is always a backslash, since linkify continues a URL through the
+// `&` that opens either reference.
+func textEscape(char rune, endsBareURL bool) string {
+	if endsBareURL {
+		return "\\" + string(char)
+	}
 	if char == '~' {
 		return numericEntity(char)
 	}
@@ -746,30 +763,8 @@ func entityReference(value string, offset int) bool {
 	return end < len(value) && value[end] == ';'
 }
 
-// urlSchemeColon reports whether the colon at offset ends a URL's scheme, which linkify would read
-// a URL from: after `http` or `https`, and after either in another case where linkify reads a URL
-// from it (readsURLAt), since it reads the scheme in any case.
 func urlSchemeColon(value string, offset int) bool {
-	before := value[:offset]
-	if strings.HasSuffix(before, "http") || strings.HasSuffix(before, "https") {
-		return true
-	}
-	for _, scheme := range []string{"https", "http"} {
-		if hasSuffixFold(before, scheme) {
-			return readsURLAt(value, offset-len(scheme))
-		}
-	}
-	return false
-}
-
-// wwwPrefixDot reports whether the dot at offset ends a `www`, in any case, that linkify would read
-// a URL from (readsURLAt). A backslash before the dot keeps it text.
-func wwwPrefixDot(value string, offset int) bool {
-	return offset >= len("www") && hasSuffixFold(value[:offset], "www") && readsURLAt(value, offset-len("www"))
-}
-
-func hasSuffixFold(value, suffix string) bool {
-	return len(value) >= len(suffix) && strings.EqualFold(value[len(value)-len(suffix):], suffix)
+	return strings.HasSuffix(value[:offset], "http") || strings.HasSuffix(value[:offset], "https")
 }
 
 func isASCIIAlphaNumeric(value byte) bool {

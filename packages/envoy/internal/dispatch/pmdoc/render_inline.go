@@ -81,7 +81,8 @@ type lineCandidate struct {
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
 // across a hard break, around a reference or inside a link label. A bare URL's text, escapes
 // included, can read back as another URL, and linkify continues one into the text written right
-// after it unless that text opens with trailing punctuation and then an end. A mark's
+// after it unless that text opens with trailing punctuation and then an end, or, for a URL the
+// tokenizer refuses and goldmark's parser reads, an escape. A mark's
 // delimiter run beside punctuation inside it and a letter outside it opens or closes nothing
 // (`**Which here?**Careful.`). A run whose text holds any of these is read back after it is
 // written, and when it does not come back as written it is written again in each spelling
@@ -148,20 +149,24 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 }
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
-// text it escapes, whether it writes each bare URL as an autolink (`<href>`, whose text both parsers
-// read as written and whose `>` ends it), whether a mark the next text still carries stays open
-// around that text's other marks (keepingOpen), and whether a letter beside a delimiter run that
-// punctuation stands inside is a character reference (flanking).
+// text it escapes, whether it escapes the character after each bare URL goldmark's parser reads
+// (endsBareURL), whether it writes each bare URL the tokenizer reads (literalLength) as an autolink
+// (`<href>`, whose text both parsers read as written and whose `>` ends it), whether a mark the
+// next text still carries stays open around that text's other marks (keepingOpen), and whether a
+// letter beside a delimiter run that punctuation stands inside is a character reference
+// (flanking).
 type runSpelling struct {
-	escapes   delimiterEscapes
-	angleURLs bool
-	keepOpen  bool
-	flanking  bool
+	escapes      delimiterEscapes
+	afterBareURL bool
+	angleURLs    bool
+	keepOpen     bool
+	flanking     bool
 }
 
 // respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
 // in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
-// then each again with every bare URL written as an autolink.
+// then each again with the character after a bare URL escaped, then each with every bare URL the
+// tokenizer reads written as an autolink.
 func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 	escapes := []delimiterEscapes{delimitersAsRuled}
 	if held != delimitersAsRuled {
@@ -170,12 +175,12 @@ func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 		}
 	}
 	var spellings []runSpelling
-	for _, angleURLs := range []bool{false, true} {
-		if angleURLs && !bareURL {
+	for _, url := range []runSpelling{{}, {afterBareURL: true}, {angleURLs: true}} {
+		if url != (runSpelling{}) && !bareURL {
 			continue
 		}
 		for _, delimiters := range escapes {
-			spelling := runSpelling{escapes: delimiters, angleURLs: angleURLs, keepOpen: keepOpen}
+			spelling := runSpelling{escapes: delimiters, afterBareURL: url.afterBareURL, angleURLs: url.angleURLs, keepOpen: keepOpen}
 			if spelling != (runSpelling{}) {
 				spellings = append(spellings, spelling)
 			}
@@ -214,6 +219,18 @@ func writesBareURL(nodes []*Node, escapePipes bool) bool {
 		}
 	}
 	return false
+}
+
+// followsBareURL reports whether nodes[index] is text outside any link written right after a bare
+// URL (isBareURLLink) that goldmark's parser reads, since the tokenizer refuses it
+// (literalLength): goldmark ends a URL at a backslash, where the tokenizer reads one into it.
+func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
+	if index == 0 || nodes[index].Type != "text" || nodeHasMark(nodes[index], "link") {
+		return false
+	}
+	previous := nodes[index-1]
+	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes) &&
+		literalLength(previous.Text) == 0
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes by
@@ -348,15 +365,15 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			}
 			active = next
 			marks := visibleMarks(n.Marks)
-			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) {
+			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 {
 				// An autolink's text is literal to both parsers, so it takes no escape.
 				r.writeSyntax("<" + n.Text + ">")
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
 			}
-			if isBareURLLink(n, marks, escapePipes) {
-				// Linkify reads a bare URL's bytes as they are written, a backslash among them, so
-				// its text takes no escape either.
+			if isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 {
+				// The tokenizer reads a bare URL's bytes as they are written, a backslash among
+				// them, so its text takes no escape either.
 				r.writeSyntax(n.Text)
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
@@ -375,6 +392,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label:          label,
 				followed:       index+1 < len(nodes) || len(next) > 0,
 				delimiters:     spelling.escapes,
+				afterBareURL:   spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
 				heading:        context.heading,
 				marked:         len(next) > 0,
 				opener:         adjacentDelimiter(next[common:]),
@@ -642,7 +660,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			segmentStart = byteOffset + width
 		} else if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(textEscape(char))
+			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context)))
 			segmentStart = byteOffset + width
 		}
 		lineEnd := char == '\n'
