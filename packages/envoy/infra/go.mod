@@ -1,6 +1,6 @@
 module github.com/sjawhar/envoy/infra
 
-go 1.26.8
+go 1.27.1
 
 require (
 	cloud.google.com/go/secretmanager v1.22.0

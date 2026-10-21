@@ -302,7 +302,7 @@ func TestLiveGoConsumersCanUseTheSDK(t *testing.T) {
 	dir := t.TempDir()
 	for file, content := range map[string]string{
 		"Pulumi.yaml": "name: sdk-consumer\nruntime: go\n",
-		"go.mod":      "module example.com/sdkconsumer\n\ngo 1.26.8\n",
+		"go.mod":      "module example.com/sdkconsumer\n\ngo 1.27.1\n",
 		"main.go": `package main
 
 import (

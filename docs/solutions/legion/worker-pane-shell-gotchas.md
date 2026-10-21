@@ -577,12 +577,12 @@ first push" is satisfied by recording why it cannot.
 A worker pane's PATH is the daemon's allow-listed environment plus `mise env` for the tools the *daemon* needs
 (`bun`, `jj`, `gh`, `tmux`, `jq`). A plan whose verify steps say `actionlint <workflow>`, `yq '.on | keys'
 <workflow>`, or `go test ./...` meets `command not found` for all three — including `go`, although
-`mise ls` shows Go installed (`go 1.26.8` on this box); it is installed, not activated. The deployment
+`mise ls` shows Go installed; it is installed, not activated. The deployment
 instructions forbid `bun add`/`mise install` against the live profile, so the answer is never to install anything:
 
 ```bash
-mise x go@1.26.8 -- go test ./internal/webhook/ -count=1              # the pinned Go, activated for one command
-mise x go@1.26.8 -- go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 <workflow>   # module cache only
+mise x go@1.27.1 -- go test ./internal/webhook/ -count=1              # the pinned Go, activated for one command
+mise x go@1.27.1 -- go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 <workflow>   # module cache only
 js-yaml <workflow> | jq -c '.on | keys_unsorted, .on.merge_group.types, (.jobs | to_entries | map({job: .key, if: .value["if"]}))'
 ```
 

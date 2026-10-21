@@ -63,8 +63,8 @@ ARG GH_TOOL=gh@2.98.0
 # (/opt/go), checked against GO_SHA256: the SHA-256 https://go.dev/dl/ publishes for
 # go${GO_VERSION}.linux-amd64.tar.gz (its ?mode=json&include=all listing), which a version bump reads
 # from there again.
-ARG GO_VERSION=1.26.8
-ARG GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+ARG GO_VERSION=1.27.1
+ARG GO_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 # gopls, which the go stage builds static from golang.org/x/tools/gopls at this tag (gopls/v<version>).
 ARG GOPLS_VERSION=0.23.0
 # The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
@@ -337,7 +337,7 @@ RUN set -eu; \
 # ships, so their sections name the Cargo.lock that lists those crates; gopls, which the go stage
 # compiles, links Go modules the same way, and its section names the go.mod that lists them rather
 # than a go-licenses report like `legion`'s, because go-licenses (go-third-party-notices.sh's
-# v2.0.1, under Go 1.26.8) finds no license for one of them, github.com/segmentio/asm, and would fail
+# v2.0.1, under Go 1.27.1) finds no license for one of them, github.com/segmentio/asm, and would fail
 # the build. kubectl's section names the go.mod of the Kubernetes release its binary is built from,
 # the same way. The k8s.io modules that go.mod replaces with ./staging/src, kubectl itself among them,
 # are that release's own source, each with its license file under staging/src/k8s.io at the release's
