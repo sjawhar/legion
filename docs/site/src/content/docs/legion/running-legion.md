@@ -518,7 +518,9 @@ Closing the terminal leaves the project without one, and the daemon logs
   (`currentVersion`, `approvedVersion`), the `controllerLocator`, `pendingStatusWrites`,
   `heldOutboxRows` ([An issue's stop or start waits behind its own launch](/legion/legion/troubleshooting/#an-issues-stop-or-start-waits-behind-its-own-launch)),
   `strandedClaims` ([A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)),
-  and `agentSecretsLogin` when the broker is configured:
+  `settings` (the daemon's resolved `legion.yaml` — `max_fix_attempts`, `worker_boot_timeout_seconds`
+  and the rest as the daemon runs them — with every credential, credential source and credential
+  file path left out), and `agentSecretsLogin` when the broker is configured:
 
   ```sh
   legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate}'

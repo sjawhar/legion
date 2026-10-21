@@ -25,13 +25,17 @@ as that App. Against a daemon with no GitHub App, `legion controller start` says
 acts as nobody. The controller reads Dispatch and the daemon's state, and applies its controller
 capability, through the `legion` tool alone: `op: "read_state"` returns the daemon's whole state
 (`issues.<KEY>.phase`, `issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `admission.cap`,
-`admission.active`, `admission.waiting`, `capabilities[]`, `daemon.project`), and `op: "set_status"`
-with `issue` and `status` (`todo`, `backlog` or `icebox`) moves an issue. It runs no `legion` from
-bash. Any pull-request comment or review the controller posts ends with
-`<!-- legion: {"session":"<session-id>","phase":"controller"} -->`, the footer every Legion role
-appends: the daemon reads the session to tell a controller's review from the reviewer's verdict. A
-review the controller submits without that footer still decides nothing for Legion's own workflow
-(the daemon sets it aside), but the footer is what makes that legible in the daemon's log.
+`admission.active`, `admission.waiting`, `capabilities[]`, `daemon.project`, and `settings`, the
+resolved `legion.yaml` with every credential, its sources and its files left out:
+`settings.max_fix_attempts`, `settings.worker_boot_timeout_seconds`, `settings.admission_cap`,
+`settings.linger_hours`, `settings.runtime.kubernetes.resources`, …), and `op: "set_status"` with
+`issue` and `status` (`todo`, `backlog` or `icebox`) moves an issue. It runs no `legion` from bash.
+When an incident asks how the daemon is tuned, read `settings`; nobody with cluster access need read
+the ConfigMap in `legion-system` (LEGION-791). Any pull-request comment or review the controller
+posts ends with `<!-- legion: {"session":"<session-id>","phase":"controller"} -->`, the footer every
+Legion role appends: the daemon reads the session to tell a controller's review from the reviewer's
+verdict. A review the controller submits without that footer still decides nothing for Legion's own
+workflow (the daemon sets it aside), but the footer is what makes that legible in the daemon's log.
 
 ## Backlog stewardship
 
@@ -492,4 +496,3 @@ controller never opens a gate and there is no operator command for it; a project
 want the gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the
 authoritative owning architect role and route the verified context with `envoy_publish`. Do not
 route raw event traffic or invent a role token from a partial issue reference.
-

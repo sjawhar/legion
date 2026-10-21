@@ -3131,6 +3131,11 @@ itself, as an Agent Sandbox pod it supervises ([Daemon-launched controller](#dae
 `controller: daemon` needs `runtime: kubernetes`; the loader refuses it under tmux (`controller:
 daemon needs runtime: kubernetes, …`) and refuses any value but the two.
 
+Under either mode a controller reads its daemon's resolved settings — `max_fix_attempts`,
+`worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential,
+credential source and credential file path left out — from `read_state`'s `settings` (contract 30,
+LEGION-791), never from the ConfigMap in `legion-system`, which `legion-worker` may not read.
+
 ### Controller liveness
 
 Under either `controller` mode the daemon checks the project's controller every minute: it reads
