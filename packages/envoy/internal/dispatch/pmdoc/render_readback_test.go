@@ -219,3 +219,184 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		})
 	}
 }
+
+// An agent edits a table row by reading its markdown and writing it back, so the markdown a write
+// takes must come back from the next read as it went in. Each cell here holds a bare URL next to
+// punctuation, the first from a production row, read in a table cell and in a paragraph: Go must
+// read it as the browser editor's engine does - GFM leaves trailing punctuation before an end out
+// of a URL, so only the URL is linked, a URL after a quote is linked as one after a space, and a
+// scheme or `www` reads in any case - and every write must render it as written.
+func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
+	type form struct{ name, before, after string }
+	forms := []form{{"paragraph", "", "\n"}, {"table cell", "| a | b |\n| --- | --- |\n| x | ", " |\n"}}
+	tests := []struct{ name, cell string }{
+		{"bare URL before a parenthesis and a quote", `"HTTP 401: Bad credentials (https://api.github.com/graphql)" while`},
+		{"bare URLs in quotes and before a bracket", `see "https://x.test/a"; and 'https://x.test/b'! or https://x.test/c]`},
+		{"bare URLs with an uppercase scheme and www", `see HTTPS://X.TEST/Y and Www.x.test/z; or (www.a.test) and *www.b.test*`},
+	}
+	var markdowns []string
+	for _, test := range tests {
+		for _, f := range forms {
+			markdowns = append(markdowns, f.before+test.cell+f.after)
+		}
+	}
+	readings := engineReadings(t, markdowns)
+	index := 0
+	for _, test := range tests {
+		for _, f := range forms {
+			markdown, engine := markdowns[index], readings[index]
+			index++
+			t.Run(test.name+" in a "+f.name, func(t *testing.T) {
+				doc, err := Parse(markdown)
+				if err != nil {
+					t.Fatalf("Parse(%q) = %v", markdown, err)
+				}
+				if engine == nil || !doc.Equal(engine) {
+					got, _ := doc.JSON()
+					reading, _ := engine.JSON()
+					t.Errorf("Go reads %q as %s, the engine as %s", markdown, got, reading)
+				}
+				for write := 1; write <= 3; write++ {
+					rendered, err := Render(doc)
+					if err != nil {
+						t.Fatalf("Render, write %d: %v", write, err)
+					}
+					if rendered != markdown {
+						t.Fatalf("write %d renders %q, want %q", write, rendered, markdown)
+					}
+					if doc, err = Parse(rendered); err != nil {
+						t.Fatalf("Parse(%q) = %v", rendered, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// A www link is written as its bare text only where the browser editor's tokenizer and Go's guard
+// both read it from that text: right after a line's head, a space, a tab, `(`, `*`, `_`, `[`, `]`
+// or `~`, and only when its text opens with no email address. Anywhere else - after a quote, a code
+// span, inline HTML or a link - it is written as an explicit link, which both parsers read back as
+// the tree, where the bare text would read in the editor as a longer link or an email.
+func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
+	link := func(text string) *Node {
+		return &Node{Type: "text", Text: text, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://" + text, "title": nil}}}}
+	}
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	code := func(value string) *Node { return &Node{Type: "text", Text: value, Marks: []Mark{{Type: "inlineCode"}}} }
+	html := func(value string) *Node { return &Node{Type: "html", Attrs: Attrs{"value": value}} }
+	tests := []struct {
+		name   string
+		inline []*Node
+		want   string
+	}{
+		{"after a quote, and after a space", []*Node{text(`see "`), link("www.a.test"), text(`" and `), link("Www.b.test"), text(".")},
+			"see \"[www.a.test](http://www.a.test)\" and Www.b.test.\n"},
+		{"text opening with an email", []*Node{text("see "), link("www.x@y.com"), text(" b")},
+			"see [www.x@y.com](http://www.x@y.com) b\n"},
+		{"after inline HTML, before a letter outside ASCII", []*Node{html("<b>"), link("www.a.test"), text("é")},
+			"<b>[www.a.test](http://www.a.test)é\n"},
+		{"after a code span, before a backslash", []*Node{code("c"), link("www.a.test"), text(`\b`)},
+			"`c`[www.a.test](http://www.a.test)\\b\n"},
+		{"after a link", []*Node{link("www.a.test"), link("www.b.test"), text("|x")},
+			"[www.a.test](http://www.a.test)[www.b.test](http://www.b.test)|x\n"},
+	}
+	rendered := make([]string, len(tests))
+	docs := make([]*Node, len(tests))
+	for index, test := range tests {
+		docs[index] = &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: test.inline}}}
+		markdown, err := Render(docs[index])
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		rendered[index] = markdown
+	}
+	readings := engineReadings(t, rendered)
+	for index, test := range tests {
+		if rendered[index] != test.want {
+			t.Errorf("%s: Render = %q, want %q", test.name, rendered[index], test.want)
+		}
+		back, err := Parse(rendered[index])
+		if err != nil || !back.Equal(StripAnchorMarks(docs[index])) || readings[index] == nil || !readings[index].Equal(back) {
+			got, _ := back.JSON()
+			engine, _ := readings[index].JSON()
+			t.Errorf("%s: %q reads back in Go as %s (%v), in the engine as %s", test.name, rendered[index], got, err, engine)
+		}
+	}
+}
+
+// The first spelling of a run, the one inlineWithEscapes falls back to when no respelling reads
+// back, closes a code span before a www link it writes as an explicit link: rolling back the bare
+// writing of the link restores the open code fence its marks closed.
+func TestTheFirstSpellingClosesACodeSpanBeforeAWWWLinkAfterIt(t *testing.T) {
+	nodes := []*Node{
+		{Type: "text", Text: "c", Marks: []Mark{{Type: "inlineCode"}}},
+		{Type: "text", Text: "www.a.test", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://www.a.test", "title": nil}}}},
+	}
+	r := &renderer{}
+	r.writeInlineRun(nodes, "", inlineContext{startsLine: true}, runSpelling{})
+	if got, want := r.b.String(), "`c`[www.a.test](http://www.a.test)"; got != want {
+		t.Fatalf("writeInlineRun = %q, want %q", got, want)
+	}
+}
+
+// The browser editor's parser links a URL in decoded text, after an escape or a character
+// reference, which Go's parser, reading markdown, does not. Each row is markdown and whether Go and
+// the engine read it alike, so a change to either reading shows here: the divergences that remain
+// (a URL after a letter and `;`, `#` or `&`, after an escaped character, at a line opening with a
+// quote, a lowercase scheme written `http\:`, and a URL inside a www URL the transform reads) are
+// recorded as differing, and the writer keeps a plain-text `www.` and an uppercase scheme
+// unescaped, so they read as links in both, where an escape would leave Go reading text and the
+// engine a link.
+func TestURLReadingsBesideEscapesAgreeWhereRecorded(t *testing.T) {
+	tests := []struct {
+		markdown string
+		agree    bool
+	}{
+		{"see www\\.x.test b\n", false},
+		{"see HTTP\\://x.test b\n", false},
+		{"see http\\://x.test b\n", false},
+		{"x;https://x.test b\n", false},
+		{"x#https://x.test b\n", false},
+		{"x&https://x.test b\n", false},
+		{"\\*https://x.test b\n", false},
+		{"\\(www.x.test b\n", false},
+		{"\"www.a.test/?u=https://b.test\"\n", false},
+		{"\"https://x.test\" b\n", false},
+		{"see \"https://x.test\" and 'https://y.test'.\n", true},
+		{"see www.x.test b\n", true},
+		{"see HTTP://x.test b\n", true},
+	}
+	plain := func(text string) *Node {
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}}}
+	}
+	written := map[string]string{}
+	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
+		markdown, err := Render(plain(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		written[text] = markdown
+	}
+	markdowns := make([]string, 0, len(tests)+len(written))
+	for _, test := range tests {
+		markdowns = append(markdowns, test.markdown)
+	}
+	for _, text := range []string{"see www.x.test b", "see HTTP://x.test b"} {
+		markdowns = append(markdowns, written[text])
+	}
+	readings := engineReadings(t, markdowns)
+	for index, markdown := range markdowns {
+		agree := true
+		if index < len(tests) {
+			agree = tests[index].agree
+		}
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q) = %v", markdown, err)
+		}
+		if got := readings[index] != nil && doc.Equal(readings[index]); got != agree {
+			t.Errorf("%q: Go reads %s, the engine %s; recorded as agreeing: %v", markdown, inlineSummary(doc.Children[0]), inlineSummary(readings[index].Children[0]), agree)
+		}
+	}
+}

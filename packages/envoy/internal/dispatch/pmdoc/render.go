@@ -694,23 +694,75 @@ func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 }
 
 // isBareAutolink reports whether a link whose text is its href can be written as that bare text for
-// linkify to link again. A backtick in it would be written escaped, which linkify stops at, so such
-// a link is written as an autolink (isAngleURLLink).
+// linkify to link again. A backtick in it would be written escaped, and linkify reads the escape's
+// backslash into the URL, so such a link is written as an autolink (isAngleURLLink). A URL the
+// tokenizer reads at all (literalLength), its scheme in any case, must be read whole: one ending in
+// punctuation the tokenizer leaves out of a URL before an end (literalTrail) is never read back
+// whole. One the tokenizer refuses outright, such as a host opening with `-`, goldmark's parser
+// reads (linkifyGuard), and it is held to goldmark's rule, which reads a lowercase scheme alone.
 func isBareAutolink(value string) bool {
-	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
+	if value == "" || strings.ContainsAny(value, " \t\n<>`") {
 		return false
 	}
-	if strings.ContainsAny(value, " \t\n()<>`") {
+	if length := literalLength(value); length != 0 {
+		return length == len(value) && !(len(value) >= len("www.") && strings.EqualFold(value[:len("www.")], "www."))
+	}
+	if strings.ContainsAny(value, "()") || !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
 	}
 	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
 }
 
+// isBareWWWLink reports whether node is a www link, its href `http://` and its text, that the
+// tokenizer reads whole from that text (literalLength), which is written as the bare text where the
+// character before it is one a www URL follows (renderer.wwwMayFollow) and its run reads back so
+// (inlineWithEscapes), and as an explicit link otherwise (runSpelling.angleURLs). Text whose run of
+// email characters from its start reaches an `@` is not one: the editor reads it as an email.
+func isBareWWWLink(node *Node, marks []Mark, escapePipes bool) bool {
+	for _, mark := range marks {
+		if mark.Type != "link" {
+			continue
+		}
+		href, _ := mark.Attrs["href"].(string)
+		title, _ := mark.Attrs["title"].(string)
+		value := node.Text
+		return title == "" && href == "http://"+value && len(value) > len("www.") && strings.EqualFold(value[:len("www.")], "www.") &&
+			!strings.ContainsAny(value, " \t\n<>`") && !(escapePipes && strings.Contains(value, "|")) && !opensEmail(value) &&
+			literalLength(value) == len(value)
+	}
+	return false
+}
+
+// opensEmail reports whether the run of email address characters (`+`, `-`, `.`, `_`, letters and
+// digits) value opens with reaches an `@`, where the editor's parser tries an email first.
+func opensEmail(value string) bool {
+	for index := range len(value) {
+		switch c := value[index]; {
+		case c == '@':
+			return true
+		case isASCIIAlphaNumeric(c) || c == '+' || c == '-' || c == '.' || c == '_':
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// literalLength is the length of the URL the browser editor's tokenizer reads from value, or 0. A
+// bare URL it reads is written as its bytes are: the tokenizer reads a URL's escapes and
+// references as written. goldmark's parser, which reads one the tokenizer refuses, keeps them as
+// written too, but the editor reads such a URL from decoded text, so its text is escaped as other
+// text is.
+func literalLength(value string) int {
+	length, _, _ := literalURL([]byte(value), &literalDomains{from: -1, end: -1})
+	return length
+}
+
 // isAngleURLLink reports whether node is a link whose text is its href, holding a backtick, which
 // is written `<href>`, as the browser editor writes it: both parsers read an autolink's text as
-// written, escapes and references included, where bare text would be escaped and linkify would stop
-// at the escape. One an autolink cannot hold (whitespace, `<`, `>`, a pipe in a table cell) is
-// written as an explicit link.
+// written, escapes and references included, where bare text would be escaped and linkify would read
+// the escape's backslash into the URL. One an autolink cannot hold (whitespace, `<`, `>`, a pipe in a
+// table cell) is written as an explicit link.
 func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	for _, mark := range marks {
 		if mark.Type != "link" {
@@ -720,7 +772,7 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 		title, _ := mark.Attrs["title"].(string)
 		value := node.Text
 		return href == value && title == "" && strings.Contains(value, "`") &&
-			(strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")) &&
+			len(value) > len("https://") && (strings.EqualFold(value[:len("http://")], "http://") || strings.EqualFold(value[:len("https://")], "https://")) &&
 			!strings.ContainsAny(value, " \t\n\r<>") && !(escapePipes && strings.Contains(value, "|"))
 	}
 	return false

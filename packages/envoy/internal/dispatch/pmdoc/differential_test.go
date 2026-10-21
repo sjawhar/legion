@@ -30,6 +30,9 @@ type diffDump struct {
 	Render    *string `json:"render"`
 	RenderErr string  `json:"render_err,omitempty"`
 	ReadsBack bool    `json:"reads_back"`
+	// FixedPoint is whether Render is the document's markdown byte for byte: reading the
+	// document and writing it back gives back what was read.
+	FixedPoint bool `json:"fixed_point"`
 	// EngineRender is the rendering of the engine's reading of the document, the tree a browser
 	// holds, and EngineReadsBack whether Parse reads it back as that tree.
 	EngineRender    *string `json:"engine_render"`
@@ -230,6 +233,7 @@ func TestDifferentialDump(t *testing.T) {
 		if tree != nil {
 			dump.Tree, _ = withoutBlockIDs(tree).JSON()
 			dump.Render, dump.RenderErr, dump.ReadsBack = diffRender(&dump, "render", tree)
+			dump.FixedPoint = dump.Render != nil && *dump.Render == source.MD
 		}
 		if engineTree := diffTree(read.MD); engineTree != nil {
 			dump.EngineRender, dump.EngineRenderErr, dump.EngineReadsBack = diffRender(&dump, "engine render", engineTree)
@@ -385,6 +389,14 @@ func TestDifferentialCompare(t *testing.T) {
 		case !base.correct && head.correct:
 			flag("fixed", sides)
 		}
+		// A fixed point base kept of a document it read otherwise than the editor is a misread kept
+		// stable; it is counted apart, and only one of a document base read as the editor gates.
+		switch lost := base.dump.FixedPoint && !head.dump.FixedPoint; {
+		case lost && base.ReadsAsEngine:
+			flag("lost fixed point", sides)
+		case lost:
+			flag("lost fixed point of a misread", sides)
+		}
 		if base.correct && differs(base.dump.Render, head.dump.Render) {
 			flag("churn", sides)
 		}
@@ -414,6 +426,7 @@ func TestDifferentialCompare(t *testing.T) {
 		{"engine-tree regressions (base renders the engine's tree correctly, head does not)", "engine-tree regression"},
 		{"engine-tree churn (base renders the engine's tree correctly, head's bytes differ)", "engine-tree churn"},
 		{"head panics (recovered or not)", "head panic"},
+		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
 	} {
 		fmt.Fprintf(&summary, "GATE %-86s %d\n", line.label, counts[line.key])
 	}
@@ -426,7 +439,7 @@ func TestDifferentialCompare(t *testing.T) {
 		fmt.Fprintf(&summary, "  %s: %d\n", key, counts[key])
 	}
 	fmt.Print(summary.String())
-	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic"} {
+	for _, gate := range []string{"regression", "misread", "churn", "engine-tree regression", "engine-tree churn", "head panic", "lost fixed point"} {
 		if counts[gate] > 0 {
 			t.Errorf("%d %s; see %s", counts[gate], gate, os.Getenv("PMDOC_DIFF_REPORT"))
 		}
