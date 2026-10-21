@@ -55,16 +55,26 @@ Not charged:
   read-only credential mounts — Secret volumes, `9p ro`, which a reader cannot write to at all.
 
 Free of the storage budget is not free: the three in-memory `emptyDir`s spend memory instead. A
-write to one of them is charged against the container's **memory** limit, so a reader who moves a
-cache onto `/home/legion/.config`, `/var/run/legion/private` or `/var/run/legion/state` trades the
-eviction for an OOM kill — the same silent death this note exists to prevent. Measured twice, in two
-role containers of this pod: a `dd bs=1M count=100` into `/var/run/legion/private` moved
-`/sys/fs/cgroup/memory.current` from 766,550,016 to 871,407,616 bytes — exactly the 104,857,600
-bytes written — with `free -k` reporting `shared` at 102,520 KiB, and a second role container of
-the same pod read 708,227,072 → 813,051,904 for the same write. Both readings are recorded on
-`sjawhar/legion#2088`. The per-role memory limits are `defaultResources` in
-`packages/daemon/internal/config/kubernetes.go`: 1Gi for the architect, planner and merger, 4Gi for
-the reviewer, 6Gi for the implementer and tester.
+`dd bs=1M count=100` into `/var/run/legion/private` moves `free -k`'s `shared` column from 132 to
+102,532 KiB — exactly the 100 MiB written — and releases it when the file is removed. Both figures
+were read in two role containers of this pod, this issue's implementer and its tester, and are
+recorded on `sjawhar/legion#2088`. So a write into one of those three directories is resident
+memory, and a reader who moves a cache onto
+`/home/legion/.config`, `/var/run/legion/private` or `/var/run/legion/state` trades the eviction
+for an OOM kill — the same silent death this note exists to prevent.
+
+What this pod cannot show is whose budget that memory spends. The sandbox is cgroup v1, and
+`ls /sys/fs/cgroup` is how a reader sees which layout their own container has: here it lists `cpu`,
+`cpuacct`, `cpuset`, `devices`, `job`, `memory` and `pids`, and the counter is
+`/sys/fs/cgroup/memory/memory.usage_in_bytes`. That counter is the sandbox's, not the container's:
+`memory.limit_in_bytes` reads 20,401,094,656 bytes, equal to `free -k`'s total of 19,922,944 KiB,
+and is neither the 6Gi the golden pod JSON gives the implementer and tester nor the 1Gi it gives
+the architect, planner and merger (`defaultResources`,
+`packages/daemon/internal/config/kubernetes.go`). The rule is Kubernetes' own, not verified from
+inside this sandbox, which can see no per-container counter: for a memory-backed `emptyDir`,
+"files you write count against the memory limit of the container that wrote them"
+(https://kubernetes.io/docs/concepts/storage/volumes/#emptydir). So treat the write as spending
+the role's own memory budget; on a 1Gi role that is a smaller budget than the disk it was avoiding.
 
 **`/tmp` is not the exception a reader expects.** A role container mounts no `/tmp`: the
 memory-backed `tmp` volume belongs to the `workspace-fetch` init container alone, as that
@@ -172,10 +182,10 @@ show does not.
   filesystem and the same figure. Verified twice, in two different role containers of this pod.
 
 The limit of all of it: a role container carries no ServiceAccount token and reaches no API server.
-The pod sets `automountServiceAccountToken: false` and names no ServiceAccount of its own
-(`packages/daemon/internal/runtime/sandbox/testdata/golden/root.json`; the live assertion is in
-`packages/daemon/internal/runtime/sandbox/live_operator_test.go`), `/var/run/secrets/kubernetes.io`
-does not exist, and `kubectl get --raw /api` answers `The connection to the server localhost:8080
-was refused`. So neither the kubelet's per-container accounting nor the eviction event itself can be
+The pod runs under the **operator's** ServiceAccount with `automountServiceAccountToken: false`, so
+no token is mounted: `packages/daemon/internal/runtime/sandbox/live_operator_test.go` asserts
+both and execs the pod to confirm the token file is absent. `/var/run/secrets/kubernetes.io` does
+not exist, and `kubectl get --raw /api` answers `The connection to the server localhost:8080 was
+refused`. So neither the kubelet's per-container accounting nor the eviction event itself can be
 read from inside a role container: measure from inside with `df` and `du`, and read the event from
 the cluster.
