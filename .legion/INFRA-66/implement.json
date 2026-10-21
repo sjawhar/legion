@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-66",
+  "completed": "2026-10-21T22:20:00Z",
+  "proof": [
+    {
+      "criterion": "Two envoy-dispatch processes against one database and one message bus: no durable bind error, and the standby takes the durable over when its holder dies.",
+      "surface": "Two real envoy-dispatch binaries on one Postgres 17 (pgvector, UTF8/ICU) and one nats-server 2.10 with JetStream, in this issue's pod; driven over HTTP, the processes' own logs and NATS's own ConsumerInfo.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=2 -timeout 30m ./cmd/dispatch",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 527.022s, both runs green. TestOneProcessBindsEachDeliveryDurableAndTheOtherStandsBy: exactly one process logged 'NATS consumer bound' for each of delivery-events and delivery-jobs with ConsumerInfo.PushBound true, the other logged the standby line and no ERROR, and after the holder was SIGKILLed the survivor bound both durables 1.9 s later.",
+      "headSha": "2c54d2f15430b96c4cb21a1b6ccd973d92a80cf8",
+      "negativeControl": "Killing the durable's holder is the row's own control: before the kill the standby is refused and binds nothing, and the assertion that it then binds within 10 s fails if the 2 s poll or the standby classification is removed. At the parent commit the loser logs 'dispatch delivery: bind NATS consumer' at ERROR instead, which the row refuses."
+    },
+    {
+      "criterion": "Each outbox message meets its per-lane guarantee: every events row reaches published_at once, and the unguarded role lane carries each event exactly once.",
+      "surface": "The same two processes; writes made through both processes' HTTP APIs, read back from Postgres and from a core-NATS subscriber on the role subject and from the JetStream stream.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 20m -run TestTheOutboxPublishesEachEventOnceAcrossBothProcesses ./cmd/dispatch",
+      "observed": "PASS: every claimable events row reached published_at, the role lane notifications.role.<lane> carried exactly one message per source_event_id over the eight comments written alternately through A and B, and each (dedupe key, topic) appeared once in the stream past the pre-write head.",
+      "headSha": "2c54d2f15430b96c4cb21a1b6ccd973d92a80cf8",
+      "negativeControl": "The role lane is the control surface by construction: it is core NATS with no nats.MsgId, so nothing dedupes it. Without the claim both processes' scans select the same rows and the per-event count is 2; the JetStream half would still pass, which is why the role lane is what the row asserts on."
+    },
+    {
+      "criterion": "Each background loop behaves as the plan's table says: a leased loop runs once overall and the other process skips.",
+      "surface": "The same two processes, with three leases made to collide on purpose (a transaction holding refs and write_suggestions, and the GitHub fake holding its first deliveries listing), counted from the processes' own logs.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 20m -run TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses ./cmd/dispatch",
+      "observed": "webhook-redelivery: A ran 1 skipped 0, B ran 0 skipped 1; reference-excerpts: A ran 1 skipped 0, B ran 0 skipped 1; suggestion-outcomes: A ran 1 skipped 0, B ran 0 skipped 1. document-compaction (24 h ticker), architecture-import and delivery-reconcile (first pass jittered over 5 minutes, each process drawing its own) are logged by name with that reason rather than asserted.",
+      "headSha": "2c54d2f15430b96c4cb21a1b6ccd973d92a80cf8",
+      "negativeControl": "Each row holds the loop's lease from a second caller first, so the skip is observed happening rather than inferred from absence; with duty.Exclusive removed neither log line exists and the row fails at its deadline with both processes running every pass."
+    },
+    {
+      "criterion": "A live stream open on one process receives an event committed on the other, without the reader reconnecting.",
+      "surface": "The same two processes: GET /api/v1/events held open on process A over one HTTP connection while an issue is created through process B's API.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 20m -run TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent ./cmd/dispatch",
+      "observed": "PASS: the frame carrying B's issue.created arrived on the connection A already had, with no reconnect and no since= replay.",
+      "headSha": "2c54d2f15430b96c4cb21a1b6ccd973d92a80cf8",
+      "negativeControl": "At the parent commit the live feed is this process's in-memory events.Broker, so B's event never reaches A's open stream and the row fails at its 30 s deadline."
+    },
+    {
+      "criterion": "The reader-facing half of the live stream, in a real browser: a live update reaches an open page, and the stream survives the event log being reset beneath it.",
+      "surface": "Dispatch's own browser suite in this pod: real Chromium, the real envoy-dispatch server built from this head, the harness Postgres, the suite's own truncation between scenarios.",
+      "command": "bash /legion/harness/e2e.sh e2e/inbox.e2e.ts e2e/attention.e2e.ts e2e/doc.e2e.ts e2e/agent-view.e2e.ts e2e/agents.e2e.ts --project=chromium --reporter=line",
+      "observed": "83 passed (6.2m) at head 18438f0b, and the same five specs green again in CI's own dispatch job at 2c54d2f1.",
+      "headSha": "18438f0b6367a1e2b5c9e8b2a0bbb0d2dd3dba77",
+      "negativeControl": "These five specs are exactly the ones CI had red at 4e8d2e6f (run 39535772120: an SSE reply refreshes a thread hydrated by the Inbox response; a reader scrolled up keeps their Conversation viewport when a new card arrives; named versions, the version picker, and the diff stay current across users; a reader scrolled back into a live session's transcript keeps their place; a session's untargeted reply lands in the open conversation), when the relay carried a cursor and nothing else and went silent once the suite's truncation restarted the ids below it."
+    },
+    {
+      "criterion": "A document open on one process does not see the other's writes as a live session, and the durable gate that makes that safe holds: no version, settlement or ask retraction from a stale room.",
+      "surface": "The same two processes, with a real document websocket client connected to process A's room and a replace applied through process B's HTTP API; plus two docs.Services on one database for the gate's own rows.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 20m -run TestADocumentWriteOnOneProcessClosesTheStaleRoomOnTheOther ./cmd/dispatch && go test -count=1 -timeout 1800s ./internal/dispatch/docs/",
+      "observed": "The editor's socket on A closed 50-82 ms after B's write, A logged 'closed a document room another process's write left behind', and A's GET /api/v1/artifacts/{id}/text then served the current markdown. The docs suite is green (ok 733.301s), including the nine stale-room rows: a settlement on a stale room refused and the reload versioning the whole text, an ask whose block only the other room holds not retracted, an upload and a conditional edit refused, and the live write taking the cold path instead of answering 503.",
+      "headSha": "2c54d2f15430b96c4cb21a1b6ccd973d92a80cf8",
+      "negativeControl": "Each gate row drives the same write with the other process's room current and asserts it succeeds, so the refusal is shown to be the staleness and not the write; and TestTheUpdateObserverNeverRendersAWriteHalfWay, run five times, is the control for the gate over-reaching into healthy rooms."
+    },
+    {
+      "criterion": "A session minted on one process authenticates on the other when both carry one DISPATCH_SIGNING_KEY, and is refused when they do not.",
+      "surface": "Three real envoy-dispatch processes on one database with a real OIDC issuer (internal/oidc/oidctest): A and B sharing a key, a third carrying its own; the browser's whole code flow driven over HTTP.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 20m -run TestASessionMintedOnOneProcessAuthenticatesOnTheOtherUnderOneSigningKey ./cmd/dispatch",
+      "observed": "PASS: GET /auth/start, the issuer's authorization and GET /auth/callback on A produced a dsession cookie; GET /auth/whoami answered 200 naming the person on A and on B.",
+      "headSha": "2c54d2f15430b96c4cb21a1b6ccd973d92a80cf8",
+      "negativeControl": "The third process, identical but for a signing key of its own, answers 401 to that same cookie. This row is a guard rather than a regression test: it passes at the parent commit too, because the shared key is a deployment precondition this issue wrote down rather than new code."
+    },
+    {
+      "criterion": "The migration rule exists in the repository's own guidance on a branch a contributor branching from main reads.",
+      "surface": "The repository's own documents, read at this head.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj diff --git -r 69bdeba263c9 -- packages/envoy/cmd/dispatch/README.md packages/envoy/cmd/dispatch/AGENTS.md packages/envoy/deploy/README.md packages/envoy/internal/dispatch/store/README.md docs/site/src/content/docs/dispatch/running-dispatch.md packages/envoy/AGENTS.md",
+      "observed": "The rule, with its expand-then-contract examples and its named stop-the-world exception, is the standing requirement of cmd/dispatch/README.md's 'Database migrations' section, repeated in a new internal/dispatch/store/README.md beside the migrations directory, pointed at from cmd/dispatch/AGENTS.md, and published in running-dispatch.md; 0113's own instruction is rescoped to itself, deploy/README.md's 'two releases never serve together' is scoped to the compose deployment, and no document still says a rolling update is forbidden.",
+      "headSha": "2c54d2f15430b96c4cb21a1b6ccd973d92a80cf8",
+      "negativeControl": "The README beside the migrations directory is deliberately at internal/dispatch/store/README.md rather than inside migrations/: pgmigrate.Load refuses a set holding any file not named <version>_<name>.{up,down,census}.sql, so a README.md in that directory would refuse every boot. That refusal is the control, and the file's own first paragraph records it."
+    }
+  ],
+  "filesChanged": [
+    "internal/dispatch/duty/exclusive.go and its test: duty.Exclusive, the session-level two-key advisory lease (namespace 0x4C4F4F50), with the run/skip log lines the two-process test counts.",
+    "internal/dispatch/store/pool.go: Pool.Leases(), a separate pool so a pass never holds one of the sixteen shared connections; storetest/second.go: SecondProcess, a second store on one database.",
+    "internal/dispatch/delivery/{intake.go,jobs.go,intakes.go}: the standby - the bind refusal classes (held by another process, not created yet), the 2 s bind poll with no deadline, the per-intake throttles, the leased consumer reconciliation and its PushBound guard.",
+    "internal/dispatch/outbox/publisher.go: the batch claim under for update skip locked with claimWindow, and the document compaction under its lease.",
+    "internal/dispatch/events/{stream.go,broker.go}: the fan-out moved into events.Stream, which Broker now holds.",
+    "internal/dispatch/api/{event_stream_relay.go,events.go,server.go}: the per-process relay on listen dispatch_events with its cursor, its reset detection and its CloseAll; streamEvents re-sourced from it, with the one id <= since drop and the rewritten comment.",
+    "internal/dispatch/pglisten/: the LISTEN/redial/ping listener extracted from api, now shared by the delivery hub, the relay and the stale-room evictor.",
+    "internal/dispatch/docs/{pending_authors.go,persistence.go,websocket.go,livewrite.go,ledger.go,service.go,rebuild.go,roomstate.go,stale_room.go}: the per-room applied cursor and its one funnel, ErrRoomBehindHead at every durable write site, the cold path for a stale live write, the dispatch_doc_changed notify inside the appending transaction and the per-process evictor.",
+    "internal/dispatch/{architecture,redeliver,docs,api}: the five other leased loops; cmd/dispatch/main.go: the lease pool and the block comment naming what is deliberately per-process.",
+    "cmd/dispatch/multiprocess_test.go and .github/workflows/envoy-and-contracts.yaml: the two-process test and the dispatch-multiprocess job.",
+    "packages/envoy/cmd/dispatch/README.md, cmd/dispatch/AGENTS.md, deploy/README.md, internal/dispatch/store/README.md, packages/envoy/AGENTS.md, docs/site/src/content/docs/dispatch/running-dispatch.md: the migration rule, the two-process limitation and the signing-key precondition."
+  ],
+  "trickyParts": [
+    "The harness is on the issue volume at /legion/harness and is meant to be inherited rather than rebuilt: setup.sh is idempotent (PostgreSQL 17.11 with pgvector unpacked from Debian packages without root, nats-server 2.10.22, the cluster initdb'd as UTF8 with an ICU en-US collation because this image's default is SQL_ASCII with C collation and two existing tests read the difference), env.sh is sourced and never re-derived, e2e.sh runs Dispatch's browser suite on a lane of the role's own. Every cache (GOCACHE, GOMODCACHE, GOTMPDIR, TMPDIR, PLAYWRIGHT_BROWSERS_PATH) is on /legion: a Go cache under $HOME evicts the pod. The api suite takes about 1000 s and the docs suite about 780 s, past go test's ten-minute package default, so both need -timeout 1800s or a bare run panics at 600 s and reads as a failure.",
+    "This pod has no Docker, so internal/dispatch/delivery's own tests (and four outbox rows) cannot run here: they start NATS containers. They are CI's, and the multiprocess test exercises the same delivery code against the real local nats-server.",
+    "The riskiest part of the change is the document cursor: a missed advance leaves a room permanently behind the head, refused, failed, reloaded and refused again. Every advance goes through one funnel, and two sites the plan did not name turned out to matter - a committed write's versions must enter the room's cursor while the commit still holds the document's advisory lock (a browser append queued on that lock takes it the instant the commit drops it), and a room must record the head its load read plus every version this process appended during the load, because ygo reports a loading room as absent.",
+    "A cold write (one whose fork came from the store, with no room) is deliberately outside the gate: its update commutes with whatever landed since its read, and gating it broke TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits, a case the code already handled."
+  ],
+  "deviations": [
+    "The plan's section 9.1 allowed the proof to be a CI run id, since no Docker and no Postgres existed in this pod. That fallback was not needed: the harness above was built instead, so every row of the proof is a local run of two real processes, and the reader-facing half is a real browser.",
+    "The plan put the migrations README inside internal/dispatch/store/migrations/. It is at internal/dispatch/store/README.md instead, because pgmigrate.Load refuses a migration set holding a file that is not <version>_<name>.{up,down,census}.sql, so a README there would refuse every boot. The file says so in its first paragraph.",
+    "The multiprocess test takes its NATS from DISPATCH_TEST_NATS_URL when that is set and from testnats.Start (a container) otherwise, so it runs both in this pod and in CI. storetest's own DISPATCH_TEST_DATABASE_URL is the precedent.",
+    "Three of the six leased loops are asserted by the two-process test; document-compaction (24 h ticker), architecture-import and delivery-reconcile (first pass jittered over five minutes, each process drawing its own) are logged by name with their reason rather than held to a count, because no setting shrinks a maintenance interval and asserting on a jittered overlap would be a flake.",
+    "The ce-simplify-code pass applied nine findings and skipped four test-rig dedupes (one storetest lease-pool helper, a Count on storetest.LockedLog, a dutytest hold rig, the second API test handler) as churn across six packages for no behaviour change; they are the pull request's one Fast-follow line.",
+    "Three SSE tests of the api package were rewritten rather than kept: their premise was a fake late-committing id published straight into the broker, which cannot happen once the live stream is re-sourced from the log and the commit-order lock is what orders it. They were replaced by tests of the new contract (no backlog to a cold connection, no event at or below a connection's since, a capped catch-up delivering a mid-paging commit exactly once), not deleted for failing."
+  ],
+  "openQuestions": [
+    "Whether the new dispatch-multiprocess job is in the repository's required-checks set the way dispatch-memory is: branch protection is not readable with this role's token, so the architect or an operator must confirm it. Until it is, a red two-process run does not block a merge.",
+    "Cross-process live co-editing of one document (two live rooms with text streaming between them) is explicitly out of scope here and wants an issue of its own; the documents say so without naming a key.",
+    "The preconditions INFRA-63 needs beyond this merge: DISPATCH_SIGNING_KEY set to one value for every replica; the Dispatch NATS user's grant unchanged is sufficient, since this change adds no subject, durable, consumer or bucket (the grant lives outside this repository and was not read here); a deploy check that reads /healthz's commit field will see two builds behind one address during a roll, and /healthz is deliberately unchanged because a non-leader is not unhealthy; asset-chunk and API skew between two live builds is the deployment's, not this issue's; and the front door's stickiness is an assumption carried from INFRA-62, not a dependency - nothing here needs a reader to stay on one process."
+  ],
+  "discoveredComplexity": [
+    "Three defects were found only by surfaces, not by reading the code. The browser suite went red across five specs because the relay kept a cursor and nothing else, and the suite truncates the database between scenarios, so the ids restart below the cursor and the live stream is silent for ever; the fix reuses the delivery hub's own reset rule (eventCursorCheck) and ends every open subscription. Running the document suite under concurrent writes found the two cursor races above. And the two-process rig built its processes' database URL without the password, so every row passed locally against a trust-authenticated server and failed 28P01 in CI.",
+    "The delivery standby has three bind outcomes rather than two, and the third was discovered in CI: on a fresh bus the reconciliation is leased, so exactly one process creates each durable and every other process's subscribe is answered 'consumer not found' until that create lands. That is a wait, not a fault. The same lease is shared by the two intakes of one process, so a throttle that recorded a pass the lease had refused could leave a durable uncreated for a settings poll."
+  ]
+}
