@@ -31,11 +31,16 @@
 # `LEGION_STATE_DIR` outlives a generation in a pod, and is shared by every pane of the host under
 # the tmux runtime.
 #
-# The run shares the role's 360 s registration deadline, so it is bounded twice over:
-# `LEGION_SETUP_LOCK_WAIT` (90 s) waiting for another role's install of the same workspace, then
-# `LEGION_SETUP_INSTALL_TIMEOUT` (180 s) for the install itself — 270 s in the worst case, against
-# a measured 54 s for the first install of 1,986 packages and about 0.3 s when they are already
-# there and `bun.lock` has not moved. Whichever bound fires is a report, not a non-zero exit.
+# The run shares the role's 360 s registration deadline, so it is bounded once, as a whole:
+# `LEGION_SETUP_BUDGET` (270 s) is this run's wall clock, and every wait inside it — the flock on
+# the cache another role's install of the same workspace holds, the install's own timeout, the one
+# retry — is what is left of that budget when that wait starts. A first attempt therefore never
+# gives up on the lock before the install it is waiting for would itself have timed out, and no
+# two waits can add up past the whole: the worst case is the budget plus the 5 s `timeout` leaves
+# between its SIGTERM and its SIGKILL, 275 s against that 360 s deadline, which leaves the launch
+# the rest. Against it, a measured 54 s for the first install of 1,986 packages and about 0.3 s
+# when they are already there and `bun.lock` has not moved. Whichever wait runs out is a report,
+# not a non-zero exit.
 #
 # It writes only under the issue volume — the workspace root the `/workspaces/` component names
 # (`/legion`), or `$LEGION_WORKSPACE/.legion-setup`, which `.gitignore` holds, when that cannot be
@@ -68,9 +73,29 @@ if [ ! -r bun.lock ]; then
   exit 0
 fi
 
-lock_wait=${LEGION_SETUP_LOCK_WAIT:-90}
-install_timeout=${LEGION_SETUP_INSTALL_TIMEOUT:-180}
+# One bound for the whole run, from the environment: the wall clock the lock wait, the install and
+# the single retry share, defaulting to the 270 s that leaves the role's 360 s registration
+# deadline its margin. `deadline` is the instant that budget ends; every wait below is what is
+# left of it then. A value that is not a whole number of seconds would make that arithmetic a
+# fatal shell error, which is the one thing this script must never do, so it falls back to the
+# default — as write_report's status does with a status that is not a number.
+budget=${LEGION_SETUP_BUDGET:-270}
+case "$budget" in
+  '' | *[!0-9]*) budget=270 ;;
+esac
+deadline=$(($(date +%s) + budget))
 detail_bytes=1000
+
+# remaining: the whole seconds left of the budget, never fewer than 1. `timeout 0` is GNU
+# timeout's spelling of "no timeout at all", which on an exhausted budget would be this script's
+# longest wait rather than its shortest, and `flock -w 0` is not a wait either.
+remaining() {
+  left=$((deadline - $(date +%s)))
+  if [ "$left" -lt 1 ]; then
+    left=1
+  fi
+  printf '%s\n' "$left"
+}
 
 # The issue volume's root, which every workspace on it shares, so one role's install serves the
 # next. When the workspace is not under a `/workspaces/` component the expansion returns it
@@ -102,6 +127,14 @@ if [ -z "$cache" ]; then
   cache=$root/bun/cache
   mkdir -p "$cache" 2> /dev/null || true
 fi
+# The marker is the issue volume's, beside the cache every role of the issue shares, not the
+# workspace's: that is what makes one role's install serve the next five. It is also why a failed
+# run's `rm -f "$marker"` below reaches every workspace on the volume — a second workspace there
+# whose install failed would cost the first's roles a reinstall. Nothing reaches that: production
+# provisions exactly one clone and one jj workspace per issue volume (`workspace-init provision`,
+# `workspace.Location` in `packages/daemon/internal/workspace/provision.go`, which names the
+# repository and the issue and never a role), so one volume is one workspace. A tree that ever
+# puts two on one volume is where this would have to be keyed by workspace as well as by lock.
 marker=$state/installed
 log=$state/install.log
 
@@ -190,27 +223,35 @@ exit_if_installed
 # to that exact path.
 LOCK_BUSY=199
 
+# The install's own bound is computed inside the lock, by the shell flock runs, rather than before
+# it: `timeout`'s duration is fixed when its argument is expanded, so an install handed what was
+# left when the flock *started* would be given a budget the wait has since spent, and the two
+# would add up past the whole. $1 is the deadline, read after the lock is taken.
+# shellcheck disable=SC2016 # the arithmetic belongs to the shell under the lock, not to this one
+locked_install='left=$(($1 - $(date +%s)))
+[ "$left" -ge 1 ] || left=1
+exec timeout -k 5 "$left" bun install --frozen-lockfile'
+
 install_once() {
   [ -d "$cache" ] || rm -f -- "$cache"
   mkdir -p -- "$cache" 2> /dev/null
-  BUN_INSTALL_CACHE_DIR="$cache" /usr/bin/flock -w "$1" -E "$LOCK_BUSY" -- "$cache" \
-    timeout -k 5 "$2" bun install --frozen-lockfile > "$log" 2>&1
+  BUN_INSTALL_CACHE_DIR="$cache" /usr/bin/flock -w "$(remaining)" -E "$LOCK_BUSY" -- "$cache" \
+    sh -c "$locked_install" sh "$deadline" > "$log" 2>&1
 }
 
 echo "legion setup: installing this bun.lock's packages into $workspace" >&2
-started=$(date +%s)
-install_once "$lock_wait" "$install_timeout"
+install_once
 status=$?
 
-# The retry is for the cold-entry race alone, and it is given what is left of this run's whole
-# budget — the lock wait plus the install timeout — so a second attempt cannot push the script
-# past the registration deadline it shares with the role's launch.
+# The retry is for the cold-entry race alone, and it waits on the same remaining budget as the
+# attempt before it, so a second attempt cannot push the script past the registration deadline it
+# shares with the role's launch. A budget with no more than a few seconds left buys nothing but
+# that deadline's risk, so the retry is skipped.
 if [ "$status" -ne 0 ] && [ "$status" -ne "$LOCK_BUSY" ] &&
   grep -q 'ENOENT: failed copying files from cache to destination' "$log" 2> /dev/null; then
-  remaining=$((lock_wait + install_timeout - ($(date +%s) - started)))
-  if [ "$remaining" -gt 10 ]; then
+  if [ "$(remaining)" -gt 10 ]; then
     echo "legion setup: the cache was filled under this install; retrying once" >&2
-    install_once "$remaining" "$remaining"
+    install_once
     status=$?
   fi
 fi
@@ -225,10 +266,12 @@ if [ "$status" -eq 0 ]; then
   exit 0
 fi
 
-# 199 is flock's own, set by -E above: another install of this issue holds the cache and this role
-# will not wait it out, since a failure must not hold the work up. 124 is the install timeout; 137
-# is a SIGKILL, which on a 1 Gi role is the kernel reclaiming the install's memory — a working
-# outcome, since the next role to start installs again.
+# 199 is flock's own, set by -E above: another install of this issue held the cache for every
+# second this run had, and the agent must start anyway, since a failure must not hold the work up.
+# The wait was the whole budget, so that is what the report names. 124 is the install's own
+# timeout, the budget cutting it off where it stood; 137 is a SIGKILL, which on a 1 Gi role is the
+# kernel reclaiming the install's memory — a working outcome, since the next role to start
+# installs again.
 case "$status" in
   "$LOCK_BUSY") reason=lock-timeout ;;
   124) reason=install-timeout ;;
@@ -237,8 +280,9 @@ case "$status" in
 esac
 rm -f "$marker" 2> /dev/null
 if [ "$reason" = lock-timeout ]; then
-  echo "legion setup: another install held $cache for more than ${lock_wait}s" >&2
-  write_report lock-timeout "$status" "another install held $cache for more than ${lock_wait}s"
+  echo "legion setup: another install held $cache for this run's whole ${budget}s budget" >&2
+  write_report lock-timeout "$status" \
+    "another install held $cache for this run's whole ${budget}s budget"
   exit 0
 fi
 echo "legion setup: bun install exited $status ($reason); starting the agent without it" >&2

@@ -233,7 +233,7 @@ check "the marker is the new lock's cksum" "$(is "$(cat "$marker")" "$(cksum < "
 check "which is not the one before the merge" "$(is "$(is "$(cat "$marker")" "$first")" false)"
 check_clean
 
-echo "case: another install of this issue holds the cache"
+echo "case: another install of this issue holds the cache for longer than the whole budget"
 fixture lock-held
 mkdir -p "$cache"
 ready="$case_root/holder-ready"
@@ -251,13 +251,22 @@ for _ in $(seq 200); do
   sleep 0.05
 done
 check "the holder took the cache's lock" "$(exists "$ready")"
+# The budget, not a lock wait of its own: the run gives up when its whole wall clock is spent,
+# which is what keeps the role's registration deadline out of a holder's hands. The holder lives
+# far longer than the budget, so the elapsed time is what proves the bound rather than the reason
+# alone — a run that waited the holder out would report the same lock-timeout 30 s later.
+began=$(date +%s)
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
-  LEGION_SETUP_LOCK_WAIT=1 STUB_MODE=ok
+  LEGION_SETUP_BUDGET=2 STUB_MODE=ok
+elapsed=$(($(date +%s) - began))
 kill "$holder" > /dev/null 2>&1 || true
 wait "$holder" > /dev/null 2>&1 || true
+echo "  the run took ${elapsed}s of its 2s budget, against a holder that holds the lock for 30s"
 check "exits 0 rather than waiting the install out" "$(is "$status" 0)"
+check "within the budget, not the holder's lifetime" "$(at_most "$elapsed" 8)"
 check "the stub never ran" "$(is "$(calls)" 0)"
 check "a report names the lock" "$(is "$(field reason)" 'lock-timeout')"
+check "and the budget it waited out" "$(contains "$(field detail)" "whole 2s budget")"
 check "no marker is left" "$(is "$(exists "$marker")" false)"
 check_clean
 
@@ -270,6 +279,31 @@ check "the install is retried once" "$(is "$(calls)" 2)"
 check "and the retry is announced" "$(contains "$out" 'retrying once')"
 check "the marker is written after the retry" "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
 check "no report is left" "$(is "$(exists "$report")" false)"
+check_clean
+
+echo "case: the retry of the cold-entry race takes its wait from what is left of the budget"
+fixture cold-race-in-budget
+began=$(date +%s)
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=30 STUB_MODE=cold-race
+elapsed=$(($(date +%s) - began))
+check "exits 0" "$(is "$status" 0)"
+check "both attempts happened" "$(is "$(calls)" 2)"
+check "inside the budget they shared" "$(at_most "$elapsed" 30)"
+check "the marker is written after the retry" "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
+check_clean
+
+echo "case: the cold-entry race with too little budget left for a second attempt"
+fixture cold-race-out-of-budget
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=5 STUB_MODE=cold-race
+check "exits 0 anyway" "$(is "$status" 0)"
+check "the install is not retried into the registration deadline" "$(is "$(calls)" 1)"
+check "and the retry is not announced" "$(is "$(contains "$out" 'retrying once')" false)"
+check "the report names the failure the attempt died with" "$(is "$(field reason)" 'install-failed')"
+check "and carries its status" "$(is "$(field exitStatus)" 1)"
+check "the detail is what bun said" "$(contains "$(field detail)" 'ENOENT: failed copying files')"
+check "no marker is left" "$(is "$(exists "$marker")" false)"
 check_clean
 
 echo "case: the install fails"
@@ -298,7 +332,7 @@ check_clean
 echo "case: the install hangs"
 fixture install-hangs
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
-  LEGION_SETUP_INSTALL_TIMEOUT=1 STUB_MODE=hang
+  LEGION_SETUP_BUDGET=1 STUB_MODE=hang
 check "exits 0 anyway" "$(is "$status" 0)"
 check "the report names the timeout" "$(is "$(field reason)" 'install-timeout')"
 check "and carries timeout's status" "$(is "$(field exitStatus)" 124)"

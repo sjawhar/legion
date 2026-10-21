@@ -1454,10 +1454,13 @@ container moments earlier and another role's setup both meet it. A first attempt
 `ENOENT: failed copying files from cache to destination` is retried once, within what is left of
 this run's budget. Every path of it ends `exit 0`, the failures included, because the non-zero
 exit above would stop
-the agent from starting over an install it could have run without. It bounds itself twice —
-`LEGION_SETUP_LOCK_WAIT` (90 s) waiting for whoever holds that cache, then
-`LEGION_SETUP_INSTALL_TIMEOUT` (180 s) for the install itself, 270 s in the worst case inside the
-360 s registration deadline, the retry included, against a measured 54 s for the first install of 1,986 packages and
+the agent from starting over an install it could have run without. It bounds itself once, as a
+whole: `LEGION_SETUP_BUDGET` (270 s) is the run's wall clock, and every wait inside it — the
+`flock` on the cache, the install's own `timeout`, the retry — is what is left of that budget when
+that wait begins, so the wait for the lock can never expire before the install it is waiting for
+would have. The worst case is that budget plus the 5 s `timeout` leaves between its SIGTERM and
+its SIGKILL, 275 s inside the 360 s registration deadline this run shares with the rest of the
+role's launch, against a measured 54 s for the first install of 1,986 packages and
 about 0.3 s when they are already there — and whatever went wrong (an unreachable registry, a lock
 file that moved under the frozen install, a timeout, the kernel's OOM kill of a 1 Gi role's
 install) it writes `$LEGION_STATE_DIR/legion-setup-report.json` and exits 0, leaving no marker, so
