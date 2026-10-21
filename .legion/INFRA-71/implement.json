@@ -2,62 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-71",
-  "completed": "2026-10-21T15:05:00Z",
-  "round": "the reviewer's third round — two fail-opens this round's own commits introduced, one blocking defect in both operator knobs, and two stale sentences, with the architect's three rulings on them",
+  "completed": "2026-10-21T16:10:00Z",
+  "round": "the tester's two findings, worked as the architect scoped them: two rules, each removing a class, and nothing else",
   "proof": [
     {
-      "criterion": "The reviewer's findings 1 and 2 — the gate answered green for a tree holding three prescriptions of the squatted form: a session block that never closes, and a line whose quotes do not balance.",
-      "surface": ".github/scripts/check-check-commands.sh against fixtures carrying the reviewer's own reproductions (the real script symlinked into a miniature repository), and its 174-case suite.",
-      "command": "a fixture whose scripts/probe.sh holds `echo \"a # b && bunx biome check .`, its single-quote twin, `echo don't # bunx biome check .` and an ordinary multi-line `jq '` ; another whose AGENTS.md holds an unclosed ```console block followed by a ```sh block, and a third with no closing fence at all ; then PYTHONPATH=/legion/pytools .github/scripts/check-check-commands.sh and .test.sh over the real tree",
-      "observed": "All three of the reviewer's vulnerable lines are reported. A line whose quotes do not balance is judged whole — only the marker comes from the second reading — so nothing after its first `#` goes unread; `echo don't # bunx biome check .` is reported too (at `names \\`biome\\``, its first word being `echo`), while the multi-line `jq '` line passes, as 92 shell scripts here need it to. `prompted` answers from what it found before the fence that closes the block, False at EOF, and False at a fence a writer opened under an open one — so the unclosed block's own line is reported, and the reviewer's ```console/```sh fixture reports AGENTS.md:8. The tree passes with 13 manifests, 8 workflows, 92 shell scripts and 551 guides, and the suite reports `Results: 174 passed, 0 failed`.",
-      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
-      "negativeControl": "A well-formed session block still has its prompt judged and its output left alone, and the whole tree is green: the architect's stronger instruction — report an unbalanced-quote line as unreadable — was implemented first and measured against this repository before it was set aside, and it reports **457 places**, because a gate that reads one line at a time meets an open quote in every multi-line jq, awk and `bash -c` body (branch-protection.sh, scripts/e2e/**, docs/solutions/**, this repository's own skills). The measurement is on the thread and in the body; judging the whole line keeps the property that matters, which is that nothing is dropped."
+      "criterion": "The tester's first finding — a numeric knob too large for the shell broke both of the script's promises: `LEGION_SETUP_BUDGET=9223372036854775808` exited 2 with dash's `Illegal number` (the one outcome the header says it cannot produce, which stops the role's agent), and `LEGION_SETUP_LOCK_HOLD=99999999999999999999` left the run holding the cache's lock past every bound.",
+      "surface": "The real script run by hand in a scratch workspace on this volume, and a throwaway copy of this tree with a hanging install and a `flock` contender; plus the script's 260-assertion suite, which carries the tester's own red cases.",
+      "command": "env LEGION_WORKSPACE=<scratch> LEGION_SETUP_BUDGET=9223372036854775807|9223372036854775808|99999999999999999999|270|08 sh scripts/legion-setup.sh ; then env … LEGION_SETUP_BUDGET=3 LEGION_SETUP_LOCK_HOLD=99999999999999999999 sh scripts/legion-setup.sh against a hanging install, timed ; bash scripts/legion-setup.test.sh",
+      "observed": "`9223372036854775808` and `99999999999999999999` now exit 0 with the default in force and the sentence in the report; `9223372036854775807`, the largest this shell can use, is still taken and runs the install; `08` is refused as before. The hold the tester measured still running at 25 s ends in **4 s measured** against a 3 s budget: `install-timeout`/124, the refusal at the head of its detail, no marker, and `/usr/bin/flock -w 2` takes the cache immediately afterwards. The suite reports `Results: 260 passed, 0 failed`, the tester's red cases among them and unmodified.",
+      "headSha": "a8bc03bc0627013688bed88dd2427de8de640e78",
+      "negativeControl": "The rule is the class, not the two values: a value reaches neither `$((…))` nor `[ … -le … ]` unless its text is a digit string this shell can work with — length first, then an equal-length string comparison against the largest it takes, so nothing unvalidated is ever compared numerically. That is what makes the hold's failure mode unreachable rather than handled: `[ 5 -le 99999999999999999999 ]` is itself an `Illegal number`, and its non-zero status took the `|| left=$hold` branch, which is how `timeout -k 5 <huge>` came to bound nothing."
     },
     {
-      "criterion": "The reviewer's finding 3 — both documented operator knobs accept a leading zero, one of them exiting the script non-zero and the other removing the bound the architect's ruling exists to set.",
-      "surface": "The real script run by hand with each shape, in a scratch workspace on this volume, and its 247-assertion suite.",
-      "command": "env LEGION_WORKSPACE=<scratch> LEGION_SETUP_BUDGET=08|060|0|-9|abc sh scripts/legion-setup.sh ; the same with LEGION_SETUP_LOCK_HOLD=00 ; then a fast-path run with LEGION_SETUP_BUDGET=08 and LEGION_STATE_DIR set ; bash scripts/legion-setup.test.sh",
-      "observed": "Every rejected shape exits 0 with the default in force — `08` reached dash's arithmetic as an octal literal before this round and exited 2 (`Illegal number: 08`), which is the one outcome this script's header promises can never happen — and `00` no longer reaches `timeout -k 5`, whose no-timeout-at-all was the unbounded hold on the shared lock. The agent is told: a run that succeeds writes a report of a new kind, `setting-ignored`, exitStatus 0, detail `LEGION_SETUP_BUDGET=08 is not a whole number of seconds (1 or more, with no leading zero), so this run used the default of 270s instead.`, and a run that fails carries the same sentence at the head of its detail. On the real Oh My Pi binary that report reaches the pane's first turn and claims no failure.",
-      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
-      "negativeControl": "An unset or empty knob is the ordinary case and reports nothing; a bare `0` is rejected on an arm of its own, with the reason in the comment, because it is what stops `timeout -k 5 0` and `flock -w 0`; and no value is normalised with `$((…))`, which would be the octal parse again. `packages/pi-legion`'s suite is 531 tests, 0 failed, and the pane carrying another generation's report gets no notice."
+      "criterion": "The tester's second finding — the exemption marker must be a comment's business, and text that is not a shell comment bought a pass for a vulnerable command on the same line whenever the line's quotes did not balance.",
+      "surface": ".github/scripts/check-check-commands.sh against fixtures built as its own suite builds them, and its 179-case suite.",
+      "command": "a fixture whose scripts/probe.sh holds `echo \"see # check-check-commands: allow docs && bunx biome check .`, its single-quote twin, the balanced version of the same line, `echo don't # check-check-commands: allow …` and a balanced line carrying a genuine trailing marker ; then PYTHONPATH=/legion/pytools .github/scripts/check-check-commands.sh and .test.sh over the real tree",
+      "observed": "Both unbalanced lines are reported, as is the balanced one whose marker sits inside a string (round 2's case, still green). The line that names no pinned tool is still no problem of this gate's, and a balanced line's genuine trailing marker still exempts it — the marker remains a comment's business where there is a comment. The tree passes with 13 manifests, 8 workflows, 92 shell scripts and 551 guides, and the suite reports `Results: 179 passed, 0 failed`.",
+      "headSha": "a8bc03bc0627013688bed88dd2427de8de640e78",
+      "negativeControl": "The rule is one reading, not two quote characters: where the scan that judges the command says the text after a `#` is inside an unterminated quote, there is no comment there and therefore no marker — which is what `judge`'s own docstring already claimed. The second scan that tracked the other quote character is gone, so no spelling of the same trick survives it."
     },
     {
-      "criterion": "The reviewer's two minors and the architect's reading of them — a comment that is untrue on the retry-then-lock-busy path, a reason that cannot tell a yielded lock from an exhausted budget, and a documentation paragraph that bounds the run once three lines above describing the second bound.",
-      "surface": "The throwaway copy on the issue volume with the hold forced, the script's suite, and docs/kubernetes.md.",
-      "command": "env … LEGION_SETUP_BUDGET=600 LEGION_SETUP_LOCK_HOLD=5 sh scripts/legion-setup.sh against a hanging install, timed ; /usr/bin/flock -w 2 on the cache afterwards ; the suite's new stub mode that keeps the lock through a cold-entry failure",
-      "observed": "The yielded lock is its own reason now: exit 0 after 5 s measured, `bun install exited 124 (install-hold-timeout)`, and the lock free immediately afterwards, so the agent's notice can tell a slow container from a lock this run gave back — and `setup-report.ts` treats that reason as one that ran an install, so the install's own log is what the notice quotes. The marker decision and the detail turn on the first attempt's status rather than on the reason, so a retry that lost the lock is reported as the install it made rather than as a run that learned nothing. `docs/kubernetes.md` reads `It bounds itself twice:` with the hold's sentences after the 275 s worst case.",
-      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
-      "negativeControl": "A run that genuinely never held the lock still keeps the marker another role wrote and still reports `lock-timeout` — the case added in round 2 holds it byte-identical — so the new split did not widen what invalidates a marker."
-    },
-    {
-      "criterion": "AC1, AC3 and AC5 at this head — nothing reports a passing lint without the packages, the install puts the pinned Biome in place, and a second role installs nothing.",
-      "surface": "This role container with no node_modules and a poisoned bunx cache, and the throwaway copy on the issue volume.",
-      "command": "bun run lint packages/pi-legion/ ; bun run typecheck ; then sh scripts/legion-setup.sh in the copy, ./node_modules/.bin/biome --version, bun run lint ., and a second run as another role",
-      "observed": "Each prescribed command exits 1 with the wrapper's message; the install exits 0 with biome 2.4.11 and `Checked 1079 files`; the second role prints `already installed; nothing to do` with the shared cache byte-identical (1,395,623,403 B before and after).",
-      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
-      "negativeControl": "In the same container `bunx biome check .` exits 0 having checked nothing and `bunx biome --version` answers 0.3.3."
+      "criterion": "The repository's own checks at this head, since the install half changed again.",
+      "surface": "A throwaway copy of this tree on the issue volume with the packages installed by the script itself.",
+      "command": "sh scripts/legion-setup.sh ; ./node_modules/.bin/biome --version ; bun run typecheck and bun test in packages/pi-legion ; bun run lint . at the root",
+      "observed": "The install exits 0, biome is `Version: 2.4.11`, typecheck is clean, `bun test` is 531 tests and 0 failed, and the whole-tree Biome run is `Checked 1079 files`, exit 0.",
+      "headSha": "a8bc03bc0627013688bed88dd2427de8de640e78",
+      "negativeControl": "In this issue's own workspace, which has no node_modules, `bun run lint packages/pi-legion/` and `bun run typecheck` still exit 1 with the wrapper's message while `bunx biome check .` exits 0 answering 0.3.3 — AC1's state, left as the tester needs it."
     }
   ],
   "filesChanged": [
-    ".github/scripts/check-check-commands.sh and .test.sh: a line the gate cannot split is judged whole, and a session block's convention runs only to the fence that closes it.",
-    "scripts/legion-setup.sh and .test.sh: both knobs validated and a refused value reported, the marker decision and the detail turned on the first attempt's status, and a yielded lock given its own reason.",
-    "packages/pi-legion/src/setup-report.ts and .test.ts: the `setting-ignored` kind and its wording, and `install-hold-timeout` among the reasons that ran an install.",
-    "docs/kubernetes.md: the setup paragraph's two bounds, each beside its own consequence."
+    "scripts/legion-setup.sh: `use_seconds` refuses a digit string this shell cannot work with, by its text alone, before any arithmetic or comparison touches it.",
+    ".github/scripts/check-check-commands.sh: `split_comment` returns no comment for a line whose quotes do not balance, so the exemption comes from the reading that judges the command."
   ],
   "trickyParts": [
-    "A validator whose note must survive cannot be read through `$(…)`: the subshell takes the note with it. It assigns instead.",
-    "The architect's instruction to refuse an unbalanced-quote line outright is right in principle and unusable here, and the measurement is what shows it: 457 places in this repository, none of them a defect. The shape that landed keeps the fail-closed property — nothing dropped — without 457 exemptions or a tokenizer that reads a file rather than a line.",
-    "A fence line carrying an info string does not close a block to CommonMark, so the reviewer's own fixture needed more than the EOF fix: where the two readings differ this gate now takes the one that judges more."
+    "The boundary is the shell's integer range rather than a shape, so the check is a length and then an equal-length string comparison — `9223372036854775807` is taken, `9223372036854775808` is not, and neither is ever handed to arithmetic.",
+    "A value just under the range wraps rather than failing (`$((1 + 9223372036854775807))` is negative), which for the budget means a deadline in the past; `remaining()`'s floor of 1 keeps that harmless, and the tester's observation of it is why the two edges are documented separately."
   ],
   "deviations": [
-    "Finding 2 is fixed by the reviewer's smaller remedy rather than the architect's stronger one, for the measured reason above; both the thread and the body carry the measurement, and the exemptions are mechanical if the ruling goes the other way."
+    "Nothing else was touched this round, on the architect's instruction: no tidying, no fast-follow, no retro note, so that if this work is split the install half is refiled with a clean record of what it has and has not got."
   ],
   "openQuestions": [
-    "Unchanged: AC3's full line, AC4's daemon half and AC5's two-role form are production-check criteria, needing the worker image pin and the one `runtime.kubernetes.setup` line.",
-    "The `Fast-follow` is unchanged: the guard's header duplicates its own subcommand table, `legion.ts`'s notice fan-out has no test on the delivered order, and one sentence of `docs/kubernetes.md` still places the lock in `/legion/bun/state`."
+    "The architect has put the continuation to a human (dispatch://INFRA-71/ask/d34a1f9c-2b33-4b5e-a131-cd760f0a0437): one more round then stop, ship with both holes written down, or split the check half from the install script. This head is the two rules it asked for under two of those three answers.",
+    "Unchanged: AC3's full line, AC4's daemon half and AC5's two-role form are the production check, needing the worker image pin and the one `runtime.kubernetes.setup` line; dispatch://INFRA-91 is outside this diff."
   ],
   "discoveredComplexity": [
-    "Three rounds running, the new defects have been in the code written to fix the previous round's defects — a point for the retro, with what would have caught them earlier: every one was a shape nobody wrote a fixture for, and every one was found by running the gate against a tree rather than by reading it.",
-    "A partially installed node_modules makes a pane load no plugin and answer a turn with no notice at all, which cost me a wrong reading of this round's own proof until I reinstalled (dispatch://INFRA-91 is that gap in `legion-role-tools-omp.test.ts`)."
+    "Both findings were in the fixes of the round before them, which is the pattern the architect asked to be recorded: the huge-number defect was in the validator written for the leading-zero finding, and the marker defect was where this round's unbalanced-quote reading met the round-3 marker rule."
   ]
 }
