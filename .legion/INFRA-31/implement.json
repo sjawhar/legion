@@ -2,47 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T01:25:00Z",
+  "completed": "2026-10-21T01:40:00Z",
   "proof": [
     {
-      "criterion": "The image is held to the path the rendered install actually calls, not merely to flock being on PATH, so a base that moved it fails the build rather than every installing launch.",
-      "surface": "packages/daemon/docker/worker.Dockerfile's final step, which already resolves git, legion, gh and agent-secrets and refuses any other location; flock joins them.",
-      "command": "the step's new line, `flock=\"$(command -v flock)\"; echo \"flock: $flock\"; test \"$flock\" = /usr/bin/flock`, run as the build runs it: `sh -c 'flock=\"$(command -v flock)\"; echo \"flock: $flock\"; test \"$flock\" = /usr/bin/flock'` in this issue's pod, which runs the worker image, then the same with a stand-in flock earlier on PATH",
-      "observed": "In the pod as it is: `flock: /usr/bin/flock`, exit 0. With a directory holding another `flock` put first on PATH: `flock: <that dir>/flock`, exit 1 — the shape a base that moved the binary would produce. The agreement this pins is between `installBlock`'s `/usr/bin/flock` and the apt line, the build's toolchain check and the toolchain capability row, all three of which ask only for the name.",
-      "headSha": "86baa18af5f7223c501f9dfc0e8707a0ae24cef8",
-      "negativeControl": "The PATH-shadowed run is the control: it is the only way to see this assertion fail, since the pod's own image already satisfies it, and without it the new line would be a statement nobody had watched fail."
+      "criterion": "This issue's volume has room to finish the work: it was at 85 per cent with 3.0 GiB free, which would have failed builds with ENOSPC rather than evicting anything.",
+      "surface": "The issue volume at /legion in this pod, and the per-role scratch directories under /legion/scratch.",
+      "command": "df -h /legion; du -sh /legion/scratch/*; then rm -rf of the directories named below (chmod -R u+w first, since Go module cache files are read-only); df -h /legion again",
+      "observed": "Before, 01:32Z: `none 20G 17G 3.0G 85% /legion`, with 14 GiB of that in /legion/scratch — implementer 4.2 GiB, tester-live 3.3 GiB, reviewer 3.1 GiB across four generation directories, a finished thermonuclear run 1.3 GiB, two earlier review runs 1.1 GiB, a shared tmp 847 MiB. Removed: /legion/scratch/thermo7 (a finished thermonuclear run's Go build and module caches), /legion/scratch/implementer/go (my own Go caches, regenerable) and /legion/scratch/implementer/tmp (my finished rigs and throwaways), each named before deletion. After, 01:34Z: `none 20G 11G 8.6G 57% /legion`. Nothing of another live role's was touched, and my own directories were recreated empty so the scratch environment still resolves.",
+      "headSha": "78e350969a2620f8507d1ff801f6e94bc76a484d",
+      "negativeControl": "The five private copies this pod does not own are still there at about 7.5 GiB, which is both the control for the measurement and what the duplication costs when nobody reclaims it."
     },
     {
-      "criterion": "The documentation says when the raised issue_volume default reaches a volume, which it did not before.",
-      "surface": "docs/kubernetes.md's sizing paragraph.",
-      "command": "read at the head; `grep -n '20Gi' deploy/kubernetes/daemon/legion.yaml.example docs/kubernetes.md`",
-      "observed": "The clause now says the new size reaches the volumes created after the apply and no others — it rides in the Sandbox's volumeClaimTemplates, evaluated when the claim is created, and an issue's Sandbox outlives its pods, so an issue already running keeps the 20 GiB it was created with — and that this fits: about 8.5 GiB of shared scratch for an issue working all six roles, against live volumes at 2.1 to 2.7 GiB of their 20 and this issue's own at 7.7 GiB under the duplicating layout this change replaces. The grep finds no issue-volume `20Gi` in either file: what remains is the repository cache's own default and the sizing table's row.",
-      "headSha": "86baa18af5f7223c501f9dfc0e8707a0ae24cef8",
-      "negativeControl": "The grep is the control for the half of the finding I did not apply: the two lines it named as pinning 20Gi read 50Gi at this head, corrected in round six, so a 'fix' there would have replaced a true sentence with another true one and left the record saying the line had been wrong."
+      "criterion": "The sizing paragraph's reassurance rests on a figure that is true when read, and says what the measurement actually shows.",
+      "surface": "docs/kubernetes.md's issue_volume paragraph.",
+      "command": "read at the head",
+      "observed": "The clause cited this issue's volume at 7.7 GiB as evidence a running 20 GiB volume fits; at 01:32Z it was 17 GiB of 20 with 3.0 GiB free. It now gives both numbers their measurement time and makes the argument the measurement supports: 14 GiB of that 17 was six private per-role copies of the Go caches — the layout this change deletes — removing one role's copy returned 5.5 GiB in a minute, and the shared layout's worst case for a six-role issue is about 8.5 GiB against live volumes at 2.1 to 2.7 GiB (01:45Z). So the already-running volumes fit because the duplication is being removed, not because the number was small.",
+      "headSha": "78e350969a2620f8507d1ff801f6e94bc76a484d",
+      "negativeControl": "The superseded sentence is the control: it was measured, true when taken, and reassuring when read later, which is exactly the class this branch exists to remove — a stale figure reads like a current one."
     },
     {
-      "criterion": "The round changed nothing executable in the daemon.",
-      "surface": "The working copy's diff and the sandbox package.",
-      "command": "jj diff --stat; gofmt -l ./cmd ./internal; go vet ./internal/runtime/sandbox/; bash .github/scripts/check-private-names.sh",
-      "observed": "Three files, +23/-3: a documentation clause, a Dockerfile assertion with its comment, and one comment paragraph in plugins.go. gofmt clean, vet ok, private-names clean. No Go behaviour moved, so every proof of the earlier rounds stands at this head unre-run.",
-      "headSha": "86baa18af5f7223c501f9dfc0e8707a0ae24cef8",
-      "negativeControl": "The diff stat is the control for that claim: a round that had touched the render or a test would show it there."
+      "criterion": "The round changed nothing executable.",
+      "surface": "The working copy's diff and the private-names check.",
+      "command": "jj diff --stat; bash .github/scripts/check-private-names.sh",
+      "observed": "One file, docs/kubernetes.md, +8/-4. check-private-names clean over 4693 files. No Go code, no test and no Dockerfile moved, so every proof of the earlier rounds stands at this head unre-run.",
+      "headSha": "78e350969a2620f8507d1ff801f6e94bc76a484d",
+      "negativeControl": "The diff stat is the control for that claim."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md — the sizing paragraph gains the clause saying the raised default reaches volumes created after the apply and no others, with the arithmetic that shows the 20 GiB already-running volumes still fit.",
-    "packages/daemon/docker/worker.Dockerfile — the final step resolves flock and refuses any path but /usr/bin/flock, beside git's, legion's and gh's; the comment above names the gap the other gates leave.",
-    "packages/daemon/internal/runtime/sandbox/plugins.go — installBlock's comment says flock is named by the absolute path for the reason bun is, and where the declaration and this use are held to agree."
+    "docs/kubernetes.md — the issue_volume paragraph's reassurance replaced by the measurement that supports it, both figures timestamped."
   ],
   "trickyParts": [
-    "The direction of the fix was a choice: make the script resolve flock through PATH, or make the declaration name the path. The path won because the script already names bun absolutely, because the build's final step is an existing fence that this joins rather than a new mechanism, and because PATH resolution in a container whose PATH an operator's pod env can shape is the weaker of the two.",
-    "The fence this adds is a build-time one and the reply says so: legion probe-image and the daemon's probe Sandbox check the capability row, which is a PATH check by construction, so the image build is the only gate that can catch a moved binary."
+    "Go module cache files are written read-only, so `rm -rf` of a module cache fails with Permission denied until `chmod -R u+w` runs over it; the first removal left /legion/scratch/thermo7/mod behind for that reason and it took a second pass.",
+    "Only directories this pod owns were removed. The reviewer's four generation caches and the tester's live scratch are the two largest remaining and are theirs to reclaim; naming them to their owners is cheaper than guessing whether a live role is mid-build."
   ],
-  "deviations": [
-    "Half of the first finding is answered with the file rather than applied: the two lines it named as pinning 20Gi read 50Gi at this head. Said on the thread rather than silently fixed."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "A declaration and a use can both be right and still disagree: every gate asked for `flock` by name and the renderer asked for it by path, so each was internally consistent and the pair was not. The thing to check is not that the dependency is declared but that the declaration names what the caller actually calls."
+    "The duplication this change removes was not a projection: a live issue reached 17 GiB of 20 with 14 GiB of it in six private copies of the same Go caches, and removing one copy returned 5.5 GiB. The benefit argued from a table all evening was measurable on the disk the argument was being written on."
   ]
 }
