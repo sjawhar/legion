@@ -2,39 +2,52 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T05:05:00Z",
-  "decision": "changes_requested",
-  "round": 14,
+  "completed": "2026-10-21T05:25:00Z",
+  "decision": "approved",
+  "round": 15,
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "pull request #2085",
-      "description": "The pull request conflicts with its base. gh pr view reports mergeable CONFLICTING and mergeStateStatus DIRTY; main is 5 commits ahead of this head, the newest being 'chore: release pi-legion v10.16.0 [skip ci]', and nine files are touched by both sides since the merge base 2127101bddff: packages/pi-legion/package.json, packages/pi-legion/AGENTS.md, packages/claude-envoy/{package.json,CHANGELOG.md,dist/envoy-channel.js}, packages/contracts/fixtures/daemon-api/version.json, packages/daemon/internal/api/version.go, docs/site/src/content/docs/legion/running-legion.md and scripts/e2e/README.md. Nothing in the change is wrong; this is the forge state, and it is the whole of this round's verdict. An approval now would be worth nothing twice over: GitHub computes no merge ref for a conflicting head and runs no on: pull_request workflow for any of its activity, so no later head of this branch gets checks until the conflict is cured, and the forward merge that cures it lands above the approved commit, which READY then refuses as READY_UNREVIEWED_CHANGE. The remedy is the forward merge, not a rebase: merge main into the issue branch, resolve each of the nine by hand, push, and the round after reviews the merge itself.",
-      "nextRound": "This verdict is a request for changes, so the round after it continues against the new head rather than being a fingerprint confirmation. If the forward merge is a pure union and the unchanged-diff fingerprint is unchanged, that round is the approval and needs no second full audit: everything below is already cleared at this head and only the merge itself has to be read."
-    }
-  ],
-  "clearedAtThisHead": {
-    "finding1TheGuardIsNowPinned": "Verified by my own mutation, and I confirmed the mutation was applied before reading its result — the lesson your tester volunteered, which I had the chance to learn the same way ten minutes later. I reverted plugins.go to the pre-guard shape, printed the rendered block to see the old shape in place, then ran the new test: exactly one subtest fails, 'a regular file an interrupted flock left behind', with the message naming the consequence; 'a cache already filled', 'a symlink to a filled cache' and 'no cache at all' all stay green. That is the narrow failure I asked for — a test that went red everywhere would pin the wrapper rather than the guard. plugins.go restored, working copy clean.",
-    "theDocumentationFence": "Verified the same way, and my first attempt at it failed exactly as the implementer's first version of the fence did: my mutation did not apply (the path I struck was not in the region I searched), the tests passed, and the pass was mine rather than the fence's. I read the lists, struck the '- `/legion/uv/cache`' item from the delete list for real, confirmed the list no longer carries it, and reran: TestTheReclaimParagraphNamesEveryDirectoryTheRendererPutsOnTheIssueVolume fails with 'accounts for /legion/uv/cache in neither list, though the renderer puts it on the issue's volume: it belongs on the delete list or in an exemption, and a mention inside an exemption's reason is neither' — the message names the exact false-pass hole the first version had. The companion test stays green, which is right: striking a path is not a collision.",
-    "finding2TheTmpWindow": "Answered and correctly scoped: the paragraph now says tmp's only creator is a role's next shim start through podsafety.EnsureScratch, that a shim lives across turns so a tmp deleted under a live role stays gone until relaunch, that mktemp -d fails with exit 1 where Python's tempfile silently falls back to /tmp — the container filesystem charged to the limit this layout exists to escape — and that tmp is therefore deleted with the role stopped, not merely between turns. Both halves of what I ran are in the document, including the quiet one.",
-    "finding3TheUvSplit": "Answered: /legion/uv/cache is on the delete list and /legion/uv/python/<issue> is exempt, with the dependency named — the interpreters uv installed, and a .venv in the issue's workspace that this remedy does not delete pointing at one of them.",
-    "theStructure": "The paragraph is now two explicit lists rather than a prose sentence, which is the structural change that makes the fence possible at all. This is the seventh version of it and the first whose correctness does not depend on a human noticing."
-  },
+  "keyFindings": [],
+  "theMergeIsAUnion": "Derived rather than taken. I diffed the branch against its old merge base at my last review's commit and against the new merge base at this head, and compared the two diff bodies: 51 changed files on each side, file sets identical excluding .legion, and the whole content delta is the daemon API contract number — 33 to 34 in the constant, the changelog and release lines, the manifest, the documentation and the collision note. No product work moved in the resolution.",
+  "theRenumberIsRight": "Also derived: main's constant at the new merge base is DaemonAPIVersion = 33, the published @sjawhar/pi-legion@10.16.0 declares daemonApiVersion 33 (npm view, run here), and this head declares 34. The architect's earlier ruling in this tree was the opposite — at round 4 nothing published claimed 33, so rewriting entry 33 was right — and reversing it now is the same rule applied to changed input rather than a changed judgement. One correction to the account: only pi-legion's manifest carries the number; pi-envoy has no legion block at all. That is not a gap, because the chain is fenced mechanically — packages/pi-legion/src/daemon-api-version.test.ts asserts the manifest equals packages/contracts/fixtures/daemon-api/version.json, which is the golden of the daemon's own constant, and the fixture reads 34 here.",
+  "bothFencesStillBiteAfterTheMerge": "Re-run by me at this head, each mutation asserting its anchor before writing — the discipline the tester volunteered and that I needed myself a round ago. Pre-guard installBlock: exactly the poisoned-file subtest red, with the mkdir: File exists message, the other three green. The reclaim fence with '- `/legion/uv/cache`' struck from the delete list: red with the message naming the false-pass hole its own first version had. Working copy clean afterwards, verified.",
   "ci": {
-    "verdict": "all four required green at the code head, read by me rather than taken",
+    "verdict": "green",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "ec06cb01444a",
-    "note": "lint, typecheck, test and pr-title are all completed and success at ec06cb01444a, read with per_page=100 --paginate. The architect's report had test still running; it has since finished green, and I read it at the commit rather than inferring it. CI is not what this round turns on."
+    "ciHead": "8ad8590408e4",
+    "note": "lint, typecheck and pr-title completed success; test was in_progress at the architect's read and at my first, and I waited and read it completed success at 05:23Z rather than approving around it. Nobody in this tree had called it green before that read. gh api compare 8ad8590408e4...<branch head> is all .legion/.",
+    "theShapeThatBitesFirstHere": "The branch head is a .legion-only handoff carrying skip-checks, so it has no check run at all. An empty set there is not a missing verdict — the code head is the merge commit."
   },
-  "agreedFastFollow": [
-    "The comment sentence the tester asked for, recording that putting /legion itself on the delete list passes the accounting test and fails the collision test three times, so the two tests are not redundant and a later tidying that folds one into the other loses that case. The architect's lean is fast-follow rather than a round and I agree: the tests are correct as they stand and the risk is a future edit, not a present defect.",
-    "The scratch.go extraction from manifest.go, collapsing the rationale restated across about fifteen sites rather than relocating it.",
-    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
-    "The drift fence's reverse walk over every role rather than one rendered spec.",
-    "A test for configure's refusal of a non-positive RegistrationIntervals.",
-    "docs/kubernetes.md:1965 — the canonical 'Sharing BUN_INSTALL_CACHE_DIR' section still describes the install as taking flock after a mkdir -p of it, with no mention of the per-attempt remake or the non-directory clearing."
-  ]
+  "threads": {"unresolved": 0, "botThreads": 0},
+  "fastFollow": [
+    "The tester's comment sentence recording that putting /legion itself on the delete list passes the accounting test and fails the collision test three times, so the two tests are not redundant and a later tidying must not fold one into the other.",
+    "Extract the scratch layout out of manifest.go into scratch.go, collapsing the rationale restated across about fifteen sites rather than relocating it, and fold the state home's regained mount assertions into one helper with the sibling test's copy; bunInstallArgs and runStart's shared stubbing belongs in the same pass.",
+    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23, whose 103-byte path sits under a 107-byte sun_path with no margin named.",
+    "Give the drift fence a reverse walk over every role rather than one rendered spec: exactly ten /legion variables, none kind-specific.",
+    "A test for configure's refusal of a non-positive RegistrationIntervals, safe today only because the loader's positive-count key and installLockWait's one-second floor both stand.",
+    "docs/kubernetes.md's canonical 'Sharing BUN_INSTALL_CACHE_DIR' section still describes the install as taking flock after a mkdir -p of it, with no mention of the per-attempt remake or the non-directory clearing."
+  ],
+  "forTheMerger": {
+    "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the approval body.",
+    "rule": "Read the run, not the lane; and read the review's commit_id, not reviewDecision. Every shape below is a way a name misleads where an id does not.",
+    "shapes": [
+      "The default check-runs page is 30 and these commits carry 25 to 39 runs; read per_page=100 --paginate or required names fall off the page and a green head reads as missing.",
+      "A superseded run shows completed/cancelled while a later run of the same workflow succeeded; dispatch at 0085e4b45a48 is the worked example.",
+      "A push carrying code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
+      "A .legion-only head carrying skip-checks has no check run at all, which is not a missing verdict: the code head is the commit below it. This head is that shape.",
+      "pr-title fires on every pull-request edit, so one head carries many of its runs; the newest decides.",
+      "While a pull request is CONFLICTING, GitHub computes no merge ref and runs no on: pull_request workflow for any of its activity.",
+      "A genuinely failing non-required lane may belong to another issue: dispatch://INFRA-76 is an Inbox test failing across this project, and this change touches no file under packages/dispatch or packages/proof-editor.",
+      "gh pr view --json reviewDecision returns APPROVED for a head the reviewer never saw, because this repository does not dismiss stale approvals on push. reviewDecision is a claim about a review, not about a head; only a review's own commit_id carries one. What makes that safe here is Legion's READY check rather than the forge."
+    ]
+  },
+  "forTheRetro": {
+    "theParentLesson": "A derived pin is worth more than a correct constant, and it holds one level up: a value asserted in a review must be re-derived from the file at the head, because a citation inside a subagent's finding is a claim rather than a reading.",
+    "theSharperForm": "The architect's, above mine: writing to strengthen an argument rather than to describe a system. Neither of this tree's documentation failures was careless; both made the case better, which is why neither was checked.",
+    "theSystemProperty": "Eight of this review's rounds turned on a sentence rather than on code, and every one of those sentences was operator-facing and about a production system no role in this tree can read. A claim about production in operator-facing documentation needs the fence a derived constant gets: it should name what it rests on.",
+    "theStructuralCure": "That paragraph was wrong seven times and every correction was locally right, because each round fixed the sentence and left the structure that produced it. What ended it was not a better sentence but reclaim_doc_test.go — two machine-readable lists the renderer is compared against. The lesson is that a hand-maintained list in prose rots silently, and the fix for the seventh correction is a fence rather than an eighth correction.",
+    "theMutationDiscipline": "A mutation must be confirmed applied before its result is read. The tester volunteered this after its own near-miss; I repeated the near-miss within ten minutes of reading it, and caught it only because I had. Every mutation I ran afterwards asserts its anchor first, and so do the tester's scripts.",
+    "whatMostChangedOutcomes": "Running the thing rather than reading about it. The shared-cache cold-fill race, the unbounded flock, the subshell exit, the read-only delete, the flock-creates-a-regular-file poisoning: not one was visible in the diff. Every one came from rendering the artefact and executing it."
+  }
 }
