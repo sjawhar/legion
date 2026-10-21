@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -231,10 +233,11 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 // A tree that closed retired every member's claim, so a re-admitted root's children sit mid-phase
 // with nothing running: the architect cannot release a child already in the workflow, and only a
 // worker's own handoff moves it. Admission starts each mid-phase child's role with its architect,
-// whichever mid-phase that is — the production check included, whose role is the implementer's
-// (workflow.RoleFor), the path a drain's re-admission restarts production-check children through —
-// and tells it to carry that phase on: the run whose handoff began the phase is over, and a start
-// with no task leaves the resumed agent holding its old transcript with nothing asked of it.
+// whichever mid-phase that is — retro included, whose role is the implementer's (workflow.RoleFor)
+// — and tells it to carry that phase on: the run whose handoff began the phase is over, and a start
+// with no task leaves the resumed agent holding its old transcript with nothing asked of it. A
+// child in accepting waits on the tree's architect, which the promotion starts: nothing is queued
+// for it.
 func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -246,8 +249,10 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		Phase: phase.Testing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
 	putIssue(t, pool, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "finished child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
-	putIssue(t, pool, record.Issue{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "production-check child", Tree: root.Key, Parent: &parentKey,
-		Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "D", LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "retro child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "D", LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "accepting child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.Accepting, Generation: 1, Status: "needs_review", Rank: "E", LastDispatchSeq: 1})
 
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 
@@ -259,8 +264,8 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
 			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work.", ResumeTask: true}},
 		{kind: record.OutboxKindIssueBranch, issue: "LEGION-211", payload: record.IssueBranch{Generation: 1}},
-		{kind: record.OutboxKindSupervise, issue: "LEGION-211", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
-			Task: "Continue production-check child. Issue: LEGION-211. Phase: production_check. Resume the existing phase work.", ResumeTask: true}},
+		{kind: record.OutboxKindSupervise, issue: "LEGION-211", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleImplementer, Generation: 1, Phase: phase.Retro,
+			Task: "Continue retro child. Issue: LEGION-211. Phase: retro. Resume the existing phase work.", ResumeTask: true}},
 	})
 }
 
@@ -348,10 +353,13 @@ func TestReadmissionSendsAnAwaitingChildWithNoREADYBackToMerging(t *testing.T) {
 }
 
 // A merge is the one fact GitHub never sends again, and a child whose READY was posted can be
-// merged after its root closed. The lingering tree starts no worker, but the child moves on to its
-// production check, so re-admission, which keeps no merged pull request, starts its implementer
-// there instead of leaving it in awaiting_merge, where no role could move it.
-func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain(t *testing.T) {
+// merged after its root closed. The lingering tree starts no phase worker, and the merge closes
+// the child: done, with its production check open, whose first look is the one start a member of
+// a lingering tree takes — the implementer's, fenced on the check's look (CheckLook 1), a wake of
+// the claim the linger suspended. Re-admission, which clears the tree's generation (merged pull
+// requests, gates, handoffs) and starts a role only for a phase one works, leaves the open check as
+// it is and starts nobody for the done child.
+func TestAMergeWhileTheTreeLingersClosesTheChildAndWakesItsCheck(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
@@ -367,26 +375,66 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 			t.Fatalf("seed pull request: %v", err)
 		}
 	})
-	implementerStarts := func() int {
+	childStarts := func() []string {
 		t.Helper()
-		var starts int
-		if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
-			and payload->>'op' = 'start' and payload->>'role' = 'implementer' and payload->>'phase' = 'production_check'`).Scan(&starts); err != nil {
-			t.Fatalf("count the child's starts: %v", err)
+		rows, err := pool.Query(context.Background(), `select payload->>'role' || ':' || coalesce(payload->>'phase', '') || ':' || coalesce(payload->>'checkLook', '0')
+			from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' order by id`)
+		if err != nil {
+			t.Fatalf("read the child's starts: %v", err)
+		}
+		defer rows.Close()
+		var starts []string
+		for rows.Next() {
+			var start string
+			if err := rows.Scan(&start); err != nil {
+				t.Fatalf("scan a start: %v", err)
+			}
+			starts = append(starts, start)
 		}
 		return starts
+	}
+	check := func() *record.ProductionCheck {
+		t.Helper()
+		var got *record.ProductionCheck
+		inTx(t, pool, func(tx pgx.Tx) {
+			var err error
+			if got, err = record.NewStore().ProductionCheck(context.Background(), tx, "LEGION-209"); err != nil {
+				t.Fatalf("read the child's production check: %v", err)
+			}
+		})
+		return got
 	}
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
 		t.Fatalf("ApplyFact merge: %v", err)
 	}
-	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 0 {
-		t.Fatalf("the merged child while its tree lingers = %s with %d implementer starts, want production_check with none", got.Phase, starts)
+	wantStarts := []string{"implementer::1"}
+	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || got.Status != "done" || !slices.Equal(starts, wantStarts) {
+		t.Fatalf("the merged child while its tree lingers = %s/%s with starts %v, want done/done with the check's look alone %v", got.Phase, got.Status, starts, wantStarts)
+	}
+	if got := check(); got == nil || !got.Open() || got.Looks != 1 || !got.LookOpen || got.MergeSHA != "merge" || got.Repo != "acme/widgets" || got.Number != 42 {
+		t.Fatalf("the merged child's production check = %+v, want it open at look 1 on merge commit merge of acme/widgets#42", got)
+	}
+	if got := superviseOps(t, pool, "LEGION-209", "issue_close"); got != 0 {
+		t.Fatalf("issue_close rows of the lingering member = %d, want none: the tree's close retires its claims", got)
 	}
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
-	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 1 {
-		t.Fatalf("the merged child after re-admission = %s with %d implementer starts, want production_check with its implementer started", got.Phase, starts)
+	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || !slices.Equal(starts, wantStarts) {
+		t.Fatalf("the merged child after re-admission = %s with starts %v, want done with nobody more started", got.Phase, starts)
 	}
+	if got := check(); got == nil || !got.Open() || got.Looks != 1 || !got.LookOpen || got.MergeSHA != "merge" {
+		t.Fatalf("the production check after re-admission = %+v, want it left open at look 1 as it was", got)
+	}
+}
+
+// superviseOps counts the supervise rows of op queued for issue.
+func superviseOps(t *testing.T, pool *pgxpool.Pool, issue, op string) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = $2`, issue, op).Scan(&count); err != nil {
+		t.Fatalf("count %s rows of %s: %v", op, issue, err)
+	}
+	return count
 }
 
 // A re-admitted root that waits for a slot no longer lingers, so a fact in that window can move a

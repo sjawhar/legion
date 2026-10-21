@@ -154,6 +154,17 @@ type overrides struct {
 	checkLaunch func(context.Context, supervise.Claim) error
 }
 
+// Build is what the binary knows of its own build: Revision, the commit it was built from, and
+// Repository, the repository that commit is in — both set only by a release build (cmd/legion's
+// ldflags-stamped revision beside its builtFromRepository constant) and empty in every other. The
+// boot compares a release build, and the build Dispatch reports on its /healthz, against the open
+// production checks of that repository (intake.DaemonBooted, workflow.Config.BuiltFrom); a zero
+// Build compares nothing.
+type Build struct {
+	Revision   string
+	Repository string
+}
+
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
 // configuration first, then, under tmux, the plugin gate, which holds the Oh My Pi plugin every
 // pane will load to this daemon's contract — then opens the store (refusing by the host it could
@@ -174,11 +185,14 @@ type overrides struct {
 // arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
 // signal that arrives while the plugin gate, the GitHub App tokens' mint, or the image probe waits
 // ends the daemon there, cleanly: it has served nothing and records nothing.
-func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
-	return run(ctx, cfg, log, overrides{})
+//
+// build is the binary's own build (Build), which the boot compares against the open production
+// checks of the repository it is built from.
+func Run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger) error {
+	return run(ctx, cfg, build, log, overrides{})
 }
 
-func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) error {
+func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, o overrides) error {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -236,7 +250,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
 	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
 	// after them has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI)
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, plan.repositories, log, o.workflowTokens, o.githubAPI, build)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {

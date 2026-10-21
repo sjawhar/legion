@@ -42,8 +42,8 @@ Negative control: <deliberately broken input or call> → <refusal or failure ob
 Negative control: <deliberately broken input or call> → <refusal or failure observed>.
 Verified the implementer's proof by <re-running its command | driving the same surface independently>.
 
-**Production:** <what was checked in production, how, what was observed> — merge commit <sha>.
-(written by the implementer after the merge lands; `pending <what is missing>` until then)
+**Production:** <what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>.
+(written by the implementer from the production check after the merge closes the issue, naming what woke that look; `pending deploy of <sha>` until then)
 
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 

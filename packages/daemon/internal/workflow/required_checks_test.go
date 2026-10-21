@@ -134,8 +134,8 @@ func TestARequiredCheckCancelledOrMissingLeavesTheHeadUndecided(t *testing.T) {
 		{"missing, then failed, in testing", phase.Testing, "testing", missing, []intake.Fact{failed}, phase.Implementing},
 		{"cancelled, then failed, in testing", phase.Testing, "testing", cancelled, []intake.Fact{failed}, phase.Implementing},
 		{"missing, then failed, in reviewing", phase.Reviewing, "needs_review", missing, []intake.Fact{failed}, phase.Implementing},
-		{"missing, then the reviewer approves the head", phase.Reviewing, "needs_review", missing, approval, phase.Retro},
-		{"cancelled, then the reviewer approves the head", phase.Reviewing, "needs_review", cancelled, approval, phase.Retro},
+		{"missing, then the reviewer approves the head", phase.Reviewing, "needs_review", missing, approval, phase.Accepting},
+		{"cancelled, then the reviewer approves the head", phase.Reviewing, "needs_review", cancelled, approval, phase.Accepting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -212,8 +212,8 @@ func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 		read     intake.Fact
 		want     phase.Phase
 	}{
-		{"the boot read of the required set", nil, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate}}, phase.Retro},
-		{"the set already read, a read that confirms it", []string{requiredGate}, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate}}, phase.Retro},
+		{"the boot read of the required set", nil, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate}}, phase.Accepting},
+		{"the set already read, a read that confirms it", []string{requiredGate}, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate}}, phase.Accepting},
 		{"a read that requires one of the reds", nil, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate, "review"}}, phase.Implementing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,8 +243,8 @@ func TestARedTheBaseBranchDoesNotRequireSendsNothingBack(t *testing.T) {
 				t.Fatalf("after the read the architect was told %v, want nothing: no required check is red", got)
 			}
 			applyRefusingNothing(t, pool, engine, approval...)
-			if got := issuePhase(t, pool); got != phase.Retro {
-				t.Fatalf("after the reviewer's approval the issue is in %s, want retro", got)
+			if got := issuePhase(t, pool); got != phase.Accepting {
+				t.Fatalf("after the reviewer's approval the issue is in %s, want accepting", got)
 			}
 			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "review-stuck") || containsNotice(got, "checks-red") {
 				t.Fatalf("notices %v, want the round ended with no stuck or red notice", got)

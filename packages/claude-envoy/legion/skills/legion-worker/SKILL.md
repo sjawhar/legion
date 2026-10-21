@@ -88,8 +88,8 @@ into the branch only on a real conflict or a retarget
 implementer's own proof on a production-like surface at the head that merges, an applied simplify
 head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`,
 `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the
-implementer's production check after the merge
-(`skill://legion-worker/references/merge-gate.md#after-the-merge`).
+implementer's production check after the merge closes the issue
+(`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
 
 ## Asking another role
 
@@ -304,12 +304,12 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
 - **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
-  → retro → the merger's READY → the merge → the implementer's production check. On READY's
-  acceptance the daemon submits the merge of the head READY named, unless the answer's note begins
-  `MANUAL_MERGE_REQUIRED:`, where a person merges it; no role runs `gh pr merge`, and the
-  repository's required reviews and checks decide when it lands
-  (`skill://legion-worker/references/merge-gate.md`). The reviewer's submissions, retro's commit,
-  the merger's READY, the daemon's submission, and the production check follow the same reference.
+  → the architect's acceptance → retro → the merger's READY → the merge, which closes the issue →
+  the implementer's production check, after the close. On READY's acceptance the daemon submits
+  the merge of the head READY named, unless the answer's note begins `MANUAL_MERGE_REQUIRED:`,
+  where a person merges it; no role runs `gh pr merge`, and the repository's required reviews and
+  checks decide when it lands (`skill://legion-worker/references/merge-gate.md`). The reviewer's
+  submissions, the acceptance, retro's commit, READY, the daemon's submission, and the check follow the same reference.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
   complete the phase: `skill://legion-worker/references/pr-body.md`.
 
@@ -370,9 +370,9 @@ check, or the `MANUAL_MERGE_REQUIRED:` note of a pull request a person merges).
 
 Retro's last commit removes `.legion/<issue>/` from the head that merges (`skill://legion-retro`);
 a round after it, such as one a withdrawn READY sends back, writes and commits its own handoff
-again, since `handoff_complete` reports the commit carrying the file. Retro, the merger and the
-post-merge production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report
-with `handoff_complete` alone, which reports the commit the workspace stands on.
+again, since `handoff_complete` reports the commit carrying the file. Retro and the merger write no
+`.legion/<issue>/<phase>.json`, commit no handoff, and report with `handoff_complete` alone, which
+reports the commit the workspace stands on; a look of the production check after the close reports with `handoff_complete` and a `verdict`, and no commit at all.
 
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — push the issue branch with the plain `jj` of your pane, from bash in your

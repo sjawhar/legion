@@ -423,6 +423,48 @@ func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
 	}
 }
 
+// BuildCommit is Dispatch's /healthz `commit`: the stamped build commit when the build has one, and
+// none ("") when the field is null or absent; a Dispatch that answers other than 2xx — its own 503
+// while a dependency is down — is an error, not a commit of none.
+func TestBuildCommitReadsTheHealthzCommitAndNoneForNullOrAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+		err    bool
+	}{
+		{name: "stamped", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":true,"files":null,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","schema_version":41}`, want: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"},
+		{name: "null", status: http.StatusOK, body: `{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":41}`},
+		{name: "absent", status: http.StatusOK, body: `{"ok":true,"db":true}`},
+		{name: "unavailable", status: http.StatusServiceUnavailable, body: `{"ok":false,"db":false,"commit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"}`, err: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/healthz" {
+					t.Fatalf("request = %s %s, want GET /healthz", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			got, err := New(server.URL, dispatchToken).BuildCommit(context.Background())
+			if tc.err {
+				var refused *Error
+				if !errors.As(err, &refused) || refused.Status != tc.status {
+					t.Fatalf("BuildCommit = %q, %v; want Dispatch's %d as an error", got, err, tc.status)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("BuildCommit = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 // Dispatch keeps a label's case as typed and treats labels differing only in case as one label, so
 // the label that hands an issue to Legion matches in any case, and nothing else stands in for it.
 func TestCarriesLegionLabelMatchesTheLabelInAnyCaseAndNothingElse(t *testing.T) {

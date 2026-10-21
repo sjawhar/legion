@@ -112,6 +112,10 @@ type workflowRuntime struct {
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
+	// build is the daemon's own build (Build): what the boot fact carries as the revision it
+	// compares the open production checks against, and the guard on whether Dispatch's build is
+	// read and compared too.
+	build Build
 	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
 	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
 	// reviewPermissionTTL, and a test shortens it. limitedUntil is when GitHub's last rate limit
@@ -208,8 +212,9 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
 // checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
 // from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
-// written before the record carried its repository.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
+// written before the record carried its repository. build is the daemon's own build (Build), which
+// the engine and the boot fact compare against the open production checks.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string, build Build) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
@@ -231,7 +236,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
 	}
 	w := &workflowRuntime{
-		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
+		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
@@ -258,7 +263,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
 	// through the runtime, since the outbox itself is built later (attach).
 	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
-	engineCfg := engineConfig(cfg, reviewAppLogin)
+	engineCfg := engineConfig(cfg, reviewAppLogin, build)
 	engineCfg.Repositories = w
 	w.engine = workflow.New(w.records, engineCfg, log)
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
@@ -278,15 +283,22 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 	}
 }
 
-// engineConfig is the workflow engine's configuration from the daemon's and the review App's bot
-// login from its boot lease: its own project's merge_queue_role is the role the merger's READY is
-// published to.
-func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
-	return workflow.Config{
+// engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
+// login from its boot lease and the daemon's own build: its own project's merge_queue_role is the
+// role the merger's READY is published to, and the repository the binary is built from is the one
+// whose open production checks a build is compared against — only for a release build, one with
+// a revision, since nothing else names a commit a merge could be in; a build with none compares
+// nothing, Dispatch's start included.
+func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
+	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
-		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ReviewAppLogin: reviewAppLogin,
-		MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
+		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
+		ReviewAppLogin: reviewAppLogin, MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
 	}
+	if build.Revision != "" {
+		engine.BuiltFrom = build.Repository
+	}
+	return engine
 }
 
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
@@ -517,12 +529,33 @@ func retryUntilApplied(ctx context.Context, log *slog.Logger, first, most time.D
 
 // booted tells the workflow of this boot (intake.DaemonBooted), once every stored claim has its
 // machine and the terminal facts are replayed: it starts, through the outbox's start, every claim
-// that owns its issue's current phase and that the daemon or its own exit suspended.
+// that owns its issue's current phase and that the daemon or its own exit suspended, and it
+// compares two builds against the open production checks of the repository the daemon is built
+// from: this binary's own revision, and the build Dispatch reports itself built from
+// (dispatchBuild), read only when the daemon has a revision to compare — a build with none
+// compares nothing — and a Dispatch client to ask.
 func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
-	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("boot:%s:%d", w.dispatchProject, bootID), intake.DaemonBooted{Boot: bootID}, w.handlers...); err != nil {
+	fact := intake.DaemonBooted{Boot: bootID, Revision: w.build.Revision}
+	if w.build.Revision != "" && w.dispatch != nil {
+		fact.DispatchBuild = w.dispatchBuild(ctx)
+	}
+	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("boot:%s:%d", w.dispatchProject, bootID), fact, w.handlers...); err != nil {
 		return fmt.Errorf("apply the boot of %s: %w", w.dispatchProject, err)
 	}
 	return nil
+}
+
+// dispatchBuild is the build commit Dispatch reports itself built from (dispatch.Client.BuildCommit),
+// "" when it reports none or could not be asked: the boot never fails on it, since a Dispatch
+// unreachable, or answering 503 while its own dependencies are down, is logged and compared with
+// nothing, and Dispatch's own start reports the same build (intake.ServerStarted).
+func (w *workflowRuntime) dispatchBuild(ctx context.Context) string {
+	commit, err := w.dispatch.BuildCommit(ctx)
+	if err != nil {
+		w.log.Warn("legion daemon could not read Dispatch's build commit; the boot compares none", "error", err)
+		return ""
+	}
+	return commit
 }
 
 func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState) {

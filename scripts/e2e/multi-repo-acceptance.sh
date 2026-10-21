@@ -538,8 +538,8 @@ as_role_probe() {
 
 # second-owner <O child KEY> <pod> [container]: its pull request is in O (structurally,
 # .pullRequest.repo) and GitHub confirms it merged there (gh api .../pulls/<n> --jq .merged; the
-# daemon's `done` phase is accepted only beside `production_check`, never alone, since the phase is
-# not merge proof by itself); the pod is bound to the issue by its legion.dev/issue label, as
+# daemon's `done` phase, the one a merge closes an issue into, is never merge proof by itself);
+# the pod is bound to the issue by its legion.dev/issue label, as
 # `cache` binds it. The credential evidence is lib/as-role.py's, run once under one resolved agent
 # process: the agent's LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR and LEGION_GH_PATH are the image's own
 # (a difference fails: the pod is not the shape this check is about, or the agent rewrote its
@@ -565,7 +565,7 @@ second_owner() {
   phase=$(jq -r --arg k "$child" '.issues[$k].phase // "none"' "$state_file")
   [ "$(lower "$pr_repo")" = "$repo_o" ] || ok=0
   case "$phase" in
-    production_check | done) ;;
+    done) ;;
     *) ok=0 ;;
   esac
   merged=false

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -50,7 +51,7 @@ func TestReconcileCatchesAMissedPullRequest(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 	reconcile.runOnce(ctx)
 
 	pr, err := ScanPullRequest(pool.QueryRow(ctx, `select `+PullRequestColumns+` from delivery_pull_requests where repo = $1 and number = $2`, "acme/widgets", 50))
@@ -118,7 +119,7 @@ func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 	reconcile.runOnce(ctx)
 
 	run, err := ScanRun(pool.QueryRow(ctx, `select `+RunColumns+` from delivery_runs where repo = $1 and run_id = $2`, "acme/widgets", int64(900)))
@@ -159,7 +160,7 @@ func TestReconcileRecordsAMissingPermissionByNameAndDoesNotAdvanceLastReconcileA
 	fake.permissions = map[string]string{"contents": "read", "pull_requests": "read"}
 	client := fake.newTestClient()
 
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 	reconcile.runOnce(ctx)
 
 	after, err := GetSettings(ctx, pool)
@@ -208,7 +209,7 @@ func TestReconcileNeverWipesACompletePullRequestsAttribution(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 	reconcile.runOnce(ctx)
 
 	pr, err := ScanPullRequest(pool.QueryRow(ctx, `select `+PullRequestColumns+` from delivery_pull_requests where repo = $1 and number = $2`, "acme/widgets", 60))
@@ -246,7 +247,7 @@ func TestReconcileClearsLastErrorOnceItSucceedsAgain(t *testing.T) {
 	})
 	client := fake.newTestClient()
 
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 	reconcile.runOnce(ctx)
 
 	after, err := GetSettings(ctx, pool)
@@ -293,7 +294,7 @@ func TestReconcileMarksA404PullRequestUnfetchableAndSkipsItUntilItRecovers(t *te
 		mustEncode(t, w, map[string]any{"total_count": 0, "workflow_runs": []any{}})
 	})
 	client := fake.newTestClient()
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 
 	reconcile.runOnce(ctx)
 	pr, err := ScanPullRequest(pool.QueryRow(ctx, `select `+PullRequestColumns+` from delivery_pull_requests where repo = $1 and number = $2`, "acme/widgets", 70))
@@ -375,7 +376,7 @@ func TestReconcileWorkflowFailureStopsThePassFromReportingSuccess(t *testing.T) 
 	})
 	client := fake.newTestClient()
 
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 	reconcile.runOnce(ctx)
 
 	run, err := ScanRun(pool.QueryRow(ctx, `select `+RunColumns+` from delivery_runs where repo = $1 and run_id = $2`, "acme/widgets", int64(900)))
@@ -443,7 +444,7 @@ func TestReconcileMarksA404RunJobsUnfetchableAndSkipsItUntilItRecovers(t *testin
 		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
 	})
 	client := fake.newTestClient()
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 
 	reconcile.runOnce(ctx)
 	after, err := GetSettings(ctx, pool)
@@ -536,7 +537,7 @@ func TestReconcilePartialPullRequestsStopsOnRateLimitInsteadOfRetryingAtFullConc
 	})
 	client := fake.newTestClient()
 
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 	reconcile.runOnce(ctx)
 
 	got := attempts.Load()
@@ -621,7 +622,7 @@ func TestReconcileWorkflowStopsAtTheFirstRateLimitAndCapsLastError(t *testing.T)
 		mustEncode(t, w, map[string]any{"jobs": []any{}})
 	})
 	client := fake.newTestClient()
-	reconcile := NewReconcile(pool, client)
+	reconcile := NewReconcile(pool, client, events.NewBroker())
 
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
 	err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", ".github/workflows/deploy.yml", DeliveryRunKindDeploy, Production{}, until)

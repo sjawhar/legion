@@ -188,7 +188,7 @@ func runLogging(t *testing.T, cfg config.Config, o overrides) (context.CancelFun
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, cfg, slog.New(slog.NewJSONHandler(logs, nil)), o) }()
+	go func() { done <- run(ctx, cfg, Build{}, slog.New(slog.NewJSONHandler(logs, nil)), o) }()
 	return cancel, done, logs
 }
 
