@@ -528,6 +528,140 @@ run_check "$root"
 check "the same prefixes before the wrapper and before ordinary commands still pass" \
   "$(is "$status" 0)"
 
+echo "case: the tool is the command a segment runs, not the text it contains"
+# Four lines that live in this repository today and must keep passing, written here as fixtures
+# so the suite holds them whatever the tree does next: a trailing comment naming a tool after an
+# ordinary command (AGENTS.md:53), a comment naming `tsc` beside `tsconfig.check.json`, a
+# capitalised `Biome` and a `biome.json` in the same comment (packages/proof-editor/AGENTS.md:168
+# and :169), and `bunx playwright install --with-deps chromium` under a block-level marker
+# (docs/solutions/envoy/github-runner-chrome-apt-hash-mismatch.md:45). A rule that read "the
+# segment contains a tool's name" would refuse every one of them, the note that records this
+# very defect included.
+root=$(fixture tool-named-in-a-comment)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+bun run lint <package>/       # Lint (the pinned Biome, through `scripts/repo-tool.sh`)
+bun run typecheck             # Type check (the pinned tsc, through the same wrapper)
+bun run typecheck              # tsc against tsconfig.check.json (src/, tests/ and scripts/)
+bun run lint                   # Biome over the package; the root biome.json turns it off for the copy
+../../scripts/repo-tool.sh playwright test --config e2e/playwright.config.ts
+```
+MD
+run_check "$root"
+check "a tool named in a trailing comment, or inside an identifier, is no command" \
+  "$(is "$status" 0)"
+
+root=$(fixture tool-before-a-comment)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+tsc --noEmit                  # Type check (the comment is not what hides this)
+```
+MD
+run_check "$root"
+check "and stripping the comment leaves the command it follows" "$(is "$status" 1)"
+check "names its line" "$(contains "$out" 'AGENTS.md:4: this fenced command runs `tsc`')"
+
+root=$(fixture marked-block-keeps-the-runner)
+cat > "$root/docs/solutions/apt-hash-mismatch.md" <<'MD'
+# What the runner did
+
+<!-- check-check-commands: allow the note records the command that reached the registry -->
+
+```bash
+bunx playwright install --with-deps chromium
+```
+MD
+run_check "$root"
+check "the block-level marker still exempts the block under it" "$(is "$status" 0)"
+
+root=$(fixture marked-block-control)
+cat > "$root/docs/solutions/apt-hash-mismatch.md" <<'MD'
+# What the runner did
+
+```bash
+bunx playwright install --with-deps chromium
+```
+MD
+run_check "$root"
+check "the same block without the marker is judged" "$(is "$status" 1)"
+check "names its line" \
+  "$(contains "$out" 'docs/solutions/apt-hash-mismatch.md:4: this fenced command runs `bunx`')"
+
+echo "case: a fenced YAML block is judged at the tool, not at the segment's first word"
+# `docs/solutions/testing/a-package-no-workflow-names-has-no-ci.md` quotes three workflow steps
+# this way. The segment starts `- run:`, so a gate that judged the first word could neither
+# approve the wrapper nor catch the bare tool.
+root=$(fixture yaml-block-wrapper)
+cat > "$root/docs/solutions/wiring.md" <<'MD'
+# The wiring
+
+```yaml
+      - name: Lint workspace
+        run: ../../scripts/repo-tool.sh biome check src/
+        working-directory: packages/workspace
+```
+MD
+run_check "$root"
+check "a run: line that reaches the tool through the wrapper passes" "$(is "$status" 0)"
+
+root=$(fixture yaml-block-bare)
+cat > "$root/docs/solutions/wiring.md" <<'MD'
+# The wiring
+
+```yaml
+      - name: Lint workspace
+        run: biome check src/
+        working-directory: packages/workspace
+```
+MD
+run_check "$root"
+check "the same block with a bare biome fails" "$(is "$status" 1)"
+check "names the line inside the block" \
+  "$(contains "$out" 'docs/solutions/wiring.md:5: this fenced command runs `biome`')"
+
+echo "case: the pinned binary is the other approved spelling"
+root=$(fixture pinned-path)
+cat >> "$root/scripts/release.sh" <<'SH'
+./node_modules/.bin/biome check .
+node_modules/.bin/tsc --noEmit
+SH
+run_check "$root"
+check "a path into node_modules/.bin is the file the lockfile installed" "$(is "$status" 0)"
+
+echo "case: whatever stands in front of the tool, the tool is what runs"
+# The prefix set only looks closed: a runner, a prefix word, an option, a quote, a `sh -c` and a
+# variable holding the runner are the same shape, and each of these reaches the squat or the
+# image's own compiler. None of them is judged by its first word any more.
+root=$(fixture tool-behind-anything)
+cat >> "$root/scripts/release.sh" <<'SH'
+exec biome check .
+sh -c 'bunx biome check .'
+xargs bunx biome check
+timeout 60 npx tsc --noEmit
+sudo npx playwright test
+FOO=1 exec env BAR=2 nice -n 5 bunx biome check .
+$RUNNER biome check .
+SH
+run_check "$root"
+check "every one of them fails" "$(is "$status" 1)"
+check "exec hides nothing" "$(contains "$out" 'scripts/release.sh:5: this line runs `biome`')"
+check "a quoted sh -c hides nothing" \
+  "$(contains "$out" 'scripts/release.sh:6: this line runs `biome`')"
+check "xargs hides nothing" "$(contains "$out" 'scripts/release.sh:7: this line runs `biome`')"
+check "timeout and its option hide nothing" \
+  "$(contains "$out" 'scripts/release.sh:8: this line runs `tsc`')"
+check "sudo hides nothing" \
+  "$(contains "$out" 'scripts/release.sh:9: this line runs `playwright`')"
+check "a pile of prefixes hides nothing" \
+  "$(contains "$out" 'scripts/release.sh:10: this line runs `biome`')"
+check "a variable holding the runner is refused, not read" \
+  "$(contains "$out" 'scripts/release.sh:11: this line cannot be read for certain')"
+check "each line is reported once" "$(contains "$out" '7 place(s)')"
+
 echo "case: a command the gate cannot read is refused, never waved through"
 root=$(fixture shell-expanded-tool)
 cat >> "$root/scripts/release.sh" <<'SH'
@@ -630,5 +764,66 @@ MD
 run_check "$root"
 check "an unsnapshotted guide is read" "$(is "$status" 1)"
 check "names it" "$(contains "$out" 'packages/thing/AGENTS.md:4: this fenced command runs `bunx`')"
+
+echo "case: a package manager's subcommand decides what the words after it are"
+# The branch that treats a manager's arguments as non-commands swallowed every segment whose
+# subcommand was not the one runner spelling tabled, so `pnpm exec biome check .` and
+# `yarn biome check .` — a runner and a tool, as plainly as `bunx biome` is — both passed. Each
+# of the four cases is a case here: a runner subcommand, a pinned tool's own basename, the
+# ordinary subcommands this repository prescribes, and a subcommand the gate does not know,
+# which is refused rather than waved through.
+root=$(fixture shell-manager-runners)
+cat >> "$root/scripts/release.sh" <<'SH'
+pnpm exec biome check .
+yarn exec biome check .
+yarn biome check .
+npm exec biome -- check .
+pnpm dlx tsc --noEmit
+SH
+run_check "$root"
+check "every runner subcommand and the tool yarn runs itself fail" "$(is "$status" 1)"
+check "pnpm exec is a runner" \
+  "$(contains "$out" 'scripts/release.sh:5: this line runs `pnpm exec`, a package runner')"
+check "yarn exec is a runner" \
+  "$(contains "$out" 'scripts/release.sh:6: this line runs `yarn exec`, a package runner')"
+check "yarn <tool> is the tool, judged by the tool rule" \
+  "$(contains "$out" 'scripts/release.sh:7: this line runs `biome`')"
+check "npm exec is a runner" \
+  "$(contains "$out" 'scripts/release.sh:8: this line runs `npm exec`, a package runner')"
+check "pnpm dlx is a runner" \
+  "$(contains "$out" 'scripts/release.sh:9: this line runs `pnpm dlx`, a package runner')"
+check "each line is reported once" "$(contains "$out" '5 place(s)')"
+
+root=$(fixture shell-manager-ordinary)
+cat >> "$root/scripts/release.sh" <<'SH'
+bun run lint
+bun test
+bun install --frozen-lockfile
+npm view biome version
+npm ci
+SH
+run_check "$root"
+check "the ordinary subcommands this repository prescribes still pass" "$(is "$status" 0)"
+
+root=$(fixture shell-unknown-subcommand)
+cat >> "$root/scripts/release.sh" <<'SH'
+bun frobnicate biome check .
+SH
+run_check "$root"
+check "a subcommand the gate does not know, in a segment naming a tool, fails" \
+  "$(is "$status" 1)"
+check "names the segment it cannot read and the subcommand" \
+  "$(contains "$out" 'scripts/release.sh:5: this line cannot be read for certain: `bun frobnicate biome check .` runs `bun frobnicate`, a subcommand this gate does not know')"
+check "names the tool the segment carries" "$(contains "$out" 'it names `biome`')"
+check "offers the marker as the way to say why it is safe" \
+  "$(contains "$out" 'check-check-commands: allow <reason>')"
+
+root=$(fixture shell-unknown-subcommand-harmless)
+cat >> "$root/scripts/release.sh" <<'SH'
+bun frobnicate --help
+SH
+run_check "$root"
+check "the same unknown subcommand naming no pinned tool passes: the rule stays that narrow" \
+  "$(is "$status" 0)"
 
 summary "check-check-commands.sh"
