@@ -287,6 +287,18 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 
+	// A pod leaves routing asynchronously: the EndpointSlice controller, and then every node's
+	// proxy and Tailscale Serve, learn of a terminating pod only after the kubelet has sent it
+	// SIGTERM, while envoy-dispatch closes its HTTP listener as that signal arrives
+	// (packages/envoy/cmd/dispatch/shutdown.go). The pre-stop wait holds the container open across
+	// that propagation window, so a pod still being sent requests still answers them. It runs
+	// before the process is signalled, inside the pod's 30 s grace period, so it takes nothing
+	// from the server's own drain budget, and the image (debian:bookworm-slim) carries /bin/sleep.
+	// Only the app's container waits: the front door and the listener are single-replica Recreate
+	// workloads with no second pod to route to, so a wait there would only lengthen their outage.
+	appPreStop := &corev1.LifecycleArgs{PreStop: &corev1.LifecycleHandlerArgs{
+		Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("sleep"), pulumi.String("5")}},
+	}}
 	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(30), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{
@@ -296,7 +308,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources("1", "4Gi"), Env: corev1.EnvVarArray{
 				valueEnv("HOME", "/home/envoy"), secretEnv("DATABASE_URL", dispatchSecretName, "DATABASE_URL"), secretEnv("DISPATCH_AGENT_TOKEN", dispatchSecretName, "DISPATCH_AGENT_TOKEN"), secretEnv("DISPATCH_SIGNING_KEY", dispatchSecretName, "DISPATCH_SIGNING_KEY"), secretEnv("DISPATCH_SIGNIN_CLIENT_SECRET", dispatchSecretName, "DISPATCH_SIGNIN_CLIENT_SECRET"),
 				valueEnv("DISPATCH_SIGNIN_ISSUER", "https://accounts.google.com"), valueEnv("DISPATCH_SIGNIN_CLIENT_ID", s.signIn.clientID), valueEnv("DISPATCH_SIGNIN_DOMAIN", s.signIn.domain), valueEnv("DISPATCH_SERVER_URL", "https://"+s.hostname+"."+s.tailnetDNSName), valueEnv("DISPATCH_LISTEN_HOST", "0.0.0.0"), corev1.EnvVarArgs{Name: pulumi.String("NATS_URLS"), Value: args.NatsUrl}, valueEnv("ENVOY_ALLOW_REMOTE_NATS", "1"), valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"), valueEnv("ENVOY_NATS_SOCKS5_PROXY", socks5Proxy), valueEnv("ENVOY_URL", listenerURL), secretEnv("ENVOY_TOKEN", listenerName, "ENVOY_API_TOKEN"),
-			}, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
+			}, VolumeMounts: seedMount, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 		},
 		Volumes: seedVolume,
 	}, frontDoor); err != nil {

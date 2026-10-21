@@ -200,13 +200,20 @@ the seed remains outside Pulumi state.
 The Deployments intentionally have no liveness probe for Dispatch because its health endpoint
 reads Cloud SQL. At one replica an input or image update recreates the app's one pod, which is a
 brief outage; so is every update of the front door or of the listener, at any replica count, since
-both are recreated and Serve is down while the tailnet pod is replaced. Above one replica the app
-rolls instead: a new pod is ready before an old one stops, and its readers see no gap. A rolling
-update also runs the new image's migrations while the previous build is still serving, which
-bounds what a migration may change: "Database migrations" in
-`packages/envoy/cmd/dispatch/README.md` holds the rule. A region change replaces the component's
-networked resources. Keep `deletionProtection` enabled outside deliberate teardown-and-rebuild
-work: deleting the Cloud SQL instance deletes its backups.
+both are recreated, and a front-door recreate takes the app down with it: the app's readiness reads
+NATS, which reaches the hub only through that proxy, so thirty seconds later (`failureThreshold` 3
+at `periodSeconds` 10) every app replica fails readiness and leaves Service `<hostname>` too, and
+the in-cluster `allowedNamespaces` consumers lose the app for that window as well. It heals itself,
+since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no liveness probe restarts
+anything, and it is no regression, since the base ran one pod. Above one replica the app rolls
+instead: a new pod is ready before an old one stops, and a stopping pod keeps serving for five
+seconds after it is removed from routing, which is what the pre-stop wait is for. Whether that is
+enough to lose no request across a real release is unmeasured; the consuming stack's release
+measures it, with a poll every 250 milliseconds. A rolling update also runs the new image's
+migrations while the previous build is still serving, which bounds what a migration may change:
+"Database migrations" in `packages/envoy/cmd/dispatch/README.md` holds the rule. A region change
+replaces the component's networked resources. Keep `deletionProtection` enabled outside deliberate
+teardown-and-rebuild work: deleting the Cloud SQL instance deletes its backups.
 
 `envoy-dispatch` itself is not yet safe at more than one concurrent process: its two delivery
 consumers are exclusive push durables, so a second process logs a bind error for as long as it

@@ -501,6 +501,23 @@ func TestDispatchListenerStaysSingleAndAuthenticated(t *testing.T) {
 	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
 }
 
+// A pod the apiserver has marked terminating stays in routing for a while yet: the EndpointSlice
+// controller, every node's proxy and the front door's Tailscale Serve learn of its removal only
+// after the kubelet has signalled it, while envoy-dispatch closes its HTTP listener as that signal
+// arrives (packages/envoy/cmd/dispatch/shutdown.go). The app's container therefore waits before it
+// is signalled, so a pod still being sent requests still answers them, and the pod's grace period
+// covers that wait with the server's own drain budget untouched.
+func TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	template := deploymentPodTemplate(t, m, "example-dispatch")
+	require.EqualValues(t, 30, template["spec"].(map[string]any)["terminationGracePeriodSeconds"])
+	app := podContainer(t, template, "envoy-dispatch")
+	require.Equal(t, map[string]any{"preStop": map[string]any{"exec": map[string]any{"command": []any{"sleep", "5"}}}},
+		app["lifecycle"])
+}
+
 func TestDispatchServiceExposesPort8766(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -518,21 +535,29 @@ func TestDispatchServiceExposesPort8766(t *testing.T) {
 	require.EqualValues(t, 8766, port["targetPort"])
 }
 
-// policyIngressPods returns the app labels one NetworkPolicy's single ingress rule admits at port,
-// failing when the policy covers other pods than its own workload, admits another port, admits a
-// namespace, or carries an empty from, which admits every pod in the cluster.
-func policyIngressPods(t *testing.T, m *pulumitest.Mocks, name string, port int) []string {
+// policyIngressRules returns one NetworkPolicy's ingress rules, failing when the policy covers
+// other pods than its own workload, is not an Ingress policy, or carries another number of rules
+// than count.
+func policyIngressRules(t *testing.T, m *pulumitest.Mocks, name string, count int) []any {
 	t.Helper()
 	spec := m.Named(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy", name).Inputs.Mappable()["spec"].(map[string]any)
 	require.Equal(t, map[string]any{"app": name}, spec["podSelector"].(map[string]any)["matchLabels"])
 	require.Equal(t, []any{"Ingress"}, spec["policyTypes"])
 	ingress := spec["ingress"].([]any)
-	require.Len(t, ingress, 1)
-	rule := ingress[0].(map[string]any)
-	ports := rule["ports"].([]any)
+	require.Len(t, ingress, count)
+	return ingress
+}
+
+// ingressPods returns the app labels one ingress rule admits at port, failing when the rule admits
+// another port, admits a namespace, or carries an empty from, which admits every pod in the
+// cluster.
+func ingressPods(t *testing.T, rule any, port int) []string {
+	t.Helper()
+	fields := rule.(map[string]any)
+	ports := fields["ports"].([]any)
 	require.Len(t, ports, 1)
 	require.EqualValues(t, port, ports[0].(map[string]any)["port"])
-	from := rule["from"].([]any)
+	from := fields["from"].([]any)
 	require.NotEmpty(t, from)
 	apps := make([]string, 0, len(from))
 	for _, item := range from {
@@ -542,6 +567,12 @@ func policyIngressPods(t *testing.T, m *pulumitest.Mocks, name string, port int)
 		apps = append(apps, peer["podSelector"].(map[string]any)["matchLabels"].(map[string]any)["app"].(string))
 	}
 	return apps
+}
+
+// policyIngressPods returns the app labels a NetworkPolicy's single ingress rule admits at port.
+func policyIngressPods(t *testing.T, m *pulumitest.Mocks, name string, port int) []string {
+	t.Helper()
+	return ingressPods(t, policyIngressRules(t, m, name, 1)[0], port)
 }
 
 // With no namespace named, the app's policy carries exactly one rule: the front door's. Serve runs
@@ -554,16 +585,21 @@ func TestDispatchNetworkPolicyAdmitsNoNamespaceByDefault(t *testing.T) {
 	require.Equal(t, []string{"example-dispatch-tailnet"}, policyIngressPods(t, m, "example-dispatch", 8766))
 }
 
+// With namespaces named, the shape the consuming stack passes, the app's policy carries those two
+// rules and no other: the named namespaces on 8766, and the front door's pod on 8766, which Serve
+// needs and which no namespace selector covers.
 func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
 	args := dispatchArgs()
 	args.AllowedNamespaces = []string{"envoy", "legion"}
 	m, err := runDispatch(t, args, true)
 	require.NoError(t, err)
 
-	policy := m.Named(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy", "example-dispatch")
-	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
-	ingress := spec["ingress"].([]any)[0].(map[string]any)
-	from := ingress["from"].([]any)
+	rules := policyIngressRules(t, m, "example-dispatch", 2)
+	namespaceRule := rules[0].(map[string]any)
+	ports := namespaceRule["ports"].([]any)
+	require.Len(t, ports, 1)
+	require.EqualValues(t, 8766, ports[0].(map[string]any)["port"])
+	from := namespaceRule["from"].([]any)
 	require.Len(t, from, 2)
 	var namespaces []string
 	for _, peer := range from {
@@ -572,6 +608,7 @@ func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
 		namespaces = append(namespaces, labels["kubernetes.io/metadata.name"].(string))
 	}
 	require.ElementsMatch(t, []string{"envoy", "legion"}, namespaces)
+	require.Equal(t, []string{"example-dispatch-tailnet"}, ingressPods(t, rules[1], 8766))
 }
 
 // Whatever reaches the proxy at 1055 gets tailnet egress as this node, so only the two workloads

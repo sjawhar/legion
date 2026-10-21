@@ -102,6 +102,16 @@
           }
         ],
         "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "lifecycle": {
+          "preStop": {
+            "exec": {
+              "command": [
+                "sleep",
+                "5"
+              ]
+            }
+          }
+        },
         "name": "envoy-dispatch",
         "readinessProbe": {
           "exec": {
