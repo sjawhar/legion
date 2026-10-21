@@ -86,9 +86,11 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 }
 
 // StoreUpdateContext appends a room's update with the in-flight credit its update observer
-// recorded (AppendUpdateWithCredit). An update that never reaches the store - its room failed, or
-// a live write or a settlement already made it durable - lands its credit here instead: the room
-// drops it with the update, which the browser resends.
+// recorded (AppendUpdateWithCredit), and with that observer's record of which room instance the
+// update was made in (documentUpdateClass.cursor): the append is gated on that instance standing
+// at the durable head, and advances it when it commits (appendUpdate). An update that never
+// reaches the store - its room failed, or a live write or a settlement already made it durable -
+// lands its credit here instead: the room drops it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
 		return nil
@@ -101,7 +103,7 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
-	if _, err := a.store.AppendUpdateWithCredit(ctx, room, update, class.contentChanged, class.credit); err != nil {
+	if _, err := a.store.AppendUpdateWithCredit(withRoomCursor(ctx, class.cursor), room, update, class.contentChanged, class.credit); err != nil {
 		a.service.failRoom(room, err)
 		return err
 	}
@@ -454,7 +456,8 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if loaded, ok := s.loadedHeads.LoadAndDelete(room); ok {
 		head = loaded.(persistence.Version)
 	}
-	hold := s.keepHold(doc, head)
+	instance := s.keepInstance(doc, head)
+	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,
 		// before ygo's persistence observer, which the room registers after OnLoadDocument, hands
@@ -465,6 +468,13 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		}
 		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			s.recordSuppressedCommit(repair.slot, update)
+			// A repair's update is not classified or credited - its writer appends it in its own
+			// transaction - but it names this instance all the same: one that reaches the room's
+			// persistence outside its suppression slot, which another writer's update can take
+			// first (consumeSuppressedPersistence), is stored as any other update, and the room
+			// it was made in has to take that version in or stand behind the head for good. The
+			// class counts for nothing else: it is not durable work the room's state waits on.
+			s.recordUpdateClass(room, update, documentUpdateClass{contentChanged: true, cursor: &instance.cursor})
 			return
 		}
 		if s.beforeObserveUpdate != nil {
@@ -473,7 +483,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
 			s.observeAskBlocksForUpdate(room, tree)
 		})
-		class := documentUpdateClass{contentChanged: contentChanged, durable: true}
+		// The cursor is this instance's, taken here rather than looked up when the update reaches
+		// the store: a room evicted and reloaded in between is a different instance, which did not
+		// take this update and must not be recorded as holding the version it is stored at.
+		class := documentUpdateClass{contentChanged: contentChanged, durable: true, cursor: &instance.cursor}
 		if contentChanged {
 			class.credit = s.creditContentChange(room, origin, hold)
 			if s.afterCreditUpdate != nil {

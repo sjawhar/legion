@@ -130,6 +130,12 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("commit document update: %w", err)
 		}
 		credit.held(version)
+		// The room instance's cursor advances here, inside the lock the append holds, rather than
+		// where the caller marked the context with it (StoreUpdateContext): a writer that took the
+		// lock after this commit released it would otherwise read a cursor one version behind the
+		// head it reads under that lock, and the gate would refuse an agent's edit while nothing
+		// was wrong with its room.
+		advanceRoomCursor(roomCursorFrom(ctx), version)
 		return nil
 	})
 	return version, err
@@ -201,6 +207,17 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		select coalesce(max(version), 0) from doc_updates where artifact_id = $1
 	`, room).Scan(&latest); err != nil {
 		return 0, fmt.Errorf("read latest document update: %w", err)
+	}
+	// The gate: the document this update was made on must stand at the head. Two envoy-dispatch
+	// processes serve one database, and an append of the other process's room is not in this
+	// one's document; appending from a room behind the head is itself harmless, since Yjs updates
+	// commute and this lock serialises them, but everything the appending transaction renders
+	// from that document - an upload's or a conditional edit's version, a settlement's repairs -
+	// is rendered from text the writer never saw. The order is the lock, then the cursor, then
+	// the head: a peer of this very room whose append committed under this lock has already
+	// advanced the cursor (appendUpdate), so two peers of one room never refuse each other.
+	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), latest); err != nil {
+		return 0, err
 	}
 	version := persistence.Version(latest + 1)
 	if _, err := tx.Exec(ctx, `

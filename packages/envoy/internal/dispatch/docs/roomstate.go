@@ -89,13 +89,15 @@ type roomState struct {
 
 // documentUpdateClass is what the room's update observer recorded for one update, which its
 // persistence takes (consumeUpdateClass): whether it changed the content, whether it is durable
-// work the room's state waits on, and the browser edit's in-flight credit, nil for an update no
-// browser edit credited.
+// work the room's state waits on, the browser edit's in-flight credit, nil for an update no
+// browser edit credited, and cursor, the durable version the room instance the update was made in
+// stands at, which gates and then takes in the update's own append (StoreUpdateContext).
 type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
 	durable        bool
 	credit         *UpdateCredit
+	cursor         *roomCursor
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -193,13 +195,17 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
 }
 
+// recordUpdateClass records what the room's update observer read off one update, for the
+// persistence that takes it next (consumeUpdateClass). Only a durable class is work the room's
+// state waits on: a repair's update is recorded for the room instance it names alone, and its
+// writer, not the room's persistence, is what makes it durable.
 func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	class.update = append([]byte(nil), update...)
 	state.updateClasses = append(state.updateClasses, class)
-	state.pendingUpdates++
 	if class.durable {
+		state.pendingUpdates++
 		state.durableAppends.Add(1)
 	}
 }
@@ -219,7 +225,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 			continue
 		}
 		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
-		state.pendingUpdates--
+		if class.durable {
+			state.pendingUpdates--
+		}
 		return class, true
 	}
 	return documentUpdateClass{contentChanged: true}, false

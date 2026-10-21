@@ -202,10 +202,12 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
-	// holds holds, for each resident room document, the durable updates that instance holds
-	// (*roomHold), keyed by a weak pointer to the document (keepHold). loadedHeads passes the head a
-	// room's load read (servicePersistenceAdapter.LoadDoc) to the hook ygo calls next on the same
-	// goroutine (onLoadDocument).
+	// holds holds, for each resident room document, what that instance records about the durable
+	// history behind it (*roomInstance): the updates whose writes can have recorded a pending
+	// author, and the durable version the instance stands at, keyed by a weak pointer to the
+	// document (keepInstance). loadedHeads passes the head a room's load read
+	// (servicePersistenceAdapter.LoadDoc) to the hook ygo calls next on the same goroutine
+	// (onLoadDocument).
 	holds       sync.Map
 	loadedHeads sync.Map
 	// reads holds the renderings of the documents cold reads served, each under the stored state
@@ -1178,7 +1180,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	s.unlockState(room, state)
 
 	ledger := &Ledger{service: s, settling: true}
-	ctx := store.WithTransactionTracking(withLedger(parent, ledger))
+	// The cursor of the instance this settlement holds (doc), which gates the repairs it appends
+	// and takes them in once they are stored (advanceRoomCursor). Its own first gate is the
+	// comparison below, before it reads the document at all.
+	cursor := s.cursorOf(doc)
+	ctx := withRoomCursor(store.WithTransactionTracking(withLedger(parent, ledger)), cursor)
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		retry(fmt.Errorf("begin document transaction: %w", err))
@@ -1223,6 +1229,27 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	snapshotCursor, err := currentUpdateCursor(ctx, tx, room)
 	if err != nil {
+		retry(err)
+		return
+	}
+	// The gate, before this settlement reads the document or writes anything. The room it holds
+	// must stand at that head: with two envoy-dispatch processes on one Postgres, an update the
+	// other process appended is not in this room, and settling from it corrupts three things at
+	// once. Its version would record doc_update_version = snapshotCursor over text that is
+	// missing the other process's update, so contentChangedSinceVersion then reports nothing past
+	// that cursor and those words are never versioned; clearSettlementPending would delete the one
+	// durable record that the work is still owed; and reconcileAskBlocks would retract every open
+	// ask whose block this stale tree cannot see.
+	//
+	// Nothing is lost by refusing. The transaction rolls back, so doc_settlements_pending still
+	// stands, and retry is the existing path: retrySettleLocked reschedules, and the third refusal
+	// in a row fails the room (maxSettleFailures), whose eviction reloads the document at the head
+	// and arms the settlement again from that row (onLoadDocument), which then settles every
+	// update, this process's and the other's.
+	//
+	// The cursor is the one this settlement marked its context with, read through the accessor
+	// its repairs' appends read (appendingCursor), so the two can never disagree.
+	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), snapshotCursor); err != nil {
 		retry(err)
 		return
 	}
@@ -1347,10 +1374,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return
 		}
 		identityChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
-		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate, identityChanged); err != nil {
+		repaired, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate, identityChanged)
+		if err != nil {
 			abandon(err)
 			return
 		}
+		// The room already holds this repair (applySuppressed wrote it there), so the instance
+		// takes the version it is stored at. It is recorded before the commit, under the advisory
+		// lock this transaction holds until then, so nothing reads the cursor in between; a
+		// rollback here fails the room, which reloads the document (abandon).
+		advanceRoomCursor(cursor, repaired)
 		if err := tx.Commit(ctx); err != nil {
 			abandon(fmt.Errorf("commit superseded document identity update: %w", err))
 			return
@@ -1394,10 +1427,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return
 		}
 		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, reconciled)
-		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged); err != nil {
+		repaired, err := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged)
+		if err != nil {
 			abandon(err)
 			return
 		}
+		advanceRoomCursor(cursor, repaired)
 		snapshotCursor, err = currentUpdateCursor(ctx, tx, room)
 		if err != nil {
 			abandon(err)
@@ -1693,7 +1728,12 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	// block's repeated id changes the `#id` its directive carries.
 	var stampedChanged bool
 	var renamed []stampedAsk
+	// The cursor of the room instance the stamp is written into, taken inside the Apply that
+	// holds that instance: the backfill appends a durable version of its own below, and a room
+	// that did not take it in would stand behind the head and be refused its next write.
+	var cursor *roomCursor
 	slot, update, err := s.applySuppressed(backfillCtx, artifactID, nil, func(doc *crdt.Doc, origin any) (bool, error) {
+		cursor = s.cursorOf(doc)
 		read, err := s.liveTree(artifactID, doc)
 		if err != nil {
 			return false, err
@@ -1743,9 +1783,13 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		return abandon(fmt.Errorf("begin document transaction: %w", err))
 	}
 	defer tx.Rollback(ctx)
-	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, stampedChanged); err != nil {
+	stamped, err := s.persistence.AppendUpdateTx(withRoomCursor(ctx, cursor), tx, artifactID, update, stampedChanged)
+	if err != nil {
 		return abandon(fmt.Errorf("append identity update: %w", err))
 	}
+	// The stamp is in the room, so that instance takes the version it is stored at, under the
+	// advisory lock this transaction holds until it commits. A rollback fails the room (abandon).
+	advanceRoomCursor(cursor, stamped)
 	if err := tx.Commit(ctx); err != nil {
 		return abandon(fmt.Errorf("commit identity update: %w", err))
 	}

@@ -1,0 +1,365 @@
+package docs
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+)
+
+// Two envoy-dispatch processes serve one Postgres, and a room resident in one of them never
+// receives the updates the other appends: only a reload brings them in. Everything a process
+// renders from such a room - a settlement's version and its ask reconciliation, an upload's
+// replacement, an agent's edit - would be written over text that process has never seen, so every
+// one of them is refused while the room's cursor is not the durable head (ErrRoomBehindHead), and
+// a write that can be made on the stored document instead is (coldFork). The tests here drive each
+// of those paths through two services on one database, as production's two tasks are, and each one
+// fails without the gate.
+
+// processPair is one document served by two processes: taskA, whose rooms the tests leave behind
+// the head, and taskB, the other process, on a pool of its own (storetest.SecondProcess) as a
+// second envoy-dispatch task has.
+type processPair struct {
+	database   *store.Store
+	artifactID string
+	taskA      *Service
+	taskB      *Service
+}
+
+func newProcessPair(t *testing.T) processPair {
+	t.Helper()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	taskA, _ := newTestServiceInstance(t, database)
+	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
+	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, taskA, artifactID)
+	return processPair{database: database, artifactID: artifactID, taskA: taskA, taskB: taskB}
+}
+
+// leaveTaskABehind loads task A's room, then has a browser on task B edit the document: task A's
+// room holds every update through the head it loaded and not that one, which is the state every
+// gate here refuses to write from.
+func (pair processPair) leaveTaskABehind(t *testing.T, connection uint64, peer model.Actor, markdown string) {
+	t.Helper()
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	editAsConnectedPeer(t, pair.taskB, pair.artifactID, connection, peer, appendBlocks(t, markdown))
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	if behind := roomBehind(t, pair.taskA, pair.artifactID); !behind {
+		t.Fatal("task A's room stands at the head after task B's edit, so nothing here is tested")
+	}
+}
+
+// roomBehind reports whether service's room for artifactID stands behind the document's head.
+func roomBehind(t *testing.T, service *Service, artifactID string) bool {
+	t.Helper()
+	live := service.srv.GetDoc(artifactID)
+	if live == nil {
+		t.Fatal("no room is resident")
+	}
+	cursor := service.cursorOf(live)
+	if cursor == nil {
+		t.Fatal("the resident room lists no cursor")
+	}
+	return cursor.heldThrough() != storedHead(t, service.store, artifactID)
+}
+
+// storedHead is the document's durable head, the version its stored history stands at.
+func storedHead(t *testing.T, database *store.Store, artifactID string) int64 {
+	t.Helper()
+	var head int64
+	if err := database.Pool.QueryRow(context.Background(), `
+		select coalesce(max(version), 0) from doc_updates where artifact_id = $1
+	`, artifactID).Scan(&head); err != nil {
+		t.Fatalf("read the document's head: %v", err)
+	}
+	return head
+}
+
+// storedMarkdown is the stored document's rendering, the one every reload of it reads.
+func storedMarkdown(t *testing.T, database *store.Store, artifactID string) string {
+	t.Helper()
+	markdown, err := renderTree(persistedProofTree(t, database, artifactID))
+	if err != nil {
+		t.Fatalf("render the stored document: %v", err)
+	}
+	return markdown
+}
+
+// latestVersionOf is the document's latest version: its markdown and the update cursor it records,
+// past which a later settlement looks for content changes (contentChangedSinceVersion).
+func latestVersionOf(t *testing.T, database *store.Store, artifactID string) (markdown string, cursor int64) {
+	t.Helper()
+	if err := database.Pool.QueryRow(context.Background(), `
+		select markdown, doc_update_version from artifact_versions
+		where artifact_id = $1 order by number desc limit 1
+	`, artifactID).Scan(&markdown, &cursor); err != nil {
+		t.Fatalf("read the latest version: %v", err)
+	}
+	return markdown, cursor
+}
+
+// requireRoomStillWrites fails unless service's room can still make a durable write: a browser's
+// edit on it reaches the store. The gate refuses the append of a room whose cursor is behind the
+// head, which fails the room, so a missed advance shows here and nowhere else - the room would be
+// reloaded and refused again at its next edit.
+func requireRoomStillWrites(t *testing.T, service *Service, artifactID string, connection uint64) {
+	t.Helper()
+	text := fmt.Sprintf("Writing again as peer %d.", connection)
+	before := storedHead(t, service.store, artifactID)
+	editAsConnectedPeer(t, service, artifactID, connection,
+		model.Actor{Kind: "user", ID: fmt.Sprintf("peer-%d", connection)}, appendBlocks(t, text+"\n"))
+	deadline := time.Now().Add(roomWait(t))
+	for time.Now().Before(deadline) {
+		if strings.Contains(storedMarkdown(t, service.store, artifactID), text) {
+			if head := storedHead(t, service.store, artifactID); head <= before {
+				t.Fatalf("the room's edit is stored at head %d, want one past %d", head, before)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("the room's edit %q never reached the store (room failure: %v): its append was refused, so this room's cursor never took an update it holds",
+		text, service.roomFailure(artifactID))
+}
+
+// A settlement from a room behind the head is refused before it reads the document, so it writes
+// no version and clears no pending settlement; the reload settles every update, this process's
+// and the other's, into one version whose cursor covers them both. Without the gate task A's
+// settlement versions its own room's text alone, records doc_update_version at a head that
+// includes task B's update, and deletes the doc_settlements_pending row that says the work is
+// still owed: task B's words are then past no cursor any later settlement looks behind, and
+// nothing is left to version them (corruptions 1 and 2 of INFRA-66).
+func TestASettlementFromARoomBehindTheHeadIsRefusedAndLosesNothing(t *testing.T) {
+	pair := newProcessPair(t)
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	// Task A's room has an unversioned change of its own, so a settlement of it would write a
+	// version; then task B's edit leaves it behind the head.
+	editAsConnectedPeer(t, pair.taskA, pair.artifactID, 1, alice, appendBlocks(t, "Alice's paragraph.\n"))
+	waitForLandedAppends(t, pair.taskA, pair.artifactID)
+	pair.leaveTaskABehind(t, 2, bob, "Bob's paragraph.\n")
+
+	versions := latestVersionNumber(t, pair.taskA, pair.artifactID)
+	settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+	if now := latestVersionNumber(t, pair.taskA, pair.artifactID); now != versions {
+		markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+		t.Fatalf("task A's settlement wrote version %d from a room behind the head: %q at cursor %d", now, markdown, cursor)
+	}
+	if owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID); err != nil || !owed {
+		t.Fatalf("the document owes a settlement = %v (%v), want true: the refused settlement cleared the one record that the work is owed", owed, err)
+	}
+
+	// The reload brings in task B's update, and that settlement versions both.
+	if err := pair.taskA.Evict(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("evict task A's room: %v", err)
+	}
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("reload task A's room: %v", err)
+	}
+	settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+	markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+	for _, want := range []string{"Alice's paragraph.", "Bob's paragraph."} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("the settled version = %q, want it to hold %q", markdown, want)
+		}
+	}
+	if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+		t.Fatalf("the settled version records update cursor %d, want the head %d", cursor, head)
+	}
+}
+
+// An open ask whose block only the other process's room holds is not retracted: the settlement
+// that cannot see it is refused before it reconciles anything. Without the gate task A's stale
+// tree holds no such block, and reconcileAskBlocks retracts the ask and publishes its
+// `ask.resolved` event, over a question nobody answered (corruption 3 of INFRA-66).
+func TestAnOpenAskIsNotRetractedByASettlementFromARoomBehindTheHead(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 1, bob,
+		appendBlocks(t, ":::ask{#bob-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"))
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	settleCurrentGeneration(t, pair.taskB, pair.artifactID)
+	if state := askState(t, pair.database, pair.artifactID, "bob-ask"); state != "open" {
+		t.Fatalf("the ask task B settled is %q, want open", state)
+	}
+	if behind := roomBehind(t, pair.taskA, pair.artifactID); !behind {
+		t.Fatal("task A's room stands at the head after task B's ask block, so nothing here is tested")
+	}
+
+	settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+	if state := askState(t, pair.database, pair.artifactID, "bob-ask"); state != "open" {
+		t.Fatalf("the ask is %q after task A's settlement, want open: its room cannot see the block the ask is anchored to", state)
+	}
+}
+
+// askState is the state of the ask anchored to blockID of artifactID.
+func askState(t *testing.T, database *store.Store, artifactID, blockID string) string {
+	t.Helper()
+	var state string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select state from asks where block_artifact_id = $1 and block_id = $2
+	`, artifactID, blockID).Scan(&state); err != nil {
+		t.Fatalf("read the ask anchored to %s: %v", blockID, err)
+	}
+	return state
+}
+
+// An upload from a room behind the head is rendered from the stored document, so the document it
+// leaves is the one its version records. Without the gate the replacement is computed on the stale
+// fork, which never held task B's paragraph: the replacement deletes what the fork held and the
+// paragraph survives the merge, so the stored document holds text the version does not
+// (corruption 6 of INFRA-66).
+func TestAnUploadFromARoomBehindTheHeadReplacesTheStoredDocument(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
+	uploadOn(t, pair.taskA, pair.artifactID, uploaded, model.Actor{Kind: "session", ID: "uploader-on-task-a"})
+	markdown, _ := latestVersionOf(t, pair.database, pair.artifactID)
+	if markdown != uploaded {
+		t.Fatalf("the upload's version = %q, want %q", markdown, uploaded)
+	}
+	if stored := storedMarkdown(t, pair.database, pair.artifactID); stored != uploaded {
+		t.Fatalf("the stored document after the upload = %q, want %q: the upload replaced a document it had not read", stored, uploaded)
+	}
+}
+
+// An agent's edit whose room is behind the head is made on the stored document and succeeds: the
+// cold path is what keeps the gate from answering 503 for a write this process can still make
+// correctly. The edit lands beside task B's paragraph, which the room it would otherwise have
+// forked never held (corruption 7 of INFRA-66: a write made over text its writer never saw).
+func TestAnEditFromARoomBehindTheHeadTakesTheColdPathAndSucceeds(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	if _, err := joinedApplyOps(pair.taskA, pair.artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Bob's paragraph."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("an agent's edit on a room behind the head: %v", err)
+	}
+	stored := storedMarkdown(t, pair.database, pair.artifactID)
+	for _, want := range []string{"Bob's paragraph.", "Agent's paragraph."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document after the edit = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
+// The load is where a room's cursor starts: the head its load read (keepInstance), including the
+// update the other process appended before it. A load that recorded anything else would refuse
+// this room's first write.
+func TestARoomLoadedAfterAnotherProcessesAppendStandsAtTheHead(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	// The room the seed left on task A would be the one behind the head; this test is about the
+	// load that replaces it.
+	if err := pair.taskA.Evict(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("evict the room task A seeded: %v", err)
+	}
+	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 1, bob, appendBlocks(t, "Bob's paragraph.\n"))
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room after task B's append: %v", err)
+	}
+	if behind := roomBehind(t, pair.taskA, pair.artifactID); behind {
+		t.Fatal("the loaded room stands behind the head it was loaded at")
+	}
+	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 2)
+}
+
+// A browser append takes in the version it stored, so the next edit of the same room is stored
+// too. Without that advance the room's second edit is refused, the room fails, and every edit
+// after a reload meets the same refusal.
+func TestARoomWritesAgainAfterItsOwnBrowserAppend(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	editAsConnectedPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"}, appendBlocks(t, "Alice's paragraph.\n"))
+	waitForLandedAppends(t, service, artifactID)
+	requireRoomStillWrites(t, service, artifactID, 2)
+}
+
+// A committed live write is appended outside the room and published into it, so the publish is
+// what takes its version in (publishLiveUpdate). Without that advance a room left behind by its
+// own process's write refuses the next browser edit.
+func TestARoomWritesAgainAfterACommittedWritePublishesIntoIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("an agent's edit into the resident room: %v", err)
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+}
+
+// A settlement that stamps block ids writes that repair into its own room and appends it in its
+// transaction, so the room takes the version it is stored at there (settleRoomWithin). Without
+// that advance every settlement that repairs anything would leave its own room unable to write.
+func TestARoomWritesAgainAfterItsSettlementAppendsARepair(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "A paragraph with no block id."))
+	before := storedHead(t, service.store, artifactID)
+	settleCurrentGeneration(t, service, artifactID)
+	if head := storedHead(t, service.store, artifactID); head <= before {
+		t.Fatalf("the document's head is %d after the settlement, want one past %d: it stamped no block id, so no repair was appended", head, before)
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+}
+
+// A settlement superseded after it wrote its repair commits that repair alone, on its own path,
+// and the room takes that version in there too.
+func TestARoomWritesAgainAfterASupersededSettlementAppendsItsRepair(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	editLiveTree(t, service, artifactID, appendUnidentifiedBlocks(t, "A paragraph with no block id."))
+	// The settlement is superseded between its read and its supersession check, as a write
+	// opening on the room supersedes it: it then commits the repair it has already written into
+	// the room and writes no version.
+	superseded := false
+	service.afterSettleRead = func(room string) {
+		if room != artifactID || superseded {
+			return
+		}
+		superseded = true
+		state := service.lockState(room)
+		state.roomGeneration++
+		service.unlockState(room, state)
+	}
+	versions := latestVersionNumber(t, service, artifactID)
+	before := storedHead(t, service.store, artifactID)
+	settleCurrentGeneration(t, service, artifactID)
+	service.afterSettleRead = nil
+	if !superseded {
+		t.Fatal("the settlement never reached the window its supersession was arranged in")
+	}
+	if head := storedHead(t, service.store, artifactID); head <= before {
+		t.Fatalf("the document's head is %d after the superseded settlement, want one past %d: it appended no repair", head, before)
+	}
+	if now := latestVersionNumber(t, service, artifactID); now != versions {
+		t.Fatalf("the superseded settlement wrote version %d, want none past %d", now, versions)
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+}

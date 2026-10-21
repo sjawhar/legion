@@ -173,18 +173,169 @@ func (hold *roomHold) snapshot() heldUpdates {
 	return heldUpdates{through: hold.loaded, since: slices.Clone(hold.since)}
 }
 
-// keepHold starts the roomHold of live, a room instance loaded at head, and lists it for the
-// instance's writes (holdOf) while live is resident (listResident).
-func (s *Service) keepHold(live *crdt.Doc, head persistence.Version) *roomHold {
-	hold := &roomHold{loaded: int64(head)}
-	listResident(&s.holds, live, hold)
-	return hold
+// roomInstance is what one resident room instance records about the durable history behind its
+// document: hold, the updates whose writes can have recorded a pending author (roomHold), and
+// cursor, the durable version the instance's document stands at (roomCursor). They are different
+// sets, which is why the cursor is kept beside the hold rather than read off it: a browser append
+// that changed no rendered content carries a nil credit and never enters the hold, and
+// settlement's own repair append carries none either, so a hold equal to the head would say
+// nothing about whether the instance holds it.
+type roomInstance struct {
+	hold   roomHold
+	cursor roomCursor
+}
+
+// keepInstance starts the bookkeeping of live, a room instance loaded at head, and lists it for
+// the instance's writes (instanceOf, holdOf) while live is resident (listResident). The load is
+// the first advance of the instance's cursor: the instance holds every durable update through the
+// head its load read.
+func (s *Service) keepInstance(live *crdt.Doc, head persistence.Version) *roomInstance {
+	instance := &roomInstance{hold: roomHold{loaded: int64(head)}, cursor: roomCursor{through: int64(head)}}
+	listResident(&s.holds, live, instance)
+	return instance
+}
+
+// instanceOf is live's bookkeeping, nil for a document no room load listed.
+func (s *Service) instanceOf(live *crdt.Doc) *roomInstance {
+	if listed, ok := s.holds.Load(weak.Make(live)); ok {
+		return listed.(*roomInstance)
+	}
+	return nil
 }
 
 // holdOf is live's roomHold, nil for a document no room load listed.
 func (s *Service) holdOf(live *crdt.Doc) *roomHold {
-	if listed, ok := s.holds.Load(weak.Make(live)); ok {
-		return listed.(*roomHold)
+	if instance := s.instanceOf(live); instance != nil {
+		return &instance.hold
+	}
+	return nil
+}
+
+// cursorOf is live's roomCursor, nil for a document no room load listed.
+func (s *Service) cursorOf(live *crdt.Doc) *roomCursor {
+	if instance := s.instanceOf(live); instance != nil {
+		return &instance.cursor
+	}
+	return nil
+}
+
+// roomCursor is the durable version one instance of a room stands at: the head its load read, and
+// every version appended since whose update that instance applied - a browser update its own
+// append stored, a committed live write published into it, and settlement's own repair. Two
+// processes serve one database, and a room resident in this one never receives the updates the
+// other appended, so an append that raised the head elsewhere is in no cursor here: only a reload
+// brings it in. Every write that renders durable state from a room - a settlement's version and
+// its ask reconciliation, an upload's or a conditional edit's version, a rebuild - is refused
+// while this is not the durable head (ErrRoomBehindHead), because what it would write is rendered
+// from a document missing that update.
+//
+// It advances only by the version that follows the one it stands at, through advanceRoomCursor.
+// A version with a gap before it - another process's append this instance never took - leaves the
+// cursor where it was, since the instance does not hold the history through that version, and
+// only a reload fills the gap: every gate refuses until then, which is the point.
+type roomCursor struct {
+	mu      sync.Mutex
+	through int64
+}
+
+// advanceRoomCursor records that cursor's room instance now holds the durable update stored at
+// version. It is the one funnel every advance goes through, so the sites that have to advance a
+// cursor are one grep away. They are every site that makes a version durable for a document a
+// room of this process holds:
+//
+//   - the room's load, which starts the cursor at the head it read (keepInstance);
+//   - a browser append that committed, inside the lock it holds (PgVersioned.appendUpdate);
+//   - a live write's commit, for the versions its publish is about to apply to the room
+//     (Ledger.takeRoomCursors), and that publish itself (publishLiveUpdate);
+//   - settlement's own repair append, its superseded path included (settleRoomWithin);
+//   - the block-id backfill's stamp (backfillBlockIDs).
+//
+// A nil cursor is a document no room instance holds, whose writes no cursor gates.
+func advanceRoomCursor(cursor *roomCursor, version persistence.Version) {
+	if cursor == nil {
+		return
+	}
+	cursor.mu.Lock()
+	defer cursor.mu.Unlock()
+	if int64(version) == cursor.through+1 {
+		cursor.through = int64(version)
+	}
+}
+
+// heldThrough is the durable version the instance holds every update through.
+func (cursor *roomCursor) heldThrough() int64 {
+	cursor.mu.Lock()
+	defer cursor.mu.Unlock()
+	return cursor.through
+}
+
+// documentCursor is the durable version the document a write was made on holds every update
+// through: a room instance's cursor for an update made in a room, or a transaction's own view of
+// it (liveWrite.heldThrough), which adds the versions that transaction has appended itself and no
+// room holds until it publishes.
+type documentCursor interface {
+	heldThrough() int64
+}
+
+// ErrRoomBehindHead refuses a write that would record durable state for a document from a room
+// whose instance does not stand at the durable head: with two envoy-dispatch processes on one
+// Postgres, the room resident here never received the updates the other process appended, and a
+// version, an ask reconciliation or a conditional edit rendered from it would be written over text
+// this process has never seen. It is ErrServiceUnavailable, which is what it is for a caller: this
+// process cannot serve that write until the room reloads.
+var ErrRoomBehindHead = fmt.Errorf("%w: the document's room is behind its durable head", ErrServiceUnavailable)
+
+// refuseRoomBehindHead is the gate itself: cursor, the durable version the document the write was
+// made on holds every update through, must be the head, read in the same transaction under the
+// document's advisory lock so no append can land between the two reads.
+//
+// Equality, not `cursor < head`: a prune lowers the head (PruneAfter's checkpoint, finished by
+// recoverPruneTx) and a document's deletion removes it altogether, so a room resident across one
+// of those stands ahead of the head and holds a history the store no longer has; `<` would admit
+// it. A nil cursor is a write with no room's document behind it to be behind the head - a new
+// document's seed (SeedText), a test's own append - and is not gated.
+func refuseRoomBehindHead(room string, cursor documentCursor, head int64) error {
+	if cursor == nil {
+		return nil
+	}
+	if at := cursor.heldThrough(); at != head {
+		return fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
+			ErrRoomBehindHead, room, at, head)
+	}
+	return nil
+}
+
+// roomCursorContextKey marks a context with the cursor of the room instance whose document an
+// append's update was made on.
+type roomCursorContextKey struct{}
+
+// withRoomCursor marks ctx with cursor for the gate in appendUpdateTxClass. The appends made from
+// a room outside any live write mark their own context, since no ledger of theirs names the
+// document they were made on: the room's own appends (servicePersistenceAdapter.StoreUpdateContext,
+// which takes the cursor the update's observer recorded with it), settlement's repairs
+// (settleRoomWithin) and the block-id backfill's stamp (backfillBlockIDs).
+func withRoomCursor(ctx context.Context, cursor *roomCursor) context.Context {
+	if cursor == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, roomCursorContextKey{}, cursor)
+}
+
+// roomCursorFrom is the cursor withRoomCursor marked ctx with, nil for a context no room marked.
+func roomCursorFrom(ctx context.Context) *roomCursor {
+	cursor, _ := ctx.Value(roomCursorContextKey{}).(*roomCursor)
+	return cursor
+}
+
+// appendingCursor is the cursor the gate reads for an append to room: the calling transaction's
+// own write to room when it has one, whose fork is what the write was made on, otherwise the room
+// cursor its caller marked the context with. Nil is an append no cursor gates.
+func appendingCursor(ctx context.Context, room string) documentCursor {
+	if write := ledgerFrom(ctx).liveWriteFor(room); write != nil && write.forkCursor != nil {
+		return write
+	}
+	if cursor := roomCursorFrom(ctx); cursor != nil {
+		return cursor
 	}
 	return nil
 }

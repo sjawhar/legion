@@ -162,8 +162,28 @@ func (l *Ledger) commit(ctx context.Context) error {
 		l.fail(err)
 		return err
 	}
+	l.takeRoomCursors()
 	l.creditRooms()
 	return nil
+}
+
+// takeRoomCursors records on each room instance a write was made on the versions this commit made
+// durable, before the publish that applies them to that room (publish). The room does not hold
+// them yet, and nothing in that window renders from it: the write holds its writer slot until the
+// publish has returned, which defers its room's settlement (settleRoomWithin's supersession
+// check) and holds off every other transaction's write and version (awaitLiveWriter). What does
+// run in that window is a browser's append queued on the document's advisory lock, which takes it
+// the instant this commit drops it: refused there, this process's own committed write would fail
+// its own room and drop the browser's edit (TestSettlementBetweenCommitAndPublishWaitsForTheWrite).
+// The publish records them again on the room it reaches, which is the same instance unless the
+// room was replaced meanwhile (publishLiveUpdate).
+func (l *Ledger) takeRoomCursors() {
+	for _, artifactID := range l.order {
+		write := l.live[artifactID]
+		for _, version := range write.versions {
+			advanceRoomCursor(write.forkCursor, version)
+		}
+	}
 }
 
 // roomCapture is a version's capture with the document it versions.
