@@ -2,51 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T04:05:00Z",
+  "completed": "2026-10-21T04:50:00Z",
   "proof": [
     {
-      "criterion": "Every directory this layout puts on the issue volume is accounted for in the reclaim paragraph — on the delete list or in an exemption — and the claim is checkable against the renderer rather than asserted.",
-      "surface": "docs/kubernetes.md's issue_volume paragraph, enumerated against the code that renders the paths.",
-      "command": "grep -n 'scratchRoot + \"' packages/daemon/internal/runtime/sandbox/manifest.go; grep -n 'UV_' packages/daemon/internal/runtime/sandbox/podkind.go; for p in /legion/scratch/cache /legion/scratch/data /legion/scratch/tmp '/legion/scratch/state/<role>' /legion/scratch/bun/install/cache /legion/go /legion/uv; do sed -n '1228,1262p' docs/kubernetes.md | grep -cF -- \"$p\"; done",
-      "observed": "The renderer's set is cache, data, tmp, state/<role>, bun/install/cache (manifest.go:731-737, 758), the Go pair under /legion/go and uv's /legion/uv (podkind.go:194-196). All seven appear in the paragraph: five on the delete list, two in the exemptions below it. The claim sentence reads 'accounts for every directory this layout creates, either on its delete list or in the two exemptions below it', which that loop checks.",
-      "headSha": "3beee3e6d2c1",
-      "negativeControl": "The same loop returned 0 for /legion/scratch/data at the head before round 19, under a sentence claiming the set was complete — so the control is known to fail when the paragraph drifts from the renderer."
+      "criterion": "The install block's cache guard fails a test when it is reverted — the reviewer's finding that it was pinned by nothing.",
+      "surface": "The rendered start wrapper, run under /bin/sh with stand-ins for bun and node, in this role container.",
+      "command": "cd packages/daemon && go test ./internal/runtime/sandbox/ -run TestAnInstallRemakesAPoisonedCacheAndSparesARealOne -count=1 -v; then the same after editing installBlock back to the pre-guard shape; then jj restore of plugins.go",
+      "observed": "Four subtests pass at the head: a 0-byte regular file at $BUN_INSTALL_CACHE_DIR is cleared and the path is a directory afterwards; a filled cache keeps entry.txt and nested.json byte for byte; a symlink to a filled cache is still a symlink with its target intact; a path with nothing at it runs clean. With `mkdir -p -- \"$cache\"` moved back outside legion_install and the `[ -d ] || rm -f` line removed, the first subtest fails: `the wrapper exited 1 with a regular file an interrupted flock left behind at the cache path … mkdir: cannot create directory '…/cache': File exists`. plugins.go restored from the parent commit and absent from the round's diff.",
+      "headSha": "ec06cb01444a",
+      "negativeControl": "The revert is the control and I ran it myself rather than taking the subagent's word, since the finding was precisely that a reported-green check proved nothing. The 'no cache at all' subtest is the second control: without it the three prepared cases could pass on a wrapper that never touched the path."
     },
     {
-      "criterion": "The data home's exemption rests on a reason the code supports, and the state-class directories are attributed to the path that actually holds them.",
-      "surface": "podsafety.go's EnsureStateHome contract and this volume, read against the exemption sentence.",
-      "command": "sed -n '137,140p' packages/daemon/internal/podsafety/podsafety.go; ls -d /legion/scratch/state/*/omp; du -sh /legion/scratch/data",
-      "observed": "podsafety.go:137-140 places Oh My Pi's state-class directories — run/daemons, logs, browser-profiles, reports, terminal-sessions — under $XDG_STATE_HOME/omp, with the parenthesis 'sessions are data-class'. The volume agrees: /legion/scratch/state/<role>/omp exists for the roles that have run, and /legion/scratch/data is 4.0K. The exemption now says the state home holds those directories (as the paragraph already exempted it for) and that /legion/scratch/data is the shared XDG_DATA_HOME, the data-class directory of every tool a role runs, exempt because nothing re-derives it: a cache, a temporary directory and an install cache are rebuilt by the next build or install, where what a tool stores in its data home is gone when deleted. No size claim is made.",
-      "headSha": "3beee3e6d2c1",
-      "negativeControl": "The superseded sentence is the control, and it is what the code refutes: it said Oh My Pi puts its whole profile root under $XDG_DATA_HOME/omp, which would have made the data home the profile root and the state home redundant — contradicted by podsafety.go:137-140 and by the directories on this volume. The 4.0K reading is deliberately not used as evidence either way: these pods run the merge-base layout and are told no XDG_DATA_HOME at all."
+      "criterion": "Every directory the runtime renders onto the issue volume is accounted for in the operator's reclaim remedy, checked against the renderer rather than by a reader.",
+      "surface": "docs/kubernetes.md's reclaim paragraph, now two markdown lists, parsed by a Go test in the package that renders the paths.",
+      "command": "cd packages/daemon && go test ./internal/runtime/sandbox/ -run TestTheReclaimParagraph -count=1, at the head and with the document mutated two ways",
+      "observed": "TestTheReclaimParagraphNamesEveryDirectoryTheRendererPutsOnTheIssueVolume derives nine directories from roleEnvironment and the issue pod's agentEnv and requires each on the delete list or opening an exemption bullet, in exactly one of the two; TestTheReclaimParagraphNeverDeletesWhatItExempts refuses a delete-list path that is an ancestor of an exempt one. My own controls at this head: removing the `/legion/uv/cache` bullet gives `accounts for /legion/uv/cache in neither list … a mention inside an exemption's reason is neither`; coarsening it to `/legion/uv` gives `deletes /legion/uv, which holds /legion/uv/python/<issue> that the same paragraph exempts … the bullet is a segment too coarse`. The document was restored by checksum after each (f3e94c63…).",
+      "headSha": "ec06cb01444a",
+      "negativeControl": "The first version of this test searched the paragraph's text and **passed** with /legion/uv/cache off the delete list, because an exemption's prose mentions the path. I found that with the control above, which is why the committed version parses the two lists and ignores a path named inside a reason. An unreadable document, a missing boundary marker, a region with no paths and an empty list are each a hard failure rather than a skip."
     },
     {
-      "criterion": "The between-turns rule states the limit of what the install block fixes, so the operator is not left believing a delete is safe under a running install.",
-      "surface": "The same paragraph, against the tester's round-18 measurements of the rendered block.",
-      "command": "read docs/kubernetes.md's between-turns sentence at this head",
-      "observed": "It says a lock whose inode is unlinked protects nothing, so the mutual exclusion is still lost under a delete mid-install (the tester measured B entering at 886.599 while A was inside until 888.599, against a serialised control), and that what each attempt's mkdir and non-directory removal buys is that the damage stops at that install rather than leaving a regular file that fails every later installing launch until a person clears it.",
-      "headSha": "3beee3e6d2c1",
-      "negativeControl": "The tester ran this head's block from an already-poisoned path: exit 0, where the old block from the same fixture exits 1 at `mkdir: File exists`, and this head's block with only the `rm -f` guard removed fails the regular-file case again."
-    },
-    {
-      "criterion": "Nothing else moved: both rounds above this head are documentation, so the code proofs stand unre-run.",
-      "surface": "The round's diff and the repository's own text check.",
-      "command": "jj diff --stat; bash .github/scripts/check-private-names.sh",
-      "observed": "One file, docs/kubernetes.md, in each of 5c6d3ada654e and 3beee3e6d2c1. `check-private-names: no file or path names the private deployment repository or the company …` over 4694 files. No Go file, test, Dockerfile or workflow is touched since 054a8de75719, where `go test ./internal/runtime/sandbox/` was `ok … 136.563s` and `gofmt -l` silent.",
-      "headSha": "3beee3e6d2c1",
-      "negativeControl": "The diff stat is the check and it names one markdown file; a code change would appear there."
+      "criterion": "The remedy's instructions are ones an operator can follow without harm: tmp's window matches its only creator, and the uv split protects what a workspace depends on.",
+      "surface": "docs/kubernetes.md read against EnsureScratch's callers and manifest.go's uv contract.",
+      "command": "grep -rn 'EnsureScratch(' packages/daemon --include=*.go; read manifest.go's uvPythonRoot comment; read the paragraph at the head",
+      "observed": "EnsureScratch has one non-test caller, worker_shim.go, run once as the shim starts Oh My Pi, so a role's shim outliving a turn means a deleted tmp stays gone until relaunch: the document now says to delete it with the role stopped, names the shim start as its only creator, and states both halves of a live role meeting a missing TMPDIR — `mktemp -d` exits 1, Python's `tempfile` silently falls back to /tmp, the container's own filesystem, re-arming the eviction this layout exists to prevent. 'A temporary directory' is out of the rebuilt-by-the-next-build clause, which now names only the caches. /legion/uv/cache is on the delete list and /legion/uv/python/<issue> is an exemption carrying the dependency manifest.go's uvPythonRoot promises: a project's .venv in the issue's workspace links to an interpreter there, and the remedy deletes no workspace.",
+      "headSha": "ec06cb01444a",
+      "negativeControl": "The reviewer ran the halves that matter and I did not re-run them: `mktemp -d` exit 1 and Python placing its directory at /tmp with TMPDIR naming a path that does not exist. What I checked independently is the claim the clause rests on — that EnsureScratch has exactly one non-test caller — since that is what makes 'between turns' the wrong window."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md — /legion/scratch/data exempted with a reason the code supports, the state-class directories attributed to the per-role state home, no size claim, the completeness claim made enumerable, and the between-turns sentence given the limit of what the install block fixes."
+    "packages/daemon/internal/runtime/sandbox/plugins_test.go — TestAnInstallRemakesAPoisonedCacheAndSparesARealOne; runStart takes the cache path so a caller can say what is at it.",
+    "packages/daemon/internal/runtime/sandbox/live_setup_unit_test.go — one call site updated for that parameter.",
+    "packages/daemon/internal/runtime/sandbox/reclaim_doc_test.go — new: the two fences over the reclaim paragraph.",
+    "docs/kubernetes.md — the remedy is a delete list and an exemption list; tmp's window and its fallback hazard; uv split; the hand-maintained count dropped from the lead-in."
   ],
   "trickyParts": [
-    "The data home is exempt because nothing re-derives it, not because Oh My Pi's profile root lives there. $XDG_STATE_HOME/omp holds the state-class directories (podsafety.go:137-140); the data home is the data-class one. Anyone editing this paragraph again should read those four lines rather than the paragraph's own history."
+    "flock creates a missing lock path as a regular file and exits 0, which is why the pre-guard shape was a one-way failure rather than a transient one.",
+    "The fence's first version was satisfied by a path mentioned in an exemption's prose. The committed version parses the delete list and the exemption bullets structurally: a path counts only as a whole delete bullet or as the path an exemption bullet opens with.",
+    "The ancestor rule (a delete-list bullet covers what is under it) is needed for /legion/go to cover GOCACHE and GOMODCACHE, and is exactly what would let a coarsened bullet swallow an exemption — hence the second test."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Four rounds in a row on one paragraph, each a sentence true of something other than what it described. The last one is the sharpest and it was the architect's: it ruled the exemption and supplied its reason, and the reason — the omp profile root under $XDG_DATA_HOME — was the one clause nobody derived, because it came from the role whose rulings the others have no standing to doubt. My enumeration control caught the structure (is every rendered path accounted for) and could not catch a false reason attached to a correctly-exempted path. A claim's structure and a claim's grounds need separate checks.",
-    "What finally made the completeness claim hold was its form rather than more care: 'accounts for every directory this layout creates, either on its delete list or in the two exemptions below it' is checkable by a seven-line loop, where 'names the directories this layout creates' could only be asserted. A prose claim that cannot be mechanically enumerated against the code it describes will drift again, however carefully it is written."
+    "Both committed tests check structure, not grounds, and their comments say so: an earlier head passed a check of this kind while carrying an exemption whose stated reason the code refuted. Which of the two lists a path sits on is likewise a reader's judgement — a cache promoted into the exemptions passes. The fences stop the class of failure that recurred six times (a rendered path unaccounted for, a delete that swallows an exemption) and nothing beyond it.",
+    "This round's first fence was reported green by the subagent that wrote it and was too weak; my own control found that. The review's own lesson applied one level up: a check's author is the worst-placed party to judge whether it can fail, because the control they imagine is the one their design already handles."
   ]
 }
