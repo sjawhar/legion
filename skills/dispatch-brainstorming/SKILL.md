@@ -1,121 +1,56 @@
 ---
 name: dispatch-brainstorming
-description: "Use in a session with Dispatch whenever a design conversation with a person starts: brainstorming or /brainstorming, \"let's design\", writing or changing a spec, writing an implementation plan, or a feature request or change that needs a person's choices. In a session with Dispatch it replaces superpowers' brainstorming and writing-plans; a Legion architect's own spec follows skill://legion-architect instead."
+description: "Use when a session with Dispatch starts a design conversation with a person: brainstorming, /brainstorming or \"let's design\". Also use it there for a spec, an implementation plan, or a change that needs a person's choices. It replaces superpowers' brainstorming and writing-plans. A Legion architect's own spec follows skill://legion-architect instead."
 ---
 
 # Brainstorming in Dispatch
 
-This skill governs a design conversation with a person, never a Legion architect's own issue
-spec: an architect follows `skill://legion-architect` for that, even for a child issue.
+A Legion architect's own issue spec, a child's too, follows `skill://legion-architect`. A Legion phase worker never writes the spec: it sends the decision to its architect (`skill://legion-worker`).
 
-In a session with Dispatch, such a conversation happens in its issue's spec, and the plan that
-follows is a document on the same issue. This skill replaces superpowers' `brainstorming` and
-`writing-plans` there, even when the user invokes one of them by name:
+This skill replaces superpowers' `brainstorming` and `writing-plans`, even when the user names one:
 
-- No design question goes to chat. Every question is a decision block in the spec, and your reply
-  in chat links the issue and asks nothing.
-- There is no limit of one question per message. Every question that is ready goes out at once.
-- There is no approval after each section, only the one at the end.
-- A small change gets a short spec, never a design in chat: its size shortens the spec and changes
-  nothing about where the conversation happens.
-- The spec is the issue's primary document and the plan is its `plan.md` document, in place of
-  superpowers' spec and plan files (`docs/superpowers/specs/`, `docs/superpowers/plans/`). A copy
-  also goes in the repository only when the person, the issue, its spec or the repository asks for
-  one.
+- The spec is the issue's primary document, the plan its `plan.md`. No `docs/superpowers/` files.
+- Each design question is a decision block in the spec, never a chat question. A small change gets a short spec.
+- Send every ready question at once. Request approval once, at the end.
+- Ask in stages: clarifying questions, two or three approaches with a recommendation, the design by section. A question that depends on no open answer goes out at once.
+- Copy the spec, plan or spec code into the repository only when the person, the issue, its spec or the repository asks.
 
-The brainstorming stages still shape what you ask: clarifying questions, then two or three
-approaches with a recommendation, then the design section by section. A question that depends on
-no open answer goes out at once, whatever its stage.
-
-Read `skill://dispatch` before the first version: its "Writing a spec", "Decision blocks",
-"Writing for the human" and "Approval of a spec" sections define the spec's shape, each block's
-shape, and when approval is requested. A Legion phase worker never writes the issue's spec
-document; it sends a decision to its architect (`skill://legion-worker`).
+Before the first version, read the code and documents the design touches. Before the first version, also read the `skill://dispatch` sections "Writing a spec", "Decision blocks", "Writing for the human" and "Approval of a spec".
 
 ## Where the spec lives
 
-Search Dispatch first, as `skill://dispatch-first` says. When an issue already tracks the work, its
-primary document is the spec: extend it in place with `dispatch doc-edit`, keeping the human's own
-text. Otherwise create the issue with its first version as `spec`, in the project a search hit
-already named or, when none does, the project the human names:
-
-```bash
-dispatch issue --project <KEY> --title '<title>' --spec-file - <<'EOF'
-<the spec's first version>
-EOF
-```
-
-No command lists every project, so when nothing you found names one, ask the human in chat which
-project the issue belongs in before you create it — a filing question with nowhere else to land
-yet, not a design question, so it does not change "your reply in chat links the issue and asks
-nothing" for the design itself. Never read the project from the environment, a configuration file,
-or the Dispatch HTTP API: every read and write goes through a `dispatch` command.
-
-Before the first version, read the code and documents the design touches, so the facts you write
-are ones you checked.
+1. Search first (`skill://dispatch-first`). If an issue tracks the work, extend its primary document with `dispatch doc-edit`, keeping the human's text.
+2. Else run `dispatch issue --project <KEY> --title '<title>' --spec-file -` in the project a search hit names.
+3. If no hit names a project, ask the human in chat which one (`dispatch projects` lists them). This is a filing question, not a design question.
+4. Use only `dispatch` commands. Never get the project from the environment, a configuration file or the Dispatch HTTP API.
 
 ## Each turn
 
-1. **Start with what is established.** The first version holds only what the conversation has
-   established: the problem and its evidence, what the human has said in their own words, the
-   facts the next questions need, and each question that is ready, as a decision block at the end
-   of the section that sets it up. Write nothing past those questions: no design, no defaults you
-   chose, no "what we will build", and no recommendation outside a decision block's own text. A
-   point the human has not stated, however obvious it seems (what a word in the request means, how
-   an edge case behaves, what a change does to an existing command), goes inside a decision block
-   or stays out. This is stricter than `skill://dispatch`'s general rule for an inferred point
-   elsewhere in a spec ("a point you inferred says so, with the reasoning"): in a live conversation
-   nothing is settled until the human has seen it, so even a flagged inference waits for its own
-   decision block.
-2. **The human answers or comments.** Reply to each human comment in its thread
-   (`dispatch comment --reply-to <comment id>`), then rewrite the passage the answer or the comment
-   changes. Under an open ask whose next move is yours, such as the approval request you must
-   revise or hand back, reply with `--reply-to-ask <ask id> --turn agent` instead: a `--reply-to`
-   reply takes the default turn, which hands the request back to the human unchanged, and a call
-   with a corrected `--summary` is refused while it waits on them.
-3. **Each next version keeps answers in place and adds what they open.** An answered decision
-   block already carries its own record, as `skill://dispatch`'s "Writing a spec" says; leave it
-   where it is. Where an answer changes design text elsewhere in the spec, rewrite that text. Then
-   add the next sections, each with its question. Every question that is ready goes out
-   at once, each as a decision block at the end of the section that sets it up; a question waits
-   only when it depends on an answer still open.
-4. **A comment that answers a question settles it** as surely as the block does. It carries no
-   rendered record, so write it into the text at once, recording the person as `skill://dispatch`'s
-   "Writing a spec" says, and close the block with `dispatch resolve-ask` if the human has not.
-5. **Request approval at the end, not after each section.** Once nothing in the spec is new to the
-   human, request it exactly when "Approval of a spec" in `skill://dispatch` says: every decision
-   block settled, the human has agreed to every point in the spec, and the current
-   version is not yet approved (or waived, as that section's next paragraph covers). The request
-   carries nothing new, as that section also says.
+1. **First version: only what the human settled.** Write the problem, its evidence, the human's words and the facts the questions need. Add each ready question as a block at the end of its section. Write no design, no default you chose, and no recommendation outside a block. A point the human did not state goes in a block or stays out, however obvious. A flagged inference waits too.
+2. **Reply to each comment in its thread** (`dispatch comment --reply-to <comment id>`), then rewrite what it changes. When the next move on an open ask is yours, such as an approval request to revise, use `--reply-to-ask <ask id> --turn agent`.
+3. **Each next version keeps answered blocks in place** and rewrites every passage a decision changes. The spec records the current design and requirements, never how you got there. Then add the next sections and their ready questions.
+4. **A comment that answers a question settles it.** Write the answer into the text at once, as "Writing a spec" says. Close the block with `dispatch resolve-ask` if it is still open.
+5. **Request approval** when nothing in the spec is new to the human, as "Approval of a spec" says.
 
 ## Coming to terms
 
-The conversation comes to terms in both directions. Explain what the code does today, plainly
-enough for the human to react to and with each tool, event and route it uses named exactly (as
-"Writing for the human" in `skill://dispatch` says), and ask; the human's model comes out of those
-reactions, and so do corrections to it. Neither your model nor theirs is the starting truth.
+Explain plainly what the code does now, naming each tool, event and route exactly, and ask. Neither model is true at the start: the human's reactions give their model and its corrections.
+
+## Handing over a spec or plan
+
+1. Start your chat reply with:
+   1. Each decision the human must make: options, trade-offs and your recommendation, clear without the document. The human answers in the block.
+   2. Each point the human has not yet settled, one line each, with a line reference.
+   3. The link.
+2. The reply carries only what is new. The document stays the full current design.
+3. If no decision is open and nothing is new, do not ask for review in the reply. Say the document records what you agreed. Turn step 5 still applies.
+4. When you ask for review, say "ready for review", never "complete". Put the uncertainty first and show your reasoning.
 
 ## The plan
 
-Once the spec is approved — or, when the issue needed no spec at all (a bug fix with no design
-decision), once you have enough to plan from — the implementation plan is the issue's `plan.md`
-document, never its spec:
-
-```bash
-dispatch artifact --issue <KEY> --name plan.md --content-file - <<'EOF'
-<the plan>
-EOF
-```
-
-Uploading `plan.md` again writes its next version. `writing-plans`'s content rules still apply in
-full — file structure, task right-sizing, bite-sized steps, no placeholders, the header, and its
-self-review — only where the plan lives changes: the issue's `plan.md`, in place of a plan file.
-A copy in the repository, or spec code there, goes in only when the person, the issue, its spec or
-the repository asks for it.
-Technical choices inside the approved design are made in the plan and need no question. A plan
-never changes a decision the human made in the spec: a change to one goes back to the spec as a
-decision block, with the evidence for it.
-
-Execution reads the plan the same way: `dispatch doc-read --issue <KEY> --artifact plan.md` in place
-of opening a plan file, then follows `executing-plans` or `subagent-driven-development` as it would
-for a file on disk.
+- Write it after the spec's approval. With no spec (a bug fix with no design decision), write it when you can plan.
+- Upload it with `dispatch artifact --issue <KEY> --name plan.md --content-file -`. Each upload is a new version.
+- Follow all `writing-plans` content rules: file structure, task size, small steps, no placeholders, the header, its self-review.
+- Make technical choices inside the approved design in the plan, with no question. A change to a human's decision goes back to the spec as a block, with its evidence.
+- If the human says "plan only", stop after the plan.
+- To execute, read it with `dispatch doc-read --issue <KEY> --artifact plan.md`, then follow `executing-plans` or `subagent-driven-development`.
