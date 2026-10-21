@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- `dispatch read` of an issue's document prints the document's summary, including the links
+  `dispatch search` returns, where it printed the issue's summary. Owner arguments that disagree
+  or that a command would drop (a document `comment` posts past without `--quote`, `ask` without
+  `--anchor`, `--issue` beside another issue's ref, and the rest) are refused, naming the
+  spelling that does each. `dispatch://KEY/artifact/<slug>/comment/<id>` is refused with one
+  problem naming `dispatch://KEY/comment/<id>`. An ask or comment a reference names is held to
+  the issue or document it names by `read`, `resolve-comment`, `resolve-ask`, `edit-ask` and
+  `follow`, and `dispatch ask` beside `--issue` or `--project` may cite any other issue or
+  document.
+- The `dispatch` skill: `dispatch read` of a document prints its summary, and a document hit
+  names its issue on `Issue:`.
 - A `dispatch` write ends with `(not subscribed to KEY; …)` only when none of the session's Envoy
   subscriptions, as the listener records them, receives every event on the issue or document; it
   used to end every write that way. With Envoy off or the listener not answering, the write says

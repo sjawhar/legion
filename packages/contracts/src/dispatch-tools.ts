@@ -1071,10 +1071,10 @@ export const dispatchToolSpecs = [
     name: "dispatch_read",
     example: { issue: "DSP-1" },
     description:
-      "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " +
+      "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " +
       "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " +
-      "or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
-      "reply to it (they belong to no issue). " +
+      "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
+      "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " +
       "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " +
       "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " +
       "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " +
@@ -1093,7 +1093,12 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
-      artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
+      artifact: z
+        .string()
+        .describe(
+          "Document artifact id, slug, or filename: one of the issue's, or a project document."
+        )
+        .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       message: z
         .string()
