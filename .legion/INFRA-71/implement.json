@@ -10,7 +10,7 @@
       "surface": ".github/scripts/check-check-commands.sh against fixtures carrying the reviewer's own reproductions (the real script symlinked into a miniature repository), and its 174-case suite.",
       "command": "a fixture whose scripts/probe.sh holds `echo \"a # b && bunx biome check .`, its single-quote twin, `echo don't # bunx biome check .` and an ordinary multi-line `jq '` ; another whose AGENTS.md holds an unclosed ```console block followed by a ```sh block, and a third with no closing fence at all ; then PYTHONPATH=/legion/pytools .github/scripts/check-check-commands.sh and .test.sh over the real tree",
       "observed": "All three of the reviewer's vulnerable lines are reported. A line whose quotes do not balance is judged whole — only the marker comes from the second reading — so nothing after its first `#` goes unread; `echo don't # bunx biome check .` is reported too (at `names \\`biome\\``, its first word being `echo`), while the multi-line `jq '` line passes, as 92 shell scripts here need it to. `prompted` answers from what it found before the fence that closes the block, False at EOF, and False at a fence a writer opened under an open one — so the unclosed block's own line is reported, and the reviewer's ```console/```sh fixture reports AGENTS.md:8. The tree passes with 13 manifests, 8 workflows, 92 shell scripts and 551 guides, and the suite reports `Results: 174 passed, 0 failed`.",
-      "headSha": "ba46d366b211a1e1db83fd33e2bd91dcc4ba8d07",
+      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
       "negativeControl": "A well-formed session block still has its prompt judged and its output left alone, and the whole tree is green: the architect's stronger instruction — report an unbalanced-quote line as unreadable — was implemented first and measured against this repository before it was set aside, and it reports **457 places**, because a gate that reads one line at a time meets an open quote in every multi-line jq, awk and `bash -c` body (branch-protection.sh, scripts/e2e/**, docs/solutions/**, this repository's own skills). The measurement is on the thread and in the body; judging the whole line keeps the property that matters, which is that nothing is dropped."
     },
     {
@@ -18,7 +18,7 @@
       "surface": "The real script run by hand with each shape, in a scratch workspace on this volume, and its 247-assertion suite.",
       "command": "env LEGION_WORKSPACE=<scratch> LEGION_SETUP_BUDGET=08|060|0|-9|abc sh scripts/legion-setup.sh ; the same with LEGION_SETUP_LOCK_HOLD=00 ; then a fast-path run with LEGION_SETUP_BUDGET=08 and LEGION_STATE_DIR set ; bash scripts/legion-setup.test.sh",
       "observed": "Every rejected shape exits 0 with the default in force — `08` reached dash's arithmetic as an octal literal before this round and exited 2 (`Illegal number: 08`), which is the one outcome this script's header promises can never happen — and `00` no longer reaches `timeout -k 5`, whose no-timeout-at-all was the unbounded hold on the shared lock. The agent is told: a run that succeeds writes a report of a new kind, `setting-ignored`, exitStatus 0, detail `LEGION_SETUP_BUDGET=08 is not a whole number of seconds (1 or more, with no leading zero), so this run used the default of 270s instead.`, and a run that fails carries the same sentence at the head of its detail. On the real Oh My Pi binary that report reaches the pane's first turn and claims no failure.",
-      "headSha": "ba46d366b211a1e1db83fd33e2bd91dcc4ba8d07",
+      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
       "negativeControl": "An unset or empty knob is the ordinary case and reports nothing; a bare `0` is rejected on an arm of its own, with the reason in the comment, because it is what stops `timeout -k 5 0` and `flock -w 0`; and no value is normalised with `$((…))`, which would be the octal parse again. `packages/pi-legion`'s suite is 531 tests, 0 failed, and the pane carrying another generation's report gets no notice."
     },
     {
@@ -26,7 +26,7 @@
       "surface": "The throwaway copy on the issue volume with the hold forced, the script's suite, and docs/kubernetes.md.",
       "command": "env … LEGION_SETUP_BUDGET=600 LEGION_SETUP_LOCK_HOLD=5 sh scripts/legion-setup.sh against a hanging install, timed ; /usr/bin/flock -w 2 on the cache afterwards ; the suite's new stub mode that keeps the lock through a cold-entry failure",
       "observed": "The yielded lock is its own reason now: exit 0 after 5 s measured, `bun install exited 124 (install-hold-timeout)`, and the lock free immediately afterwards, so the agent's notice can tell a slow container from a lock this run gave back — and `setup-report.ts` treats that reason as one that ran an install, so the install's own log is what the notice quotes. The marker decision and the detail turn on the first attempt's status rather than on the reason, so a retry that lost the lock is reported as the install it made rather than as a run that learned nothing. `docs/kubernetes.md` reads `It bounds itself twice:` with the hold's sentences after the 275 s worst case.",
-      "headSha": "ba46d366b211a1e1db83fd33e2bd91dcc4ba8d07",
+      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
       "negativeControl": "A run that genuinely never held the lock still keeps the marker another role wrote and still reports `lock-timeout` — the case added in round 2 holds it byte-identical — so the new split did not widen what invalidates a marker."
     },
     {
@@ -34,7 +34,7 @@
       "surface": "This role container with no node_modules and a poisoned bunx cache, and the throwaway copy on the issue volume.",
       "command": "bun run lint packages/pi-legion/ ; bun run typecheck ; then sh scripts/legion-setup.sh in the copy, ./node_modules/.bin/biome --version, bun run lint ., and a second run as another role",
       "observed": "Each prescribed command exits 1 with the wrapper's message; the install exits 0 with biome 2.4.11 and `Checked 1079 files`; the second role prints `already installed; nothing to do` with the shared cache byte-identical (1,395,623,403 B before and after).",
-      "headSha": "ba46d366b211a1e1db83fd33e2bd91dcc4ba8d07",
+      "headSha": "ba46d366b2116a63f88f78ea9aa3fe9de40a40c3",
       "negativeControl": "In the same container `bunx biome check .` exits 0 having checked nothing and `bunx biome --version` answers 0.3.3."
     }
   ],
