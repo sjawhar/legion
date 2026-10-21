@@ -250,7 +250,7 @@ sed -i 's|    "typecheck": .*|    "typecheck": "tsc --noEmit",|' "$root/packages
 run_check "$root"
 check "a bare tsc recipe fails: the worker image answers the name" "$(is "$status" 1)"
 check "names the recipe's own line" \
-  "$(contains "$out" 'packages/thing/package.json:5: the "typecheck" recipe runs `tsc`')"
+  "$(contains "$out" 'packages/thing/package.json:5: the "typecheck" recipe names `tsc`')"
 
 root=$(fixture recipe-bunx-vite)
 sed -i 's|    "build": .*|    "build": "bunx vite build",|' "$root/packages/thing/package.json"
@@ -292,7 +292,7 @@ cat >> "$root/.github/workflows/ci.yaml" <<'YAML'
 YAML
 run_check "$root"
 check "a bare biome step fails" "$(is "$status" 1)"
-check "names its line" "$(contains "$out" 'ci.yaml:10: this run: line runs `biome`')"
+check "names its line" "$(contains "$out" 'ci.yaml:10: this run: line names `biome`')"
 
 root=$(fixture workflow-broken)
 printf 'jobs: [\n' > "$root/.github/workflows/broken.yaml"
@@ -308,7 +308,7 @@ playwright test --config e2e/playwright.config.ts
 SH
 run_check "$root"
 check "a bare playwright line fails" "$(is "$status" 1)"
-check "names its line" "$(contains "$out" 'scripts/release.sh:5: this line runs `playwright`')"
+check "names its line" "$(contains "$out" 'scripts/release.sh:5: this line names `playwright`')"
 
 root=$(fixture shell-nested-bunx)
 cat > "$root/scripts/screenshots.sh" <<'SH'
@@ -344,7 +344,7 @@ MD
 run_check "$root"
 check "a fenced bare tsc in a solution note fails" "$(is "$status" 1)"
 check "names the line inside the block" \
-  "$(contains "$out" 'docs/solutions/note.md:4: this fenced command runs `tsc`')"
+  "$(contains "$out" 'docs/solutions/note.md:4: this fenced command names `tsc`')"
 
 root=$(fixture skill-fenced-playwright)
 cat > "$root/skills/worker/SKILL.md" <<'MD'
@@ -563,7 +563,7 @@ tsc --noEmit                  # Type check (the comment is not what hides this)
 MD
 run_check "$root"
 check "and stripping the comment leaves the command it follows" "$(is "$status" 1)"
-check "names its line" "$(contains "$out" 'AGENTS.md:4: this fenced command runs `tsc`')"
+check "names its line" "$(contains "$out" 'AGENTS.md:4: this fenced command names `tsc`')"
 
 root=$(fixture marked-block-keeps-the-runner)
 cat > "$root/docs/solutions/apt-hash-mismatch.md" <<'MD'
@@ -621,7 +621,79 @@ MD
 run_check "$root"
 check "the same block with a bare biome fails" "$(is "$status" 1)"
 check "names the line inside the block" \
-  "$(contains "$out" 'docs/solutions/wiring.md:5: this fenced command runs `biome`')"
+  "$(contains "$out" 'docs/solutions/wiring.md:5: this fenced command names `biome`')"
+
+echo "case: a fenced block is judged by its info string"
+# A guide quotes what a command printed about as often as it prescribes one, and what it quotes
+# is the wrong form by construction — that is what a solution note records. So a block labelled
+# as data is not read as commands: a `text` block holding `error: Cannot find module 'tsc'` is
+# output, while a `console` block holding the same line is a session someone is being shown and
+# is judged. A language the gate cannot name is data too, since guessing would report a
+# transcript. The first word of the info string decides, because an info string carries
+# attributes in this repository's markdown.
+root=$(fixture fence-data-info)
+cat > "$root/docs/solutions/transcript.md" <<'MD'
+# What it printed
+
+```text
+error: Cannot find module 'tsc'
+bunx biome check .
+```
+
+```json
+{ "scripts": { "lint": "bunx biome check ." } }
+```
+
+```ts
+const command = "bunx playwright test";
+```
+
+```frobnicate
+bunx biome check .
+```
+MD
+run_check "$root"
+check "a block labelled as data, or in a language the gate cannot name, is not judged" \
+  "$(is "$status" 0)"
+
+root=$(fixture fence-console-info)
+cat > "$root/docs/solutions/transcript.md" <<'MD'
+# What it printed
+
+```console
+error: Cannot find module 'tsc'
+```
+MD
+run_check "$root"
+check "a console session holding the very same line is judged" "$(is "$status" 1)"
+check "names the line inside the block" \
+  "$(contains "$out" 'docs/solutions/transcript.md:4: this fenced command names `tsc`')"
+
+root=$(fixture fence-no-info)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```
+bunx biome check .
+```
+MD
+run_check "$root"
+check "a block with no info string at all is judged" "$(is "$status" 1)"
+check "names the line inside the block" \
+  "$(contains "$out" 'AGENTS.md:4: this fenced command runs `bunx`')"
+
+root=$(fixture fence-info-attributes)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash title="scripts/release.sh"
+bunx biome check .
+```
+MD
+run_check "$root"
+check "an info string carrying attributes is judged by its first word" "$(is "$status" 1)"
+check "names the line inside the block" \
+  "$(contains "$out" 'AGENTS.md:4: this fenced command runs `bunx`')"
 
 echo "case: the pinned binary is the other approved spelling"
 root=$(fixture pinned-path)
@@ -648,16 +720,16 @@ $RUNNER biome check .
 SH
 run_check "$root"
 check "every one of them fails" "$(is "$status" 1)"
-check "exec hides nothing" "$(contains "$out" 'scripts/release.sh:5: this line runs `biome`')"
+check "exec hides nothing" "$(contains "$out" 'scripts/release.sh:5: this line names `biome`')"
 check "a quoted sh -c hides nothing" \
-  "$(contains "$out" 'scripts/release.sh:6: this line runs `biome`')"
-check "xargs hides nothing" "$(contains "$out" 'scripts/release.sh:7: this line runs `biome`')"
+  "$(contains "$out" 'scripts/release.sh:6: this line names `biome`')"
+check "xargs hides nothing" "$(contains "$out" 'scripts/release.sh:7: this line names `biome`')"
 check "timeout and its option hide nothing" \
-  "$(contains "$out" 'scripts/release.sh:8: this line runs `tsc`')"
+  "$(contains "$out" 'scripts/release.sh:8: this line names `tsc`')"
 check "sudo hides nothing" \
-  "$(contains "$out" 'scripts/release.sh:9: this line runs `playwright`')"
+  "$(contains "$out" 'scripts/release.sh:9: this line names `playwright`')"
 check "a pile of prefixes hides nothing" \
-  "$(contains "$out" 'scripts/release.sh:10: this line runs `biome`')"
+  "$(contains "$out" 'scripts/release.sh:10: this line names `biome`')"
 check "a variable holding the runner is refused, not read" \
   "$(contains "$out" 'scripts/release.sh:11: this line cannot be read for certain')"
 check "each line is reported once" "$(contains "$out" '7 place(s)')"
@@ -743,6 +815,29 @@ run_check "$root"
 check "a line marker with no reason fails" "$(is "$status" 1)"
 check "names that line" "$(contains "$out" 'scripts/release.sh:5: this exemption gives no reason')"
 
+echo "case: the marker is read from the line's comment, not from anywhere on the line"
+# The gate used to search the raw line for the marker, before any tokenizing, so a marker
+# written inside a quoted string bought a pass for everything else on that line: a guide
+# demonstrating how to write an exemption, or a script that greps for the marker, exempted the
+# command beside it. The marker is a comment's business, and `#` inside a string is a character.
+root=$(fixture marker-quoted-before-the-command)
+cat >> "$root/scripts/release.sh" <<'SH'
+echo "see # check-check-commands: allow docs" && bunx biome check .
+SH
+run_check "$root"
+check "a marker quoted in a string exempts nothing on its line" "$(is "$status" 1)"
+check "names the line and the runner" \
+  "$(contains "$out" 'scripts/release.sh:5: this line runs `bunx`, a package runner')"
+
+root=$(fixture marker-quoted-after-the-command)
+cat >> "$root/scripts/release.sh" <<'SH'
+bunx biome check . && echo "# check-check-commands: allow z"
+SH
+run_check "$root"
+check "a marker quoted after the command exempts nothing either" "$(is "$status" 1)"
+check "names the line and the runner" \
+  "$(contains "$out" 'scripts/release.sh:5: this line runs `bunx`, a package runner')"
+
 echo "case: a file that is not text names itself"
 root=$(fixture undecodable)
 printf '# A note\n\xff\xfe binary\n' > "$root/docs/solutions/rogue.md"
@@ -750,6 +845,18 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the file, without a traceback" \
   "$(contains "$out" 'docs/solutions/rogue.md is not readable as text')"
+check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
+
+echo "case: a file the walk finds and no one can open names itself"
+# `walk()` keeps symlinked files, so a dangling one reaches `read_text`. It used to end the
+# required job with a `FileNotFoundError` traceback whose line numbers are the heredoc's, which
+# is both a crash for everyone and a report naming no file.
+root=$(fixture dangling-symlink)
+ln -s missing-target.sh "$root/scripts/dangling.sh"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the file it cannot read, without a traceback" \
+  "$(contains "$out" 'scripts/dangling.sh cannot be read: \[Errno 2\] No such file or directory')"
 check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
 
 echo "case: a file jj has never seen still counts"
@@ -787,7 +894,7 @@ check "pnpm exec is a runner" \
 check "yarn exec is a runner" \
   "$(contains "$out" 'scripts/release.sh:6: this line runs `yarn exec`, a package runner')"
 check "yarn <tool> is the tool, judged by the tool rule" \
-  "$(contains "$out" 'scripts/release.sh:7: this line runs `biome`')"
+  "$(contains "$out" 'scripts/release.sh:7: this line names `biome`')"
 check "npm exec is a runner" \
   "$(contains "$out" 'scripts/release.sh:8: this line runs `npm exec`, a package runner')"
 check "pnpm dlx is a runner" \
@@ -825,5 +932,95 @@ SH
 run_check "$root"
 check "the same unknown subcommand naming no pinned tool passes: the rule stays that narrow" \
   "$(is "$status" 0)"
+
+echo "case: the whole of every sentence a report prints"
+# Every case above asserts `file:line` and the first clause and nothing after it, so a sentence
+# could say something untrue of the line it was printed for and no case would notice: that is
+# how `which biome` came to be reported as a line that runs `biome`, "whatever PATH answers
+# with". Each sentence this gate builds is held here word for word.
+root=$(fixture sentence-names-a-tool)
+cat >> "$root/scripts/release.sh" <<'SH'
+which biome
+grep -rn biome package.json
+rm -rf ~/.cache/biome
+SH
+run_check "$root"
+check "a line that names a tool as an argument is reported" "$(is "$status" 1)"
+sentence='this line names `biome` where this gate reads a command, and reaches it neither '
+sentence+='through `scripts/repo-tool.sh` nor as the pinned '
+sentence+='`node_modules/.bin/biome` — a name reached any other way is answered by whatever PATH holds '
+sentence+='(the worker image ships its own tsc, and with no `node_modules` the name reaches a squatted '
+sentence+='package) rather than the biome this repository pins, so run `scripts/repo-tool.sh biome` or '
+sentence+='the pinned `node_modules/.bin/biome`, or write `check-check-commands: allow <reason>` to say '
+sentence+='why this line does not run biome at all, or cannot reach it that way'
+check "the whole sentence is true of \`which biome\`, which names the tool and runs none" \
+  "$(contains "$out" "scripts/release.sh:5: $sentence")"
+check "and of \`grep -rn biome package.json\`" "$(contains "$out" "scripts/release.sh:6: $sentence")"
+check "and of \`rm -rf ~/.cache/biome\`, named for the tool rather than the path it deletes" \
+  "$(contains "$out" "scripts/release.sh:7: $sentence")"
+
+root=$(fixture sentence-package-runner)
+cat >> "$root/scripts/release.sh" <<'SH'
+bunx biome check .
+SH
+run_check "$root"
+check "a package runner is reported" "$(is "$status" 1)"
+sentence='this line runs `bunx`, a package runner that resolves the name it is given from the npm '
+sentence+='registry rather than this repository'\''s lockfile (with no `node_modules`, `bunx biome` '
+sentence+='fetches a squatted package that checks nothing and exits 0) — run '
+sentence+='`scripts/repo-tool.sh <tool>` instead'
+check "the whole of the package-runner sentence" \
+  "$(contains "$out" "scripts/release.sh:5: $sentence")"
+
+root=$(fixture sentence-expansion)
+cat >> "$root/scripts/release.sh" <<'SH'
+"$TOOL" biome check .
+SH
+run_check "$root"
+check "a command that begins with an expansion is refused" "$(is "$status" 1)"
+sentence='this line cannot be read for certain: `"\$TOOL" biome check .` starts with a shell '
+sentence+='expansion, so what it runs is not knowable here, and it names `biome` — spell the command '
+sentence+='out as `scripts/repo-tool.sh biome`, or write `check-check-commands: allow <reason>` to say '
+sentence+='why what this expands to is safe'
+check "the whole of the cannot-be-read sentence" \
+  "$(contains "$out" "scripts/release.sh:5: $sentence")"
+
+root=$(fixture sentence-unknown-subcommand)
+cat >> "$root/scripts/release.sh" <<'SH'
+bun frobnicate biome check .
+SH
+run_check "$root"
+check "a subcommand the gate does not know is refused" "$(is "$status" 1)"
+sentence='this line cannot be read for certain: `bun frobnicate biome check .` runs `bun frobnicate`, '
+sentence+='a subcommand this gate does not know, so whether the words after it are commands or that '
+sentence+='subcommand'\''s own arguments is not knowable here, and it names `biome` — spell the command '
+sentence+='out as `scripts/repo-tool.sh biome`, or write `check-check-commands: allow <reason>` to say '
+sentence+='why this line is safe'
+check "the whole of the sentence an unknown subcommand gets" \
+  "$(contains "$out" "scripts/release.sh:5: $sentence")"
+
+root=$(fixture sentence-exemption-line)
+cat >> "$root/scripts/release.sh" <<'SH'
+bunx biome check . # check-check-commands: allow
+SH
+run_check "$root"
+check "a line exemption with no reason is reported" "$(is "$status" 1)"
+check "the whole of the sentence it gets" \
+  "$(contains "$out" 'scripts/release.sh:5: this exemption gives no reason — write `# check-check-commands: allow <reason>`')"
+
+root=$(fixture sentence-exemption-block)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+<!-- check-check-commands: allow -->
+
+```bash
+bun run lint .
+```
+MD
+run_check "$root"
+check "a block exemption with no reason is reported" "$(is "$status" 1)"
+check "the whole of the sentence it gets" \
+  "$(contains "$out" 'AGENTS.md:3: this exemption gives no reason — write `<!-- check-check-commands: allow <reason> -->`')"
 
 summary "check-check-commands.sh"

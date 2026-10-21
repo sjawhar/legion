@@ -37,9 +37,11 @@
 # assignments are stepped over; and the words that remain are the command the shell would run.
 # Quotes are stepped over rather than obeyed, so a command nested in
 # `bash -c '… && bunx playwright …'` — how `docs/site/media/broker/screenshots.sh` used to call
-# Playwright — is judged like any other. The comment goes after the trailing marker has been
-# looked for, so `… # check-check-commands: allow <reason>` still exempts the line it ends, and
-# before the split, so a `;` inside a comment starts no segment of its own.
+# Playwright — is judged like any other. The comment is where the trailing exemption marker is
+# read from, and the only place it is read from, so `… # check-check-commands: allow <reason>`
+# exempts the line it ends while a marker quoted inside a string —
+# `echo "# check-check-commands: allow x" && bunx biome check .` — is text and exempts nothing.
+# The comment is taken before the split, so a `;` inside a comment starts no segment of its own.
 #
 # A segment is judged by the tool it reaches, never by the word it starts with. Judging the
 # first word is what failed twice: `exec bunx biome`, `env FOO=1 bunx biome`, `command bunx
@@ -60,8 +62,12 @@
 # in `scripts/repo-tool.sh` however it is spelled — so a workflow's
 # `run: ../../scripts/repo-tool.sh biome check src/`, whose segment starts with neither — and
 # the pinned binary itself, a word ending `node_modules/.bin/<tool>`. Anything else is reported,
-# whatever stands in front of it, and the message names the exemption marker as the way to
-# record a line that genuinely cannot be written through the wrapper.
+# whatever stands in front of it, and the report says what the gate knows rather than more: the
+# segment names the tool where this gate reads a command, and reaches it neither approved way.
+# Whether the line runs the tool is the author's to say — `which biome`, `grep -rn biome
+# package.json` and `rm -rf ~/.cache/biome` each name it without running it, and are reported
+# like any other — so the message names the exemption marker as the way to record that, as much
+# as to record a line that genuinely cannot be written through the wrapper.
 #
 # A package manager's own arguments are not commands the shell resolves, but which words those
 # are depends on the subcommand: `bun`, `npm`, `pnpm` and `yarn` each take one first, read as
@@ -122,11 +128,20 @@
 #      because a command prescribed in `packages/envoy/infra/AGENTS.md` binds its reader exactly
 #      as the root guide's does, and a set written depth by depth left fifteen of them unjudged.
 #      Prose and inline code are never judged: a note may name `bunx biome` in a sentence or in
-#      backticks, because only a line inside a fenced block is a command someone runs,
+#      backticks, because only a line inside a fenced block is a command someone runs. Which
+#      fenced blocks those are is the first word of the info string: no info string at all, a
+#      shell (`sh`, `shell`, `bash`, `zsh`, `ksh`), a command session (`console`, `terminal`,
+#      `shell-session`) or `yaml`, because a workflow's `run:` step is a prescription wherever
+#      it is quoted. A block labelled as data is not judged — `text`, `json`, `diff`, `ts`,
+#      `go`, `md`, and a language this gate does not know with them — because a transcript
+#      quoting `error: Cannot find module 'tsc'` is output rather than an instruction; the
+#      first word, because an info string carries attributes here (```bash title="x"),
 #   4. an exemption that gives no reason. A fenced block whose immediately preceding non-blank
 #      line is `<!-- check-check-commands: allow <reason> -->` is not judged, and neither is a
-#      line ending `# check-check-commands: allow <reason>`; the reason is what makes the
-#      exemption reviewable, so an empty one is itself a problem.
+#      line whose comment ends `# check-check-commands: allow <reason>` — its comment as the
+#      shell reads it, so a line that quotes the marker inside a string exempts nothing it goes
+#      on to run; the reason is what makes the exemption reviewable, so an empty one is itself
+#      a problem.
 #
 # Excluded, each for its own reason:
 #
@@ -141,9 +156,16 @@
 #   * `.git`, `.jj`, `node_modules`, `.venv` and `vendor`, which hold nothing this repository
 #     prescribes.
 #
+# What this gate reads is what prescribes a command: the manifests, the workflows, the shell
+# files and the guides above. It does not read source, so a prescribed command written inside a
+# `.ts`, `.go` or `.py` file is outside this gate and stays right by review alone —
+# `packages/dispatch/e2e/local-instance.ts` printed one to the developer on every run. The limit
+# is recorded here so the next person meets it rather than discovers it.
+#
 # Files are discovered by walking the tree, not by asking jj or git, so an unsnapshotted change
 # cannot read green locally. Every problem is printed with its file and line; the only non-zero
-# exit is a named problem, and a file that cannot be parsed or decoded is a named problem too.
+# exit is a named problem, and a file that cannot be parsed, cannot be decoded, or cannot be
+# read at all — a dangling symlink the walk finds — is a named problem too.
 #
 # Run from anywhere: .github/scripts/check-check-commands.sh
 # CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -250,6 +272,16 @@ PROMPT = re.compile(r"^\$(?:\s|$)")
 # backticks. What carries one, the gate cannot resolve to a command.
 EXPANSION = re.compile(r"\$\S|`")
 FENCE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+# The info strings a fenced block is read as commands under: none at all, a shell or a command
+# session, and yaml — a workflow's `run:` step is a prescription wherever it is quoted. A fence
+# that names anything else is data: a transcript in a `text` block, a manifest in a `json` one
+# and a module in a `ts` one are output or source, not an instruction. A language this gate does
+# not know is not judged either, because reporting a quoted transcript is a report that is
+# simply untrue, and the exemption marker stays for the judged block that legitimately shows the
+# wrong form.
+JUDGED_FENCES = frozenset(
+    "sh shell bash zsh ksh console terminal shell-session shellsession sh-session yaml yml".split()
+)
 ALLOW_COMMENT = re.compile(rf"^<!--\s*{MARKER}(?P<reason>.*?)-->$")
 ALLOW_TRAILING = re.compile(rf"#\s*{MARKER}(?P<reason>[^#]*)$")
 
@@ -296,22 +328,23 @@ def runner_problem(spelling: str) -> str:
     )
 
 
-def strip_comment(command: str) -> str:
-    """The command a line runs, its comment removed: a `#` that begins a word and stands outside
-    quotes ends the command, as the shell reads it. Stripped after the trailing exemption has
-    been looked for, so `# check-check-commands: allow <reason>` still exempts its own line, and
-    before the segments are split, so a `;` or a `|` written inside a comment starts no segment
-    of its own."""
+def split_comment(line: str) -> tuple[str, str]:
+    """A line as the shell reads it: the command it runs, and the comment it carries. A `#` that
+    begins a word and stands outside quotes ends the command, so everything from there is the
+    comment — the one place the exemption marker is honoured, since a marker quoted inside a
+    string is part of the word it sits in and exempts nothing. The split happens before the
+    segments are split, so a `;` or a `|` written inside a comment starts no segment of its
+    own."""
     quote = ""
-    for index, character in enumerate(command):
+    for index, character in enumerate(line):
         if quote:
             if character == quote:
                 quote = ""
         elif character in "\"'":
             quote = character
-        elif character == "#" and (index == 0 or command[index - 1] in " \t"):
-            return command[:index]
-    return command
+        elif character == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index], line[index:]
+    return line, ""
 
 
 def basename(word: str) -> str:
@@ -333,13 +366,13 @@ def reached(words: list[str]) -> tuple[int, str] | None:
 
 
 def offenders(command: str):
-    """Every segment of a command string that reaches a pinned check tool outside the two
-    approved spellings, that calls a package runner at all, or that cannot be read for certain,
-    as the sentence naming what is wrong with it (the segment's own words are quoted inside it).
-    A segment yields at most one sentence, so a line never gives two messages. One reading of
-    what the shell would run serves a recipe, a workflow `run:` line, a shell line and a fenced
-    command line alike."""
-    for segment in SEGMENT.split(strip_comment(command)):
+    """Every segment of a command — its comment already removed by `judge` — that reaches a
+    pinned check tool outside the two approved spellings, that calls a package runner at all, or
+    that cannot be read for certain, as the sentence naming what is wrong with it (the segment's
+    own words are quoted inside it). A segment yields at most one sentence, so a line never
+    gives two messages. One reading of what the shell would run serves a recipe, a workflow
+    `run:` line, a shell line and a fenced command line alike."""
+    for segment in SEGMENT.split(command):
         words = command_words(segment)
         if not words:
             continue
@@ -396,19 +429,29 @@ def offenders(command: str):
                 f"`{MARKER} <reason>` to say why what this expands to is safe"
             )
         else:
+            # True of every line this is printed for, the line that names a tool as data
+            # included: what the gate read is a command, and what it found there is the tool's
+            # own name outside the two approved spellings. Whether the line runs the tool is
+            # the author's to say, through the marker, which is why the sentence ends by
+            # offering it.
             yield (
-                f"runs `{one_line(word)}`, which is whatever PATH answers with (the worker "
-                f"image ships its own tsc, and with no `node_modules` the name reaches a "
-                f"squatted package), not the {tool} this repository pins — run "
-                f"`{WRAPPER} {tool}` or the pinned `{PINNED_PATH}/{tool}`, or write "
-                f"`{MARKER} <reason>` to say why this line cannot go through the wrapper"
+                f"names `{tool}` where this gate reads a command, and reaches it neither "
+                f"through `{WRAPPER}` nor as the pinned `{PINNED_PATH}/{tool}` — a name reached "
+                f"any other way is answered by whatever PATH holds (the worker image ships its "
+                f"own tsc, and with no `node_modules` the name reaches a squatted package) "
+                f"rather than the {tool} this repository pins, so run `{WRAPPER} {tool}` or the "
+                f"pinned `{PINNED_PATH}/{tool}`, or write `{MARKER} <reason>` to say why this "
+                f"line does not run {tool} at all, or cannot reach it that way"
             )
 
 
 def judge(path: Path, number: int, text: str, context: str) -> None:
-    """Judges one command line, honouring a trailing exemption. An exemption with no reason is
+    """Judges one command line, honouring the exemption its comment carries. The marker is read
+    from the comment `split_comment` finds and from nowhere else, so a line that quotes the
+    marker inside a string exempts nothing it goes on to run. An exemption with no reason is
     reported instead: the reason is the whole of what makes it reviewable."""
-    exemption = ALLOW_TRAILING.search(text.rstrip())
+    command, comment = split_comment(text.rstrip())
+    exemption = ALLOW_TRAILING.search(comment)
     if exemption:
         if not exemption.group("reason").strip():
             problems.append(
@@ -416,7 +459,7 @@ def judge(path: Path, number: int, text: str, context: str) -> None:
                 f"`# {MARKER} <reason>`"
             )
         return
-    for wrong in offenders(text):
+    for wrong in offenders(command):
         problems.append(f"{path}:{number}: {context} {wrong}")
 
 
@@ -460,12 +503,18 @@ def excluded(path: Path) -> bool:
 
 
 def read_text(path: Path) -> str | None:
-    """None when the file cannot be decoded — named like an unparseable workflow, not raised.
-    UTF-8 explicitly: the gate must not depend on the runner's or a developer's locale."""
+    """None when the file cannot be read or cannot be decoded — named like an unparseable
+    workflow, not raised. `OSError` beside `UnicodeDecodeError` because the walk finds files no
+    one can open: a dangling symlink is one, and a required job that ends in a traceback names
+    no file at all. UTF-8 explicitly: the gate must not depend on the runner's or a developer's
+    locale."""
     try:
         return path.read_bytes().decode("utf-8")
     except UnicodeDecodeError as error:
         problems.append(f"::error file={path}::{path} is not readable as text: {one_line(error)}")
+        return None
+    except OSError as error:
+        problems.append(f"::error file={path}::{path} cannot be read: {one_line(error)}")
         return None
 
 
@@ -569,18 +618,30 @@ for script in shell_scripts:
             continue
         judge(script, number, stripped, "this line")
 
+
+def judged_fence(info: str) -> bool:
+    """Whether a fenced block is read as commands, by the first word of its info string — the
+    first word, because an info string carries attributes in this repository's markdown. An
+    empty info string, a shell, a command session and yaml are commands; every other language
+    is data, and one this gate does not know is data too, since a block it cannot name is as
+    likely a transcript as a recipe."""
+    words = info.strip().split()
+    return not words or words[0].lower() in JUDGED_FENCES
+
+
 for guide in guides:
     content = read_text(guide)
     if content is None:
         continue
     fence = ""
-    exempt = False
+    exempt = judged = False
     previous, previous_number = "", 0
     for number, text in enumerate(content.splitlines(), start=1):
         match = FENCE.match(text)
         if not fence:
             if match:
                 fence = match.group("fence")
+                judged = judged_fence(match.group("info"))
                 exemption = ALLOW_COMMENT.match(previous.strip())
                 exempt = bool(exemption and exemption.group("reason").strip())
                 if exemption and not exempt:
@@ -600,7 +661,7 @@ for guide in guides:
             previous, previous_number = text, number
             continue
         stripped = text.strip()
-        if exempt or not stripped or stripped.startswith("#"):
+        if exempt or not judged or not stripped or stripped.startswith("#"):
             continue
         judge(guide, number, stripped, "this fenced command")
 
