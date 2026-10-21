@@ -1,3 +1,11 @@
+import {
+  branchHoldsNotice,
+  type FirstTurnNotice,
+  type FirstTurnNoticeMessage,
+  firstTurnNoticeMessage,
+  withoutRepeatedNotice,
+} from "./first-turn-notice";
+
 /**
  * The notice a resumed agent gets when its role launcher found its workspace recreated since its
  * session was last written: `LEGION_WORKSPACE_RECREATED=true`, which the launcher sets on every
@@ -14,10 +22,7 @@ export const WORKSPACE_RECREATED_MESSAGE = "legion-workspace-recreated";
  * One process's notice: its text, and the id every copy it sends carries (`details.id`), which
  * tells its copies from a notice an earlier recreation of the same session left in the history.
  */
-export interface WorkspaceRecreatedNotice {
-  readonly id: string;
-  readonly content: string;
-}
+export type WorkspaceRecreatedNotice = FirstTurnNotice;
 
 /**
  * The notice for a Legion session on `issue` whose environment is `environment`, undefined when its
@@ -39,37 +44,10 @@ export function workspaceRecreatedNotice(
 }
 
 /** The custom message that carries `notice`, as the session saves it. */
-export function workspaceRecreatedMessage(notice: WorkspaceRecreatedNotice): {
-  readonly customType: string;
-  readonly content: string;
-  readonly display: true;
-  readonly details: { readonly id: string };
-} {
-  return {
-    customType: WORKSPACE_RECREATED_MESSAGE,
-    content: notice.content,
-    display: true,
-    details: { id: notice.id },
-  };
-}
-
-/** Whether `value`, a branch entry or a request's message, is a copy of the notice `id` names. */
-function isNoticeCopy(value: unknown, kind: "entry" | "message", id: string): boolean {
-  if (typeof value !== "object" || value === null) return false;
-  const typed =
-    kind === "entry"
-      ? "type" in value && value.type === "custom_message"
-      : "role" in value && value.role === "custom";
-  return (
-    typed &&
-    "customType" in value &&
-    value.customType === WORKSPACE_RECREATED_MESSAGE &&
-    "details" in value &&
-    typeof value.details === "object" &&
-    value.details !== null &&
-    "id" in value.details &&
-    value.details.id === id
-  );
+export function workspaceRecreatedMessage(
+  notice: WorkspaceRecreatedNotice
+): FirstTurnNoticeMessage {
+  return firstTurnNoticeMessage(notice, WORKSPACE_RECREATED_MESSAGE);
 }
 
 /**
@@ -81,7 +59,7 @@ export function branchHoldsWorkspaceRecreatedNotice(
   branch: readonly unknown[],
   id: string
 ): boolean {
-  return branch.some((entry) => isNoticeCopy(entry, "entry", id));
+  return branchHoldsNotice(branch, WORKSPACE_RECREATED_MESSAGE, id);
 }
 
 /**
@@ -95,10 +73,5 @@ export function withoutRepeatedWorkspaceRecreatedNotice(
   messages: readonly unknown[],
   id: string
 ): unknown[] | undefined {
-  const first = messages.findIndex((message) => isNoticeCopy(message, "message", id));
-  if (first === -1) return undefined;
-  const kept = messages.filter(
-    (message, index) => index <= first || !isNoticeCopy(message, "message", id)
-  );
-  return kept.length === messages.length ? undefined : kept;
+  return withoutRepeatedNotice(messages, WORKSPACE_RECREATED_MESSAGE, id);
 }
