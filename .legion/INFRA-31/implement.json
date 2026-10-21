@@ -2,47 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-20T23:40:00Z",
+  "completed": "2026-10-21T00:30:00Z",
   "proof": [
     {
-      "criterion": "The property that holds the install lock's wait can see the derivation get too small, which it could not before: a wait of one second at the defaults must be red.",
-      "surface": "TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline, each case now carrying the wait computed by hand with its arithmetic beside it, plus a clause anchored to the feature rather than the derivation (queuedInstalls = 5 at installBudget = 1s, neither computed anywhere in installLockWait).",
-      "command": "installLockWait's body replaced by `return 1`, then `go test -count=1 -run TestTheInstallLockWaitIsABound ./internal/runtime/sandbox/`",
-      "observed": "Three of four cases red, each for two independent reasons: `the wait at boot 2m0s x 3 intervals is 1s, want 120s: the 6m0s deadline's third, floored at a second` and `… 1s, less than the 5s the queue this lock creates needs: the last of a pod's six roles waits for the 5 installs before it, so a wait this short fails the launch the lock was added to save`. Before this round the same mutation left the whole sandbox suite green in 1.2 s.",
-      "headSha": "f52a00d3b7bac9b07831aa94110b0612e9a25272",
-      "negativeControl": "The reviewer's run of the same mutation against the previous head is the control: `ok … 1.201s`, green, which is what established that every clause derived both sides from installLockWait and so could not fail."
+      "criterion": "The pull request merges again, by a forward merge of the base rather than a rebase, with nothing of this branch dropped in the resolution.",
+      "surface": "GitHub's own mergeability for PR #2085, and the seven files the merge conflicted in: plugins.go, plugins_test.go, launcher.go, live_test.go, controller_test.go, docs/kubernetes.md, scripts/e2e/README.md.",
+      "command": "jj new legion/INFRA-31 main@origin -m 'merge: resolve conflict against main@origin'; resolve; jj git push --bookmark legion/INFRA-31; gh api repos/sjawhar/legion/pulls/2085 --jq '{mergeable, mergeable_state, head: .head.sha}'",
+      "observed": "Before: `mergeable: false`, `mergeable_state: dirty`. After: `{\"head\":\"f714cec148b6b8175f6b1e128a705e54bd00487e\",\"mergeable\":true,\"mergeable_state\":\"blocked\"}` — blocked being the review gate, not a conflict. The merge is a genuine fast-forward from both parents, so nothing existing was rewritten.",
+      "headSha": "f714cec148b6b8175f6b1e128a705e54bd00487e",
+      "negativeControl": "The pre-merge read is the control, taken twice ten seconds apart by the reviewer and once by me: dirty both times, so the conflict was a settled computation rather than one in flight."
     },
     {
-      "criterion": "The table fails for a wrong derivation rather than only for a different one, and fails for the right reason in each case.",
-      "surface": "The same property under two further mutations of installLockWait's divisor.",
-      "command": "divisor 4, then divisor 2, each `go test -count=1 -run TestTheInstallLockWaitIsABound ./internal/runtime/sandbox/`, restored between",
-      "observed": "Divisor 4: three cases red on the hand arithmetic alone (90s want 120s, 45s want 60s, 60s want 80s) with the queue clause silent — correct, since a quarter still covers five serialised installs, so it is not the stated derivation rather than unsafe. Divisor 2: red on all three clauses (180s want 120s; `more than its third of the 6m0s deadline`; `two waits of 180s and a second of install take 6m1s, past the 6m0s registration deadline`). Restored: `ok … 0.022s`, plugins.go back to checksum a0fc3865faeff5f7.",
-      "headSha": "f52a00d3b7bac9b07831aa94110b0612e9a25272",
-      "negativeControl": "The divisor-4 run is the control for the queue clause: it shows that clause stays silent for a change that is merely different, so its firing under `return 1` is a statement about the feature and not an echo of the arithmetic mismatch beside it."
+      "criterion": "The lock's two kinds of assertion still pair as they did before the merge, so the base's restructure did not quietly weaken them.",
+      "surface": "TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline and TestTwoRenderedInstallsSerialiseOnTheSharedBunCache, at the merged head, under the same two mutations the reviewer ran before it.",
+      "command": "installLockWait's body replaced by `return 1`, then the divisor moved to 4, each `go test -count=1 -run 'TestTheInstallLockWaitIsABound|TestTwoRenderedInstallsSerialise' ./internal/runtime/sandbox/`, restored between",
+      "observed": "`return 1`: three cases red twice each — `the wait at boot 2m0s x 3 intervals is 1s, want 120s: the 6m0s deadline's third, floored at a second` and `less than the 5s the queue this lock creates needs: the last of a pod's six roles waits for the 5 installs before it`. Divisor 4: the same three cases red once each, on the hand arithmetic alone (`90s, want 120s`; `45s, want 60s`; `60s, want 80s`), the queue clause silent in every one. Restored: `ok … 1.223s`.",
+      "headSha": "f714cec148b6b8175f6b1e128a705e54bd00487e",
+      "negativeControl": "The divisor-4 run is the control for the queue clause: silent there and firing under `return 1` is what shows that clause reads the feature rather than the derivation, and it behaves identically either side of the merge."
     },
     {
-      "criterion": "The three copies of the bound's argument agree, including on the floor's exception, which two of them denied.",
-      "surface": "installLockWait's comment, docs/kubernetes.md's Sharing BUN_INSTALL_CACHE_DIR paragraph, and the test's doc comment — the one that already had it right.",
-      "command": "read at the head: the three sentences compared",
-      "observed": "All three now say the remainder holds at every configuration but the smallest, where the floor takes over — under a three-second deadline two floored waits of a second consume it, deliberately, since being serialised and then retired is no worse than racing. The documentation's five-installs sentence is scoped with it (`Above that floor …`), which was the second half of the finding: `boot 1s x 1` loads, so the exception is reachable rather than hypothetical. The comment also now says why the grace term is zero rather than dropped — the supervisor's grace is ProvisionBound while the claim is launching, and this script rides in the argv sent after the hello.",
-      "headSha": "f52a00d3b7bac9b07831aa94110b0612e9a25272",
-      "negativeControl": "The test's doc comment is the control: it stated the exception and its justification before this round, which is how the disagreement between the three copies was visible at all."
+      "criterion": "The resolution is the union of both sides, not either side wholesale.",
+      "surface": "The merged plugins.go, plugins_test.go and docs/kubernetes.md read against both parents.",
+      "command": "go build ./... && go vet -tags e2e ./... && go test -count=1 ./internal/runtime/sandbox/ ./internal/capabilities/... ./internal/config/ ./cmd/legion/ ; bunx biome check . ; bash .github/scripts/check-private-names.sh",
+      "observed": "All green: sandbox 134.241s, capabilities 25.865s, config 0.733s, cmd/legion 68.166s, gofmt clean, vet ok, biome exit 0, private-names clean. The base's startScript/startArgv/setupBlock and its four setup-command tests are present; so are this branch's --backend=copyfile, the cache read with no default, the flock function with its bounded wait and retry, installLockWait with its whole rationale, requireFlock, the pinned BUN_INSTALL_CACHE_DIR, the serialisation test with its lockless control and the wait's property with its four hand-computed cases. In the documentation both sides' sentences stand, including this branch's floor exception and its five-installs claim scoped above the floor.",
+      "headSha": "f714cec148b6b8175f6b1e128a705e54bd00487e",
+      "negativeControl": "The fingerprint is the control and it reports changed, which is the honest answer: the base restructured the code this branch changed, so the branch's diff against its new fork point is a different diff. A resolution that had dropped a correction would have produced the same verdict, so the verdict is not the evidence — the mutations and the suite above are."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/runtime/sandbox/plugins_test.go — each case of the property carries a hand-computed want with its arithmetic in the case's comment; queuedInstalls and installBudget name the lower bound the lock's own queue needs; the inherited and false 'a change to either default is what fails' is gone, and is now true of the table it describes.",
-    "packages/daemon/internal/runtime/sandbox/plugins.go — the comment regains the lower bound the deleted constant carried (the last of six roles behind five serialised installs, 24 seconds each at the defaults), states the floor's exception to the remainder claim, and explains the zero grace term.",
-    "docs/kubernetes.md — the same exception in the same words, with the five-installs sentence scoped above the floor."
+    "Merge commit f714cec148b6 resolves seven conflicted files against main@origin (#2070, the deployment setup command).",
+    "packages/daemon/internal/runtime/sandbox/plugins.go — this branch's lock, copyfile flag, cache read and installLockWait re-expressed inside the base's installBlock/startScript/startArgv, with the wait threaded as a parameter; both doc comments merged rather than one chosen.",
+    "packages/daemon/internal/runtime/sandbox/plugins_test.go — both sides' tests, the base's setup-command four and this branch's five, with every assertion of this branch's kept.",
+    "packages/daemon/internal/runtime/sandbox/launcher.go — the base's startArgv call with this branch's installLockWait argument.",
+    "live_test.go, controller_test.go — both sides' option fields.",
+    "docs/kubernetes.md, scripts/e2e/README.md — both sides' sentences."
   ],
   "trickyParts": [
-    "A table of hand-computed literals has its own rot: the day the derivation legitimately changes, four literals go red together and the cheap move is to paste in what the code now returns. The arithmetic written beside each literal is what makes that paste visible, since a pasted number disagrees with its own stated sum.",
-    "The two kinds of clause fail for different reasons on purpose. The literals catch a derivation that is not the stated one; the queue clause catches a derivation that is unsafe. Divisor 4 fires only the first, `return 1` fires both, and that difference is the evidence the second clause is anchored outside the code under test."
+    "The base's commit restructured exactly this branch's code, so the merge was structural rather than textual: installScript ceased to exist and its body became installBlock inside a subshell. The lock had to be re-expressed in that shape rather than re-applied as a patch.",
+    "A changed fingerprint was unavoidable here and is reported as changed. The rule that a changed fingerprint means a new round rather than a continuation is the reviewer's to apply; smoothing the resolution to make the number match would have been the defect this branch has spent eight rounds removing."
   ],
-  "deviations": [
-    "f52a00d3b7ba replaces 31e2e73673ea, pushed a minute earlier in this same round: the second finding's documentation scoping went into that commit rather than beside it. Nothing was built on the first and no other role had fetched it; the push was a sideways move of my own commit alone, recorded here and on the thread rather than left to be noticed."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The defect fixed here is the second instance of one shape in two rounds: a substring assertion built with Sprintf from installLockWaitSeconds could not see that constant change, and a property built from installLockWait could not see that function change. Knowing the first did not prevent the second, because the second looked like a property over four configurations rather than like a pin. The discriminator is not how many cases a check ranges over but where its expectation comes from: an expectation computed from the subject is a restatement, not a check."
+    "A mergeable read is perishable: the reviewer's and my own reads were MERGEABLE at 23:24 and dirty by 23:58, because the base moved between them. The behind-count's trend, not the status alone, is what says how long the read stays true."
   ]
 }
