@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-45",
+  "completed": "2026-10-21T20:35:00Z",
+  "proof": [
+    {
+      "criterion": "AC1 — the Dispatch server accepts a comment, a comment edit, a message and a broadcast of 32,000 characters, and refuses one of 32,001 naming the limit and the count.",
+      "surface": "The real Dispatch Go server over HTTP against a real pgvector Postgres, in CI's `envoy-go` job (this pod has no Docker socket, no Postgres and no compiler for pgvector, so no local run was possible).",
+      "command": "run 39661833569, job envoy-go (119436670878): `go list ./... | grep -v /integration | xargs go test`, which runs the new TestBodiesAreCappedOnEveryWriteRoute in packages/envoy/internal/dispatch/api",
+      "observed": "`ok github.com/sjawhar/envoy/internal/dispatch/api 501.341s` with the new table compiled into it (`go vet ./internal/dispatch/api/` clean in this pod at the same head). The table sends a body of exactly contracts.DispatchBodyMax on all four routes, requires each route to return it whole, and asserts the refusal of the over-cap cases through the package's own assertCapExceeded.",
+      "headSha": "700a0216955421525a7855f7ecebe1d64fb2c95d",
+      "negativeControl": "The same table's over-cap cases: a body of DispatchBodyMax+1 ASCII units and one of DispatchBodyMax/2+1 non-BMP characters (which count two units each) on every one of the four routes. Each must answer 400 CAP_EXCEEDED with the exact count wording, and a server that accepted either fails the package."
+    },
+    {
+      "criterion": "AC2 — the `dispatch` command posts a 32,000-character comment and message against a running Dispatch, and refuses a longer one before it sends anything, naming how much to trim.",
+      "surface": "The real `dispatch` entry (packages/envoy-client/bin/dispatch.ts) spawned as its own process against the browser suite's running Dispatch server and Postgres, in CI's `dispatch` job. New spec packages/dispatch/e2e/cli-body-cap.e2e.ts, written because nothing in the repository drove the command against a live server.",
+      "command": "run 39661833569, job dispatch (119436670554): `bunx playwright test --config e2e/playwright.config.ts`",
+      "observed": "`✓ 140 [chromium] › e2e/cli-body-cap.e2e.ts:91:1 › dispatch posts a comment and a message of the whole body limit, and refuses one longer before it sends (778ms)`; suite total `1442 passed (43.5m)`. The row posts a comment and a message of exactly DISPATCH_BODY_MAX characters and reads each back from the API byte for byte.",
+      "headSha": "700a0216955421525a7855f7ecebe1d64fb2c95d",
+      "negativeControl": "The same row then runs `dispatch comment` and `dispatch message` with DISPATCH_BODY_MAX+1 characters: each exits non-zero with `- --body is 1 characters over the 32000-character limit (32001/32000)`, and the issue afterwards holds exactly one comment and one message, both of DISPATCH_BODY_MAX characters — so the refusal happened before anything was sent, rather than being a refusal from the server."
+    },
+    {
+      "criterion": "AC3 — a 32,000-character comment posted on an issue reaches a subscribed agent session whole, over the message bus.",
+      "surface": "A real NATS server (testcontainers) with the deployed Dispatch outbox publishing into it and a subscriber connected as a listener lane would be, in CI's `envoy-go` job. New test TestRunDeliversACommentBodyAtTheCapThroughNATS in packages/envoy/internal/dispatch/outbox; nothing asserted this before (publisher_test.go uses an in-process recording publisher).",
+      "command": "run 39661833569, job envoy-go (119436670878): the same `go test` sweep, package github.com/sjawhar/envoy/internal/dispatch/outbox",
+      "observed": "`ok github.com/sjawhar/envoy/internal/dispatch/outbox 42.066s`. The test publishes a comment body of exactly contracts.DispatchBodyMax UTF-16 units built from three-byte BMP characters — the widest body the cap allows, about 96 KB — waits for the event to be marked published, and requires the body inside the delivered envelope to equal the published body exactly.",
+      "headSha": "700a0216955421525a7855f7ecebe1d64fb2c95d",
+      "negativeControl": "The test fails two ways by construction and both were exercised in writing it: a body that arrives cut fails the byte-for-byte equality (the body carries HEAD:/:TAIL markers so a cut at either end is visible), and a body NATS refuses never arrives, so the subscriber's 10-second wait fails with the failure this test exists for — an event recorded delivered that reached no session."
+    },
+    {
+      "criterion": "AC4 — Legion's daemon holds no limit of its own: each message it posts may hold 31,956 characters, derived from the one definition, and a longer READY packet, close reason or status reason is still refused before anything is queued.",
+      "surface": "A real Dispatch server built from this checkout and run by the daemon's own scratch-Dispatch harness against a real pgvector Postgres, in CI's `test` job (`Test the Go daemon`).",
+      "command": "run 39661833589, job test (119436567562): the daemon Go suite, including TestOutboxPostsABodyAtThePostLimitWithTheLongestMarkerAgainstScratchDispatch in packages/daemon/internal/daemon and TestAWithdrawalOfAMergeTheQueueFailedFitsOneDispatchMessage in packages/daemon/internal/workflow",
+      "observed": "The job passed at this head. The scratch-Dispatch test posts a body of exactly record.MessagePostLimit with the longest possible outbox marker and asserts the posted length equals dispatch.MessageBodyLimit, so the daemon's number and Dispatch's are proven equal rather than pinned to a literal; `packages/daemon/internal/dispatch/types.go` no longer declares the constant at all, and `go build ./internal/...` in this pod shows the generated file supplying it. The same suite was red at the previous head (run 39655628970) precisely because the withdrawal fixture had been sized to 1,956; it is now derived from the constant.",
+      "headSha": "700a0216955421525a7855f7ecebe1d64fb2c95d",
+      "negativeControl": "The scratch-Dispatch test posts one unit more than the limit and requires Dispatch to refuse it CAP_EXCEEDED with the row left queued; and the withdrawal test requires a reason past record.MessagePostLimit to be cut to fit one message and to say so, so a daemon that queued an over-long body would fail both."
+    },
+    {
+      "criterion": "AC5 — a question is still refused past 800 characters, and an approval request's summary still gets what is left of those 800 after Dispatch's own wording.",
+      "surface": "The real Dispatch server over HTTP (CI `envoy-go`) and the real dashboard in Chromium (CI `dispatch`).",
+      "command": "run 39661833569: job envoy-go (119436670878) for packages/envoy/internal/dispatch/api, whose asks and reviews tests are untouched by this change; job dispatch (119436670554) for the new ask row in packages/dispatch/e2e/composer-body-cap.e2e.ts",
+      "observed": "`✓ 147 [chromium] › e2e/composer-body-cap.e2e.ts:54:1 › an ask composer still stops at the question limit (1.3s)` — a body-sized question typed into the ask composer is cut back to ASK_QUESTION_MAX, and a question of exactly ASK_QUESTION_MAX stays whole. `asks.go`'s maxAskQuestion16 and `reviews.go`'s remaining-budget arithmetic are untouched in the diff.",
+      "headSha": "700a0216955421525a7855f7ecebe1d64fb2c95d",
+      "negativeControl": "The first half of that row is the control: a 32,000-character question is offered to the ask composer and the field holds only 800 of it, so a composer that had taken the body limit for a question would fail there."
+    },
+    {
+      "criterion": "AC6 — no text a person or an agent reads still gives 2,000 as the limit on a body, and every test that pinned the old refusal wording pins the new one. (Also the deployment instruction's rule for a reader-facing Dispatch page.)",
+      "surface": "The real dashboard composer in Chromium, proven as a pair: the same spec failing on the commit before the composer changed and passing at this head. Plus the mechanical guards: the generated-constant check and the committed-bundle check.",
+      "command": "passing: run 39661833569, job dispatch (119436670554), at head 700a0216955421525a7855f7ecebe1d64fb2c95d. Failing: run 39655782661, job dispatch (119415607484), on branch `infra-45-composer-cap-base` (pull request #2098), whose only change over commit 588363c261fb — the commit before MentionComposer stopped hardcoding 2,000 — is that spec.",
+      "observed": "Passing: `✓ 146 [chromium] › e2e/composer-body-cap.e2e.ts:25:1 › the comment composer takes a whole body of the limit, and holds a longer one to it (2.4s)`, suite `1442 passed`. Failing: `✘ 145 [chromium] › e2e/composer-body-cap.e2e.ts … Error: expect(received).toBe(expected) Expected: 32000 Received: 2000` at the cap assertion, with `1 failed / 1440 passed` — it failed on the cap and on nothing else. The prose sweep is machine-guarded where the language allows: `bun run check:go` fails on a hand-edited copy of either generated file (new per-output cases in gen-go.test.ts), `bun run check-dist` fails on a stale claude-envoy bundle, and every tool description interpolates the constant.",
+      "headSha": "700a0216955421525a7855f7ecebe1d64fb2c95d",
+      "negativeControl": "The failing half above is itself the control for the composer. For the generated copies: hand-editing each of packages/envoy/internal/contracts/generated.go and packages/daemon/internal/dispatch/generated.go was run in this pod and in the new gen-go.test.ts cases, and `--check` exited non-zero naming the file it found stale."
+    },
+    {
+      "criterion": "AC7 — the repository's own checks pass.",
+      "surface": "CI at this head, and the lanes this pod can run.",
+      "command": "run 39661833589 (lint, typecheck, test) and run 39661833569 (contracts, envoy-client, envoy-go, envoy-go-race, dispatch, dispatch-memory, claude-envoy, envoy-smoke, envoy-e2e-local, pi-envoy, pi-legion, pi-shared, envoy-plugin, envoy-infra-go) and run 39661833556 (pr-title)",
+      "observed": "Every job green at 700a0216955421525a7855f7ecebe1d64fb2c95d. Locally in this pod at the same tree: `bunx biome check .` clean (one pre-existing warning in packages/pi-shared and one in packages/claude-envoy, both on main), `bunx tsc --noEmit` clean in packages/dispatch and packages/contracts, `bun test` green in packages/contracts (209), packages/envoy-client (771), packages/dispatch (2314), packages/pi-legion (499), and `go test ./internal/prompts/ ./internal/record/ ./internal/dispatch/ ./internal/workflow/ ./internal/api/` green in packages/daemon.",
+      "headSha": "700a0216955421525a7855f7ecebe1d64fb2c95d",
+      "negativeControl": "The previous head of this branch, 76c1eb9c7d72, was red: run 39655628970's `test` job failed TestAWithdrawalOfAMergeTheQueueFailedFitsOneDispatchMessage because the raised limit stopped the fixture overrunning it. The failure was fixed at the fixture, not at the assertion, and the suite is green at this head."
+    }
+  ],
+  "filesChanged": [
+    "packages/contracts/src/dispatch-tools.ts — DISPATCH_BODY_MAX is 32000, and its doc comment now says what the server enforces and where it is generated.",
+    "packages/contracts/scripts/gen-go.ts — renders a list of outputs; --check gofmt-compares each and names the stale file; one gofmt spawn for both.",
+    "packages/contracts/scripts/gen-go.test.ts — one hand-edit case per generated output.",
+    "packages/envoy/internal/contracts/generated.go — generated: contracts.DispatchBodyMax.",
+    "packages/daemon/internal/dispatch/generated.go — new, generated: dispatch.MessageBodyLimit, so the daemon's production build still imports nothing from the envoy module.",
+    "packages/daemon/internal/dispatch/types.go — the hand-written const is gone.",
+    "packages/daemon/internal/prompts/go/merger.md — the packet figure is 31956.",
+    "packages/daemon/internal/workflow/ready_test.go — the cut-to-fit fixture is sized from record.MessagePostLimit, not from a run count.",
+    "packages/envoy/internal/dispatch/api/{comment_create,comment_actions,messages,broadcasts}.go — the four enforcement sites read contracts.DispatchBodyMax; maxCommentBody16 and maxMessageBody16 are deleted.",
+    "packages/envoy/internal/dispatch/api/body_cap_test.go — new: the four write routes at the cap and over it.",
+    "packages/envoy/internal/dispatch/outbox/body_cap_nats_test.go — new: a full-cap body delivered byte for byte over real NATS.",
+    "packages/envoy/internal/dispatch/api/{interactions,comments,broadcasts,search_pathological}_test.go — pinned wording derived from the constant; the pathological ladder now runs at the new cap.",
+    "packages/dispatch/web/src/features/conversation/MentionComposer.tsx — maxLength reads ASK_QUESTION_MAX and DISPATCH_BODY_MAX.",
+    "packages/dispatch/web/src/features/refs/Unfurl.test.tsx — the reader-tab guard runs at the new cap, its millisecond budget untouched.",
+    "packages/dispatch/e2e/{cli-body-cap,composer-body-cap}.e2e.ts and bodies.ts, e2e/api.ts — the two new proofs and their shared helper.",
+    "packages/envoy-client/src/__tests__/{dispatch-execute,dispatch-images}.test.ts, packages/contracts/src/dispatch-tools.test.ts — cap expectations derived from the constant and from overCapMessage.",
+    "packages/claude-envoy/dist/*.js and legion/skills/* — regenerated by `bun run build`, never hand-edited.",
+    ".github/workflows/envoy-and-contracts.yaml — both paths-filters that reach `bun run check:go` name the new generated file.",
+    "skills/legion-controller/SKILL.md, skills/legion-retro/SKILL.md, docs/site/src/content/docs/dispatch/for-agents.md, packages/contracts/AGENTS.md, packages/envoy/AGENTS.md, packages/contracts/CHANGELOG.md, packages/envoy/CHANGELOG.md, scripts/e2e/{README.md,stage4b-sandbox-tree.sh,stage3-4b13b-acceptance.sh} — the prose sweep and the two changelog entries, the envoy one carrying the deploy order."
+  ],
+  "trickyParts": [
+    "The daemon must not import the envoy module in its production build (packages/daemon/internal/agentsecrets/contract_test.go states that invariant), so the generator writes a second file into the daemon's own package rather than the daemon importing contracts. Both outputs are checked by `bun run check:go`, and both CI paths-filters that reach that command name the new file — without the `envoy` filter the new generated file would be hand-editable with no job checking it.",
+    "Two fixtures were sized to the old cap and stopped testing what they were written for: the reader-tab guard in Unfurl.test.tsx (resized; isBareReferenceBody measured at 4.380 ms for three 31,998-character bodies of repeated schemes against its unchanged 2,000 ms budget, so it is linear at the new cap and no production change was needed) and the merge-withdrawal cut-to-fit fixture in ready_test.go (CI caught it; now derived from the constant).",
+    "The pathological-write premise in search_pathological_test.go said comments were too short to ladder. A full-cap `a_` comment is 32 KB of exactly the shape migration 0056 measured at 5 s before search_text bounded it, so the file now ladders comments at DispatchBodyMax/32, /4 and the cap, held by its existing growsLinearly bound. CI's `go test` is not verbose, so the rung times are not printed; the bound is asserted rather than eyeballed, and the test fails if a write stops being linear.",
+    "The branch was 47 commits behind main and several swept files had moved, so it was forward-merged with main@origin (ac6ca2d1548ae991d0e8943ce07e5991037ac5a3) before implementing, on the architect's instruction. Fingerprint e3b0c442…b855 → e3b0c442…b855, unchanged: the branch carried no product diff at that point. Posted on the pull request."
+  ],
+  "deviations": [
+    "The plan's live proof commands (`bun run dispatch:local`, `bun run e2e`, the Go tests wanting a DSN) cannot run in a Legion worker pod: no Docker socket, no Postgres, no psql, and no C compiler to build pgvector for one. The architect confirmed CI as the production-like surface for every criterion and that each proof cites the run id, job, test, assertion and head. Nothing here claims a local run of those lanes.",
+    "The plan named no harness for AC2 and none existed. On the architect's instruction a new browser-suite row spawns the real `dispatch` command against the running Dispatch, so the criterion is proven in CI rather than by hand.",
+    "The deployment instruction requires a reader-facing Dispatch change to be proven by a browser test failing before the change and passing at the head; the plan did not name one. packages/dispatch/e2e/composer-body-cap.e2e.ts is that test, with the failing half run on branch `infra-45-composer-cap-base` (pull request #2098, run 39655782661) over commit 588363c261fb.",
+    "The plan's T8 table listed skills/dispatch/SKILL.md; a rewrite on main had already removed every body-cap number from it and from skills/dispatch/references/, so there was nothing to sweep there. Confirmed on main@origin.",
+    "`packages/dispatch/web/src/features/conversation/composer-references.test.ts` and the performance.now() millisecond budgets in both browser tests were left alone, as the plan's spec departure and the architect's ruling say: those budgets are the catastrophic-backtracking guard."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "A document's whole margin is bounded at 1 MiB, not only 256 KiB per record (packages/envoy/internal/dispatch/docs/growth.go, pmdoc.MaxDocumentBytes): about 32 full-length ASCII comments, or about 10 CJK ones, now fill it, after which every further comment or suggestion on that document is refused 413. Escalated; the architect accepted it with no work.",
+    "Embedding cost per comment rises up to sixteenfold: embed.maxInputChars is 32,000 runes, so a full-cap comment is now embedded whole, about 8,000 tokens against embedqueue's 200,000-token ceiling. Escalated; accepted with no work.",
+    "A 32,000-character agent turn is cut at AGENT_STREAM_LIMITS.partChars = 16,000 in the dashboard's Agent view. Delivery to the agent is unaffected, so AC3 still holds; only what a human watching that page sees is cut. Escalated; the architect ruled it outside this issue."
+  ]
+}
