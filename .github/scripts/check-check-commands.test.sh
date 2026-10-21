@@ -968,6 +968,37 @@ SH
 run_check "$root"
 check "and the marker is still read from the comment of such a line" "$(is "$status" 0)"
 
+# The same two properties meeting: a line whose quotes do not balance is judged whole, and the
+# marker is a comment's business. Here the marker sits inside the quote that never closes, so
+# the second reading — which tracks only the other quote character — finds a comment the shell
+# never has, and the vulnerable command beside it is exempted by text that is not a comment.
+# That is the hole `marker-quoted-before-the-command` above closed for a balanced line, open
+# again on an unbalanced one.
+root=$(fixture marker-inside-an-unclosed-quote)
+cat >> "$root/scripts/release.sh" <<'SH'
+echo "see # check-check-commands: allow docs && bunx biome check .
+SH
+run_check "$root"
+check "a marker inside a quote that never closes exempts nothing on its line" "$(is "$status" 1)"
+check "names the line" "$(contains "$out" 'scripts/release.sh:5:')"
+
+root=$(fixture marker-inside-an-unclosed-apostrophe)
+cat >> "$root/scripts/release.sh" <<'SH'
+echo 'see # check-check-commands: allow docs && bunx biome check .
+SH
+run_check "$root"
+check "and its single-quote twin exempts nothing either" "$(is "$status" 1)"
+check "names the line" "$(contains "$out" 'scripts/release.sh:5:')"
+
+# The control the fix must not break: an unbalanced line whose marker exempts a line that runs
+# no pinned tool stays green, as does the multi-line body two cases above.
+root=$(fixture marker-unclosed-quote-no-tool)
+cat >> "$root/scripts/release.sh" <<'SH'
+echo don't # check-check-commands: allow an apostrophe before the marker
+SH
+run_check "$root"
+check "a line that names no pinned tool is still no problem of this gate's" "$(is "$status" 0)"
+
 echo "case: a file that is not text names itself"
 root=$(fixture undecodable)
 printf '# A note\n\xff\xfe binary\n' > "$root/docs/solutions/rogue.md"
