@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-45",
+  "completed": "2026-10-21T21:40:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 6,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/contracts/scripts/gen-go.test.ts:43",
+      "description": "The two new --check tests append `// hand-edited` to the committed packages/envoy/internal/contracts/generated.go and packages/daemon/internal/dispatch/generated.go in the working tree and restore them in `finally`. A run killed inside the 120 s window leaves a tracked generated file modified, and because the injected text is a Go comment nothing but `check:go` goes red - `go build`, `go vet` and the daemon suite stay green. In a Legion issue workspace every role shares that tree. Cheaper shape: copy both outputs to a scratch directory, corrupt the copies, and let --check take the paths to compare. Fast-follow, not blocking: the coverage it buys (that --check visits every output, not just the first) is worth having and CI runs on a fresh checkout."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/refs/Unfurl.test.tsx:342",
+      "description": "The new comment says the appended ` x` / `\\nx` 'reach it exactly'. Measured: scheme.repeat(floor((32000-2)/len)) + 2 gives 31,999 for `http://` (7), 31,994 for `https://` (8) and 31,990 for `dispatch://` (11). The bodies are at or just under the cap, which is what the guard needs, but the comment's claim of exactness is false for all three schemes. The old 1998 form was not exact either, so the claim is new with this diff."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/src/__tests__/dispatch-execute.test.ts:449",
+      "description": "The ask-cap expectation now reads `overCapMessage(821, 800)` (and dispatch-images.test.ts:202 `overCapMessage(801, 800)`), computed by the same formatter the code under test calls, for a cap this change does not move. The body-cap conversions in those files must follow the constant; these two are collateral. Not blocking: the literal wording stays pinned at dispatch-tools.test.ts:136 and tool-input-errors.test.ts:130, so a wording regression still fails somewhere."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-controller/SKILL.md:341",
+      "description": "The daily report's authoring budget was swept from 2,000 to 32,000 along with the server cap, and scripts/e2e/stage4b-sandbox-tree.sh:5460 relaxed its proof to `<= 32000` to match. In that skill the number read as the report's own budget, not only a restatement of the server's refusal; the 'Writing for the human' rule that follows it is the only thing left bounding the report's length. AC6 as the tester recorded it ('no text a person or an agent reads still gives 2,000 as the limit on a body') covers the edit, so this is reported to the architect as a product consequence rather than held as a defect."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_create.go:349",
+      "description": "A document-anchored comment is also projected into its document's margin (comment_create.go:519-523), which docs/growth.go bounds in bytes: 256 KiB per thread record (maxMarginRecordBytes, growth.go:155) and 1 MiB per document margin (maxMarginBytes = pmdoc.MaxDocumentBytes, growth.go:149). At 96 KB worst case per body a thread now holds about 2 CJK or 8 ASCII full-length comments and a document's margin about 10 or 32, where at 2,000 units it held ~43/131 and ~174/524; the margin never shrinks, so a full document refuses every further comment 413 CAP_EXCEEDED until it is split. Verified: the refusal is clean (defer tx.Rollback at comment_create.go:397, commit at :658), the byte budgets themselves are unchanged, and the implementer escalated this and the architect accepted it with no work (.legion/INFRA-45/implement.json discoveredComplexity). Recorded in the PR body's `Not proven / risk` line rather than re-litigated, and no test covers an anchored comment at the new cap."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comments_test.go:508",
+      "description": "The over-cap edit assertion inside TestEditCommentIsAuthorOnly (507-512) is now the 'comment edit' case of the new body_cap_test.go:30-32,50-56, which also pins the refusal wording this one only substring-matches, in a test whose subject is authorship. Fast-follow: delete 507-512; 513-516 still proves the comment survived the two remaining rejected edits. The sibling tail in interactions_test.go:527-537 is not redundant - it goes through sessionRequest, the session-actor path body_cap_test.go does not exercise."
+    }
+  ],
+  "verified": {
+    "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection declares none. CI head for legion/INFRA-45 = 700a0216955421525a7855f7ecebe1d64fb2c95d (newest pull_request run). All four required checks completed/success at that commit, and the full check-run list is green or skipped (attest, deploy skipped). compare 700a0216...48ec71ec lists only .legion/INFRA-45/implement.json and .legion/INFRA-45/test.json, so the code under review is the code CI ran. The PR body's CI line names runs 39661833589, 39661833569 and 39661833556, all at that same head: not stale.",
+    "threads": "gh api graphql reviewThreads: zero threads, resolved or unresolved, and zero prior reviews. No bot findings to adjudicate.",
+    "e2e": "Both `E2E (implementer)` and `E2E (tester)` lines present in the live PR body, each naming surface, run id, observation, head SHA and a negative control.",
+    "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality run once at 48ec71ec. Deep review returned CHANGES on one Medium (the document-margin interaction) and one Low (no claude-envoy changelog entry); code quality returned APPROVE with five low findings. The Medium is the architect-accepted escalation above, so it is recorded as risk rather than held as a finding.",
+    "sweep": "Independent tree grep for `2,000-character|2000-character|at most 2,000 characters|1,?956`: every remaining hit is history (the two CHANGELOG entries recording the move, two older envoy CHANGELOG incident entries, search_pathological_test.go:38 naming the old number as the premise it removes) or unrelated (a scrollY of 1956 in a docs/solutions note). AC6 holds.",
+    "derivation": "record.MessagePostLimit = dispatch.MessageBodyLimit - len(\"\\n\\n<!-- legion-outbox: -->\") - len(\"9223372036854775807\") = 32000 - 25 - 19 = 31956 (record/outbox.go:135-139), exact against the longest marker, and every daemon site reads it (api/handoff.go:128, api/architect.go:609, record/outbox.go:615, workflow/ready.go:136); merger.md:7 is pinned to it by prompts_test.go.",
+    "specDepartures": "Both plan departures re-checked in the diff: Unfurl.test.tsx resized while composer-references.test.ts and the millisecond budgets are untouched, and skills/dispatch/ is not in the diff at all."
+  },
+  "contractCensus": "Not required. The diff adds no refusal, makes no field required, removes or renames no field, and changes no signature at a process or package boundary: dispatch.MessageBodyLimit keeps its name and package (types.go -> generated.go), maxCommentBody16/maxMessageBody16 were unexported and are deleted with their only callers, and the cap itself is loosened. The one cross-process consequence - a new client against an old server - is carried by the PR body's `### Deploy order` section and packages/envoy/CHANGELOG.md:419-425, both of which this review verified against daemon/internal/daemon/outbox.go:394-423 and record/store.go:760-774."
+}
