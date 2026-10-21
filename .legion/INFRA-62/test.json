@@ -2,66 +2,88 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-62",
-  "completed": "2026-10-21T01:40:00Z",
-  "round": 2,
-  "head": "e1aa31d69f9397ad6515c6fc46b9790d4c0c0f2b",
-  "codeHead": "f8ec21dfc724e27e1b75c84ba4ff763902708436",
-  "verdict": "fail",
+  "completed": "2026-10-21T02:55:00Z",
+  "round": 3,
+  "head": "4dbdbba3d06e052a09b3cbe54ac7d48ebdfc7521",
+  "codeHead": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
+  "verdict": "pass",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Five of the six entries re-verify at this head, driven independently on the tester's own harness (its own mock resource monitor, none of the implementer's driver): the rendering is byte-identical to the head the tester verified in round 1 except for the one added lifecycle block on the app's envoy-dispatch container (entries 1, 2 and the arrangement); the schema and SDK are untouched by this round, since dispatch.go is unchanged (entry 3); the migration rule and its two cited facts still hold (entry 4); and the allowedNamespaces policy now renders and is pinned at two rules, the second the front door's, which the tester re-rendered at the consuming stack's input shape and re-ran as a test (entry 6). Entry 5 is rejected. Its central claim — 'The hook runs before SIGTERM, inside the unchanged 30 s grace, so cmd/dispatch/shutdown.go's own drain budget is untouched' — is false against the Kubernetes contract it depends on, and the thing it claims to prove is the defect recorded in failures[0]. Separately, every one of the six entries records headSha f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46, which is not a commit of this repository (failures[1]), so no entry can be checked at the commit it names.",
-    "verifiedEntries": [1, 2, 3, 4, 6],
-    "rejectedEntries": [5]
+    "verdict": "verified",
+    "how": "Both of round 2's failures are answered at this head and each was re-checked independently, not read. The pod now asks for 35 seconds — the five-second wait on top of the thirty cmd/dispatch/shutdown.go builds its shutdown for — which the tester observed on its own Construct harness rebuilt from this tree, and the tester's red test, which the implementer did not touch, now passes while the same test file against the pre-fix tree still fails. Every headSha in the implement handoff now resolves with jj (6e01eacc6cca, and f8ec21dfc724 where a round is named), and the pull request body carries an explicit correction of the earlier fabricated id. The seven proof entries are consistent with what the tester re-rendered: the rendering at this head differs from the one the tester verified in round 2 by exactly one field, terminationGracePeriodSeconds 30 → 35.",
+    "verifiedEntries": [1, 2, 3, 4, 5, 6, 7],
+    "rejectedEntries": []
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Deliverable 1 / review round 1 finding 1: the app rolls a new image in without taking Dispatch away, which requires each terminating pod to finish the shutdown envoy-dispatch is written for. The pre-stop wait added this round is taken out of that shutdown rather than added to the pod's budget, so every terminating pod now has five seconds less than its server assumes.",
-      "evidence": "The app pod renders terminationGracePeriodSeconds: 30 with lifecycle.preStop.exec.command ['sleep','5'] on envoy-dispatch (tester's own Construct dump at this head: 'example-dispatch: grace=30 lifecycle=envoy-dispatch=sleep 5'; the front door and the listener carry none). The kubelet runs the preStop hook first and sends SIGTERM only after it returns, inside that one grace period — kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle, Pod termination: 'If one of the Pod's containers has defined a preStop hook ... the kubelet runs that hook inside of the container ... If the preStop hook needs longer to complete than the default grace period allows, you must modify terminationGracePeriodSeconds to suit this', and only then 'The kubelet triggers the container runtime to send a TERM signal to process 1'. So envoy-dispatch now has 25 s after SIGTERM, not 30. Its shutdown is built for 30: cmd/dispatch/shutdown.go declares stopGrace = 30 * time.Second as 'how long Dispatch's runtime lets it run after SIGTERM before killing it', and derives documentShutdownTimeout = docs.ShutdownDrainBudget (9 s, internal/dispatch/docs/service.go:597) + 5 s = 14 s and httpDrainBeforeDocuments = 30 - 5 - 14 = 11 s, so the planned sequence ends at 25 s with a five-second reserve that the file says exists to outlast a measured 3.4 s settlement overrun. At 25 s that reserve is exactly zero, and cmd/dispatch/shutdown_test.go's TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit — a write that commits and answers 27 s after SIGTERM, '3 s inside the runtime's kill' — is SIGKILLed mid-commit on every rolling update, the path this issue delivers. Red test: TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown in packages/envoy/infra/gcp/dispatch_test.go, committed at 51f3c6a08972; `cd packages/envoy/infra && go test -p 1 -count=1 -run TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown ./gcp/` fails with '\"30\" is not greater than or equal to \"35\"'. The fix is the pod's budget, not the wait: TerminationGracePeriodSeconds 35 (the five-second wait plus the thirty the server assumes). TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates pins the 30 and must be updated with it, and the code comment at dispatch_kube.go ('so it takes nothing from the server's own drain budget') and the implement handoff's proof entry 5 say the opposite of the contract and need correcting too; dispatch-pod.golden changes with the field."
+      "criterion": "Round 2's failure, now fixed: the pre-stop wait must be added to the pod's budget rather than taken out of the server's shutdown, so envoy-dispatch keeps the thirty seconds after SIGTERM its own shutdown is built for.",
+      "surface": "The pulumi-resource-envoy-infra plugin rebuilt by the tester from this tree and driven through its own Construct RPC server by the tester's own harness, and the repository's test suite for the same package.",
+      "command": "go build the tester's dump program against this workspace, then ./head/dump and REPLICAS=3 ./head/dump; cd packages/envoy/infra && go test -p 1 -count=1 -run 'TestDispatchAppPod|TestDispatchNetworkPolicy|TestDispatchPoliciesFence|TestDispatchPodMatchesGolden|TestDispatchRenderingsMatchGoldens|TestDispatchDeployment|TestDispatchFrontDoor|TestDispatchListener' ./gcp/",
+      "observed": "example-dispatch: grace=35 preStop=sleep 5; example-dispatch-listener and example-dispatch-tailnet: no grace period of their own and no hook. 35 = 5 + 30, so the kubelet signals envoy-dispatch five seconds in and kills it thirty seconds after that, which is what shutdown.go's stopGrace assumes, and the document service's five-second reserve is whole again. The tester's red test TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown passes untouched — the implementer changed the other test instead, deriving its expected 35 from the same dispatchServerStopGrace constant rather than from a literal — and the whole selected set is ok.",
+      "headSha": "4dbdbba3d06e052a09b3cbe54ac7d48ebdfc7521",
+      "negativeControl": "The same test file, copied onto the pre-fix tree fetched from GitHub (tarball of e1aa31d69f9397ad6515c6fc46b9790d4c0c0f2b) and run there, still fails: '\"30\" is not greater than or equal to \"35\" … leaving envoy-dispatch 25 seconds after SIGTERM where its shutdown is built for 30'. The assertion pins the relation between the two numbers, not either number, so it keeps biting if the wait is retuned."
     },
     {
-      "criterion": "Evidence integrity: a proof entry records the commit it ran at, and a pull-request body records the head its CI and its thread resolutions stand at, so the reviewer and the merger can check both on GitHub.",
-      "evidence": "The code commit of this round is f8ec21dfc724e27e1b75c84ba4ff763902708436. All six proof entries of .legion/INFRA-62/implement.json record headSha f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46, and the pull request body repeats that value in its CI line and in all three thread-resolution lines. It is not a commit of this repository: `gh api repos/sjawhar/legion/commits/f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46/check-runs` answers HTTP 422 'No commit found for SHA', while the same call at f8ec21dfc724e27e1b75c84ba4ff763902708436 returns the run. The first twelve characters match, the tail does not. Replace it in the handoff's six entries and in the four body lines."
-    }
-  ],
-  "failed": 2,
-  "verifiedThisRound": [
-    {
-      "criterion": "Nothing but the pre-stop wait changed in what the component registers, so round 1's verification of the arrangement, the inventory and the refusals still stands at this head.",
-      "surface": "The tester's own Construct RPC driver, rebuilt from this head, diffed object by object against the rendering it recorded at the head it verified in round 1 (0ae5a902d601, tree of 90b710d3).",
-      "command": "go build the dump program against this workspace; ./head/dump and REPLICAS=3 ./head/dump; per-object jq diff against round 1's map",
-      "observed": "35 registrations, unchanged in number and name. Exactly one object differs from round 1: Deployment example-dispatch, by the addition of lifecycle.preStop.exec.command ['sleep','5'] on the envoy-dispatch container and nothing else. The front door's and the listener's Deployments are byte-identical, neither carries a lifecycle, and both keep the default grace period.",
-      "headSha": "e1aa31d69f9397ad6515c6fc46b9790d4c0c0f2b",
-      "negativeControl": "The same diff reports no change to any of the other 34 objects, so a stray edit to a Service, a policy or a Secret in this round would have shown here."
+      "criterion": "Acceptance 1, first half: a replica count above one produces a rolling update, and the behaviour at one replica is unchanged — still true at this head, and nothing but the grace period moved.",
+      "surface": "The same Construct harness, at the default shape and at the consuming stack's own shape (existingNamespace: true, allowedNamespaces: [envoy, legion], namespace: dispatch).",
+      "command": "./head/dump; REPLICAS=3 ./head/dump; per-object jq diff of this head's rendering against the one recorded at round 2's head",
+      "observed": "35 registrations at the default shape and 34 at the consuming stack's, the same objects under the same names as round 2. The object diff against round 2 reports exactly one difference in the whole rendering: Deployment example-dispatch's terminationGracePeriodSeconds, 30 → 35. At replicas 3 the app is RollingUpdate{maxUnavailable: 0, maxSurge: 1}; the front door and the listener are each one Recreate replica with no rollingUpdate key, and each of the app and the listener still waits on both of the front door's two resources while the front door waits on neither.",
+      "headSha": "4dbdbba3d06e052a09b3cbe54ac7d48ebdfc7521",
+      "negativeControl": "replicas 0 → `rpc error: code = Unknown desc = envoy-infra:gcp:Dispatch example-dispatch: replicas 0 must be at least 1` with 0 registrations, unchanged by this round's edit."
     },
     {
-      "criterion": "Review round 1 finding 2: the front-door rule is asserted in the configuration production runs.",
-      "surface": "The rendered NetworkPolicy at the consuming stack's input shape (existingNamespace: true, allowedNamespaces: [envoy, legion], namespace: dispatch, replicas: 3), and the repository's own test for it.",
-      "command": "EXISTING_NAMESPACE=true ALLOWED_NAMESPACES=envoy,legion NAMESPACE=dispatch REPLICAS=3 ./head/dump; cd packages/envoy/infra && go test -p 1 -count=1 -run 'TestDispatchNetworkPolicy|TestDispatchPoliciesFence|TestDispatchPodMatchesGolden' ./gcp/",
-      "observed": "The app policy renders two ingress rules — namespaceSelector envoy and legion on 8766, then podSelector app=example-dispatch-tailnet on 8766 — and the rewritten test now pins both through policyIngressRules/ingressPods with an exact rule count, so the silent replacement the reviewer named would fail it. ok github.com/sjawhar/envoy/infra/gcp.",
-      "headSha": "e1aa31d69f9397ad6515c6fc46b9790d4c0c0f2b",
-      "negativeControl": "The pre-stop defect above is the negative control this round produced for its own red test: the new assertion fails at this head and names the number it wants."
+      "criterion": "Acceptance 1, second half, in the configuration production runs: the front-door rule survives beside the named namespaces, which is what review round 1's second finding asked to be asserted.",
+      "surface": "The rendered NetworkPolicies at the consuming stack's input shape, and the repository's own tests for them.",
+      "command": "EXISTING_NAMESPACE=true ALLOWED_NAMESPACES=envoy,legion NAMESPACE=dispatch REPLICAS=3 ./head/dump; go test -run 'TestDispatchNetworkPolicy|TestDispatchPoliciesFence' ./gcp/",
+      "observed": "example-dispatch carries two ingress rules (the two namespaceSelectors on 8766, then podSelector app=example-dispatch-tailnet on 8766), example-dispatch-tailnet one rule on 1055 and example-dispatch-listener one on 9020; the rewritten test pins the app's rule count and both rules through the shared reader. ok.",
+      "headSha": "4dbdbba3d06e052a09b3cbe54ac7d48ebdfc7521",
+      "negativeControl": "The implementer's own control for it, which the tester read: turning the policy block's append into an assignment fails the test with 'should have 2 item(s), but has 1'. The tester's independent control is the default shape, which still renders exactly one rule — so the test's count is not trivially satisfied."
+    },
+    {
+      "criterion": "Deliverable 3 and acceptance 3 still hold at this head: the input, its refusals and the generated SDK, and the migration rule in the repository's guidance.",
+      "surface": "The tree at this head and the comparison of it against the head where the tester verified both with the pinned Pulumi CLI v3.268.0 and a compiled SDK consumer.",
+      "command": "gh api repos/sjawhar/legion/compare/0ae5a902d601f6184b20aa8d02d5283ccc7cc938...6e01eacc6cca024498b267bd3a5eece355b4beb1 --jq '[.files[].filename]'; grep -c \"A migration runs while the build before it is still serving\" packages/envoy/cmd/dispatch/README.md",
+      "observed": "The compare lists seven files: three under .legion/ and four under packages/envoy/infra (README.md, gcp/dispatch_kube.go, gcp/dispatch_test.go, gcp/testdata/dispatch-pod.golden). gcp/dispatch.go, which declares the replicas input and its refusals, is untouched since the head where the tester read the schema ({\"type\":\"integer\",\"plain\":true}, in no requiredInputs) and compiled a consumer against the generated SDK's Replicas *int, so both still stand. The migration rule is still in packages/envoy/cmd/dispatch/README.md.",
+      "headSha": "4dbdbba3d06e052a09b3cbe54ac7d48ebdfc7521",
+      "negativeControl": "The same compare is what would have shown an unannounced edit to dispatch.go, the goldens of the other two pods or the migration guidance; it shows none, and the per-object rendering diff above independently agrees."
+    },
+    {
+      "criterion": "Round 2's second failure, now fixed: every commit a proof entry or the pull request body names must be a commit of this repository.",
+      "surface": "The handoff on disk and the live pull request body, each id resolved against the repository.",
+      "command": "jj log -r <id> for every headSha in .legion/INFRA-62/implement.json; gh api repos/sjawhar/legion/pulls/2089 --jq .body | grep for the fabricated id",
+      "observed": "Every id in the handoff resolves: the seven proof entries and the file's head all name 6e01eacc6cca024498b267bd3a5eece355b4beb1, two of them also naming f8ec21dfc724e27e1b75c84ba4ff763902708436 for the round whose rendering they were first run at. The body's only remaining occurrence of f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46 is in an explicit correction paragraph that names it as the wrong id and gives the right one, which is the honest way to leave it.",
+      "headSha": "4dbdbba3d06e052a09b3cbe54ac7d48ebdfc7521",
+      "negativeControl": "The fabricated id still answers HTTP 422 'No commit found for SHA' from gh api repos/sjawhar/legion/commits/<it>/check-runs, which is how the correction was checked rather than assumed."
     }
   ],
-  "previousRound": {
-    "round": 1,
-    "verdict": "pass",
-    "head": "90b710d384718af81a84417a9dd2afe94fa06c00",
-    "codeHead": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
-    "implementerProof": "verified",
-    "where": "The five proof entries of that round, with the base-to-head object diff behind them, are the version of this file committed at bfc7b95aa7c75d517a82992c264d8f5a349872f1 and the evidence comment https://github.com/sjawhar/legion/pull/2089#issuecomment-6304835958. They are not repeated here because this round's head is new: the next passing round re-states the whole proof at the head that merges."
-  },
   "ciRead": {
-    "codeHead": "f8ec21dfc724e27e1b75c84ba4ff763902708436",
-    "runs": "Tests 39524750234 (lint, typecheck, test) success; Docs 39524750284 (build) success; PR Title 39524750191 (pr-title) success; Legion Envoy and Contracts 39524750249 still in_progress at 01:32Z with changes, envoy-infra-go, envoy-e2e-local, envoy-smoke, envoy-go, envoy-go-race and dispatch-memory already success and only `dispatch` running (started 01:00:46Z; the same job took about 38 minutes and passed at the previous head). No job failed at this head. No CI lane was re-run by the tester; the Go tests the tester ran are the single red test it wrote and the three policy and golden tests it read against it, not a CI lane.",
-    "afterThisHandoff": "This push carries a red test, so CI at the new head is expected to fail on TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown until the grace period is raised."
+    "codeHead": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
+    "runs": "Tests 39529241775 (lint, typecheck, test) success; Docs 39529241713 (build) success; PR Title 39529242465 (pr-title) success; Legion Envoy and Contracts 39529241707 failure — within it changes, envoy-infra-go, envoy-e2e-local, envoy-smoke, envoy-go, envoy-go-race and dispatch-memory all success, and `dispatch` failure on each of its three attempts. No CI lane was re-run by the tester.",
+    "redLaneNotThisChange": "The `dispatch` lane fails on one dashboard test, `a cold Inbox hydrates every ask thread from its one list response` (packages/dispatch/web/src/features/inbox/Inbox.test.tsx:85), with `expect(received).toHaveBeenCalledTimes(expected)` after 2256 other tests pass. It is not this change's: gh api compare ba3f6b7e…6e01eacc lists no file under packages/dispatch at all, and the same single test failed at c5a4ae303a65aa6a8b94e73ee91efbd4664dea72 — the tester's own round-2 push, whose only change outside .legion/ was a Go test file under packages/envoy/infra. The same lane was success at 0ae5a902d601 (run 39513347754, 36m43s) on a byte-identical packages/dispatch tree, and was cancelled, not failed, at f8ec21dfc724. The assertion is a count of calls a slow render can make, so it reads as load- or ordering-sensitive rather than as a change in behaviour; the tester did not install the dashboard's dependencies to reproduce it, because doing so is what evicted this pod mid-turn once already.",
+    "consequence": "It blocks the merge gate rather than this phase: the base branch envoy-infra-integration requires no status check (the reviewer established that at round 1), so nothing stopped this round, but a head whose checks are red is not a head to arm. Fixing a dashboard test is outside this issue's scope, so it is the architect's to place — a sibling issue, or an owner for the flake — and the pull request body's CI line, written before that lane finished, still says it 'runs again here' and needs the outcome."
   },
+  "previousRounds": [
+    {
+      "round": 1,
+      "verdict": "pass",
+      "codeHead": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
+      "where": "The five proof entries, the base-to-head object diff and the schema and SDK verification are the version of this file committed at bfc7b95aa7c75d517a82992c264d8f5a349872f1 and https://github.com/sjawhar/legion/pull/2089#issuecomment-6304835958."
+    },
+    {
+      "round": 2,
+      "verdict": "fail",
+      "codeHead": "f8ec21dfc724e27e1b75c84ba4ff763902708436",
+      "where": "Two failures — the pre-stop wait charged to the server's shutdown, and the fabricated head id — in the version of this file committed at c5a4ae303a65aa6a8b94e73ee91efbd4664dea72. Both are answered at this head and re-checked above."
+    }
+  ],
   "unproven": [
-    "Unchanged from round 1 and still INFRA-63's to settle: no pod in Legion reaches a cluster or the consuming stack's state, so Tailscale Serve resolving the app's cluster DNS name under TS_USERSPACE=true, the cutover's two tailscaled processes against one state Secret (the consuming program still mints the tailnet key Reusable: false), the front door's unmeasured 100m/128Mi reservation, and whether a release loses no request are all unproved here.",
-    "The pre-stop wait's five seconds are themselves unmeasured — whether that covers EndpointSlice propagation plus Tailscale Serve's own routing refresh is what the consuming stack's measured release settles. The README says so. Raising the pod's grace period to cover the wait, which failures[0] asks for, is correct whatever that measurement later changes the wait to, since the invariant the red test pins is a relation between the two numbers."
+    "Unchanged and still INFRA-63's to settle, since no pod in Legion reaches a cluster or the consuming stack's state: Tailscale Serve resolving the app's cluster DNS name under TS_USERSPACE=true; the cutover's two tailscaled processes against one state Secret, with the consuming program still minting the tailnet key Reusable: false; the front door's unmeasured 100m/128Mi reservation; and whether a release loses no request, which is what decides whether five seconds of pre-stop wait is the right number.",
+    "If that measurement changes the wait, the pod's grace period moves with it: the coupling is now stated in the component's code comment, in the operator README and in TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown, which fails on the relation rather than on either number."
   ],
   "observations": [
-    "README wording, not a defect: 'a stopping pod keeps serving for five seconds after it is removed from routing' reads as though the wait begins once removal has propagated. The hook and the EndpointSlice update start together, when the pod is marked terminating; the five seconds are the window the propagation has to finish inside. Worth a word when that paragraph is edited for failures[0] anyway.",
-    "Carried from round 1 and unchanged: replicas has a floor and no ceiling, and the ApplyT that renders the listener's environment panics rather than returning an error when core.ListenerConfig.Env refuses — both pre-existing and neither reachable from the generated Go SDK."
+    "Commit attribution, for the architect rather than for this change: 6e01eacc6cca, the implementer's fix commit, is authored by the review App (343353696+legion-reviewer[bot]) and committed by the implement App. The tester's handoff round before it left an empty working-copy commit of its own authorship in the shared workspace, and a role that describes or splits the commit it finds at the start of its turn keeps that author — the hazard skill://legion-worker names. Nothing of the change is wrong and the handoff commits are each authored by the right App; only this one code commit's author line is. Rewriting a pushed commit to correct it costs more than the wrong attribution, so the tester did not ask for it.",
+    "Carried and unchanged: replicas has a floor and no ceiling; the ApplyT that renders the listener's environment panics rather than returning an error when core.ListenerConfig.Env refuses. Both pre-existing, neither reachable from the generated Go SDK."
   ],
-  "scrubEvidence": "Not applicable: this issue's acceptance criteria call for no environment or secret-scrub evidence. The new rendering adds no value-bearing field; the pre-stop hook is a literal sleep."
+  "scrubEvidence": "Not applicable: this issue's acceptance criteria call for no environment or secret-scrub evidence. This round's edit adds no value-bearing field."
 }
