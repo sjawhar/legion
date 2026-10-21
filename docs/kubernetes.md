@@ -1303,6 +1303,43 @@ refuses a name already added, and `omp plugin install` an installed plugin witho
 container's first start the `update` finds no such marketplace, so the role's log shows one
 `Failed to update marketplace … not found` line before the `add` succeeds; that line is expected.
 
+What this repository offers that line is `scripts/legion-setup.sh`, which installs its own packages
+into the issue's workspace so that the checks a role is told to run can run at all — without
+`node_modules`, `bunx biome check` answers with a squatted npm package that checks nothing and
+exits 0. The deployment's whole side of it is one line, and the `-r` test belongs to that line
+rather than to the script, because the same argv runs where the file does not exist: the
+controller's `/legion`, an issue on a repository that carries no such script, and any branch older
+than the change that added it, each of which a shell's own "not found" would turn into a non-zero
+exit and a held issue.
+
+```yaml
+runtime:
+  kubernetes:
+    setup: [/bin/sh, -c, 'if [ -r ./scripts/legion-setup.sh ]; then sh ./scripts/legion-setup.sh; fi']
+```
+
+It writes nothing to the container's own filesystem: bun's download cache goes to
+`/legion/bun/cache` and its lock, log and marker to `/legion/bun/state`, both on the issue's own
+volume, which every role container of the pod mounts, so the install is paid once for the issue
+rather than once for each of its six roles. The marker holds `cksum < bun.lock` and is honoured
+only while `node_modules/.bin/biome` is there too, so a forward merge that moves the lock mid-issue
+installs again and a deleted tree cannot skip the install forever. A workspace outside the
+`/workspaces/` layout falls back to `<workspace>/.legion-setup`, which `.gitignore` holds.
+
+Every path of it ends `exit 0`, the failures included, because the non-zero exit above would stop
+the agent from starting over an install it could have run without. It bounds itself twice —
+`LEGION_SETUP_LOCK_WAIT` (90 s) for another role's install of the same workspace, then
+`LEGION_SETUP_INSTALL_TIMEOUT` (180 s) for the install itself, 270 s in the worst case inside the
+360 s registration deadline, against a measured 54 s for the first install of 1,986 packages and
+about 0.3 s when they are already there — and whatever went wrong (an unreachable registry, a lock
+file that moved under the frozen install, a timeout, the kernel's OOM kill of a 1 Gi role's
+install) it writes `$LEGION_STATE_DIR/legion-setup-report.json` and exits 0, leaving no marker, so
+the next role to start installs again. The role's own pi-legion reads that report at `session_start`
+and saves it as a notice in the agent's first turn, matching the report's `issue`, `role` and
+`generation` against its own environment, since that directory outlives a generation in a pod and,
+under `runtime: tmux`, is shared by every pane of the host. The agent therefore starts either way
+and knows which checks it cannot run.
+
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
 `omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. It refuses a
@@ -3362,7 +3399,7 @@ that was a daemon-machine path re-pointed at its pod location:
 | `PATH` | `/legion/worker-bin:` + the image's PATH | the pane's `gh` shim first, as on tmux |
 | `GH_CONFIG_DIR` | `/legion/gh` | `gh` |
 | `LEGION_GRANT_FILE` | `/var/run/legion/grant/<role token>-grant` | the pi-legion extension (writes), `legion credential`/`gh`/`handoff complete` (read) |
-| `LEGION_STATE_DIR` | `/legion` | the pi-legion extension's jj attribution overlay |
+| `LEGION_STATE_DIR` | `/var/run/legion/state` (`names.go`'s `StateDir`, a per-role memory-backed emptyDir) | the pi-legion extension's jj attribution overlay and its setup report (`scripts/legion-setup.sh`) |
 | `LEGION_CREDENTIAL_HELPER` | `!/opt/legion/bin/legion credential` | what `workspace-init` wrote into the clone's git config |
 | `DISPATCH_TOKEN_FILE` | `/var/run/legion/providers/DISPATCH_TOKEN` | `dispatchSettings` (when the deployment sets `dispatch_url`) |
 | `LEGION_ROOT_WORKSPACE` / `LEGION_WORKSPACE` | `/legion/workspaces/<owner>/<repo>/<key-lower>` | the extension; also the container's `workingDir` |

@@ -98,6 +98,13 @@ reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, ser
 repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json`
 (`repositories.refused`), one either App is missing from.
 
+A Kubernetes deployment also names one setup command, `runtime.kubernetes.setup`, run in every
+role's container before its agent starts. What this repository offers it is
+`scripts/legion-setup.sh`, which installs these packages into the issue's shared workspace with
+bun's cache on the issue volume, once per `bun.lock` digest, and never exits non-zero: a failed
+install is a report the role's agent reads in its first turn, never a role that does not start
+(`docs/kubernetes.md`, the `setup` section).
+
 ## Version Control
 
 **jj (Jujutsu), not git.** Changes auto-accumulate. Push directly.

@@ -667,7 +667,11 @@ func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 // beneath the cache home (e.g. a tree-shared warm-cache volume at
 // $XDG_CACHE_HOME/.bun/install/cache) that a bare prefix-or-equal check would miss. No code
 // change is needed to keep the cache private; this test locks the absence of any overlapping
-// mount so a future volume addition cannot reintroduce sharing.
+// mount so a future volume addition cannot reintroduce sharing. `scripts/legion-setup.sh` sets
+// BUN_INSTALL_CACHE_DIR itself, to /legion/bun/cache on the issue's own volume, which is not the
+// sharing this test guards: that volume carries exactly one workspace, so the cache is hardlinked
+// into that one node_modules and no other checkout, where LEGION-198's cache was one box's,
+// hardlinked into every worktree on it.
 func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
