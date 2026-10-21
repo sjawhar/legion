@@ -359,6 +359,43 @@ check "a fenced bunx playwright in a skill fails" "$(is "$status" 1)"
 check "names the line inside the block" \
   "$(contains "$out" 'skills/worker/SKILL.md:4: this fenced command runs `bunx`')"
 
+echo "case: \`bun x\` and \`npx\` are the same command spelled another way"
+# Measured in a role container of this issue's own pod (worker image, bun 1.3.14, no node_modules):
+# `bun x biome check .` and `npx biome check .` each exit 0 having checked nothing, and
+# `bun x biome --version` and `npx biome --version` each answer 0.3.3 — the squatted package, not
+# the Biome 2.4.11 this repository pins. `bun x` is bunx's own spelling (one binary, one
+# resolution), and the worker image ships npm and npx beside bun, so both reach the squat exactly
+# as `bunx` does. A gate that keeps the vulnerable form out has to keep these out too.
+root=$(fixture guide-fenced-bun-x)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+bun x biome check .
+```
+MD
+run_check "$root"
+check "a fenced 'bun x biome' in AGENTS.md fails" "$(is "$status" 1)"
+check "names the line inside the block" "$(contains "$out" 'AGENTS.md:4:')"
+
+root=$(fixture recipe-bun-x)
+sed -i 's|    "lint": .*|    "lint": "bun x biome check src/",|' "$root/packages/thing/package.json"
+run_check "$root"
+check "a 'bun x' lint recipe fails" "$(is "$status" 1)"
+check "names the recipe's own line" "$(contains "$out" 'packages/thing/package.json:4:')"
+
+root=$(fixture guide-fenced-npx)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```bash
+npx biome check .
+```
+MD
+run_check "$root"
+check "a fenced 'npx biome' in AGENTS.md fails" "$(is "$status" 1)"
+check "names the line inside the block" "$(contains "$out" 'AGENTS.md:4:')"
+
 echo "case: rule 4 — an exemption that gives no reason"
 root=$(fixture exemption-empty-block)
 cat > "$root/AGENTS.md" <<'MD'
