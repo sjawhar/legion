@@ -24,8 +24,13 @@ the delta: which paths are charged, where the locations must come from, and what
 whose image predates the fix.
 
 - **Export the six variables before the first build, in every shell of the turn.** A role in a pod
-  on an image older than daemon API contract 33 is told none of them, so a build fills the
+  on an image older than daemon API contract 34 is told none of them, so a build fills the
   container filesystem and the kubelet evicts the whole pod — every role of the issue with it.
+  (34 is the contract that carries this layout; 33 is another change's, so an image at 33 is one
+  of the images that needs the export.) The directories the block below makes are yours, made by
+  hand: the reclaim remedy in `docs/kubernetes.md` names only the paths the runtime renders, and
+  the test that holds that remedy to the renderer cannot see these, so remove them yourself when
+  the volume fills.
 
   ```sh
   # /legion/scratch/<role>/env.sh — source it in every command of the turn

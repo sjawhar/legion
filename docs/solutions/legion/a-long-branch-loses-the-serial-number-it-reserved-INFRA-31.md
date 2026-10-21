@@ -47,7 +47,9 @@ teaches — and the forward-merge discipline that goes with it.
   two changelog entries, the prose in a package's `AGENTS.md`, and `dist/envoy-channel.js` rebuilt
   with `bun run build` and verified by `bun run check-dist`. A bundle resolved by eye in a merge is
   how a wrong artefact ships; the two contract pins (`daemon-api-version.test.ts` in each package)
-  are what catch a manifest left behind.
+  are what catch a manifest left behind. End the sweep with `grep -rn 'contract <old>'` over the
+  whole tree, `docs/solutions/` included: a file written after the renumber still carried the old
+  number here, because the list above was read as the sweep's extent and the grep was not run.
 
 ## When a base merge is allowed
 

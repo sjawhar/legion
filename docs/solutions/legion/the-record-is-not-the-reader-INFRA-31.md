@@ -18,7 +18,11 @@ related_issues:
 Legion's handoffs work. `rm -rf` of a Go module cache failed in this issue's own pod — 19
 `Permission denied` lines, exit 1, the extracted source left behind — and the implementer did
 exactly what the process asks: it recorded the failure as a `trickyParts` entry in
-`.legion/INFRA-31/implement.json`. Capture succeeded.
+`.legion/INFRA-31/implement.json`, at commit `9798c9f3a0f6` of this issue's branch. Capture
+succeeded. (The commit is named because the entry is not readable at the merged head: every later
+round overwrote that file, and retro removes the directory before the merge — so the record this
+document is about outlives itself only as a commit id, which is the document's own point one turn
+further on.)
 
 A round later, the same role wrote an operator instruction in `docs/kubernetes.md` telling someone
 to delete those directories with a plain `rm -rf`. It had watched the command fail, had written

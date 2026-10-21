@@ -43,10 +43,13 @@ have closed this in ten. The honest number is the useful one.
 The four shapes, each with its instance:
 
 - **A restated fact loses its fence.** A number repeated in a second place arrives without the
-  condition that made it true. `image_test.go:195-222` is the worked example in code: the
-  assertion's `want` must carry the configuration it was derived under, or a later reader reads a
-  bare number as universal. In prose the same move is "measured on X at T" rather than the figure
-  alone.
+  condition that made it true: in prose, write "measured on X at T" rather than the figure alone,
+  and in a test write the `want` by hand with the configuration it was derived under beside it,
+  as `plugins_test.go`'s wait-bound table does. (An earlier version of this bullet cited
+  `image_test.go:195-222` as its worked example. The lines resolve, and they argue the opposite:
+  that test's `want` is built from the function it tests. A citation that resolves without
+  supporting its sentence, in the file that coined the rule — left here as the instance rather
+  than quietly swapped.)
 - **A figure loses its scope.** "2.1 to 2.7 GiB" means nothing without *of what, where, when*.
   Name the repository a measurement came from: a Go build cache measured on this repository is not
   a bound for a tree whose repository is ten times the size, and a reader two months out cannot
@@ -73,7 +76,7 @@ The four shapes, each with its instance:
 - **A check derived from a claim's shape cannot see a false clause inside it.** That enumeration
   passed at the head where the data home's exemption carried a reason the code refuted — the
   structure was right and only a *reason* was false. It is the same shape as a pin built from the
-  value it pins (`installLockWaitSeconds = 0` left a substring assertion green). So **a claim's
+  value it pins (`installLockWait` made to return a constant left a substring assertion green). So **a claim's
   structure and its grounds need separate checks**: the structural one is mechanical and belongs
   in the handoff; the other is "read the lines the sentence rests on", which nothing automates.
   The tester found it that way, and the grounds it refuted came from the role no one had standing
