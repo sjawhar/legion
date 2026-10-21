@@ -6,7 +6,8 @@
 
 - The `dispatch` command (`dist/dispatch.js`) ends a write with `(not subscribed to KEY; …)` only
   when none of the session's Envoy subscriptions, as the listener records them, receives every
-  event on the issue or document; it used to end every write that way.
+  event on the issue or document; it used to end every write that way. An ask or an ask reply
+  names its `envoy_subscribe` line under the same rule.
 - The `dispatch` command (`dist/dispatch.js`) finds an ask in a spec by its `:::ask{#<id>}` block
   id in `dispatch read --ref dispatch://KEY/ask/<id>`, whole or as a unique 8+ hex prefix, and
   prints the ask's own id (`Ask id:`).

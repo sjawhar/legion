@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { documentTopicOf, issueTopic } from "../dispatch-owner";
 import {
-  dispatchFollowNotice,
+  followedAsk,
+  followNoticeText,
   subscriptionCovers,
   subscriptionRemovedTopics,
 } from "../dispatch-subscribe";
+
+/** The follow notice for `details`, which must follow an ask, given the session's `topics`. */
+function notice(details: unknown, topics: readonly string[] | null): string {
+  const followed = followedAsk(details);
+  if (followed === null) throw new Error("details follow no ask");
+  return followNoticeText(followed, topics);
+}
 
 describe("subscriptionCovers", () => {
   test("a topic covers an owner when it receives every event on it, as the listener matches", () => {
@@ -42,25 +50,20 @@ describe("subscriptionCovers", () => {
   });
 });
 
-describe("dispatchFollowNotice", () => {
+describe("the follow notice", () => {
   test("names the ask, its issue, and the subscribe line only when no subscription covers the issue", () => {
     const details = { issue: "DSP-42", ask: "ask-1", follows: { ask: "ask-1" } };
     const follows =
       "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop).";
     const subscribe =
       " For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.";
-    expect(dispatchFollowNotice(details, ["notifications.agent.ses-1"])).toEqual({
-      ask: "ask-1",
-      text: `${follows}${subscribe}`,
-    });
-    expect(dispatchFollowNotice(details, [])?.text).toBe(`${follows}${subscribe}`);
-    expect(dispatchFollowNotice(details, ["notifications.dispatch.issue.DSP-42.>"])?.text).toBe(
-      follows
-    );
-    expect(dispatchFollowNotice(details, ["notifications.dispatch.>"])?.text).toBe(follows);
+    expect(followedAsk(details)).toEqual({ ask: "ask-1", owner: issueTopic("DSP-42") });
+    expect(notice(details, ["notifications.agent.ses-1"])).toBe(`${follows}${subscribe}`);
+    expect(notice(details, [])).toBe(`${follows}${subscribe}`);
+    expect(notice(details, ["notifications.dispatch.issue.DSP-42.>"])).toBe(follows);
+    expect(notice(details, ["notifications.dispatch.>"])).toBe(follows);
     // Subscriptions that could not be read say nothing about what the session receives.
-    expect(dispatchFollowNotice(details, null)?.text).toBe(follows);
-    expect(dispatchFollowNotice(details)?.text).toBe(follows);
+    expect(notice(details, null)).toBe(follows);
   });
 
   test("names a project document by project/slug with the document topic", () => {
@@ -71,20 +74,20 @@ describe("dispatchFollowNotice", () => {
       ask: "ask-1",
       follows: { ask: "ask-1" },
     };
-    expect(dispatchFollowNotice(details, [])?.text).toBe(
+    expect(notice(details, [])).toBe(
       "Following ask ask-1 on CORE/design-notes: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on CORE/design-notes: envoy_subscribe notifications.dispatch.document.CORE.design-notes.>."
     );
-    expect(
-      dispatchFollowNotice(details, ["notifications.dispatch.document.CORE.design-notes.>"])?.text
-    ).not.toContain("envoy_subscribe");
+    expect(notice(details, ["notifications.dispatch.document.CORE.design-notes.>"])).not.toContain(
+      "envoy_subscribe"
+    );
   });
 
   test("returns null for reads, unfollows, and results without an owner", () => {
-    expect(dispatchFollowNotice(undefined)).toBeNull();
-    expect(dispatchFollowNotice({ issue: "DSP-42" })).toBeNull();
-    expect(dispatchFollowNotice({ ask: "ask-1" })).toBeNull();
-    expect(dispatchFollowNotice({ follows: { ask: "ask-1" } })).toBeNull();
-    expect(dispatchFollowNotice({ follows: { ask: 7 }, issue: "DSP-42" })).toBeNull();
+    expect(followedAsk(undefined)).toBeNull();
+    expect(followedAsk({ issue: "DSP-42" })).toBeNull();
+    expect(followedAsk({ ask: "ask-1" })).toBeNull();
+    expect(followedAsk({ follows: { ask: "ask-1" } })).toBeNull();
+    expect(followedAsk({ follows: { ask: 7 }, issue: "DSP-42" })).toBeNull();
   });
 });
 

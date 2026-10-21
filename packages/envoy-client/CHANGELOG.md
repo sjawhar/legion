@@ -12,7 +12,8 @@
   answer from the listener, the write says nothing about subscriptions. `executeDispatchTool` takes
   `subscriptions`, a function answering the session's topics, or null when they cannot be read.
   An ask or an ask reply names `For every event on KEY: envoy_subscribe …`, in its result and its
-  follow notice (`dispatchFollowNotice(details, topics)`), under the same rule. The command reads
+  follow notice (`followedAsk` and `followNoticeText(followed, topics)`, which replace
+  `dispatchFollowNotice`), under the same rule. The command reads
   the listener once per call, in one attempt with no retry (`createEnvoyClient`'s new `retry:
   false`), and a failure anywhere in that read leaves a landed write reported as written.
 - `dispatch read --ref dispatch://KEY/ask/<id>` finds an ask in a document by the id of its

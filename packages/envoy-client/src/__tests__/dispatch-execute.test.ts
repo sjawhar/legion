@@ -22,7 +22,7 @@ import {
   resolveIssueDocumentId,
 } from "../dispatch-execute";
 import { DispatchClient } from "../dispatch-http";
-import { dispatchFollowNotice } from "../dispatch-subscribe";
+import { followedAsk } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -1289,7 +1289,7 @@ describe("executeDispatchTool", () => {
       offset: 0,
       limit: 20,
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/search?q=astrolabe"]);
   });
 
@@ -1727,7 +1727,7 @@ describe("executeDispatchTool", () => {
       },
     });
     expect(requests).toEqual(["/api/v1/asks/open?author_session=session-1"]);
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
   });
 
   test("dispatch_open_asks reports its active-owner scope when no asks are open", async () => {
@@ -2481,7 +2481,7 @@ describe("executeDispatchTool", () => {
       "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13"
     );
     expect(result.details).toEqual({ issue: "LEGION-13" });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
   });
 
@@ -3090,7 +3090,7 @@ describe("executeDispatchTool", () => {
         external_links: [existingLink.url, pullRequest],
       },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       { method: "GET", pathname: "/api/v1/issues/ACME-175" },
       {
@@ -3935,7 +3935,7 @@ describe("executeDispatchTool", () => {
       text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
@@ -4432,7 +4432,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).not.toContain("ask ");
     expect(result.text).not.toContain("plan-gap-analyst");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
   });
 
   // A request names the latest version, and a new version moves it there and back to its agent: a
@@ -5851,7 +5851,7 @@ describe("executeDispatchTool", () => {
           : "(not subscribed to CORE/runbook-md; envoy_subscribe notifications.dispatch.document.CORE.runbook-md.> for every event on it)"
       );
     } else {
-      expect(dispatchFollowNotice(result.details)).toBeNull();
+      expect(followedAsk(result.details)).toBeNull();
     }
   });
 
@@ -6419,7 +6419,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
@@ -6686,7 +6686,7 @@ describe("executeDispatchTool", () => {
       const result = await comment(async () => topics);
       expect([topics, result.text]).toEqual([topics, text]);
       expect(result.details).toEqual({ issue: "DSP-42", comment: "comment-2" });
-      expect(dispatchFollowNotice(result.details)).toBeNull();
+      expect(followedAsk(result.details)).toBeNull();
     }
     // A host that reads no subscriptions (Envoy off) says nothing about them.
     expect((await comment()).text).toBe("Posted comment comment-2");
@@ -6757,7 +6757,7 @@ describe("executeDispatchTool", () => {
     } else {
       expect(result.text).toBe(`Unfollowed ask ${askUuid}.`);
       expect(result.details).toEqual({ ask: askUuid });
-      expect(dispatchFollowNotice(result.details)).toBeNull();
+      expect(followedAsk(result.details)).toBeNull();
     }
   });
 
@@ -6879,7 +6879,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/comments/cccccccc-0000-4000-8000-000000000042",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
@@ -7152,7 +7152,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42/messages/message-42",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fmessage%2Fmessage-42",
@@ -7494,7 +7494,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.details).toEqual({ issue: "DSP-42" });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
     expect(result.text).toContain("Labels: frontend, urgent");
     expect(result.text).toContain("Priority: P1");

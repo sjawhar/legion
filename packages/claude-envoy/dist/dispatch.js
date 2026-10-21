@@ -16131,7 +16131,7 @@ async function readPictures(client, addresses, shown) {
 }
 
 // ../envoy-client/src/dispatch-subscribe.ts
-function dispatchFollowNotice(details, topics = null) {
+function followedAsk(details) {
   if (typeof details !== "object" || details === null)
     return null;
   const { follows, issue: issue2, document } = details;
@@ -16140,22 +16140,18 @@ function dispatchFollowNotice(details, topics = null) {
   const { ask } = follows;
   if (typeof ask !== "string" || ask === "")
     return null;
-  let owner;
-  if (typeof issue2 === "string" && issue2 !== "") {
-    owner = issueTopic(issue2);
-  } else if (typeof document === "string") {
-    const [project, slug] = document.split("/", 2);
-    if (!project || !slug)
-      return null;
-    owner = { label: document, topic: documentTopicOf(project, slug).topic };
-  } else {
+  if (typeof issue2 === "string" && issue2 !== "")
+    return { ask, owner: issueTopic(issue2) };
+  if (typeof document !== "string")
     return null;
-  }
+  const [project, slug] = document.split("/", 2);
+  if (!project || !slug)
+    return null;
+  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
+}
+function followNoticeText({ ask, owner }, topics) {
   const subscribe = ownerSubscribeLine(owner, topics);
-  return {
-    ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`
-  };
+  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
 }
 function ownerSubscribeLine(owner, topics) {
   if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
@@ -19815,10 +19811,10 @@ async function runDispatchCli(argv, rawEnv, io) {
     } catch (error48) {
       problems.push(messageFor(error48));
     }
-    const followed = dispatchFollowNotice(result.details);
+    const followed = followedAsk(result.details);
     if (followed !== null && !follows.has(followed.ask)) {
       follows.add(followed.ask);
-      notes.push(dispatchFollowNotice(result.details, await subscriptions())?.text ?? followed.text);
+      notes.push(followNoticeText(followed, await subscriptions()));
     }
     entry = { tool, details: result.details };
     code = OK;

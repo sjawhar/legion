@@ -13,7 +13,7 @@ import {
   writeLongOutput,
   writePicture,
 } from "./dispatch-session-state";
-import { dispatchFollowNotice } from "./dispatch-subscribe";
+import { followedAsk, followNoticeText } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
 import {
   handedConfigFile,
@@ -273,12 +273,10 @@ export async function runDispatchCli(
     } catch (error) {
       problems.push(messageFor(error));
     }
-    const followed = dispatchFollowNotice(result.details);
+    const followed = followedAsk(result.details);
     if (followed !== null && !follows.has(followed.ask)) {
       follows.add(followed.ask);
-      notes.push(
-        dispatchFollowNotice(result.details, await subscriptions())?.text ?? followed.text
-      );
+      notes.push(followNoticeText(followed, await subscriptions()));
     }
     entry = { tool, details: result.details };
     code = OK;
