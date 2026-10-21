@@ -215,9 +215,12 @@ reads the pod's events once the pod is scheduled, at most
 every 15 s (`mountRecheck`), and refuses on the first such event, with no retry, naming the probe pod,
 the volume, the object the pod block gives it from and the kubelet's message — `the probe pod <name>
 cannot mount volume "<volume>", which runtime.kubernetes.pod.volumes gives it from ConfigMap "<name>":
-<kubelet message>` (or `Secret "<name>"`; a `projected` volume lists each ConfigMap and Secret source
-joined with `and`; a volume the block does not name reads `the probe pod <name> cannot mount volume
-"<volume>", which runtime.kubernetes.pod.volumes does not name: <kubelet message>`) — within one event
+<kubelet message>` (or `Secret "<name>"`, `PersistentVolumeClaim "<name>"`, `NFS export
+<server>:<path>`; a `projected` volume lists each ConfigMap and Secret source joined with `and`; a
+volume the block does not name reads `the probe pod <name> cannot mount volume
+"<volume>", which runtime.kubernetes.pod.volumes does not name: <kubelet message>`; a share's own
+refusals, a claim the scheduler cannot find, a mount the node ran and that failed, and gVisor's
+failed start over a share it cannot read, are under [Operator configuration](#operator-configuration)) — within one event
 read (15 s plus the wait loop's 500 ms tick) of the kubelet's first `FailedMount`, minutes into the
 boot rather than after the six attempts of the retry budget (about 71 minutes at the production
 budget), so a daemon under its Deployment's startup probe refuses, exits and is restarted with its
@@ -1372,12 +1375,44 @@ resources: Burstable roles (a request below the limit): implementer, so every is
 ```
 
 Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
-`config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
-image probe's included, and refused where they name a path or variable of Legion's own or the
-worker image's. A ConfigMap or Secret a volume names must exist in the daemon's namespace, with every
-key the volume asks of it: the image probe refuses the boot at once, naming it, when it does not, for
-every volume a `volume_mounts` entry mounts (the kubelet attempts no other)
+`config_map`, `projected`, `persistent_volume_claim` or `nfs` source), `volume_mounts` and
+`service_account`, added to every pod, the image probe's included, and refused where they name a
+path or variable of Legion's own or the worker image's. A ConfigMap or Secret a volume names must
+exist in the daemon's namespace, with every key the volume asks of it: the image probe refuses the
+boot at once, naming it, when it does not, for every volume a `volume_mounts` entry mounts (the
+kubelet attempts no other)
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+
+A volume may also be an existing network share, mounted into every pod beside Legion's own volumes —
+a team NAS, a build cache, a Filestore instance:
+
+| source | what it names | `runtime: kubernetes` | `runtime: tmux` |
+| :--- | :--- | :--- | :--- |
+| `persistent_volume_claim: {name: <claim>}` | a PersistentVolumeClaim the operator made in the daemon's namespace, bound to the share's PersistentVolume (a Filestore instance through its CSI driver, an NFS export, any volume the cluster binds) | supported | no pods; the block is not read |
+| `nfs: {server: <IP or DNS name>, path: <export>}` | an NFS export the nodes reach, mounted by the node's own NFS client | supported | no pods; the block is not read |
+| an inline `csi` volume | — | not offered | — |
+
+The mount is read-only unless its `volume_mounts` entry says `read_only: false`; the source itself
+takes no `read_only`. On GKE Autopilot both sources are among the volume types it admits
+(`persistentVolumeClaim` and `nfs`, [Autopilot security](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-security)),
+and a gVisor pod mounts both: the node mounts the share and gVisor's gofer serves it to the sandbox.
+An inline `csi` volume is not offered because a CSI driver runs outside gVisor's isolation with
+privileged access to the node ([GKE Sandbox, External dependencies](https://cloud.google.com/kubernetes-engine/docs/concepts/sandbox-pods#limitations)),
+so a pod naming an arbitrary driver would reach past the sandbox; a share behind a CSI driver is
+mounted through a claim the operator made, whose driver the cluster's administrator chose.
+`host_path` is refused too: neither gVisor nor Autopilot mounts one. A claim named as Legion's own
+claims are (`issue-legion-…`, `cache-legion-…`) is refused at load, since every pod would then mount
+an issue's workspace or a repository cache. The server must be an IP address or a DNS name with no
+scheme, port or path, and the export a clean absolute path; the claim a Kubernetes name. A share
+the pods cannot mount refuses the boot in the image probe, naming the volume and the share: a claim
+the scheduler cannot find (`persistentvolumeclaim "<name>" not found`, at once, never counted as a
+capacity wait), a mount the node ran and that failed (`… : mount failed: …`, a server that never
+answers or has no such export, or a CSI driver's `… : rpc error: …`), and a share mounted but
+unreadable, which gVisor reports as the container's failed start (`reading mounts file: …`). A claim
+that exists but is not bound yet is waited on within the attempt. The daemon needs no right on
+PersistentVolumeClaims for any of this: the pod names the claim and the kubelet mounts it.
+`scripts/e2e/share-volumes-kind.sh` is the live proof.
+
 `provider_keys` names keys of the providers Secret, which every pod mounts, those
 keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: the
 Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
@@ -3135,8 +3170,8 @@ a daemon whose own pod restarts onto a new IP can still bind every interface and
 its Service; and no Legion URL a pod is handed (`daemon_url`, `envoy_url`, `dispatch_url`, each
 `nats_urls` entry) may name a loopback or
 unspecified host (`packages/daemon/internal/config/kubernetes.go`). It also reads
-`runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, or `projected`
-source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
+`runtime.kubernetes.pod` — `env`, `volumes` (each one `secret`, `config_map`, `projected`,
+`persistent_volume_claim` or `nfs` source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
 adds to every pod, the image probe's included, refusing any name or path of Legion's own or the
 worker image's; and the top-level `provider_keys` maps each variable Oh My Pi reads to a key of the
 providers Secret, of which every pod then mounts those keys alone, for the shim to export.
@@ -3261,7 +3296,9 @@ issue's pod (every role container of it alike) and the image probe's.
   Dispatch's resolution, and refuses to boot, naming each record, while Dispatch resolves none, or
   resolves one other than the repository of the issue's pull request.
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
-  `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
+  `volumes` are each one `secret`, `config_map`, `projected`, `persistent_volume_claim` (a claim of
+  the daemon's namespace, by `name`) or `nfs` (`server` and `path`) source, never an inline `csi`
+  volume ([Operator configuration](#operator-configuration)); a projected
   `service_account_token` must last at least 600 s, the least the API server issues, and its
   `audience` may not still hold a `${…}` placeholder, which nothing expands. `volume_mounts`
   are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
