@@ -666,5 +666,61 @@ func TestAnInstallRunsBeforeTheSetupCommandAndLeavesTheStartDirectory(t *testing
 	}
 }
 
+// An install that fails ends the wrapper where it stands: nothing of the deployment's setup
+// command runs and Oh My Pi never starts on a pair that was not installed. That failure is the
+// one in this wrapper that has to cross a subshell boundary — installBlock renders `( … ) 1>&2`,
+// so the install's non-zero exit is the subshell's, and only `set -e` in the wrapper around it
+// makes it the wrapper's own. A change that let it escape would start an agent on the wrong
+// plugin pair with every other test in this file still green, which is why the behaviour is
+// pinned here rather than left to the live run that first showed it.
+//
+// The succeeding case is the control and belongs in the same test: without it the absent setup
+// and agent markers would prove only that the harness ran nothing at all.
+func TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent(t *testing.T) {
+	plugins := testPlugins()
+	failMsg := fmt.Sprintf("legion plugins: installing %s and %s failed",
+		bunSpec("@sjawhar/pi-legion", plugins.PiLegion), bunSpec("@sjawhar/pi-envoy", plugins.PiEnvoy))
+	for name, tc := range map[string]struct {
+		bun  string
+		exit int
+		ran  bool
+	}{
+		"an install that fails":    {"#!/bin/sh\necho 'bun: boom' >&2\nexit 1\n", 1, false},
+		"an install that succeeds": {"#!/bin/sh\nexit 0\n", 0, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			for file, body := range map[string]string{"bun": tc.bun, "node": "#!/bin/sh\nexit 0\n"} {
+				if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setupLog, agentLog := filepath.Join(dir, "setup.log"), filepath.Join(dir, "agent.log")
+			got := runStart(t, dir, dir, filepath.Join(dir, "bun"), plugins,
+				recorder(setupLog, "setup-stdout"), recorder(agentLog, "agent-stdout"))
+			if got.exit != tc.exit {
+				t.Errorf("the wrapper exited %d, want %d:\n%s", got.exit, tc.exit, got.stderr)
+			}
+			for what, log := range map[string]string{"setup command": setupLog, "agent": agentLog} {
+				_, err := os.Stat(log)
+				switch {
+				case tc.ran && err != nil:
+					t.Errorf("the %s did not run (%v), so the absence the failing case asserts would prove nothing", what, err)
+				case !tc.ran && !errors.Is(err, os.ErrNotExist):
+					t.Errorf("the %s ran after a failed install (%v): the install's subshell exit did not end the wrapper", what, err)
+				}
+			}
+			switch {
+			case tc.ran:
+				return
+			case !strings.Contains(got.stderr, failMsg):
+				t.Errorf("stderr is %q, want the install's own failure %q", got.stderr, failMsg)
+			case got.stdout != "":
+				t.Errorf("the wrapper wrote %q to stdout, the shim's frame stream", got.stdout)
+			}
+		})
+	}
+}
+
 // shellQuote is value as one single-quoted shell word.
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }
