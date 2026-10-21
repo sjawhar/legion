@@ -1563,6 +1563,7 @@ describe("Legion OMP extension", () => {
         heldOutboxRows: [],
         strandedClaims: [],
         capabilities: [],
+        settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
       };
       const booted = await bootPane({
         role: options.role ?? "implementer",

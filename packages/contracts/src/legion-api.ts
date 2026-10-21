@@ -285,6 +285,15 @@ const legionCapabilityState = z.strictObject({
   source: z.enum(["configuration", "boot"]).optional(),
 });
 
+/** `api.Settings` — the daemon's resolved legion.yaml with every credential, credential source and
+ * credential file path left out (contract 30). Its keys are legion.yaml's own; the two the spec
+ * names are typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
+ * contract change. */
+const legionSettings = z.looseObject({
+  max_fix_attempts: z.number().int().positive(),
+  worker_boot_timeout_seconds: z.number().int().positive(),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
  * registers as the project's controller: with the capability `legion controller start` fetched, or,
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
@@ -292,7 +301,9 @@ const legionCapabilityState = z.strictObject({
  * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
  * claim nothing will wake, by issue and then role, never null (contract 23); `heldOutboxRows` is
  * every due lifecycle outbox row held behind its issue's running one, by when it came due and then
- * id, never null (contract 28). */
+ * id, never null (contract 28); `settings` is the daemon's resolved legion.yaml with no credential,
+ * credential source or credential file path, required, and loose like `payload` above so a
+ * legion.yaml key added later changes no strictly parsed shape (contract 30). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -303,6 +314,7 @@ export const LegionStateResponse = z.strictObject({
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),
+  settings: legionSettings,
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;

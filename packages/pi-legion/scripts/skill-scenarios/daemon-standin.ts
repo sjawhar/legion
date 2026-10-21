@@ -65,7 +65,9 @@ const startedAt = new Date().toISOString();
  * report, `strandedClaims` the claims nothing will wake and `heldOutboxRows` the lifecycle rows held
  * behind their issues' running ones, each of which the strict reader requires; the rig has no
  * deployment to report on, its one claim runs and it has no outbox, so each is the empty list the
- * daemon's MarshalJSON emits when there is none. */
+ * daemon's MarshalJSON emits when there is none. `settings` is the daemon's resolved legion.yaml
+ * with no credential in it, also required; the rig has no file, so it carries the two keys the
+ * reader types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [] },
@@ -82,6 +84,7 @@ const STATE = LegionStateResponse.parse({
   heldOutboxRows: [],
   strandedClaims: [],
   capabilities: [],
+  settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
 });
 
 interface LogLine {

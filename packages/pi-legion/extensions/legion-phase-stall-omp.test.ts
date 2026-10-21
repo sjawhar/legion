@@ -83,6 +83,7 @@ const STALL_STATE = {
   heldOutboxRows: [],
   strandedClaims: [],
   capabilities: [],
+  settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
 };
 
 const cleanup: Cleanup = [];
