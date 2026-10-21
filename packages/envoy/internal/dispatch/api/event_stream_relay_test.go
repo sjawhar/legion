@@ -109,7 +109,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 		t.Fatalf("subscribe to the relay: %v", err)
 	}
 	defer cancel()
-	opened := relay.at()
+	opened, _ := relay.at()
 
 	// Committed while the relay has no connection: its notification reaches nobody.
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
@@ -123,7 +123,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 		t.Fatalf("the relay published event %d with no listening connection", event.ID)
 	case <-time.After(100 * time.Millisecond):
 	}
-	if at := relay.at(); at != opened {
+	if at, _ := relay.at(); at != opened {
 		t.Fatalf("relay cursor = %d with no connection, want the %d it opened on", at, opened)
 	}
 
@@ -146,7 +146,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 
 	// Every later LISTEN catches up the same way, from the cursor as it stands: a redial that
 	// reset it would send every open page the whole log again.
-	published := relay.at()
+	published, _ := relay.at()
 	relay.onConnected()
 	select {
 	case event := <-subscription:
@@ -155,8 +155,102 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 	}
-	if at := relay.at(); at < published {
+	if at, _ := relay.at(); at < published {
 		t.Fatalf("relay cursor = %d after a redial, want at least the %d it had published through", at, published)
+	}
+}
+
+// TestEventStreamRelayRecoversWhenTheEventLogIsReset: the browser suite empties the event log
+// between its scenarios (`truncate ... restart identity cascade`, e2e/seed.ts), so the new rows'
+// ids restart at 1, below the cursor the relay has published through, and `id > cursor` matches
+// nothing. A relay that only ever published forward would fall silent there for good: every live
+// update of every later scenario would be lost, with no error anywhere. The relay reads the reset
+// the way the delivery hub does (eventCursorCheck), moves its cursor to the new log's head and
+// ends every open subscription -- the stream's answer to a reader it can no longer serve in
+// order, which sends a browser through its reconnect -- and serves the events committed after the
+// reset to the connections opened after it.
+func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	rename := func(title string) {
+		t.Helper()
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+			"title": title,
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("rename issue to %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+	}
+
+	lifetime, stop := context.WithCancel(t.Context())
+	relay := newEventStreamRelay(directServer(deps), lifetime)
+	relay.coalesce = time.Millisecond
+	t.Cleanup(func() {
+		stop()
+		relay.wait()
+	})
+	subscription, cancel, err := relay.subscribe(context.Background())
+	if err != nil {
+		t.Fatalf("subscribe to the relay: %v", err)
+	}
+	defer cancel()
+
+	// A cursor well above the ids the reset log will hand out.
+	rename("Renamed before the reset")
+	committed := eventHead(t, database)
+	for last := int64(0); last < committed; {
+		select {
+		case event, open := <-subscription:
+			if !open {
+				t.Fatal("the relay's subscription ended before the event log was reset")
+			}
+			last = event.ID
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the relay published through %d before the reset, want the %d committed", last, committed)
+		}
+	}
+
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+	// TRUNCATE notifies nobody: it is the refill's own insert that fires migration 0107's trigger
+	// and wakes the relay onto a log that restarts at id 1.
+	rename("Renamed after the reset")
+
+	// The subscription open across the reset ends. An event above the pre-reset head is a row of
+	// the old log committed between the drain above and the TRUNCATE -- a document settling, say;
+	// one at or below it would be the relay republishing the reused ids into a reader that has
+	// already seen those ids stand for other events.
+	for open := true; open; {
+		select {
+		case event, more := <-subscription:
+			if !more {
+				open = false
+			} else if event.ID <= committed {
+				t.Fatalf("the relay published event %d into a subscription whose log was reset under it", event.ID)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the subscription open across the reset was never ended: its reader waits on a stream whose next frame can only lie")
+		}
+	}
+
+	// And the relay publishes again, from the new log, to a connection opened after the reset.
+	reopened, cancelReopened, err := relay.subscribe(context.Background())
+	if err != nil {
+		t.Fatalf("subscribe to the relay after the reset: %v", err)
+	}
+	defer cancelReopened()
+	rename("Renamed for the reopened connection")
+	head := eventHead(t, database)
+	for last := int64(0); last < head; {
+		select {
+		case event, open := <-reopened:
+			if !open {
+				t.Fatal("the relay ended a subscription opened after the reset")
+			}
+			last = event.ID
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the relay published through %d after the reset, want the %d committed since: it is silent on the new log", last, head)
+		}
 	}
 }
 

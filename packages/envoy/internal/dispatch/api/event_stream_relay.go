@@ -40,13 +40,17 @@ const (
 // processes' events on the one path, and makes the live frame and the replayed frame the same
 // bytes: both come from readEventsAfterID, with an ask event's read-time fields attached.
 //
-// cursor is the id the relay has published through. events.id is commit order, because
-// events.Broker.Append takes the database-wide commit-order lock before its insert and holds it
-// until the transaction commits, and nothing else in this module inserts an event
-// (TestOnlyTheBrokerInsertsEvents): no row at or below a committed max(id) can still be
-// uncommitted, so reading `id > cursor` skips nothing. The cursor may lag the database — a
-// notification not yet read, a connection being redialled — and must never run ahead of it, which
-// is why the first subscriber reads it before its subscription exists.
+// cursor is the id the relay has published through, and cursorAt the created_at of the event it
+// stands at. events.id is commit order, because events.Broker.Append takes the database-wide
+// commit-order lock before its insert and holds it until the transaction commits, and nothing
+// else in this module inserts an event (TestOnlyTheBrokerInsertsEvents): no row at or below a
+// committed max(id) can still be uncommitted, so reading `id > cursor` skips nothing. The cursor
+// may lag the database — a notification not yet read, a connection being redialled — and must
+// never run ahead of it, which is why the first subscriber reads it before its subscription
+// exists.
+//
+// cursorAt is what tells an event log that was reset from one that has merely gone quiet: see
+// resetCursor.
 type eventStreamRelay struct {
 	server   *server
 	lifetime context.Context
@@ -66,9 +70,10 @@ type eventStreamRelay struct {
 	// wake holds at most one signal: what a read answers covers every notification before it.
 	wake chan struct{}
 
-	mu      sync.Mutex
-	started bool
-	cursor  int64
+	mu       sync.Mutex
+	started  bool
+	cursor   int64
+	cursorAt time.Time
 }
 
 // newEventStreamRelay is s's relay. Nothing runs and no connection is held until the first
@@ -98,18 +103,20 @@ func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, f
 	return subscription, cancel, nil
 }
 
-// start reads the cursor and runs the relay's two goroutines, once.
+// start reads the cursor and runs the relay's two goroutines, once. The cursor is read through
+// eventCursorCheck, the same read the reset check uses, so it carries the newest event's
+// created_at beside its id from the first moment the relay holds one.
 func (r *eventStreamRelay) start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.started {
 		return nil
 	}
-	var cursor int64
-	if err := r.server.deps.Store.Pool.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&cursor); err != nil {
+	cursor, cursorAt, _, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, 0)
+	if err != nil {
 		return fmt.Errorf("read the live event stream's cursor: %w", err)
 	}
-	r.cursor = cursor
+	r.cursor, r.cursorAt = cursor, cursorAt
 	r.started = true
 	dial := r.dial
 	if dial == nil {
@@ -140,9 +147,10 @@ func (r *eventStreamRelay) wait() { r.running.Wait() }
 func (r *eventStreamRelay) onNotify(_, _ string) { signal(r.wake) }
 
 // onConnected catches up from the cursor after each LISTEN succeeds, which is what covers the
-// notifications sent while the relay had no connection. It never moves the cursor: a redial reads
-// from where the relay published through, not from the head, so nothing committed in that window
-// is skipped.
+// notifications sent while the relay had no connection. It moves the cursor to no head of its
+// own: a redial reads from where the relay published through, so nothing committed in that window
+// is skipped. Only a log that was reset under the cursor moves it without publishing, and only
+// because the rows it would have published are not the ones it stands for (resetCursor).
 func (r *eventStreamRelay) onConnected() { signal(r.wake) }
 
 // run publishes what each wake announced, until ctx ends. A wake waits the coalescing window
@@ -168,10 +176,22 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 
 // read publishes every committed event after the cursor, in id order, through the same read a
 // reconnect's catch-up uses (readEventsAfterID), and moves the cursor only over the rows it has
-// published. It pages until a short page, as streamEvents does. false is a read that failed.
+// published. It pages until a short page, as streamEvents does. A log that was reset under the
+// cursor is answered first, and publishes nothing (resetCursor). false is a read that failed.
 func (r *eventStreamRelay) read(ctx context.Context) bool {
+	tracked := store.WithTransactionTracking(ctx)
+	switch reset, err := r.resetCursor(tracked); {
+	case err != nil:
+		if ctx.Err() == nil {
+			slog.Warn("dispatch: live event stream could not check its cursor against the event log; retrying", "error", err)
+		}
+		return false
+	case reset:
+		return true
+	}
 	for {
-		committed, err := r.server.readEventsAfterID(store.WithTransactionTracking(ctx), r.at())
+		cursor, _ := r.at()
+		committed, err := r.server.readEventsAfterID(tracked, cursor)
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("dispatch: live event stream could not read the committed events; retrying", "error", err)
@@ -180,7 +200,7 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 		}
 		for _, event := range committed {
 			r.stream.Publish(event)
-			r.advance(event.ID)
+			r.advance(event.ID, event.CreatedAt)
 		}
 		if len(committed) < maxSSEReplay {
 			return true
@@ -188,18 +208,60 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 	}
 }
 
-// at is the id the relay has published through.
-func (r *eventStreamRelay) at() int64 {
+// resetCursor tells an event log that was reset under the cursor from one that has merely gone
+// quiet, and answers a reset by moving the cursor to the newest event and ending every open
+// subscription. The check is the delivery hub's, through the same read (eventCursorCheck,
+// catchUpEvents): a log whose newest id is below the cursor, or whose row at the cursor is gone
+// or carries another created_at — a `truncate events restart identity` refilled past it, which is
+// what e2e/seed.ts does between browser scenarios — is a log the cursor no longer names a
+// position in. Nothing of the first kind of reset would ever be published: the new log's ids
+// start again at 1, far below the cursor, so `id > cursor` matches no row until they have climbed
+// back past it, and the stream falls silent for every reader.
+//
+// A reset is the one thing the relay cannot publish its way out of, because its ids have been
+// reused: the rows it would read as `id > cursor` are not the ones it published, and every open
+// subscription's since (streamEvents) is a position in a log that no longer exists, so no frame
+// it sent could mean what its reader would take it to mean. Ending the subscriptions is the
+// honest answer and the one the stream already has for a subscriber it cannot serve in order: it
+// closes the SSE response body, exactly as an overflowed subscriber's is closed (Stream.Publish),
+// and sends each browser through its reconnect-from-last-id, which resolves its position against
+// the log as it now stands. The rows between the old cursor and the new one are published to
+// nobody: a subscription that could have received them is gone, and one opened after this holds a
+// since the relay's cursor is at or past.
+//
+// The delivery hub answers the same reset by marking its views dirty rather than by dropping
+// anything, because it holds a projection of its own that it can recompute from the database; the
+// relay holds nothing but a reader's stream, which only that reader can rebuild.
+func (r *eventStreamRelay) resetCursor(ctx context.Context) (bool, error) {
+	cursor, at := r.at()
+	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, cursor)
+	if err != nil {
+		return false, err
+	}
+	if maxID >= cursor && (cursor == 0 || (cursorAt != nil && cursorAt.Equal(at))) {
+		return false, nil
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cursor
+	r.cursor, r.cursorAt = maxID, maxAt
+	r.mu.Unlock()
+	r.stream.CloseAll()
+	slog.Warn("dispatch: the event log was reset; the live stream moved its cursor and ended its open streams",
+		"from", cursor, "to", maxID)
+	return true, nil
 }
 
-// advance moves the cursor to an id the relay has just published.
-func (r *eventStreamRelay) advance(id int64) {
+// at is the id the relay has published through and that event's created_at.
+func (r *eventStreamRelay) at() (int64, time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cursor = id
+	return r.cursor, r.cursorAt
+}
+
+// advance moves the cursor to an event the relay has just published.
+func (r *eventStreamRelay) advance(id int64, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cursor, r.cursorAt = id, at
 }
 
 func (r *eventStreamRelay) window() time.Duration {

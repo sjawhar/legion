@@ -577,10 +577,7 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 	if !stoodBy {
 		t.Fatalf("the standby said nothing about the consumer it is standing by for: %v", logs())
 	}
-	info, err := holder.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
-	if err != nil || !info.PushBound {
-		t.Fatalf("the durable is not bound to the first process after the second stood by: %+v, %v", info, err)
-	}
+	awaitPushBound(t, holder, "the durable is not bound to the first process after the second stood by")
 
 	// The holder goes away, as a process that dies does, and the standby takes the durable over
 	// on one of its polls -- the server releases the binding once the holder's interest has
@@ -598,9 +595,7 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 		return fmt.Sprintf("the standby never bound the durable the first process let go; its attempts: %v", outcomes)
 	})
 	t.Cleanup(func() { _ = taken.Unsubscribe() })
-	if info, err := standby.JS().ConsumerInfo(bus.Stream, deliveryConsumerName); err != nil || !info.PushBound {
-		t.Fatalf("the durable the standby bound is not push-bound: %+v, %v", info, err)
-	}
+	awaitPushBound(t, standby, "the durable the standby bound is not push-bound")
 }
 
 // TestAConsumerAnotherProcessIsBoundToIsLeftAlone: the destructive branch of the reconciliation
@@ -643,10 +638,7 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 	if outcome != bindStandby || sub != nil {
 		t.Fatalf("the bind against a durable another process holds = %v (subscription %v), want bindStandby", outcome, sub)
 	}
-	after, err := other.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
-	if err != nil {
-		t.Fatalf("read the durable after the bind: %v", err)
-	}
+	after := awaitPushBound(t, other, "the other process lost its binding to the durable")
 	if !slices.Equal(after.Config.FilterSubjects, legacy.FilterSubjects) || after.Config.FilterSubject != "" {
 		t.Fatalf("the durable's filter is %q / %v, want the set it carried: %v",
 			after.Config.FilterSubject, after.Config.FilterSubjects, legacy.FilterSubjects)
@@ -654,8 +646,8 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 	if !after.Created.Equal(before.Created) {
 		t.Fatalf("the durable was recreated (created %s, was %s) while another process was bound to it", after.Created, before.Created)
 	}
-	if !after.PushBound || !held.IsValid() {
-		t.Fatalf("the other process lost its binding: push_bound=%t valid=%t", after.PushBound, held.IsValid())
+	if !held.IsValid() {
+		t.Fatal("the other process lost the subscription it had bound to the durable")
 	}
 	var leftAlone bool
 	for _, record := range logs() {
@@ -725,10 +717,7 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 
-	after, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
-	if err != nil {
-		t.Fatalf("read the durable after the bind: %v", err)
-	}
+	after := awaitPushBound(t, natsClient, "the bind reconciled nothing and did not subscribe either")
 	if after.Config.AckWait != before.Config.AckWait || after.Config.MaxAckPending != before.Config.MaxAckPending {
 		t.Fatalf("the durable's flow control is %s/%d, want the %s/%d it carried: the bind updated a durable whose lease it did not hold",
 			after.Config.AckWait, after.Config.MaxAckPending, before.Config.AckWait, before.Config.MaxAckPending)
@@ -748,4 +737,22 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	if !skipped {
 		t.Fatalf("the bind never reported skipping the %s lease: %v", deliveryConsumerLease, logs())
 	}
+}
+
+// awaitPushBound waits for the server to report the durable push-bound and answers with the info
+// it read. A subscription's binding reaches the server a moment after Subscribe returns, so a
+// single ConsumerInfo straight after a bind reads a consumer that is about to be bound and fails
+// on it (CI run 39535772120); every other state this package asserts about a durable is waited
+// for the same way (awaitBoundDurable).
+func awaitPushBound(t *testing.T, client *bus.Client, failure string) *natsgo.ConsumerInfo {
+	t.Helper()
+	var info *natsgo.ConsumerInfo
+	var err error
+	waitFor(t, 20*time.Second, func() bool {
+		info, err = client.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		return err == nil && info.PushBound
+	}, func() string {
+		return fmt.Sprintf("%s: %+v, %v", failure, info, err)
+	})
+	return info
 }
