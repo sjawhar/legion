@@ -1233,9 +1233,15 @@ written on reached **17 GiB of its 20, 3.0 GiB free** (01:32Z on 2026-10-21) wit
 in six per-role copies of the Go build and module caches — an intermediate layout no shipped image
 ever produced, since a role container at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
 no `BUN_INSTALL_CACHE_DIR`, and the Go pair is new on the volume here. The remedy for a volume
-near full is manual, because nothing prunes: `chmod -R u+w` the stale `/legion/scratch/<role>`
-directories of roles that are not running and then delete them, which returned 5.5 GiB on that
-volume in about a minute. The `chmod` is not caution — the go command writes every extracted
+near full is manual, because nothing prunes, and it names the directories this layout creates:
+`chmod -R u+w` and then delete `/legion/scratch/cache`, `/legion/scratch/bun/install/cache` and
+`/legion/go`, which the issue's roles share and which hold everything a build leaves — the
+per-role `/legion/scratch/state/<role>` is Oh My Pi's logs, Chromium's profiles and the installed
+plugin generation rather than a cache, and is small. Delete them between turns: a role mid-build
+rebuilds what it loses rather than failing, but a role mid-install of its plugin pair does not.
+(The 5.5 GiB a reclaim returned on this branch's own volume came out of six per-role copies under
+the intermediate layout above, not out of these paths.) The `chmod` is not caution — the go
+command writes every extracted
 module directory read-only (mode 555), so a plain `rm -rf` of a module cache exits 1 with a
 `Permission denied` line per file and leaves bytes behind, and what it leaves is the extracted
 source while what it removes is the re-downloadable `cache/download`: run without the `chmod` the
