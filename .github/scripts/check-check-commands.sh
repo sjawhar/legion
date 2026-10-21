@@ -396,14 +396,19 @@ def split_comment(line: str) -> tuple[str, str]:
     quoting ends is also where the comment begins, and a gate that guesses at that drops
     everything after the first `#`. `echo \"a # b && bunx biome check .` was the shape: its `#`
     is string content to a reader and a comment to a guess, and the `bunx` after it was a
-    command the gate then never saw. So nothing is taken from the second reading but the
-    comment, which is where the marker may be: the command is the whole line, and a tool named
-    anywhere in it is reported. `echo don't # bunx biome check .` is reported for that reason —
-    the author quotes the apostrophe, or writes the marker to say why the line is safe."""
+    command the gate then never saw.
+
+    **One reading answers both questions.** Such a line carries no comment either, so it carries
+    no marker: reading the command from one scan and the exemption from a second, which tracked
+    only the other quote character, let `echo \"see # check-check-commands: allow docs && bunx
+    biome check .` exempt itself with text that is not a comment — the marker's own hole, in the
+    shape the unbalanced reading gave it. Where this gate cannot say a `#` begins a comment, it
+    says there is none. `echo don't # bunx biome check .` is reported for the same reason: the
+    author closes the quote, and then the comment — and a marker in it — is a comment again."""
     command, comment, unclosed = scan_comment(line, "\"'")
     if not unclosed:
         return command, comment
-    return line, scan_comment(line, "\"'".replace(unclosed, ""))[1]
+    return line, ""
 
 
 def basename(word: str) -> str:

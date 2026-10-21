@@ -94,6 +94,12 @@ fi
 # succeeds writes a `setting-ignored` report of its own to carry it (report_success).
 setting_note=
 
+# The largest number the shells this script runs under can take: dash answers `Illegal number`
+# above it, in `$((…))` fatally and in `[ … -le … ]` with a status that would be read as "the
+# clamp does not apply". Nothing below compares a value against it numerically; only its text
+# and its length are read, which is the whole point.
+SHELL_MAX=9223372036854775807
+
 # use_seconds <name> <value> <default>: sets `seconds` to the whole number of seconds <value>
 # names, or to <default> when it names anything else, appending the sentence for it to
 # `setting_note`. It assigns rather than printing, because a note added inside a `$(…)` dies
@@ -117,14 +123,34 @@ use_seconds() {
     0*) ;;
     # Anything that is not digits throughout: `-9`, `abc`, `9x`, `1.5`, `90 `.
     *[!0-9]*) ;;
-    *) return 0 ;;
+    # A digit string this shell cannot work with. `$((…))` and `[ … -le … ]` both answer dash's
+    # `Illegal number` above its integer range: the first is a fatal exit — the one this file
+    # promises it cannot make — and the second is worse than fatal, because its non-zero status
+    # takes the `|| left=$hold` branch and `timeout -k 5 <huge>` then bounds nothing at all,
+    # which is the unbounded hold on the shared cache lock this bound exists to prevent. So the
+    # value is refused here, before any arithmetic or comparison touches it, by its text alone:
+    # more digits than the largest number this shell takes, or the same count and a larger
+    # string — equal-length digit strings compare as their numbers do. `9223372036854775807` is
+    # the last one it can use and is taken; one more is refused.
+    *)
+      if [ "${#2}" -lt "${#SHELL_MAX}" ]; then
+        return 0
+      fi
+      # `\>` is the shell's string comparison, which is what makes this safe: the value never
+      # reaches arithmetic. Both shells this script runs under — the image's dash and the bash
+      # its tests use — have it.
+      if [ "${#2}" -eq "${#SHELL_MAX}" ] && ! [ "$2" \> "$SHELL_MAX" ]; then
+        return 0
+      fi
+      ;;
   esac
   seconds=$3
   if [ -n "$setting_note" ]; then
     setting_note="$setting_note "
   fi
   setting_note="$setting_note$1=$2 is not a whole number of seconds (1 or more, with no"
-  setting_note="$setting_note leading zero), so this run used the default of ${3}s instead."
+  setting_note="$setting_note leading zero, and no larger than this shell can use), so this run"
+  setting_note="$setting_note used the default of ${3}s instead."
   return 0
 }
 
