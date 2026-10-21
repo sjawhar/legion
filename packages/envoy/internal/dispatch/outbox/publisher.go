@@ -184,39 +184,65 @@ func retryEvent(ctx context.Context, deps Deps, item pendingEvent, what string, 
 	return false
 }
 
-// scanPendingEvents claims at most batchSize eligible events, lowest id first, and returns each
-// with the issue and artifact columns a publish reads. The claim and the read are one statement:
-// the ids are taken under for update skip locked, so a second process's concurrent scan skips
-// them rather than waiting on them, their next_attempt_at is pushed out by claimWindow, and the
-// claimed ids are joined back to events for the columns the scan needs. The returned rows keep
-// the order by id every batch has always had.
-func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
+// claimPendingEvents claims at most batchSize eligible events, lowest id first, and returns their
+// ids: one statement takes them under for update skip locked, so a second process's concurrent
+// scan skips them rather than waiting on them, and pushes their next_attempt_at out by
+// claimWindow in the same breath. It locks rows of events alone - the issue and artifact columns
+// a publish needs are read by scanPendingEvents afterwards, from the ids this returns, because a
+// statement that both locks `for update` and names issues or artifacts is refused by the room
+// lock's rule (TestNoForUpdateOnOwnerTables in internal/dispatch/api). The claimed rows are this
+// process's for the window whether or not that read succeeds, so the split costs a round trip
+// and nothing else: a read that fails leaves them claimed until the window lapses, exactly as a
+// process dying mid-batch does.
+func claimPendingEvents(ctx context.Context, deps Deps) ([]int64, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
-		with claimed as (
-			update events set next_attempt_at = now() + $2
-			where id in (
-				select id from events
-				where published_at is null
-				  and (next_attempt_at is null or next_attempt_at <= now())
-				  and coalesce(payload ->> 'pending', 'false') <> 'true'
-				order by id
-				limit $1
-				for update skip locked
-			)
-			returning id
+		update events set next_attempt_at = now() + $2
+		where id in (
+			select id from events
+			where published_at is null
+			  and (next_attempt_at is null or next_attempt_at <= now())
+			  and coalesce(payload ->> 'pending', 'false') <> 'true'
+			order by id
+			limit $1
+			for update skip locked
 		)
+		returning id
+	`, batchSize, claimWindow)
+	if err != nil {
+		return nil, fmt.Errorf("claim unpublished events: %w", err)
+	}
+	// CollectRows closes the cursor, which the read below needs: a pooled connection held open
+	// by one query is a second connection this caller may not ask for (store.ErrNestedAcquire).
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("claim unpublished events: %w", err)
+	}
+	return ids, nil
+}
+
+// scanPendingEvents claims a batch (claimPendingEvents) and reads each claimed event with the
+// issue and artifact columns a publish needs, in the order by id every batch has always had.
+func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
+	claimed, err := claimPendingEvents(ctx, deps)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(claimed) == 0 {
+		return nil, false, nil
+	}
+	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
 		       coalesce(ar.slug, ''), coalesce(i.route, ai.route)
-		from claimed c
-		join events e on e.id = c.id
+		from events e
 		left join issues i on i.key = e.issue_key
 		left join artifacts ar on ar.id = e.artifact_id
 		left join issues ai on ai.key = ar.issue_key
+		where e.id = any($1)
 		order by e.id
-	`, batchSize, claimWindow)
+	`, claimed)
 	if err != nil {
-		return nil, false, fmt.Errorf("claim unpublished events: %w", err)
+		return nil, false, fmt.Errorf("read claimed events: %w", err)
 	}
 	defer rows.Close()
 
@@ -246,7 +272,7 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 			// row on as a failure backs it off like any other unpublishable event, which is
 			// what lets the events queued behind it be read at all; e.id is the first
 			// destination, so the row scanned that far before it failed. The rest of the
-			// batch was claimed by the statement above and is never read here, so those
+			// batch is claimed (claimPendingEvents) and is never read here, so those
 			// events wait out claimWindow before any process reads them again - the same
 			// delay a process crashing mid-batch costs them, and the reason this row is
 			// backed off rather than left to poison every batch after it too.
