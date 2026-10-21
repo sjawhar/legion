@@ -83,6 +83,18 @@ func forgetStandbyLogs(t *testing.T) {
 	standbyLog.reported = map[string]time.Time{}
 }
 
+// forgetConsumerReconciles clears the reconciliation's per-consumer throttle
+// (settingsPollInterval), so a test's own bind reconciles its durable as the first bind of a
+// process does rather than being throttled by an earlier test's. Called for every client this
+// package's tests bind through (intakeTestClient), since each test is its own process as far as
+// the durable it binds is concerned.
+func forgetConsumerReconciles(t *testing.T) {
+	t.Helper()
+	consumerReconciles.mu.Lock()
+	defer consumerReconciles.mu.Unlock()
+	consumerReconciles.ran = map[string]time.Time{}
+}
+
 // seedDeliverySettings writes a delivery_settings row with acme/widgets-shaped placeholders.
 func seedDeliverySettings(t *testing.T, ctx context.Context, pool *store.Pool) DeliverySettings {
 	t.Helper()
@@ -270,9 +282,11 @@ func startIntake(t *testing.T, intake *Intake) {
 	})
 }
 
-// intakeTestClient connects one NATS client for an intake test and closes it with the test.
+// intakeTestClient connects one NATS client for an intake test and closes it with the test, and
+// forgets what an earlier test's bind reconciled (forgetConsumerReconciles).
 func intakeTestClient(t *testing.T) *bus.Client {
 	t.Helper()
+	forgetConsumerReconciles(t)
 	natsClient, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)

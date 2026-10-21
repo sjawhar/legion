@@ -26,7 +26,9 @@ const documentChangedChannel = "dispatch_doc_changed"
 const notifyDocumentChangedStatement = `select pg_notify('` + documentChangedChannel + `', $1)`
 
 // notifyDocumentChanged announces room's durable change inside tx, the transaction that made it,
-// which holds the document's advisory lock (lockDocumentRoom).
+// which holds the document's advisory lock (lockDocumentRoom). It is a rebuild's announcement,
+// one per rebuild; an append folds the same pg_notify into its own insert rather than spending a
+// second round trip on it under that lock (appendUpdateTxClass).
 //
 // Inside that transaction for two reasons. Postgres delivers a notification only if the
 // transaction that sent it commits, so an append the gate refused (ErrRoomBehindHead), or one
@@ -137,13 +139,19 @@ func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactI
 //
 // Every append notifies, this process's own included: the statement cannot tell who will hear it.
 // The room's cursor is what tells them apart - the durable version the resident instance holds
-// every update through (roomCursor). This process's own write advances it: a browser's append
-// inside the lock it committed under (appendUpdate), a live write's versions at the commit that
-// made them durable, which is where its notification was sent from (Ledger.takeRoomCursors), and
-// again as its publish lands in the room (publishLiveUpdate), a settlement's own repair where it
-// is stored (settleRoomWithin). So by the time the notification is heard, the room either stands
-// at the head, which is no eviction, or that write is still in flight, which is the guard below.
-// Another process's write advances no cursor here, so its room stands behind the head and goes.
+// every update through (roomCursor). This process's own write advances it before it drops the
+// document's advisory lock: a browser's append inside the session lock it appended under
+// (appendUpdate), a transaction's write before the commit that drops its lock
+// (Ledger.takeRoomCursors), a settlement's own repair likewise (settleRoomWithin). The publish
+// of a committed write records its version again as it lands in the room (publishLiveUpdate).
+// Another process's write advances no cursor here, so its room stands behind the head.
+//
+// The read through the pool is the cheap half: it holds nothing, and a room it finds at the head
+// is a room nothing is wrong with. A room it finds behind is read again under that lock
+// (roomBehindDurableHead), where this process's own writes are either finished - cursor advanced
+// - or still holding the lock, so a difference seen there is one no write of this process
+// explains. Without the second read the window between a write's commit and its own cursor
+// advance reads as another process's change, and the evictor closes a healthy room mid-write.
 //
 // Equality, not `cursor < head`, for refuseRoomBehindHead's reason: a prune or a deletion lowers
 // the head, and a room resident across one stands ahead of a history the store no longer has,
@@ -163,7 +171,9 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		return false
 	}
 	// A write of this process's own is still landing: it is about to advance this room's cursor,
-	// and a room closed under it would take its publish with it.
+	// and a room closed under it would take its publish with it. The lock the confirmation below
+	// takes would wait for a write that holds it, but an open write holds no lock between its
+	// operations, and the room it forked is the room this would close.
 	if service.hasWriteInFlight(artifactID) {
 		return false
 	}
@@ -174,7 +184,16 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		}
 		return false
 	}
-	through := cursor.heldThrough()
+	if cursor.heldThrough() == head {
+		return false
+	}
+	through, head, err := service.roomBehindDurableHead(ctx, artifactID, cursor)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("dispatch: read the head of a document that changed under its lock", "room", artifactID, "error", err)
+		}
+		return false
+	}
 	if through == head {
 		return false
 	}
@@ -191,6 +210,31 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	slog.Info("dispatch: closed a document room another process's write left behind",
 		"room", artifactID, "room_through", through, "head", head)
 	return true
+}
+
+// roomBehindDurableHead reads cursor, room's instance cursor, against the document's durable head
+// under the document's advisory lock, and returns the two: equal is a room that holds the whole
+// stored history, and anything else is a room an append this process never made left behind.
+//
+// The lock is what makes the answer exact. Every durable writer of this process takes it and
+// advances the instance's cursor before it drops it, so under it no write of this process's own
+// sits between its commit and its cursor; and no append can land between the head read here and
+// the cursor read beside it. The transaction ends with this read, before the caller closes the
+// room: a close flushes what the room still owes the store, whose appends take that same lock.
+func (s *Service) roomBehindDurableHead(ctx context.Context, room string, cursor *roomCursor) (int64, int64, error) {
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return 0, 0, err
+	}
+	head, err := currentUpdateCursor(ctx, tx, room)
+	if err != nil {
+		return 0, 0, err
+	}
+	return cursor.heldThrough(), head, nil
 }
 
 // allow is the interval: it reports whether artifactID may be evicted now, recording the eviction

@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -716,7 +718,7 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	var blind atomic.Bool
 	rig := newHubRig(t, func(hub *deliveryHub) {
 		dial := hub.dial
-		hub.dial = func(ctx context.Context) (deliveryListenerConn, error) {
+		hub.dial = func(ctx context.Context) (*pgx.Conn, error) {
 			if blind.Load() {
 				return nil, context.DeadlineExceeded
 			}
@@ -1091,7 +1093,7 @@ func TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent(t *testing.T)
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	rig := newHubRig(t, func(hub *deliveryHub) {
 		// The listener never connects, so only the broker or the store can tell the hub of an event.
-		hub.dial = func(context.Context) (deliveryListenerConn, error) { return nil, context.DeadlineExceeded }
+		hub.dial = func(context.Context) (*pgx.Conn, error) { return nil, context.DeadlineExceeded }
 		hub.backoff = func(int) time.Duration { return time.Hour }
 		observe := hub.observe
 		hub.observe = func(note deliveryHubNote) {

@@ -220,13 +220,20 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 		return 0, err
 	}
 	version := persistence.Version(latest + 1)
+	// The insert announces the change itself (documentChangedChannel), as a data-modifying CTE
+	// rather than a statement of its own, so a durable append is one round trip under the
+	// document's advisory lock instead of two: every browser update is its own append
+	// (PersistCoalesceWindow = -1). Why the announcement belongs inside this transaction is
+	// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed
+	// twice because its two parameters are different types: doc_updates.artifact_id is a uuid,
+	// and pg_notify takes text.
 	if _, err := tx.Exec(ctx, `
-		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
-	`, room, int64(version), update, contentChanged); err != nil {
+		with appended as (
+			insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+		)
+		select pg_notify('`+documentChangedChannel+`', $5)
+	`, room, int64(version), update, contentChanged, room); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
-	}
-	if err := notifyDocumentChanged(ctx, tx, room); err != nil {
-		return 0, err
 	}
 	authors, lastActor, include := credit.take()
 	// An edit credited to authors names its latest edit source, none included when no one

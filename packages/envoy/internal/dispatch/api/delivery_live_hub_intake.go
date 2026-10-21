@@ -22,12 +22,8 @@ func (h *deliveryHub) intake(ctx context.Context) {
 	events, unsubscribe := broker.Subscribe()
 	defer func() { unsubscribe() }()
 	for attempt := 1; !h.readCursors(); attempt++ {
-		timer := time.NewTimer(pglisten.RedialBackoff(attempt))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !waitFor(ctx, pglisten.RedialBackoff(attempt)) {
 			return
-		case <-timer.C:
 		}
 	}
 	close(h.ready)

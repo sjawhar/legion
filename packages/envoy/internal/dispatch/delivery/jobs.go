@@ -119,7 +119,7 @@ func (j *JobIntake) Run(ctx context.Context) {
 		bound, outcome := j.bind(ctx)
 		if outcome == bindBound {
 			sub = bound
-			continue
+			break
 		}
 		select {
 		case <-ctx.Done():

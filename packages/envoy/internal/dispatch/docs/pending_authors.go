@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"runtime"
 	"slices"
 	"sync"
 	"weak"
@@ -185,28 +186,112 @@ type roomInstance struct {
 	cursor roomCursor
 }
 
-// keepInstance starts the bookkeeping of live, a room instance loaded at head, and lists it for
-// the instance's writes (instanceOf, holdOf) while live is resident (listResident). The load is
-// the first advance of the instance's cursor: the instance holds every durable update through the
-// head its load read.
-func (s *Service) keepInstance(live *crdt.Doc, head persistence.Version) *roomInstance {
-	instance := &roomInstance{hold: roomHold{loaded: int64(head)}, cursor: roomCursor{through: int64(head)}}
-	listResident(&s.holds, live, instance)
+// roomLoad is one room load's record of the durable history behind the room it loads, kept from
+// before the load reads the store (servicePersistenceAdapter.LoadDoc) until the instance that
+// load leaves behind stands in its place (keepInstance, which onLoadDocument calls on the same
+// goroutine, ygo's loadRoom). ygo publishes no document for a room while it loads (Server.GetDoc
+// reports a loading room as absent), so a version this process appends in that window reaches no
+// instance of its own: it reaches this instead (took), and the instance takes it in with the head
+// the load read. Without that the fresh room would stand at the head of the read alone while the
+// store stood one past it, and the gate would refuse its every durable write until it reloaded -
+// a room born behind, which no reload is guaranteed to fix, since the next load can lose the same
+// race.
+type roomLoad struct {
+	mu   sync.Mutex
+	head int64
+	// appended are the versions took recorded before the instance existed, folded into its cursor
+	// when it does (start). instance is that instance, which took advances directly from then on.
+	appended []int64
+	instance *roomInstance
+}
+
+// beginRoomLoad records that room is loading, before the load reads the store: every version
+// appended from here on is one the instance this load leaves behind takes in. It replaces the
+// record of the room's last load, which ygo has finished with - one room loads at a time
+// (getOrCreateRoom) - so the records never outnumber the documents this process has loaded, and
+// each goes with the document of the load that left it (keepInstance).
+func (s *Service) beginRoomLoad(room string) *roomLoad {
+	load := &roomLoad{}
+	s.roomLoads.Store(room, load)
+	return load
+}
+
+// readHead records the head the load's read of the store saw, the version the room it loads holds
+// every update through.
+func (load *roomLoad) readHead(head persistence.Version) {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	load.head = int64(head)
+}
+
+// took records version, which this process has made durable for the room while its load runs: on
+// the load until the instance exists, and on that instance's cursor after (start).
+func (load *roomLoad) took(version persistence.Version) {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	if load.instance != nil {
+		advanceRoomCursor(&load.instance.cursor, version)
+		return
+	}
+	load.appended = append(load.appended, int64(version))
+}
+
+// start is the instance this load leaves behind: it stands at the head the load read, with every
+// version took recorded since folded in, in order and only where each follows the one before, as
+// every advance of a cursor is (advanceRoomCursor). The load holds it from here, so a version
+// appended before ygo publishes the loaded room still reaches it.
+func (load *roomLoad) start() *roomInstance {
+	load.mu.Lock()
+	defer load.mu.Unlock()
+	through := load.head
+	slices.Sort(load.appended)
+	for _, version := range load.appended {
+		if version == through+1 {
+			through = version
+		}
+	}
+	load.appended = nil
+	load.instance = &roomInstance{hold: roomHold{loaded: load.head}, cursor: roomCursor{through: through}}
+	return load.instance
+}
+
+// tookResidentVersion records version, which this process has just made durable for room outside
+// the room itself, on the instance that has to take it in: the resident one, or the one the load
+// under way is about to leave behind (roomLoad). A document this process holds no room or load
+// for takes nothing: the room that loads next reads the version from the store.
+func (s *Service) tookResidentVersion(room string, version persistence.Version) {
+	if loading, ok := s.roomLoads.Load(room); ok {
+		loading.(*roomLoad).took(version)
+	}
+	if live := s.srv.GetDoc(room); live != nil {
+		advanceRoomCursor(s.cursorOf(live), version)
+	}
+}
+
+// keepInstance starts the bookkeeping of live, the document room's load read, and lists it for
+// the instance's writes (instanceOf) while live is resident (listResident). The load is the first
+// advance of the instance's cursor: the instance holds every durable update through the head that
+// load read, and every version this process appended while it ran (roomLoad). The load's record
+// goes with the document, as the listing does: until then took still reaches this instance
+// through it, which is what ygo's loading window needs it for.
+func (s *Service) keepInstance(room string, live *crdt.Doc) *roomInstance {
+	value, ok := s.roomLoads.Load(room)
+	if !ok {
+		// A room ygo loaded without reading the store through this service's persistence stands
+		// at nothing, as a load that read an empty history does.
+		value = s.beginRoomLoad(room)
+	}
+	load := value.(*roomLoad)
+	instance := load.start()
+	listResident(&s.instances, live, instance)
+	runtime.AddCleanup(live, func(load *roomLoad) { s.roomLoads.CompareAndDelete(room, load) }, load)
 	return instance
 }
 
 // instanceOf is live's bookkeeping, nil for a document no room load listed.
 func (s *Service) instanceOf(live *crdt.Doc) *roomInstance {
-	if listed, ok := s.holds.Load(weak.Make(live)); ok {
+	if listed, ok := s.instances.Load(weak.Make(live)); ok {
 		return listed.(*roomInstance)
-	}
-	return nil
-}
-
-// holdOf is live's roomHold, nil for a document no room load listed.
-func (s *Service) holdOf(live *crdt.Doc) *roomHold {
-	if instance := s.instanceOf(live); instance != nil {
-		return &instance.hold
 	}
 	return nil
 }
@@ -243,7 +328,8 @@ type roomCursor struct {
 // cursor are one grep away. They are every site that makes a version durable for a document a
 // room of this process holds:
 //
-//   - the room's load, which starts the cursor at the head it read (keepInstance);
+//   - the room's load, which starts the cursor at the head it read and the versions this process
+//     appended while it ran (keepInstance, roomLoad);
 //   - a browser append that committed, inside the lock it holds (PgVersioned.appendUpdate);
 //   - a live write's commit, for the versions its publish is about to apply to the room
 //     (Ledger.takeRoomCursors), and that publish itself (publishLiveUpdate);

@@ -457,3 +457,91 @@ func listenForDocumentChanges(t *testing.T, database *store.Store) <-chan string
 	}
 	return heard
 }
+
+// A browser's append commits inside the session lock it took the document under, and advances its
+// room's cursor before it drops that lock (appendUpdate). Between the two the store stands one
+// past the room, which is what a notification read through the pool sees - this process's own
+// write, read as another process's. The evictor reads the room again under that lock before it
+// closes anything (roomBehindDurableHead), where the append has either dropped the lock, cursor
+// advanced, or still holds it, so the second read waits for it. Deciding on the pool read alone
+// closes a healthy room mid-write, and the browser that was typing into it is disconnected.
+func TestARoomIsNotEvictedBetweenItsOwnAppendsCommitAndItsCursor(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "# First")
+	service, _ := newTestServiceInstance(t, database)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	ctx := context.Background()
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	cursor := service.cursorOf(service.srv.GetDoc(artifactID))
+	if cursor == nil {
+		t.Fatal("the resident room lists no cursor")
+	}
+
+	// The window, held open as an append holds it: the document's session lock taken, the update
+	// committed under it, and the room's cursor not advanced yet.
+	conn, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire the appending connection: %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, artifactID); err != nil {
+		t.Fatalf("take the document's session lock: %v", err)
+	}
+	appended, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the append: %v", err)
+	}
+	version, err := NewPgVersioned(database).AppendUpdateTx(ctx, appended, artifactID, paragraphUpdate(), true)
+	if err != nil {
+		t.Fatalf("append an update under the lock: %v", err)
+	}
+	if err := appended.Commit(ctx); err != nil {
+		t.Fatalf("commit the append under the lock: %v", err)
+	}
+	if !roomBehind(t, service, artifactID) {
+		t.Fatal("the room stands at the head with its append's cursor still to come, so nothing here is tested")
+	}
+
+	decided := make(chan bool, 1)
+	go func() { decided <- newStaleRoomEvictor(service).documentChanged(ctx, artifactID) }()
+	waitFor(t, roomWait(t), "the evictor to wait on the document's lock", func() bool {
+		return waitingAdvisoryLocks(t, database) > 0
+	})
+	// What the append does next, where it does it: the cursor, and then the lock.
+	advanceRoomCursor(cursor, version)
+	if _, err := conn.Exec(ctx, `select pg_advisory_unlock(hashtext($1))`, artifactID); err != nil {
+		t.Fatalf("release the document's session lock: %v", err)
+	}
+
+	select {
+	case evicted := <-decided:
+		if evicted {
+			t.Fatal("the room was closed between its own append's commit and that append's cursor")
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatal("the evictor never decided the notification of this process's own append")
+	}
+	if service.srv.GetDoc(artifactID) == nil {
+		t.Fatal("the room this process was appending to is gone")
+	}
+	requireRoomStillWrites(t, service, artifactID, 1)
+}
+
+// waitingAdvisoryLocks is how many advisory locks of this test's own database are waited for: the
+// evictor's read of a room under the document's lock, while the append that holds it has not
+// finished.
+func waitingAdvisoryLocks(t *testing.T, database *store.Store) int {
+	t.Helper()
+	var waiting int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from pg_locks
+		where locktype = 'advisory' and not granted
+		  and database = (select oid from pg_database where datname = current_database())
+	`).Scan(&waiting); err != nil {
+		t.Fatalf("read the advisory locks waited for: %v", err)
+	}
+	return waiting
+}

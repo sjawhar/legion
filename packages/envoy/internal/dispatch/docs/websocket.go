@@ -61,12 +61,17 @@ type servicePersistenceAdapter struct {
 	service *Service
 }
 
-// LoadDoc is the durable state a room loads, and records the head it was read at, which the
-// room's load (onLoadDocument) takes next on the same goroutine (ygo's loadRoom) to start the
-// instance's roomHold.
+// LoadDoc is the durable state a room loads. It records the load before it reads, and the head it
+// read after: the room's load (onLoadDocument) takes the record next on the same goroutine (ygo's
+// loadRoom) to start the instance's roomHold and its cursor, and a version this process appends
+// between the two reaches that instance through the record (roomLoad) rather than no instance at
+// all. The read itself takes no advisory lock - a durable writer holds that one across its whole
+// transaction, and a load that waited for it would wedge a write that forks the room it loads -
+// so the record, not the lock, is what keeps a room from being born behind the head.
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
+	load := a.service.beginRoomLoad(room)
 	if loaded, ok := a.service.takePreload(room); ok {
-		a.service.loadedHeads.Store(room, loaded.Version)
+		load.readHead(loaded.Version)
 		return loaded.Update, nil
 	}
 	result, err := a.store.Load(context.Background(), room)
@@ -77,7 +82,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 		a.service.failRoom(room, err)
 		return nil, err
 	}
-	a.service.loadedHeads.Store(room, result.Version)
+	load.readHead(result.Version)
 	return result.Update, nil
 }
 
@@ -452,11 +457,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	s.unlockState(room, state)
 	replica := s.keepReplica(doc, contentMarkdown)
-	var head persistence.Version
-	if loaded, ok := s.loadedHeads.LoadAndDelete(room); ok {
-		head = loaded.(persistence.Version)
-	}
-	instance := s.keepInstance(doc, head)
+	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
 		// A published write's update is already durable. Its suppression slot is finished here,

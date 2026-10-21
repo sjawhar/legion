@@ -157,7 +157,7 @@ type deliveryHub struct {
 	lifetime context.Context
 	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is the
 	// shared pool's Listener, and a test sets them otherwise before the first Subscribe.
-	dial                    func(ctx context.Context) (deliveryListenerConn, error)
+	dial                    func(ctx context.Context) (*pgx.Conn, error)
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
 	// observe, when set, is told of each recompute and catch-up; tests set it.
@@ -190,9 +190,6 @@ type deliveryHub struct {
 	sent  deliveryFreshnessVerdict
 	known bool
 }
-
-// deliveryListenerConn is what the hub's dial returns: one connection of its own for LISTEN.
-type deliveryListenerConn = *pgx.Conn
 
 // hubClock is the hub's clock: what time it is, and a timer that calls f once the clock reaches
 // at, at once when it already has. The timer names a moment rather than a wait, so a clock that

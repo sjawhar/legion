@@ -137,15 +137,10 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 // statement listens on every channel in one round trip: with no arguments pgx sends it over the
 // simple protocol, which runs every statement in it.
 func (l *Listener) statement() string {
-	var statement strings.Builder
-	for index, channel := range l.Channels {
-		if index > 0 {
-			statement.WriteString("; ")
-		}
-		statement.WriteString("listen ")
-		statement.WriteString(channel)
+	if len(l.Channels) == 0 {
+		return ""
 	}
-	return statement.String()
+	return "listen " + strings.Join(l.Channels, "; listen ")
 }
 
 // close closes conn within the ping timeout, so a half-open connection's Terminate cannot hold

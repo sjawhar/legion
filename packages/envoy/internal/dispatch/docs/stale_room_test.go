@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -409,4 +412,147 @@ func TestAColdWriteAppendsAfterAnotherWriterMovedTheHead(t *testing.T) {
 			t.Fatalf("the stored document after the cold write = %q, want it to hold %q", stored, want)
 		}
 	}
+}
+
+// A browser's append waits on the document's advisory lock while a transaction of this process
+// writes the same document, and takes that lock the instant the commit drops it. The commit
+// records its versions on the room's cursor before it commits (takeRoomCursors), so the append
+// finds a cursor at the head that commit wrote and is stored. Recorded after the commit instead,
+// they left the room one version behind the head it reads under that lock: the append was refused
+// (ErrRoomBehindHead), which failed the room under the browser whose edit it was and dropped
+// every update the room still owed the store with it.
+func TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	appended := false
+	service.afterLiveCommit = func(room string) {
+		if room != artifactID || appended {
+			return
+		}
+		appended = true
+		// The lock's next holder, in the window it takes it in: the write's version is durable
+		// and its publish has not run.
+		requireRoomStillWrites(t, service, artifactID, 1)
+	}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("an agent's edit into the resident room: %v", err)
+	}
+	if !appended {
+		t.Fatal("nothing appended between the write's commit and its publish, so nothing here is tested")
+	}
+	stored := storedMarkdown(t, service.store, artifactID)
+	for _, want := range []string{"Agent's paragraph.", "Writing again as peer 1."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
+// A room that loads while this process's own write commits is not born behind the head. ygo
+// publishes no document for a room that is still loading (Server.GetDoc), so the commit finds no
+// cursor of that room to record its version on and the publish that would is behind the load: the
+// version goes to the record the load leaves its instance (roomLoad, tookResidentVersion), and the
+// room the load starts stands at the head. Born one behind, that room is refused its browser's
+// every append, and the reload each refusal forces can lose the same race again.
+func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	closeDocumentRoom(t, service, artifactID)
+
+	// The load is held where the window is: ygo's LoadDoc has read the store and the head it
+	// stands at, and the hook that starts the room's instance has not run.
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	load := service.srv.OnLoadDocument
+	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
+		if room == artifactID {
+			once.Do(func() {
+				close(entered)
+				<-release
+			})
+		}
+		return load(ctx, room, doc)
+	}
+	loaded := make(chan error, 1)
+	go func() { loaded <- service.warmLiveDocument(context.Background(), artifactID) }()
+	select {
+	case <-entered:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the room's load never reached the window it is held in")
+	}
+
+	read := storedHead(t, service.store, artifactID)
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the write's transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock document owner: %v", err)
+	}
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("apply the write while the room loads: %v", err)
+	}
+	if write := joinedLiveWrite(joined, artifactID); write == nil || !write.cold {
+		t.Fatal("the write forked the loading room, so nothing here is tested")
+	}
+	if err := ledger.commit(ctx); err != nil {
+		t.Fatalf("commit the write while the room loads: %v", err)
+	}
+	if head := storedHead(t, service.store, artifactID); head != read+1 {
+		t.Fatalf("the document's head is %d after the write, want %d: the load read %d", head, read+1, read)
+	}
+
+	close(release)
+	if err := <-loaded; err != nil {
+		t.Fatalf("load the room while the write committed: %v", err)
+	}
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room that loaded while this process's write committed stands behind the head")
+	}
+	ledger.publish()
+	// The browser's own append on that room, which is what standing at the head is for.
+	requireRoomStillWrites(t, service, artifactID, 1)
+	stored := storedMarkdown(t, service.store, artifactID)
+	for _, want := range []string{"Agent's paragraph.", "Writing again as peer 1."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
+// A room that does stand behind the head - the other process appended what this one's room never
+// took - recovers. Its browser's append is refused, which fails the room; the failure's eviction
+// reloads the document at the head, the browser's provider sends its edit to the room that
+// replaced it, and that room writes again, this time with nothing refused. Recovery is the whole
+// answer to a room behind the head, so it has to end somewhere: a room refused, failed, reloaded
+// and refused again is the loop INFRA-66's reproduction fell into, and a room that cannot be born
+// behind (roomLoad) is what keeps the reload out of it.
+func TestARoomBehindTheHeadIsReloadedAndWritesAgain(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob"}, "Bob writes on the other process.\n")
+	editAsBrowserPeer(t, pair.taskA, pair.artifactID, 2, model.Actor{Kind: "user", ID: "alice"},
+		appendBlocks(t, "Alice types on the room behind the head.\n"))
+	if behind := roomBehind(t, pair.taskA, pair.artifactID); behind {
+		t.Fatal("the room that replaced the one behind the head stands behind it too")
+	}
+	stored := storedMarkdown(t, pair.database, pair.artifactID)
+	for _, want := range []string{"Bob writes on the other process.", "Alice types on the room behind the head."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document after the reload = %q, want it to hold %q", stored, want)
+		}
+	}
+	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 3)
 }

@@ -396,6 +396,40 @@ func (l *standbyLogger) report(name string) {
 	slog.Info("dispatch delivery: NATS consumer held by another process; standing by", "name", name)
 }
 
+// consumerReconciles is where the reconciliation's throttle is kept, keyed by consumer, beside
+// the standby line's: one durable's configuration is brought to this release's wanted shape by
+// whichever intake asked for it, and not again for settingsPollInterval.
+//
+// Throttled because the reconciliation runs on every bind poll, and a standby polls every
+// durableBindInterval (2 s) for the life of the process: each poll of each durable would
+// otherwise take the deliveryConsumerLease -- two Postgres round trips -- and write a
+// "dispatch duty: leased pass ran" line, 1,800 of each an hour per durable, for a configuration
+// that changes only with a release. settingsPollInterval is the window because it is how often
+// the loop this bind poll replaced reconciled at all; the poll itself stays at
+// durableBindInterval, which is what makes a hand-over from a dead holder fast.
+var consumerReconciles = &reconcileThrottle{ran: map[string]time.Time{}}
+
+type reconcileThrottle struct {
+	mu  sync.Mutex
+	ran map[string]time.Time
+}
+
+// due reports whether name's reconciliation is to run now: the first attempt is, and a later one
+// within settingsPollInterval of the last pass recorded is not.
+func (t *reconcileThrottle) due(name string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	last, seen := t.ran[name]
+	return !seen || time.Since(last) >= settingsPollInterval
+}
+
+// done records a pass over name, which throttles the next settingsPollInterval of attempts.
+func (t *reconcileThrottle) done(name string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.ran[name] = time.Now()
+}
+
 // bind creates (on first run) or resumes (on a restart) the delivery durable and subscribes to it.
 func (in *Intake) bind(ctx context.Context, handle func(context.Context, string) (bool, error)) (*natsgo.Subscription, bindOutcome) {
 	return bindDurableConsumer(ctx, in.nats, in.leases, deliveryConsumerConfig(), func(msg *natsgo.Msg) {
@@ -411,7 +445,9 @@ func (in *Intake) bind(ctx context.Context, handle func(context.Context, string)
 // it leads to -- runs under the deliveryConsumerLease (reconcileDurableConsumer), so one process
 // at a time reconciles a durable. A process that does not take the lease skips the reconciliation
 // altogether and goes straight to the subscribe: the process holding the lease is doing that
-// work, and this one's job is only to bind the durable or stand by for it.
+// work, and this one's job is only to bind the durable or stand by for it. So does a process that
+// reconciled this durable within the last settingsPollInterval (consumerReconciles), which is
+// what keeps a two-second bind poll from leasing and logging a pass it has just made.
 //
 // The durable admits one subscriber, which is how exactly one process does this durable's work
 // and how that process dying hands the work on: NATS refuses a second binder with "consumer is
@@ -421,15 +457,20 @@ func (in *Intake) bind(ctx context.Context, handle func(context.Context, string)
 // bound here takes a client of its own.
 func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Leases, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bindOutcome) {
 	name, subject := wanted.Durable, wanted.FilterSubject
-	// True when the pass does not run -- the lease is held elsewhere, or could not be taken: a
-	// reconciliation that never ran failed nothing, and the subscribe below says what this
-	// process's own state is.
-	reconciled := true
-	duty.Exclusive(ctx, leases, deliveryConsumerLease, func(context.Context) {
-		reconciled = reconcileDurableConsumer(client.JS(), wanted)
-	})
-	if !reconciled {
-		return nil, bindFailed
+	if consumerReconciles.due(name) {
+		// True when the pass does not run -- the lease is held elsewhere, or could not be taken: a
+		// reconciliation that never ran failed nothing, and the subscribe below says what this
+		// process's own state is.
+		reconciled := true
+		duty.Exclusive(ctx, leases, deliveryConsumerLease, func(context.Context) {
+			reconciled = reconcileDurableConsumer(client.JS(), wanted)
+		})
+		if !reconciled {
+			return nil, bindFailed
+		}
+		// Recorded past that failure alone, so a pass that ran and failed is made again on the
+		// next poll rather than skipped for the window.
+		consumerReconciles.done(name)
 	}
 	// The subject must be the consumer's own filter subject: nats.go checks a bound
 	// subscription's subject against it, and refuses an empty one ("subject does not match

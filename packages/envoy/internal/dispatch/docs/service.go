@@ -148,6 +148,12 @@ type Service struct {
 	// afterCreditUpdate runs in a room's update observer after it has credited a content change
 	// and before it arms the room's settlement. Nil outside tests; tests use it to hold that window.
 	afterCreditUpdate func(room string)
+	// afterLiveCommit runs once a transaction's writes to a document have committed and the
+	// document's advisory lock is gone with them, before the publish applies them to the room.
+	// Nil outside tests; tests use it to append from the room in the window the lock's next
+	// holder takes - the window the commit's cursors must already stand at the head for
+	// (Ledger.takeRoomCursors).
+	afterLiveCommit func(room string)
 	// afterBackfillRead runs after the block-id backfill has read a document that needs stamping
 	// and before it stamps it. Nil outside tests; tests use it to edit the room in that window.
 	afterBackfillRead func(room string)
@@ -202,14 +208,15 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
-	// holds holds, for each resident room document, what that instance records about the durable
-	// history behind it (*roomInstance): the updates whose writes can have recorded a pending
-	// author, and the durable version the instance stands at, keyed by a weak pointer to the
-	// document (keepInstance). loadedHeads passes the head a room's load read
-	// (servicePersistenceAdapter.LoadDoc) to the hook ygo calls next on the same goroutine
-	// (onLoadDocument).
-	holds       sync.Map
-	loadedHeads sync.Map
+	// instances lists, for each resident room document, what that instance records about the
+	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
+	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
+	// the document (keepInstance). roomLoads holds what each room's load records between its read
+	// of the store (servicePersistenceAdapter.LoadDoc) and the instance the hook ygo calls next on
+	// the same goroutine starts (onLoadDocument): the head that read saw, and every version this
+	// process appended while the load ran, which reaches no instance of its own (roomLoad).
+	instances sync.Map
+	roomLoads sync.Map
 	// reads holds the renderings of the documents cold reads served, each under the stored state
 	// it was rendered from (coldRead).
 	reads *documentReads

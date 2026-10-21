@@ -243,9 +243,9 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // in the caller's own transaction, which a write always has (liveWrite): a read of its own would
 // be a second pooled connection taken under that transaction (store.ErrNestedAcquire). That head
 // includes the versions this transaction has appended itself, which are in no room until it
-// publishes, so the room's cursor is read with them folded in (liveWrite.through); without that
-// every operation after a transaction's first append would judge its own room behind. A document
-// whose room kept no cursor is not judged behind: nothing says it is.
+// publishes, so the room's cursor is read with them folded in (liveWrite.withOwnAppends);
+// without that every operation after a transaction's first append would judge its own room
+// behind. A document whose room kept no cursor is not judged behind: nothing says it is.
 func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *crdt.Doc) (bool, error) {
 	cursor := s.cursorOf(live)
 	tx, joined := txFromContext(ctx)
@@ -256,7 +256,7 @@ func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *cr
 	if err != nil {
 		return false, err
 	}
-	return write.through(cursor.heldThrough()) != head, nil
+	return write.withOwnAppends(cursor.heldThrough()) != head, nil
 }
 
 // warmFork is forkLive's fork of a document a room holds, brought up to date from that room.
@@ -289,8 +289,17 @@ func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		write.releaseFork()
 		return nil, err
 	}
+	// The instance once, rather than its hold and its cursor looked up one after the other: the
+	// two are halves of one *roomInstance, and a room evicted between the lookups would leave
+	// the write a hold from the gone instance beside a nil cursor, a split the gate is not
+	// written for. A write whose room is gone keeps neither.
+	var hold *roomHold
+	var cursor *roomCursor
+	if instance := s.instanceOf(room); instance != nil {
+		hold, cursor = &instance.hold, &instance.cursor
+	}
 	write.fork, write.forkedFrom, write.forkSeq, write.cold = fork, weak.Make(room), seq, false
-	write.forkHold, write.forkCursor = s.holdOf(room), s.cursorOf(room)
+	write.forkHold, write.forkCursor = hold, cursor
 	if s.afterForkRead != nil {
 		s.afterForkRead(write.artifactID)
 	}
@@ -426,19 +435,19 @@ func applyTransactionWrites(fork *crdt.Doc, updates [][]byte) error {
 // heldThrough is the durable version the document this write's operations run on holds every
 // update through, which gates each of its appends (refuseRoomBehindHead): its fork's basis, read
 // now so that a peer's append into the same room, which the fork takes in at its next read,
-// counts, with the versions this transaction has appended itself folded in (through). It is the
-// cursor of a write whose fork came from a room, and only appendingCursor reads it, which hands
-// the gate no cursor at all for a cold write (coldFork).
+// counts, with the versions this transaction has appended itself folded in (withOwnAppends). It
+// is the cursor of a write whose fork came from a room, and only appendingCursor reads it, which
+// hands the gate no cursor at all for a cold write (coldFork).
 func (w *liveWrite) heldThrough() int64 {
-	return w.through(w.forkCursor.heldThrough())
+	return w.withOwnAppends(w.forkCursor.heldThrough())
 }
 
-// through folds into base, the version the document a write is made on stands at, the versions
-// this transaction has appended itself: they are in its fork, and in no room until the write
-// publishes, so every head read inside its transaction counts them and no cursor does. An accept
-// writes its text change and its margin projection as two appends of one transaction, so without
-// this the second would find the head one past the fork and be refused.
-func (w *liveWrite) through(base int64) int64 {
+// withOwnAppends folds into base, the version the document a write is made on stands at, the
+// versions this transaction has appended itself: they are in its fork, and in no room until the
+// write publishes, so every head read inside its transaction counts them and no cursor does. An
+// accept writes its text change and its margin projection as two appends of one transaction, so
+// without this the second would find the head one past the fork and be refused.
+func (w *liveWrite) withOwnAppends(base int64) int64 {
 	for _, version := range w.versions {
 		if int64(version) == base+1 {
 			base++

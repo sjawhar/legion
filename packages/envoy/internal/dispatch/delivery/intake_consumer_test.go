@@ -34,6 +34,7 @@ import (
 // set once and forgotten, since the durable already exists: bind has to correct both without an
 // operator noticing a log line, which is what this holds.
 func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) {
+	forgetConsumerReconciles(t)
 	pool, ctx := deliveryTestPool(t)
 	settings := seedDeliverySettings(t, ctx, pool)
 

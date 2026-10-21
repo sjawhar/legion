@@ -176,7 +176,10 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 
 // read publishes every committed event after the cursor, in id order, through the same read a
 // reconnect's catch-up uses (readEventsAfterID), and moves the cursor only over the rows it has
-// published. It pages until a short page, as streamEvents does. A log that was reset under the
+// published - once a page, to the last of them, rather than taking the lock for each of a
+// thousand. Nothing but this goroutine writes the cursor once the relay has started, and a page
+// is published before the cursor moves over it, so no reader of it can see a row as published
+// that is not. It pages until a short page, as streamEvents does. A log that was reset under the
 // cursor is answered first, and publishes nothing (resetCursor). false is a read that failed.
 func (r *eventStreamRelay) read(ctx context.Context) bool {
 	tracked := store.WithTransactionTracking(ctx)
@@ -200,7 +203,10 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 		}
 		for _, event := range committed {
 			r.stream.Publish(event)
-			r.advance(event.ID, event.CreatedAt)
+		}
+		if len(committed) > 0 {
+			last := committed[len(committed)-1]
+			r.advance(last.ID, last.CreatedAt)
 		}
 		if len(committed) < maxSSEReplay {
 			return true
