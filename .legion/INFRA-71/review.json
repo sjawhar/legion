@@ -2,50 +2,40 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-71",
-  "completed": "2026-10-21T12:20:00Z",
+  "completed": "2026-10-21T14:05:00Z",
   "decision": "changes_requested",
   "critical": 0,
   "important": 3,
-  "minor": 3,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-legion/src/setup-report.ts:85",
-      "description": "Round 2's required change, the architect's ruling applied to the notice: every detail is introduced with \"The install log ended:\", including the `no-install-root` report whose install never ran and whose detail is \"no writable install root: …\". One conditional, with a case holding both the log-ful and log-less wordings as the gate's four sentences now are."
+      "file": ".github/scripts/check-check-commands.sh:725-738",
+      "description": "Regression introduced by 4268e56e: `prompted()` returns True the moment it sees a prompt line, whether or not it ever finds the block's closing fence, so an unclosed session block sets `prompts_only` to the end of the file and every later non-prompt line is skipped — including the lines of a well-formed ```sh block below it. Reproduced at this head: a guide with an unclosed ```console block carrying `$ bun run lint .`, then a ```sh block whose line is `bunx biome check .`, leaves the whole gate green; the same tree at 9bb1ba35 reported it. The header's own sentence scopes the convention to the lines 'to the line that closes it', so a block with no closer has no convention to read: return False when the scan reaches EOF."
     },
     {
       "severity": "important",
-      "file": ".github/scripts/check-check-commands.sh:331-347",
-      "description": "Gate fails open on a backslash-escaped quote. `split_comment` tracks `\"` and `'` but not `\\`, so in `echo \"a \\\" # b\" && bunx biome check .` it closes the string at the escaped quote, reads the rest as a comment, and `judge` passes only the prefix to `offenders`. Reproduced at this head: the whole file passes, exit 0, no marker and no trace. The shell disagrees (`sh -c 'echo \"a \\\" # b\" && echo RAN'` prints both). Distinct from round 1's quoted-marker hole, which is fixed and verified; this one predates that fix in the same function and I did not name it then. Nothing in the tree is hidden by it today."
+      "file": ".github/scripts/check-check-commands.sh:399-403",
+      "description": "The second pass added with the backslash fix returns a shorter command for a line whose quotes do not balance, so everything after that line's first `#` is judged by nothing. Reproduced at this head: `echo \"a # b && bunx biome check .` and its single-quote twin are both unreported, where the guard at 9bb1ba35 reported both. It is the one place this gate guesses rather than refusing, against the header's own posture at :108-114 ('what the tokenizer cannot read, it refuses'), and no case pins the fail-closed direction. Either return the whole line as the command and take only the comment from the re-scan — the marker still works on an apostrophe line — or keep the behaviour with a case that pins it and a header sentence admitting the exception."
     },
     {
       "severity": "important",
-      "file": "scripts/legion-setup.sh:347",
-      "description": "`rm -f \"$marker\"` runs before the `lock-timeout` branch, so a waiter whose `flock -w` expired — a run that held the lock for zero seconds and learned nothing about node_modules — deletes a marker the holder wrote under the lock, and every later role of the issue pays a full reinstall. The adjacent path of round 1's finding 4, which my own remedy under-specified: the fix correctly covered the waiter that gets the lock. Move the removal below the branch."
+      "file": "scripts/legion-setup.sh:87-91,137-140",
+      "description": "Both numeric knobs accept a leading zero the `*[!0-9]*` guard was written to reject. Measured: `LEGION_SETUP_BUDGET=08` makes `$(($(date +%s) + budget))` an octal parse that dash — the worker image's /bin/sh — ends with `Illegal number: 08`, exit 2, which is the one thing this script must never do (it stops Oh My Pi and charges the launch a failure); `LEGION_SETUP_LOCK_HOLD=00` passes the `| 0` arm, so the clamp sets `left=00` and `timeout -k 5 00` is GNU timeout's no-timeout-at-all — the unbounded hold on the shared cache lock the architect's ruling exists to prevent. Reject a leading zero in both arms, and say in one line why the `| 0` arm is load-bearing, since it looks like an inconsistency with `budget`'s case and is not."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-check-commands.sh:483-492",
-      "description": "The OSError fix stopped one layer short of the walk: `sorted(stack.pop().iterdir())` is unguarded, so a directory with mode 000 ends the required lint job in a raw PermissionError naming no file. Reproduced at this head. Fails closed, so a developer-experience defect rather than a silent green; same shape round 1 asked to be removed for files, and my remedy named only read_text."
+      "file": "scripts/legion-setup.sh:394-403",
+      "description": "A `lock-timeout` reached after this run's own install — the retry takes the lock, installs, fails the cold-entry copy, and loses the `flock -w` race on its second attempt — keeps the marker and carries a comment asserting the run 'never held the lock, never looked at node_modules, and learned nothing about what is installed', which is false on that path; the report also drops the install log's tail it does have. The first attempt's status is enough to tell the two apart. Same comment region: 124 now means both the budget and the hold cutting the install off, and the comment at :384-385 names only the budget, so the agent's notice cannot tell a slow container from a yielded lock."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-check-commands.sh:282-290",
-      "description": "JUDGED_FENCES puts `console`, `terminal`, `shell-session`, `shellsession` and `sh-session` on the judged side, and every line of such a block is judged, so a pasted session's output line that names one of the four tools is reported as a command — in the one block type whose convention interleaves commands with output, and against this round's own stated reason for the narrowing. The gate already models the separator (`PROMPT`). No judged guide uses those labels today."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-check-commands.sh:139-144",
-      "description": "The info string is now an escape hatch of its own — a block labelled `text`, or with a label the gate does not know, is not judged, with no reason and no record — while an exemption marker with no reason is itself reported. Record it where the exemptions are tabled, so a relabelled block reads as a decision rather than an accident."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/legion-setup.sh:290-295",
-      "description": "Sent to the architect as a decision rather than a requested change: the setup install now holds /usr/bin/flock on $BUN_INSTALL_CACHE_DIR for as long as LEGION_SETUP_BUDGET allows, while the daemon's plugin install waits installLockWait (RegistrationDeadline/3, 120 s at the defaults, plugins.go:139-141) on that same inode, twice, and then exits 1 and fails the launch. docs/kubernetes.md:2058-2062 derives that bound's headroom from five serialised 24 s plugin installs and no other holder. The remedies (cap the locked region, widen the daemon's bound, or accept and correct the derivation) touch daemon code outside this diff."
+      "file": "docs/kubernetes.md:1457-1466",
+      "description": "The operator paragraph now says 'It bounds itself once, as a whole' three lines above 'A second bound sits inside that one', and the insertion lands between the budget's clause and its 275 s worst case, so 'that budget' resolves across a sentence about another number. This is the page an operator reads before lowering `worker_boot_timeout_seconds`, which is the reader the new sentences address."
     }
   ],
   "verified": [
-    "Round 1's nine findings re-checked at this head, each by running the thing rather than reading the reply: the gate's three sentences now true of the lines they are printed for; both quoted-marker shapes reported; a dangling symlink named rather than a traceback; a ```text block no longer judged while ```bash and ```console are; --backend=copyfile, the re-check inside the lock, the per-run mktemp log and the no-install-root report present in the script; the three e2e prescriptions and the two remedy texts migrated. All nine threads answered and left resolved.",
-    "CI at code head 0a65d80a: 25 check runs, all success or skipped, the required lint, typecheck, test and pr-title among them; compare 0a65d80a...ea6afcd8 is .legion/ only."
+    "Round 2's seven findings re-checked by running them: the escaped-quote fail-open is closed, the walk names a mode-000 directory with no traceback, a prompted session block is judged at its prompts while its output lines naming tsc and playwright are not, an unprompted one is judged line by line, `ranInstall` gives the right introducer for all five reasons with the retry advice unconditional, the marker survives a waiter that never held the lock, and the hold is min(remaining, hold) computed inside the lock with docs/kubernetes.md's sizing paragraph naming this script among the inode's holders. All sixteen threads carry my answer and stay resolved.",
+    "CI at code head 49dbf0c0: 25 check runs, all success or skipped including `dispatch`; the required lint, typecheck, test and pr-title green; compare 49dbf0c0...c46e07d7 is .legion/ only."
   ]
 }
