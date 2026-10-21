@@ -2,85 +2,64 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-69",
-  "completed": "2026-10-21T00:50:00Z",
-  "round": 4,
-  "answeredReviewFindings": [
-    "Important (Evidence attribution): the note sent a reader to dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05 for an implementer-container measurement, and that comment records the planner container's. Fixed at abac0eb5af69edede61ef1a7c626fcaefb563ff2: the comment is now cited for what it holds — the first in-pod reading, taken at 22:20Z in this issue's planner container, devices 83 for /tmp, /home/legion and ~/.cache, 56 for .config, 97 for /var/run/legion/state, 87 for /legion, du -sx / at 42 MB — and the bullets' figures are attributed to this issue's implementer container, recorded on sjawhar/legion#2088 and its handoffs and reproduced in the tester's and reviewer's containers, with the overlay-per-container reason the device numbers differ. Thread PRRT_kwDORFy7ds6uk1jB answered and resolved.",
-    "Important (not charged is not free): the in-memory emptyDirs were listed with no word that a write there spends the container's memory limit. Fixed: a paragraph after the not-charged list, with both readings and the per-role limits. Thread PRRT_kwDORFy7ds6uk1jG answered and resolved.",
-    "Minor (front matter): \"sjawhar/legion#2088\" added as the last related_issues entry. Thread PRRT_kwDORFy7ds6uk1jJ answered and resolved."
+  "completed": "2026-10-21T01:05:00Z",
+  "round": 5,
+  "answeredFailures": [
+    "BLOCKING 1: the memory paragraph cited /sys/fs/cgroup/memory.current, a file no role container of this pod has. The tester is right and the defect is mine: my command was `cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes`, the fallback fired silently, and I wrote the first path beside a number the second produced. Fixed at bae04203582d38b8c4a8384c1144639d50ca6317: memory.current and cgroup v2 are gone from the note entirely — a path that cannot be run here does not go in it — and where a counter is named it is the v1 path /sys/fs/cgroup/memory/memory.usage_in_bytes, with `ls /sys/fs/cgroup` given as how a reader sees which layout their own container has.",
+    "BLOCKING 2: the paragraph asserted per-container charging on a counter that is the gVisor sandbox's. Fixed: the note now states that the readable counter is the sandbox's — memory.limit_in_bytes 20,401,094,656 bytes, equal to free -k's total of 19,922,944 KiB, neither the 6Gi the golden pod JSON gives the implementer and tester nor the 1Gi it gives the architect, planner and merger — and the charging rule is attributed to the Kubernetes documentation in its own words, 'files you write count against the memory limit of the container that wrote them', marked as not verified from inside this sandbox. What the pod does show carries the warning: a dd bs=1M count=100 into /var/run/legion/private moves free -k's shared from 132 to 102,532 KiB and releases it on removal.",
+    "Minor: the closing paragraph said the pod 'names no ServiceAccount of its own' and cited live_operator_test.go, which asserts the opposite. Fixed: the pod runs under the operator's ServiceAccount with automountServiceAccountToken false, so no token is mounted; live_operator_test.go asserts both and execs the pod to confirm the token file is absent. The golden-fixture citation is dropped from that sentence, since the fixture names no ServiceAccount only because its operator config sets none.",
+    "Not asked for and not done: nothing was added that this round did not run. The architect's standing instruction, if this paragraph fails again, is to cut it to the free -k sentence plus one attributed clause and drop every counter, path and figure.",
+    "Also in this round, after the architect corrected a figure it had given me: the limits sentence could be read as one 1Gi shared by three roles. Each role container has a memory limit of its own and they differ — request equal to limit, 1Gi for the architect, planner and merger, 4Gi for the reviewer, 6Gi for the implementer and tester (verified in the golden pod JSON) — and the note now says so and marks the numbers as the pod spec's rather than anything a container can read. The controller's correction quoted a memory.current figure beside it; that path is the one this round was failed for and was not reintroduced."
   ],
-  "auditOfEveryClaim": {
-    "why": "The architect's rule for this push, after three rounds that each failed the same way: run every command the note names in this container, open every citation in full, and delete any sentence that survives the question 'did I measure or open this?' unanswered.",
-    "commandsRun": [
-      "go env GOMODCACHE GOCACHE -> /home/legion/go/pkg/mod and /home/legion/.cache/go-build (both under the home directory, as the charged list says; the figures are now in the bullet).",
-      "grep ' /tmp ' /proc/mounts -> no line.",
-      "stat -c '%n dev=%d' over all twelve listed paths -> /tmp, /home/legion, /home/legion/.cache, /home/legion/.local/state all 114; /legion 118; /legion/feed 121; sessions 134; /home/legion/.config 56; /var/run/legion/state 128, private 130, gh 124, launcher 127.",
-      "df -k --output=used / around a 200 MiB dd under /tmp -> 38,280 -> 243,080 -> 38,280 KiB, a delta of exactly 204,800 KiB.",
-      "stat -c 'blocks=%b' /tmp/probe -> 409600; du -sk /tmp/probe -> 204800; du -sk /tmp -> 217413; du -sx -k / -> 42348 unchanged; du -x -a -d1 -k / -> 0 for /tmp; du -sh /tmp -> 213M.",
-      "df -k --output=target,used /legion /home/legion/.cache / -> /legion 663016; / 243080 for both of the other two.",
-      "df -x -> df: option requires an argument -- 'x'.",
-      "printenv TMPDIR -> unset.",
-      "dd bs=1M count=100 into /var/run/legion/private with /sys/fs/cgroup/memory.current -> 766,550,016 to 871,407,616 bytes, exactly the 104,857,600 written; free -k shared 102,520 KiB.",
-      "ls /var/run/secrets/kubernetes.io -> No such file or directory; kubectl get --raw /api -> connection to localhost:8080 refused.",
-      "TMPDIR=<dir> apt-get download hello -> E: Unable to locate package (the image carries no apt lists), which is why the staging claim could not be verified here and is attributed instead."
-    ],
-    "citationsOpened": [
-      "dispatch://INFRA-51/comment/c347b4be-f447-40ef-b80f-b79686e74f9c (the cluster read): carries the eleven eviction events, every one naming the implementer container and the 1Gi limit, the whole-pod eviction with infra-64's architect killed at once, and the '/tmp is memory-backed' sentence this change corrects. It names no nodes/proxy refusal.",
-      "dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05 (the planner's reply): the planner container, 22:20Z, devices 83/56/97/87, du -sx / 42 MB. Not the implementer's numbers — this is review finding 1.",
-      "dispatch://INFRA-51/comment/1a7ce2b2-076d-4609-8ea0-fcda1e35a5bf: 1.5 GiB module cache, 2.9 GiB build cache, roughly 4.4 GiB, 368 MiB after relocation; names no command, which is why round 3 deleted the du attribution.",
-      "packages/daemon/internal/runtime/sandbox/testdata/golden/root.json: the six role containers mount /legion, /legion/feed, the sessions directory, /home/legion/.config and four /var/run/legion/* and no /tmp; the Memory-medium tmp volume is workspace-fetch's with TMPDIR=/tmp; no role container has a TMPDIR entry; launcher-<role> and gh-<role> are Secret volumes; automountServiceAccountToken is false and no ServiceAccount is named.",
-      "packages/daemon/internal/config/kubernetes.go defaultResources: ephemeral storage 20Gi implementer and tester, 10Gi the others, request 1Gi each; memory 1Gi architect, planner, merger, 4Gi reviewer, 6Gi implementer and tester.",
-      "packages/daemon/internal/runtime/sandbox/live_lifecycle_test.go gkeEphemeralStorageClamped: the doc comment records the clamp confirmed live 2026-10-17 against every role container of a real production issue pod.",
-      "packages/daemon/internal/runtime/sandbox/live_operator_test.go:44-49: the live assertion that a pod runs with the operator's ServiceAccount and automountServiceAccountToken false.",
-      "docs/kubernetes.md:1188-1194 and :1703-1705: ephemeral storage is what a role container writes outside every volume, the kubelet evicts the pod of the container that passed it, and a role container mounts no /tmp.",
-      "docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md: the Extends target exists and carries the apt-get download / dpkg-deb -x recipe and the three cache variables.",
-      "sjawhar/legion#2083: carries the 299 passed, 21 skipped, 0 failed in 16.1 m figure verbatim and the sentence that the suite runs in a worker pod once Postgres, the browsers and TMPDIR live on the issue volume rather than /tmp — the record the TMPDIR bullet now attributes its staging claim to."
-    ],
-    "sentencesDeleted": [
-      "'nobody inside a role container can read the kubelet's own per-container accounting, because the cluster refuses nodes/proxy'. No record carries the nodes/proxy reason and a container with no API access cannot tell a refusal from an absence. Replaced by what is shown: the pod sets automountServiceAccountToken false and names no ServiceAccount, /var/run/secrets/kubernetes.io does not exist, kubectl answers connection refused, so neither the accounting nor the event is readable from inside — measure with df and du, read the event from the cluster.",
-      "'apt-get download, dpkg-deb -x and the Playwright browser install all stage through TMPDIR', asserted flatly. This change never ran it and cannot here. Now attributed to INFRA-44, which paid for it, with sjawhar/legion#2083 as the record; the measured half (no role container sets TMPDIR, so they default to the charged /tmp) is unchanged.",
-      "'df -k --output=used / reads 14,392 KiB at rest' and 'du -sk /tmp prints 217364', both absolute readings that do not reproduce once the container holds more. Now stated as readings at their moment, with the delta named as what reproduces (a later run in this container read 38,280 -> 243,080 -> 38,280 KiB for the same probe) and the directory total explained as the probe plus whatever else the directory holds."
-    ]
-  },
   "proof": [
     {
-      "criterion": "Review finding 1: every citation the note makes holds the figures the note says it holds.",
-      "surface": "The cited records themselves, opened in full through the Dispatch CLI and the repository, and the note at the pushed head.",
-      "command": "dispatch read --ref dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05; dispatch read --ref dispatch://INFRA-51/comment/c347b4be-f447-40ef-b80f-b79686e74f9c; dispatch read --ref dispatch://INFRA-51/comment/1a7ce2b2-076d-4609-8ea0-fcda1e35a5bf; gh pr view 2083 --repo sjawhar/legion --json body; grep -n -F 'planner container' <note>",
-      "observed": "The 0ce1448c comment says 'Measured at 22:20Z inside the planner container of dispatch://INFRA-69's pod' and gives devices 83, 56, 97 and 87 with du -sx / at 42 MB — none of the 114/118/128/130/124 or the df figures the note's bullets carry. The note now cites it for exactly that reading and attributes the bullets to this issue's implementer container and to this pull request. The cluster read c347b4be carries the eleven events and the whole-pod eviction; 1a7ce2b2 carries the 4.4 GiB and no command; #2083 carries the 299-passed figure and the TMPDIR sentence the bullet now attributes.",
-      "headSha": "abac0eb5af69edede61ef1a7c626fcaefb563ff2",
-      "negativeControl": "The same grep over the previous head (jj file show -r 568499f769f4) finds the old sentence attributing the measurement to the implementer container at that comment, and finds no 'planner container' — so the check distinguishes this head from the one the reviewer failed rather than passing on any text."
+      "criterion": "BLOCKING 1: every path the memory paragraph names exists in a role container of this pod.",
+      "surface": "This issue's implementer container, the same surface the paragraph describes.",
+      "command": "ls /sys/fs/cgroup; ls -l /sys/fs/cgroup/memory.current; find /sys/fs/cgroup -maxdepth 3 -name memory.current; grep cgroup /proc/mounts; cat /sys/fs/cgroup/memory/memory.usage_in_bytes; grep -n -F 'memory.current' <note>",
+      "observed": "ls /sys/fs/cgroup lists cpu, cpuacct, cpuset, devices, job, memory, pids — cgroup v1, as /proc/mounts confirms (`none /sys/fs/cgroup/memory cgroup rw,memory`). /sys/fs/cgroup/memory.current does not exist and find turns up none at any depth. /sys/fs/cgroup/memory/memory.usage_in_bytes reads, 805,318,656 bytes at the time of this run. The note now names that path and nothing else: grep for memory.current over it returns 0, and so does grep for 'cgroup v2'.",
+      "headSha": "89b81ed8bbb031a72b39c5989163b7d7dba65346",
+      "negativeControl": "The same grep over the previous head (jj file show -r 06e272bf7d46) finds memory.current, so the check tells this head from the one the tester failed rather than passing on any text. The absence itself was confirmed two ways — ls and find — because a single `cat … 2>/dev/null ||` is exactly what hid this defect when it was written."
     },
     {
-      "criterion": "Review finding 2: a write to an in-memory emptyDir spends the container's memory limit, and the note now says so.",
-      "surface": "A live Legion role container — this issue's implementer container — reproducing the reviewer's reading in a second container.",
-      "command": "cat /sys/fs/cgroup/memory.current; dd if=/dev/zero of=/var/run/legion/private/probe bs=1M count=100; cat /sys/fs/cgroup/memory.current; free -k; rm -f /var/run/legion/private/probe; cat /sys/fs/cgroup/memory.current",
-      "observed": "memory.current 766,550,016 -> 871,407,616 bytes for the 100 MiB write, a delta of exactly 104,857,600, with free -k reporting shared at 102,520 KiB; the removal returns it to 868,184,064. The reviewer's container read 708,227,072 -> 813,051,904 for the same write. The note now carries both readings, the OOM consequence, and the per-role memory limits from defaultResources.",
-      "headSha": "abac0eb5af69edede61ef1a7c626fcaefb563ff2",
-      "negativeControl": "The ephemeral-storage instrument is the control: the same class of write under /tmp moves df -k --output=used / by exactly its size while leaving every volume alone, and this write moves memory.current while leaving / alone — the two budgets are separately observable, so the new paragraph is not a restatement of the storage finding.",
-      "deviationFromReview": "The reviewer attributed its own reading to '.the reviewer container'; the note instead says 'a second role container of the same pod' and points both readings at sjawhar/legion#2088, because a reader cannot open a reviewer's handoff — retro deletes .legion/INFRA-69/ before the merge."
+      "criterion": "BLOCKING 2: the paragraph claims only what its measurement can show, and attributes the rest.",
+      "surface": "This issue's implementer container, and the Kubernetes documentation as the record for the rule.",
+      "command": "cat /sys/fs/cgroup/memory/memory.usage_in_bytes and free -k around `dd if=/dev/zero of=/var/run/legion/private/probe bs=1M count=100`, then rm; cat /sys/fs/cgroup/memory/memory.limit_in_bytes; free -k; read https://kubernetes.io/docs/concepts/storage/volumes/#emptydir",
+      "observed": "free -k shared 132 -> 102,532 -> 132 KiB around the write and its removal, exactly the 100 MiB written; the tester read the same 132 -> 102,532 in its own container. memory.limit_in_bytes reads 20,401,094,656 bytes, equal to free -k's total of 19,922,944 KiB, so the readable counter is the sandbox's and not this container's 6Gi. The Kubernetes page says, of a memory-backed emptyDir, 'While tmpfs is very fast, be aware that, unlike disks, files you write count against the memory limit of the container that wrote them' — the container's, not the pod's, which is the sharper warning here since the architect, planner and merger have 1Gi. The note carries the free -k reading as measured, the sandbox scope as stated, and the rule as attributed and unverified from inside.",
+      "headSha": "89b81ed8bbb031a72b39c5989163b7d7dba65346",
+      "negativeControl": "The sandbox-wide reading is itself the control on the attribution: if the counter were this container's, its limit would read 6Gi rather than free's total, and the per-container claim would have been demonstrable here. It reads the total, so the claim is attributed rather than asserted — the same treatment round 4 gave the TMPDIR staging mechanism."
     },
     {
-      "criterion": "The audit the architect ordered: every command the note names runs here and every citation holds what the note says, or the sentence is gone.",
-      "surface": "This role container and the cited records; the full sweep is in auditOfEveryClaim above.",
-      "command": "the eleven command groups and eleven citations listed in auditOfEveryClaim",
-      "observed": "Every command reproduces. Three sentences did not survive and are recorded in auditOfEveryClaim.sentencesDeleted: the nodes/proxy reason, the flat TMPDIR staging assertion, and two absolute figures restated as deltas. grep -F 'nodes/proxy' over the note now finds nothing, 'sjawhar/legion#2083' appears twice (front matter and the TMPDIR bullet), '/home/legion/go/pkg/mod' appears in the charged list, and all twelve listed paths are still present. check-private-names.sh exits 0 over 4689 files; the diff is one file.",
-      "headSha": "abac0eb5af69edede61ef1a7c626fcaefb563ff2",
-      "negativeControl": "The audit found defects rather than confirming the note, which is what makes it a check: three sentences were deleted and two figures restated. A sweep that had passed everything would have been evidence that the question was not being asked."
+      "criterion": "Minor: the closing paragraph says what its cited test asserts.",
+      "surface": "The cited test file and this container.",
+      "command": "read packages/daemon/internal/runtime/sandbox/live_operator_test.go:38-57; ls /var/run/secrets/kubernetes.io; kubectl get --raw /api; grep -n -F 'names no ServiceAccount' <note>",
+      "observed": "live_operator_test.go:44-49 refuses a pod whose ServiceAccountName is not the operator's or whose AutomountServiceAccountToken is nil or true, and notes 'serviceAccountName %s, automountServiceAccountToken false'; lines 50-57 exec the pod for /var/run/secrets/kubernetes.io/serviceaccount/token and fail if it is present. So the live pod does run under a ServiceAccount, the operator's, and the token is what is absent. The note now says exactly that; grep for the old wording returns 0. Verified here: /var/run/secrets/kubernetes.io does not exist, and kubectl get --raw /api answers 'The connection to the server localhost:8080 was refused'.",
+      "headSha": "89b81ed8bbb031a72b39c5989163b7d7dba65346",
+      "negativeControl": "The golden fixture is the control that caught the error's shape: it carries no serviceAccountName at all, which is what the old sentence generalised from, while the live assertion requires one. Citing the fixture for a live fact is what made the sentence wrong, so that citation is gone from it."
+    },
+    {
+      "criterion": "The per-role memory limits the note names are the pod spec's and are quoted correctly.",
+      "surface": "The recorded pod shape in the repository, read directly.",
+      "command": "python3 over packages/daemon/internal/runtime/sandbox/testdata/golden/root.json printing each role container's resources.requests.memory and resources.limits.memory",
+      "observed": "architect 1Gi/1Gi, planner 1Gi/1Gi, implementer 6Gi/6Gi, tester 6Gi/6Gi, reviewer 4Gi/4Gi, merger 1Gi/1Gi — request equal to limit for every role, and three distinct values. The note states each container has its own limit, gives those numbers, and cites defaultResources and the golden pod shape rather than presenting them as a measurement.",
+      "headSha": "89b81ed8bbb031a72b39c5989163b7d7dba65346",
+      "negativeControl": "The sandbox counter is the control: memory.limit_in_bytes reads 20,401,094,656 bytes, which matches none of 1Gi, 4Gi or 6Gi, so the note cannot be read as claiming the figure it can measure is the figure it cites."
     }
   ],
   "filesChanged": [
-    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — six hunks: the front-matter pull request; the Go-cache bullet showing go env's output; the memory paragraph after the not-charged list; the TMPDIR bullet's staging claim attributed to INFRA-44 and sjawhar/legion#2083; the Evidence attribution split into the planner's recorded reading and the implementer's figures; the df and du figures restated as deltas; and the closing sentence rewritten from what this container can show."
+    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — two hunks: the memory paragraph split into what this pod shows (the free -k reading and the OOM warning) and what it cannot (the counter's sandbox scope, the attributed Kubernetes rule); and the closing paragraph's ServiceAccount sentence rewritten to what live_operator_test.go asserts.",
+    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — a third hunk at 89b81ed8bbb031a72b39c5989163b7d7dba65346: the limits sentence rewritten so each role container's own limit is explicit, the three values given, and their source named as the pod spec."
   ],
   "trickyParts": [
-    "Four rounds, five defects, one class: a sentence nobody had run or opened sitting beside sentences someone had. Two were the architect's by instruction (df -x, and df ~/.cache saying nothing about the budget), one a citation that named the wrong container, one an inherited mechanism this change never ran, and one an instrument claim that was true of du -x and false of du. Every one was caught by running the command or opening the record, and none by reading the prose. That is the finding this issue should leave behind, and it belongs in retro.",
-    "A note cannot cite a Legion handoff: retro deletes .legion/<issue>/ before the merge, so a figure whose only home is implement.json becomes unopenable the moment the change lands. Anything a reader must be able to check belongs in the pull request body, which survives as main's commit message, or in a Dispatch record."
+    "`2>/dev/null ||` is how a measured number ends up wearing a path a reader cannot open: a command that cannot fail cannot tell you which half answered. The absence is now confirmed two ways, ls and find, rather than by a fallback that swallows it.",
+    "A fixture is not a deployment. The golden pod JSON names no ServiceAccount because its operator config sets none; the live assertion requires the operator's. Citing the fixture for a live fact produced the minor finding, and the same trap exists for every other value that file carries.",
+    "A correction can carry the defect it corrects: the figure handed to me for this fix arrived beside a memory.current reading, the exact path this round was failed for. A number being right does not make the path beside it runnable, and neither does who sent it."
   ],
   "deviations": [
-    "The reviewer suggested attributing its memory reading to the reviewer container; the note says 'a second role container of the same pod' and points both readings at sjawhar/legion#2088, since the reviewer's handoff will not exist after retro."
+    "The architect's instruction named the Kubernetes rule as charging a memory-backed emptyDir to 'the pod's memory limit'. The documentation says the container's. The note quotes the documentation, which is also the sharper warning here, and the architect confirmed the correction."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Two follow-ups stay filed and out of this diff: dispatch://INFRA-70 (the three out-of-scope carriers of the corrected claim) and dispatch://INFRA-71 (bunx biome check . resolving an unrelated registry package in a container with no node_modules)."
+    "Two follow-ups stay filed and out of this diff: dispatch://INFRA-70 and dispatch://INFRA-71.",
+    "Standing instruction from the architect for the next round, if the memory paragraph is failed again: cut it to the free -k sentence plus one clause attributing the charging rule, and drop every counter, path, byte figure and per-role limit from it."
   ]
 }
