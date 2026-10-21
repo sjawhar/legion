@@ -2,44 +2,47 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T01:10:00Z",
+  "completed": "2026-10-21T01:25:00Z",
   "proof": [
     {
-      "criterion": "A failed install ends the start wrapper where it stands: the deployment's setup command never runs and Oh My Pi never starts on a plugin pair that was not installed.",
-      "surface": "TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent in packages/daemon/internal/runtime/sandbox, running the rendered wrapper through the package's own runStart harness with a stand-in bun that exits non-zero, a stand-in node, and recorder stand-ins for the setup command and the agent.",
-      "command": "go test -count=1 -run TestAFailingInstallNeverRuns -v ./internal/runtime/sandbox/",
-      "observed": "Both subtests pass: the failing case exits 1, writes the install's own `legion plugins: installing @sjawhar/pi-legion@9.7.0 and @sjawhar/pi-envoy@9.6.1 failed` to stderr, leaves stdout — the shim's frame stream — empty, and neither the setup log nor the agent log exists; the succeeding case exits 0 with both logs present.",
-      "headSha": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
-      "negativeControl": "The succeeding case is the control and runs in the same test: without it the failing case's absent markers would prove only that the harness ran nothing at all."
+      "criterion": "The image is held to the path the rendered install actually calls, not merely to flock being on PATH, so a base that moved it fails the build rather than every installing launch.",
+      "surface": "packages/daemon/docker/worker.Dockerfile's final step, which already resolves git, legion, gh and agent-secrets and refuses any other location; flock joins them.",
+      "command": "the step's new line, `flock=\"$(command -v flock)\"; echo \"flock: $flock\"; test \"$flock\" = /usr/bin/flock`, run as the build runs it: `sh -c 'flock=\"$(command -v flock)\"; echo \"flock: $flock\"; test \"$flock\" = /usr/bin/flock'` in this issue's pod, which runs the worker image, then the same with a stand-in flock earlier on PATH",
+      "observed": "In the pod as it is: `flock: /usr/bin/flock`, exit 0. With a directory holding another `flock` put first on PATH: `flock: <that dir>/flock`, exit 1 — the shape a base that moved the binary would produce. The agreement this pins is between `installBlock`'s `/usr/bin/flock` and the apt line, the build's toolchain check and the toolchain capability row, all three of which ask only for the name.",
+      "headSha": "86baa18af5f7223c501f9dfc0e8707a0ae24cef8",
+      "negativeControl": "The PATH-shadowed run is the control: it is the only way to see this assertion fail, since the pod's own image already satisfies it, and without it the new line would be a statement nobody had watched fail."
     },
     {
-      "criterion": "The new test fails when the behaviour it pins is removed — checked in that order, before the test was trusted.",
-      "surface": "installBlock's rendered failure branch in plugins.go.",
-      "command": "the rendered `|| { echo %s; exit 1; }` changed to `|| { echo %s; }`, then `go test -count=1 -run TestAFailingInstallNeverRuns ./internal/runtime/sandbox/`, then restored",
-      "observed": "FAIL, three lines: `the wrapper exited 0, want 1`, `the setup command ran after a failed install (<nil>): the install's subshell exit did not end the wrapper`, and the same for the agent. Restored: `ok … 0.076s`, plugins.go back to checksum 741d9ee605423d52.",
-      "headSha": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
-      "negativeControl": "The restore is the control for the mutation: the same command on the unmutated render passes, so the failure is the deleted branch's and not the harness's."
+      "criterion": "The documentation says when the raised issue_volume default reaches a volume, which it did not before.",
+      "surface": "docs/kubernetes.md's sizing paragraph.",
+      "command": "read at the head; `grep -n '20Gi' deploy/kubernetes/daemon/legion.yaml.example docs/kubernetes.md`",
+      "observed": "The clause now says the new size reaches the volumes created after the apply and no others — it rides in the Sandbox's volumeClaimTemplates, evaluated when the claim is created, and an issue's Sandbox outlives its pods, so an issue already running keeps the 20 GiB it was created with — and that this fits: about 8.5 GiB of shared scratch for an issue working all six roles, against live volumes at 2.1 to 2.7 GiB of their 20 and this issue's own at 7.7 GiB under the duplicating layout this change replaces. The grep finds no issue-volume `20Gi` in either file: what remains is the repository cache's own default and the sizing table's row.",
+      "headSha": "86baa18af5f7223c501f9dfc0e8707a0ae24cef8",
+      "negativeControl": "The grep is the control for the half of the finding I did not apply: the two lines it named as pinning 20Gi read 50Gi at this head, corrected in round six, so a 'fix' there would have replaced a true sentence with another true one and left the record saying the line had been wrong."
     },
     {
-      "criterion": "The merged tree is otherwise unchanged by this round.",
-      "surface": "The whole sandbox package at the new head.",
-      "command": "gofmt -l ./internal; go vet ./internal/runtime/sandbox/; go test -count=1 ./internal/runtime/sandbox/; jj diff --stat",
-      "observed": "gofmt clean, vet ok, `ok … 140.663s`, and the round's diff is one file, `plugins_test.go`, +56/−0 — no production code and no prose, so the branch's diff against its base is where the merge left it.",
-      "headSha": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
-      "negativeControl": "The diff stat is the control for that claim: a round that had touched the render or the documentation would show it there."
+      "criterion": "The round changed nothing executable in the daemon.",
+      "surface": "The working copy's diff and the sandbox package.",
+      "command": "jj diff --stat; gofmt -l ./cmd ./internal; go vet ./internal/runtime/sandbox/; bash .github/scripts/check-private-names.sh",
+      "observed": "Three files, +23/-3: a documentation clause, a Dockerfile assertion with its comment, and one comment paragraph in plugins.go. gofmt clean, vet ok, private-names clean. No Go behaviour moved, so every proof of the earlier rounds stands at this head unre-run.",
+      "headSha": "86baa18af5f7223c501f9dfc0e8707a0ae24cef8",
+      "negativeControl": "The diff stat is the control for that claim: a round that had touched the render or a test would show it there."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/runtime/sandbox/plugins_test.go — TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent, the install-side mirror of main's TestAFailingSetupCommandNeverStartsTheAgent, with the succeeding case as its control in the same test."
+    "docs/kubernetes.md — the sizing paragraph gains the clause saying the raised default reaches volumes created after the apply and no others, with the arithmetic that shows the 20 GiB already-running volumes still fit.",
+    "packages/daemon/docker/worker.Dockerfile — the final step resolves flock and refuses any path but /usr/bin/flock, beside git's, legion's and gh's; the comment above names the gap the other gates leave.",
+    "packages/daemon/internal/runtime/sandbox/plugins.go — installBlock's comment says flock is named by the absolute path for the reason bun is, and where the declaration and this use are held to agree."
   ],
   "trickyParts": [
-    "The install's failure is the one in this wrapper that crosses a subshell boundary: installBlock renders `( … ) 1>&2`, so a failed `bun add` exits the subshell and only `set -e` in the wrapper makes it the wrapper's own exit. That is why the mutation deletes the `exit 1` rather than the message, and why the test asserts the wrapper's exit and the two absent logs rather than the stderr line alone."
+    "The direction of the fix was a choice: make the script resolve flock through PATH, or make the declaration name the path. The path won because the script already names bun absolutely, because the build's final step is an existing fence that this joins rather than a new mechanism, and because PATH resolution in a container whose PATH an operator's pod env can shape is the weaker of the two.",
+    "The fence this adds is a build-time one and the reply says so: legion probe-image and the daemon's probe Sandbox check the capability row, which is a PATH check by construction, so the image build is the only gate that can catch a moved binary."
   ],
   "deviations": [
-    "The commit carrying this test, 0e21bab7d988, is authored by the reviewer's App rather than mine: the working-copy commit this turn started on was the reviewer's, in the workspace all roles share, and I split it before reading its author. The handoff commit above it is mine. I did not rewrite the pushed commit to correct the attribution — rewriting a pushed commit for authorship alone is not one of the sanctioned rewrites, and a code commit's author reaches no gate — so it is recorded here instead."
+    "Half of the first finding is answered with the file rather than applied: the two lines it named as pinning 20Gi read 50Gi at this head. Said on the thread rather than silently fixed."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Absent evidence again, in its narrowest form: the tester's live run showed the failure propagating, and nothing in the suite would have noticed if it stopped. A behaviour proven once by hand on freshly restructured code is not a behaviour that is held."
+    "A declaration and a use can both be right and still disagree: every gate asked for `flock` by name and the renderer asked for it by path, so each was internally consistent and the pair was not. The thing to check is not that the dependency is declared but that the declaration names what the caller actually calls."
   ]
 }
