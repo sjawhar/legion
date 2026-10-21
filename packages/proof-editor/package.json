@@ -19,10 +19,10 @@
   "main": "src/lib.ts",
   "types": "src/lib.ts",
   "scripts": {
-    "typecheck": "bunx tsc --noEmit -p tsconfig.check.json",
+    "typecheck": "../../scripts/repo-tool.sh tsc --noEmit -p tsconfig.check.json",
     "upstream-declarations": "bun scripts/upstream-declarations.ts",
     "test": "bun test src/tests tests",
-    "lint": "bunx biome check ."
+    "lint": "../../scripts/repo-tool.sh biome check ."
   },
   "dependencies": {
     "@milkdown/core": "^7.5.0",

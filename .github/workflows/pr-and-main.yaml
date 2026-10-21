@@ -108,7 +108,7 @@ jobs:
       # AGENTS.md documents, over the whole tree, so a fixture, config or test file that Biome
       # would rewrite fails here instead of on the next person who runs it.
       - name: Check the whole tree with Biome
-        run: bunx biome check .
+        run: bun run lint .
 
       # The notices step below builds go-licenses and loads every release binary's modules. It
       # keeps them under a key of its own, apart from the one setup-go above leaves unsaved.
@@ -266,21 +266,21 @@ jobs:
         run: bun test scripts/e2e/lib
 
       - name: Lint the Dispatch census script
-        run: bunx biome check --error-on-warnings scripts/dispatch
+        run: bun run lint --error-on-warnings scripts/dispatch
 
       # scripts/dispatch is no workspace; the root package pins its TypeScript and Bun types.
       - name: Typecheck the Dispatch census script
-        run: bunx tsc --noEmit -p scripts/dispatch
+        run: bun run typecheck -p scripts/dispatch
 
       - name: Test the Dispatch census script
         run: bun test scripts/dispatch
 
       - name: Lint the GitHub App registration script
-        run: bunx biome check --error-on-warnings scripts/github-apps
+        run: bun run lint --error-on-warnings scripts/github-apps
 
       # scripts/github-apps is no workspace either; the root package pins its TypeScript and Bun types.
       - name: Typecheck the GitHub App registration script
-        run: bunx tsc --noEmit -p scripts/github-apps
+        run: bun run typecheck -p scripts/github-apps
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
