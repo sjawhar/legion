@@ -11,12 +11,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
-
-const maxMessageBody16 = 2000
 
 const maxMessageReplyPreview16 = 160
 
@@ -212,8 +211,8 @@ func validateCreateMessage(input *createMessageInput) (string, error) {
 	if strings.TrimSpace(input.Body) == "" {
 		return "", errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}
-	if length := len16(input.Body); length > maxMessageBody16 {
-		return "", capExceededError("body", length, maxMessageBody16)
+	if length := len16(input.Body); length > contracts.DispatchBodyMax {
+		return "", capExceededError("body", length, contracts.DispatchBodyMax)
 	}
 	target, delivery, err := validateMessageDelivery(input.Target, input.Delivery)
 	if err != nil {
