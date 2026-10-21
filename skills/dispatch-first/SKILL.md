@@ -1,58 +1,40 @@
 ---
 name: dispatch-first
-description: "Use in any session with the dispatch command, before planning, filing an issue, asking a human, posting a finding, or starting work that someone may already track or have decided."
+description: "Use when a session has the dispatch command, before you plan, file an issue, ask a human, post a finding, or start work. Someone may track that work already or hold a decision on it."
 ---
 
 # Dispatch first
 
-Dispatch already holds most of what you are about to plan, file or ask: the open issues, their
-specs, and the answers humans gave. A second issue for tracked work, or a question a human already
-answered, costs that human the time to notice it and splits the history across two places.
+Dispatch holds the open issues, their specs and the answers humans gave. A duplicate issue or a repeated question costs a human time and splits the history.
 
 ## Search before you act
 
-Before you plan, file an issue, ask, post a finding or start work, search Dispatch with the `dispatch` command in your shell (`dispatch --help` lists every command). Every word of
-the query must match, so each word you add can only lose hits: search with two or three words, the
-thing and what is wrong with it, as a user would name them. Never paste a draft.
+- Before you plan, file an issue, ask, post a finding or start work, run `dispatch search` (`dispatch --help` lists every command).
+- Every query word must match, so each added word can only lose hits. Use two or three words: the thing and what is wrong with it, as a user names them. Never paste a draft.
 
 ```bash
 dispatch search --query 'broadcast send order'
 dispatch search --query 'reviewer threads OR review comments'
 ```
 
-When a query finds nothing, drop a word before you add one. Try two or three wordings (the
-component's name, the symptom, the fix) before you conclude that nothing exists. Open every hit
-that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`); the
-parent's children and the issue's `Components:` line show where the rest of that work lives.
+- No hits: drop a word before you add one. Try two or three wordings (the component's name, the symptom, the fix) before you conclude that nothing exists.
+- Open each hit that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`). The parent's children and the `Components:` line show where the rest of the work is.
 
 ## What to do with what you find
 
-Filing an issue or opening an ask also searches for you: the result's `advice.suggestions` names
-likely duplicates or a decision that may already settle it. Treat a hit there the same as one you
-found yourself.
+`dispatch issue` and `dispatch ask` also search: treat a hit in the result's `advice.suggestions` as one you found.
 
-- **The work is already tracked: extend that issue.** Put the finding on it (a comment, a message,
-  or an edit to its spec) instead of filing another. File a new issue only when no hit covers the
-  work, and cite the nearest one you ruled out (`dispatch://KEY`).
-- **The question is already decided: cite the decision.** An answered ask is the record. Point to
-  it where you rely on it (`dispatch://KEY/ask/<id>`) instead of asking again.
-- **You met a duplicate: close it.** Keep the issue that holds the spec and the discussion, carry
-  over anything only the duplicate has, then close the duplicate with a reason that names the
-  survivor: `dispatch issue-update --issue <KEY> --status done --reason 'Duplicate of dispatch://KEY.'`.
-  When the duplicate carries the `legion` label, or another session or a human holds its claim,
-  comment on it naming the survivor instead of closing it.
-- **Every ask and message stands on its own.** The person who answers sees only that text: put the
-  facts, the options and your recommendation in it, and link what you cite (`dispatch://…`)
-  instead of writing "see above" or "my earlier message".
+- **Work already tracked:** put the finding on that issue (a comment, a message, or a spec edit). File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
+- **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`) where you rely on it. Do not ask again.
+- **Duplicate found:** keep the issue with the spec and the discussion, and copy over what only the duplicate has. Then close it: `dispatch issue-update --issue <KEY> --status done --reason 'Duplicate of dispatch://KEY.'`. If it has the `legion` label, or another session or a human holds its claim, comment on it with the survivor's name. Do not close it.
+- **Every ask and message stands alone:** the reader sees only that text. Put the facts, the options and your recommendation in it. Link what you cite (`dispatch://…`). Never write "see above" or "my earlier message".
 
 ## Design in the spec
 
-A design conversation with a person, or the implementation plan that follows one, uses
-`skill://dispatch-brainstorming`: read it before your first design question on a change, the spec,
-or that plan. It replaces superpowers' `brainstorming` and `writing-plans` here, even when the user
-invokes one by name. Before a spec's first version and each approval request, have a fresh read-only subagent (on Oh My Pi, `task(agent="scout")`, or whatever read-only agent the host bundles) check it against the code, the human's words and any command output a claim rests on, and resolve what it flags. A Legion architect's own issue spec follows `skill://legion-architect`, and its fresh reader in that Legion session is the Legion plugin's `plan-gap-analyst` agent.
+- A design conversation with a person, or the plan that follows it, uses `skill://dispatch-brainstorming`. Read it before your first design question, the spec, or the plan. It replaces superpowers' `brainstorming` and `writing-plans` here, also when the user names one of them.
+- Before a spec's first version and each approval request, get a fresh read-only subagent to check it. On Oh My Pi, use `task(agent="scout")`. Elsewhere, use the host's read-only agent. It checks the spec against the code, the human's words and the command output that its claims rest on. Resolve what it flags.
+- A Legion architect's own issue spec follows `skill://legion-architect`. Its fresh reader in that Legion session is the Legion plugin's `plan-gap-analyst` agent.
 
 ## Load the full skill before you write
 
-Before any write to Dispatch (an ask, a message, a comment, a document edit, a status change, a
-claim), load `skill://dispatch` unless you already have in this session.
+Before any write to Dispatch, load `skill://dispatch`: an ask, a message, a comment, a document edit, a status change, a claim. Skip this if you loaded it in this session.

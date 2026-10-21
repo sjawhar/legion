@@ -60,6 +60,15 @@
 
 ### Changed
 
+- The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
+  (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
+  references and `dispatch <command> --help`; a blind comparison of old and new text on each
+  skill's main situations found the same decisions. Two kinds of rule are new: `dispatch` says to
+  ask once (an open ask is the request; do not raise it again in each message), and
+  `dispatch-brainstorming` says how to hand a spec or plan to the human: the reply leads with each
+  open decision, then each unsettled point with a line reference, then the link; it asks for no
+  review when nothing is new; it says "ready for review", never "complete"; "plan only" stops after
+  the plan; and the spec stays a record of the current design, not of how it was reached.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
   an Oh My Pi session keeps; Claude Code holds none, so the tools behave as before.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
