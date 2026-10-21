@@ -2,48 +2,49 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T04:50:00Z",
+  "completed": "2026-10-21T05:30:00Z",
   "proof": [
     {
-      "criterion": "The install block's cache guard fails a test when it is reverted — the reviewer's finding that it was pinned by nothing.",
-      "surface": "The rendered start wrapper, run under /bin/sh with stand-ins for bun and node, in this role container.",
-      "command": "cd packages/daemon && go test ./internal/runtime/sandbox/ -run TestAnInstallRemakesAPoisonedCacheAndSparesARealOne -count=1 -v; then the same after editing installBlock back to the pre-guard shape; then jj restore of plugins.go",
-      "observed": "Four subtests pass at the head: a 0-byte regular file at $BUN_INSTALL_CACHE_DIR is cleared and the path is a directory afterwards; a filled cache keeps entry.txt and nested.json byte for byte; a symlink to a filled cache is still a symlink with its target intact; a path with nothing at it runs clean. With `mkdir -p -- \"$cache\"` moved back outside legion_install and the `[ -d ] || rm -f` line removed, the first subtest fails: `the wrapper exited 1 with a regular file an interrupted flock left behind at the cache path … mkdir: cannot create directory '…/cache': File exists`. plugins.go restored from the parent commit and absent from the round's diff.",
-      "headSha": "ec06cb01444a",
-      "negativeControl": "The revert is the control and I ran it myself rather than taking the subagent's word, since the finding was precisely that a reported-green check proved nothing. The 'no cache at all' subtest is the second control: without it the three prepared cases could pass on a wrapper that never touched the path."
+      "criterion": "The pull request is no longer conflicting, cured by a forward merge rather than a rebase, with the unchanged-diff fingerprint reported before and after.",
+      "surface": "The branch in this workspace and GitHub's own mergeability for #2085.",
+      "command": "jj new legion/INFRA-31 main@origin -m 'merge: resolve conflict against main@origin'; jj diff --from \"fork_point(main@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; gh pr view 2085 --json mergeable,mergeStateStatus",
+      "observed": "Merge 8ad8590408e4 descends from 458494679c67 and from main's b8455e13 (`chore: release pi-legion v10.16.0 [skip ci]`), so the push was a fast-forward and nothing existing was rewritten. Fingerprint f0880be4118e2093330bd80da175b4942b265dfc7be8804ab992bafd6d4b3586 → 8e8c72eded1a1125cedc8fd8906509ac433de0d98a52e78259cb9f56f114f835, reported **changed** in a pull-request comment with its one cause. GitHub now answers `mergeable: MERGEABLE` (`mergeStateStatus: BLOCKED`, the review gate), where it answered CONFLICTING/DIRTY before.",
+      "headSha": "8ad8590408e4",
+      "negativeControl": "A conflicting head is its own control: GitHub computes no merge ref for one and runs no `pull_request` workflow, which is why the previous head could not be checked at all. The fingerprint is the control for the merge's content — it is reported changed rather than claimed unchanged, because the renumber below really does change the branch's diff."
     },
     {
-      "criterion": "Every directory the runtime renders onto the issue volume is accounted for in the operator's reclaim remedy, checked against the renderer rather than by a reader.",
-      "surface": "docs/kubernetes.md's reclaim paragraph, now two markdown lists, parsed by a Go test in the package that renders the paths.",
-      "command": "cd packages/daemon && go test ./internal/runtime/sandbox/ -run TestTheReclaimParagraph -count=1, at the head and with the document mutated two ways",
-      "observed": "TestTheReclaimParagraphNamesEveryDirectoryTheRendererPutsOnTheIssueVolume derives nine directories from roleEnvironment and the issue pod's agentEnv and requires each on the delete list or opening an exemption bullet, in exactly one of the two; TestTheReclaimParagraphNeverDeletesWhatItExempts refuses a delete-list path that is an ancestor of an exempt one. My own controls at this head: removing the `/legion/uv/cache` bullet gives `accounts for /legion/uv/cache in neither list … a mention inside an exemption's reason is neither`; coarsening it to `/legion/uv` gives `deletes /legion/uv, which holds /legion/uv/python/<issue> that the same paragraph exempts … the bullet is a segment too coarse`. The document was restored by checksum after each (f3e94c63…).",
-      "headSha": "ec06cb01444a",
-      "negativeControl": "The first version of this test searched the paragraph's text and **passed** with /legion/uv/cache off the delete list, because an exemption's prose mentions the path. I found that with the control above, which is why the committed version parses the two lists and ignores a path named inside a reason. An unreadable document, a missing boundary marker, a region with no paths and an empty list are each a hard failure rather than a skip."
+      "criterion": "The daemon API contract number is this branch's own, not one a published release already claims for other shapes.",
+      "surface": "The npm registry, the two conflicted files, and the pins that hold the manifests to the fixture.",
+      "command": "npm view @sjawhar/pi-legion@10.16.0 legion; go test ./internal/api/ -run Golden -update -count=1; bun test packages/pi-legion/src/daemon-api-version.test.ts packages/claude-envoy/tests/daemon-api-version.test.ts; (cd packages/claude-envoy && bun run build && bun run check-dist)",
+      "observed": "`{ daemonApiVersion: 33 }` — main's release declares 33 for LEGION-781's shapes (`accepting`, `check`, the optional `commit`), which this branch does not carry, so this branch renumbers to 34 as docs/solutions/legion/daemon-api-contract-collision-… prescribes. version.go keeps main's entry 33 verbatim and adds entry 34 with its own collision note; AGENTS.md's \"last bumped by\" sentence reads 34 after 33 after 32. Both plugin manifests are 34, the fixture was rewritten by the golden test's -update rather than by hand, both changelogs name 34, and dist/envoy-channel.js was **rebuilt**: `check-dist` answers `dist/ and legion/ match a fresh build`, and the bundle's inlined value reads `daemonApiVersion: 34`. The two contract pins pass (2 tests, 2 expect calls).",
+      "headSha": "8ad8590408e4",
+      "negativeControl": "`check-dist` is the control for the generated file: a hand-edited or stale bundle fails it, which is the failure a conflict resolved by eye in `dist/` would otherwise ship. The pins are the control for the manifests: a manifest left at 33 against a fixture of 34 fails `daemon-api-version.test.ts` in both packages."
     },
     {
-      "criterion": "The remedy's instructions are ones an operator can follow without harm: tmp's window matches its only creator, and the uv split protects what a workspace depends on.",
-      "surface": "docs/kubernetes.md read against EnsureScratch's callers and manifest.go's uv contract.",
-      "command": "grep -rn 'EnsureScratch(' packages/daemon --include=*.go; read manifest.go's uvPythonRoot comment; read the paragraph at the head",
-      "observed": "EnsureScratch has one non-test caller, worker_shim.go, run once as the shim starts Oh My Pi, so a role's shim outliving a turn means a deleted tmp stays gone until relaunch: the document now says to delete it with the role stopped, names the shim start as its only creator, and states both halves of a live role meeting a missing TMPDIR — `mktemp -d` exits 1, Python's `tempfile` silently falls back to /tmp, the container's own filesystem, re-arming the eviction this layout exists to prevent. 'A temporary directory' is out of the rebuilt-by-the-next-build clause, which now names only the caches. /legion/uv/cache is on the delete list and /legion/uv/python/<issue> is an exemption carrying the dependency manifest.go's uvPythonRoot promises: a project's .venv in the issue's workspace links to an interpreter there, and the remedy deletes no workspace.",
-      "headSha": "ec06cb01444a",
-      "negativeControl": "The reviewer ran the halves that matter and I did not re-run them: `mktemp -d` exit 1 and Python placing its directory at /tmp with TMPDIR naming a path that does not exist. What I checked independently is the claim the clause rests on — that EnsureScratch has exactly one non-test caller — since that is what makes 'between turns' the wrong window."
+      "criterion": "Nothing of the change's behaviour moved under the merge.",
+      "surface": "The daemon packages this branch touches, in this role container.",
+      "command": "cd packages/daemon && go build ./... && go test ./internal/api/ ./internal/runtime/sandbox/ ./internal/capabilities/... ./internal/config/ -count=1; gofmt -l; bunx biome check packages/claude-envoy packages/pi-legion packages/contracts; bash .github/scripts/check-private-names.sh; bash .github/scripts/check-zod-version.sh",
+      "observed": "`ok internal/api 0.072s`, `ok internal/runtime/sandbox 142.014s` (both round-20 fences and the guard rig among them), `ok internal/capabilities 29.161s`, `ok internal/config 0.770s`; build clean; `gofmt -l` silent; biome clean but for a pre-existing `noTemplateCurlyInString` warning in main's `packages/claude-envoy/tests/dist-fresh.test.ts:230`, a file this branch does not touch; check-private-names green over 4725 files; every zod declaration names 4.3.6.",
+      "headSha": "8ad8590408e4",
+      "negativeControl": "`internal/daemon` still panics `rootless Docker not found` in a role container, exactly as in every earlier round, so it is named rather than counted — the CI `test` lane is its authority. `check-bun-version.sh` cannot run here either: it needs a Python `yaml` module this image lacks, which is unchanged by this round and equally CI's."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/runtime/sandbox/plugins_test.go — TestAnInstallRemakesAPoisonedCacheAndSparesARealOne; runStart takes the cache path so a caller can say what is at it.",
-    "packages/daemon/internal/runtime/sandbox/live_setup_unit_test.go — one call site updated for that parameter.",
-    "packages/daemon/internal/runtime/sandbox/reclaim_doc_test.go — new: the two fences over the reclaim paragraph.",
-    "docs/kubernetes.md — the remedy is a delete list and an exemption list; tmp's window and its fallback hazard; uv split; the hand-maintained count dropped from the lead-in."
+    "packages/daemon/internal/api/version.go — conflict resolved: main's entry 33 (LEGION-781) kept verbatim, this branch's entry renumbered to 34 with the collision recorded, `const DaemonAPIVersion = 34`.",
+    "packages/pi-legion/AGENTS.md — conflict resolved: the contract history now reads 34 (this branch) after 33 (acceptance before the merge) after 32 (the repository cache).",
+    "packages/pi-legion/package.json, packages/claude-envoy/package.json — `legion.daemonApiVersion` 34.",
+    "packages/contracts/fixtures/daemon-api/version.json — 34, rewritten by the Go golden test's -update.",
+    "packages/pi-legion/CHANGELOG.md, packages/claude-envoy/CHANGELOG.md — the contract entries and their 'a daemon at N' sentences name 34.",
+    "packages/claude-envoy/dist/envoy-channel.js — rebuilt by `bun run build`, verified by `bun run check-dist`."
   ],
   "trickyParts": [
-    "flock creates a missing lock path as a regular file and exits 0, which is why the pre-guard shape was a one-way failure rather than a transient one.",
-    "The fence's first version was satisfied by a path mentioned in an exemption's prose. The committed version parses the delete list and the exemption bullets structurally: a path counts only as a whole delete bullet or as the path an exemption bullet opens with.",
-    "The ancestor rule (a delete-list bullet covers what is under it) is needed for /legion/go to cover GOCACHE and GOMODCACHE, and is exactly what would let a coarsened bullet swallow an exemption — hence the second test."
+    "Only two of the nine both-sides files conflicted, and both were one collision: the contract number. Everything else main's release touched merged clean.",
+    "The generated bundle is the file a merge is most likely to corrupt silently. It was rebuilt from source and checked with `check-dist`, never resolved by reading the diff."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Both committed tests check structure, not grounds, and their comments say so: an earlier head passed a check of this kind while carrying an exemption whose stated reason the code refuted. Which of the two lists a path sits on is likewise a reader's judgement — a cache promoted into the exemptions passes. The fences stop the class of failure that recurred six times (a rendered path unaccounted for, a delete that swallows an exemption) and nothing beyond it.",
-    "This round's first fence was reported green by the subagent that wrote it and was too weak; my own control found that. The review's own lesson applied one level up: a check's author is the worst-placed party to judge whether it can fail, because the control they imagine is the one their design already handles."
+    "This is the second forward merge of this branch and the second changed fingerprint, each for a real reason — #2070's restructure, then main's release taking the contract number. A long-lived branch against a repository that releases daily should expect the number it reserved to be taken, and the collision note's rule (renumber when the published release declaring the number lacks your shapes) is what decides it rather than seniority of the branch.",
+    "The reviewer's round 14 found nothing wrong with the change and everything wrong with the forge state, and said so plainly. That is the cheapest kind of round and it is worth naming: a conflicting head silently stops every later check, so a reviewer reading mergeability before reading code saves the tree a wasted pass."
   ]
 }
