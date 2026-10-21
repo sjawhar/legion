@@ -2,43 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T02:05:00Z",
+  "completed": "2026-10-21T02:30:00Z",
   "proof": [
     {
-      "criterion": "The sizing paragraph asserts no cause it cannot support, and every figure in it says what it is a measurement of.",
-      "surface": "docs/kubernetes.md's issue_volume paragraph, read against the code it describes.",
-      "command": "read at the head; `grep -n 'GOCACHE\\|GOMODCACHE\\|BUN_INSTALL_CACHE_DIR' packages/daemon/internal/runtime/sandbox/manifest.go` at the merge base; the paragraph's own 'Nothing prunes /legion/scratch' sentence fourteen lines above",
-      "observed": "Two claims removed, both false and both mine to remove: that the duplication is being removed (nothing prunes /legion/scratch — the 5.5 GiB came back because a role deleted its own directories by hand) and that already-running volumes fit only once it is gone (no production volume ever held it: a role container at the merge base is told no GOCACHE, no GOMODCACHE and no BUN_INSTALL_CACHE_DIR, and the Go pair is new on the volume at this head). The arithmetic that remains stands without a cause: 2.1 to 2.7 GiB on live volumes (01:45Z) against a worst case of about 8.5 GiB for a six-role issue, inside 20. The 17 GiB figure is marked as this branch's own workspace under an intermediate layout no shipped image produced, with its time (01:32Z).",
-      "headSha": "0085e4b45a48161bad81287d86ad5c52120056e4",
-      "negativeControl": "The superseded sentence is the control: it was built to make the change sound safer, which is why neither its author nor its reader checked it, and the same paragraph contradicted it fourteen lines up."
+      "criterion": "The volume remedy the documentation gives can be executed as written, and says what the naive form costs.",
+      "surface": "The command the sentence names, run against a real Go module cache in this pod: one module downloaded into a scratch GOMODCACHE, then the delete, then the delete the corrected sentence gives.",
+      "command": "GOMODCACHE=<scratch> go mod download golang.org/x/sync; rm -rf <scratch>/mod; then chmod -R u+w <scratch>/mod && rm -rf <scratch>/mod",
+      "observed": "Plain delete: exit 1, 19 `Permission denied` lines, 96 KB of 2.3 MB surviving — and what survives is the extracted module source while the re-downloadable cache/download is what goes, so the naive remedy frees the cheap half and keeps the expensive one. With `chmod -R u+w` first: exit 0, nothing left. The same shape at two other scales: the reviewer's 31 lines and 83 KB of 391 KB, the tester's 11,393 lines and 147 MB on the real volume.",
+      "headSha": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
+      "negativeControl": "The chmod run is the control for the plain one: same directory, same command, one step apart, exit 0 against exit 1 — so the failure is the read-only mode the go command writes and not the rig."
     },
     {
-      "criterion": "The paragraph gives an operator near a full volume something to do, which it did not.",
-      "surface": "The same paragraph, three lines above its statement that ENOSPC on the PVC raises no event at all.",
+      "criterion": "The sentence in the document carries both halves the reproduction establishes, not only the fix.",
+      "surface": "docs/kubernetes.md's issue_volume paragraph.",
       "command": "read at the head",
-      "observed": "It now names the remedy and why it is manual: nothing prunes /legion/scratch, so a volume near full is relieved by deleting the stale /legion/scratch/<role> directories of roles that are not running — which returned 5.5 GiB on this branch's own volume in about a minute. Without it the paragraph removed the alarm (the kubelet eviction) and the reason to look (the PVC raises no event), leaving no step at all.",
-      "headSha": "0085e4b45a48161bad81287d86ad5c52120056e4",
-      "negativeControl": "The ENOSPC sentence three lines on is the control for the need: it is what makes a missing remedy consequential rather than untidy."
+      "observed": "It now reads: `chmod -R u+w` the stale /legion/scratch/<role> directories of roles that are not running and then delete them … the chmod is not caution — the go command writes every extracted module directory read-only (mode 555), so a plain rm -rf exits 1 with a Permission denied line per file and leaves bytes behind, and what it leaves is the extracted source while what it removes is the re-downloadable cache/download: run without the chmod the reclaim frees the cheap half and keeps the expensive one. The non-zero exit is named as the one mercy in that shape, since a scripted remedy fails loudly rather than silently.",
+      "headSha": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
+      "negativeControl": "The superseded sentence is the control: it was true about what to delete and impossible to carry out, which is the documentation form of a check that cannot fail."
     },
     {
-      "criterion": "This issue's volume has room to finish the work.",
-      "surface": "The issue volume at /legion in this pod and the per-role directories under /legion/scratch.",
-      "command": "df -h /legion; du -sh /legion/scratch/*; chmod -R u+w and rm -rf of the three directories named below; df -h /legion",
-      "observed": "01:32Z: 17 GiB used, 3.0 GiB free, 85 per cent, with 14 GiB in /legion/scratch. Removed /legion/scratch/thermo7 (a finished thermonuclear run's Go caches), /legion/scratch/implementer/go (my own Go caches, regenerable) and /legion/scratch/implementer/tmp (my finished rigs), each named before deletion and recreated empty afterwards so the scratch environment still resolves. 01:34Z: 11 GiB used, 8.6 GiB free, 57 per cent.",
-      "headSha": "0085e4b45a48161bad81287d86ad5c52120056e4",
-      "negativeControl": "The directories this pod does not own — the reviewer's four generation caches and the tester's live scratch, about 7.5 GiB — are untouched and still there, which is both the control for the figure and the reason their owners should reclaim them."
+      "criterion": "The round changed nothing executable and nothing else in the document.",
+      "surface": "The working copy's diff and the private-names check.",
+      "command": "jj diff --stat; bash .github/scripts/check-private-names.sh",
+      "observed": "One file, docs/kubernetes.md, +8/-2. check-private-names clean over 4693 files. No Go code, no test, no Dockerfile, so every proof of the earlier rounds stands at this head unre-run and the four required checks' verdicts at 0085e4b45a48 carry.",
+      "headSha": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
+      "negativeControl": "The diff stat is the control for that claim."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md — the invented cause dropped, the conditional dropped, the 17 GiB marked as this branch's own workspace under an intermediate layout, both figures timestamped, and the operator's manual remedy added."
+    "docs/kubernetes.md — the volume remedy gains `chmod -R u+w`, the reason it is not caution, which half of a module cache a plain delete leaves behind, and the note that the non-zero exit makes a scripted remedy fail loudly."
   ],
   "trickyParts": [
-    "Go module cache files are written read-only, so a module cache needs `chmod -R u+w` before `rm -rf` will take it; the first pass left thermo7/mod behind for that reason."
+    "I had already met this failure two rounds earlier — the reclaim's `rm -rf /legion/scratch/thermo7` left thermo7/mod behind and needed a second pass — and recorded it in that round's handoff as a tricky part instead of carrying it into the sentence I then wrote. The knowledge was in the record and not in the instruction."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Both of the sentences corrected tonight were written to make an argument stronger rather than to describe the system — an imported figure that sharpened a finding, and a cause that made this change sound safer. Neither author checked, because each was improving the case. The sentence that makes the argument stronger is the one to re-derive first.",
-    "Every claim in that paragraph about a deployed volume is an inference from this branch's own box, and two in a row were wrong. A claim about production written by roles with no production read should name what it rests on: the 2.1 to 2.7 GiB cites measured live volumes; the cause cited nothing, which is the discriminator a reader can apply."
+    "An instruction is a claim too, and the way to check one is to run it. Both documentation corrections this issue produced were text nobody had executed until someone ran it; this one was wrong in the direction that matters, since an operator who runs the naive delete, sees the error and moves on has reclaimed the re-downloadable half and kept the expensive half.",
+    "The body entry describing this finding was itself a round stale when the reviewer read it — the third such line in that artifact — because an entry is written when a finding is filed and never re-read at the next head. Reading the body at the head is now part of the round rather than trusting what I remember writing."
   ]
 }
