@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -90,6 +91,35 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 
 	state.Daemon = api.DaemonInfo{Project: "LEGION", SchemaVersion: 35, Boots: 2, FirstBootAt: admitted.Add(-time.Hour), StartedAt: admitted.Add(-time.Minute)}
 	state.Admission.Cap = 2
+	// The resolved file of a tmux daemon at every default, as a minimal legion.yaml loads
+	// (internal/config's resolve); the api package's goldens pin the maximal kubernetes shape.
+	state.Settings = api.SettingsOf(config.Config{
+		Project:                                 "LEGION",
+		Port:                                    13370,
+		Bind:                                    "127.0.0.1",
+		StateDir:                                "/var/lib/legion",
+		Runtime:                                 config.Runtime{Name: "tmux"},
+		AdmissionCap:                            2,
+		DaemonURL:                               "http://127.0.0.1:13370",
+		WorkerStreamPort:                        13371,
+		WorkerBootTimeout:                       120 * time.Second,
+		WorkerBootRegistrationDeadlineIntervals: 3,
+		WorkerRPCTimeout:                        5 * time.Second,
+		WorkerStopTimeout:                       10 * time.Second,
+		TreeStopTimeout:                         60 * time.Second,
+		SlowCommandTimeout:                      300 * time.Second,
+		ProbeInterval:                           30 * time.Second,
+		LaunchFailureLimit:                      3,
+		PromptFailureLimit:                      3,
+		PromptRetireLimit:                       2,
+		EnvoyURL:                                "http://127.0.0.1:9020",
+		Gates:                                   config.Gates{Design: config.DesignGateRootIssues},
+		Linger:                                  72 * time.Hour,
+		ReviewRoundCap:                          3,
+		MaxFixAttempts:                          3,
+		ControllerWakeInterval:                  time.Hour,
+		ControllerLaunch:                        config.ControllerLaunchOperator,
+	})
 	state.ControllerLocator = &api.ControllerLocator{Runtime: "kubernetes", External: true, SessionID: "ses_controller", RegisteredAt: admitted.Add(-30 * time.Second)}
 	golden(t, "state-controller-claim.json", state)
 }
