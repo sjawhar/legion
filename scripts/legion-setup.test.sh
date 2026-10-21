@@ -467,7 +467,9 @@ check "exits 0" "$(is "$status" 0)"
 check "it queued for the lock rather than taking the fast path" \
   "$(contains "$out" 'installing this bun.lock')"
 check "and the re-check under the lock found the install finished" \
-  "$(contains "$out" 'another role installed this bun.lock')"
+  "$(contains "$out" 'another role installed this bun.lock while this run waited; nothing to do')"
+check "and it claims no install of its own, which it did not make" \
+  "$(is "$(contains "$out" 'installed this bun.lock.s packages into')" false)"
 check "so no second install ran over the tree the other role's agent is working in" \
   "$(is "$(calls)" 0)"
 check "the marker that role wrote is left exactly as it was" \

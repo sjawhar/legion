@@ -241,6 +241,9 @@ trap 'rm -f "$log" 2> /dev/null' EXIT
 # `/usr/bin/flock` by absolute path, as plugins.go names it, and the worker image's build is held
 # to that exact path.
 LOCK_BUSY=199
+# What the locked shell exits when it found the packages already there and did nothing: a success
+# this shell must not announce as an install it made.
+ALREADY_INSTALLED=201
 
 # `--backend=copyfile`, for the reason plugins.go:155-163 states about this same cache in this
 # same container moments earlier: BUN_INSTALL_CACHE_DIR and the node_modules being written are
@@ -270,15 +273,15 @@ LOCK_BUSY=199
 #   * the marker, so the run that wrote the tree is the run that vouches for it and no waiter
 #     rewrites it;
 #   * the log's truncation, because the log is this run's own file and this is the moment it
-#     starts being written.
+#     starts being written — after the check above, so that a waiter arriving behind a finished
+#     install says so on the role container's own stderr rather than into a log it then deletes.
 # shellcheck disable=SC2016 # the arithmetic belongs to the shell under the lock, not to this one
-locked_install='deadline=$1 marker=$2 digest=$3 log=$4
-exec > "$log" 2>&1
+locked_install='deadline=$1 marker=$2 digest=$3 log=$4 already=$5
 if [ -f "$marker" ] && [ -e node_modules/.bin/biome ] &&
   [ "$(cat "$marker" 2> /dev/null)" = "$digest" ]; then
-  echo "another role installed this bun.lock while this run waited for the cache"
-  exit 0
+  exit "$already"
 fi
+exec > "$log" 2>&1
 left=$((deadline - $(date +%s)))
 [ "$left" -ge 1 ] || left=1
 timeout -k 5 "$left" bun install --backend=copyfile --frozen-lockfile || exit $?
@@ -288,7 +291,7 @@ install_once() {
   [ -d "$cache" ] || rm -f -- "$cache"
   mkdir -p -- "$cache" 2> /dev/null
   BUN_INSTALL_CACHE_DIR="$cache" /usr/bin/flock -w "$(remaining)" -E "$LOCK_BUSY" -- "$cache" \
-    sh -c "$locked_install" sh "$deadline" "$marker" "$digest" "$log"
+    sh -c "$locked_install" sh "$deadline" "$marker" "$digest" "$log" "$ALREADY_INSTALLED"
 }
 
 echo "legion setup: installing this bun.lock's packages into $workspace" >&2
@@ -316,7 +319,13 @@ fi
 tail -n 20 "$log" >&2 2> /dev/null
 
 # The marker is the locked shell's, written where the tree was written and under the lock that
-# made it safe to write; this shell only reports what that one did.
+# made it safe to write; this shell only reports what that one did, and says which of the two
+# things happened rather than claiming the install either way.
+if [ "$status" -eq "$ALREADY_INSTALLED" ]; then
+  clear_report
+  echo "legion setup: another role installed this bun.lock while this run waited; nothing to do" >&2
+  exit 0
+fi
 if [ "$status" -eq 0 ]; then
   clear_report
   echo "legion setup: installed this bun.lock's packages into $workspace" >&2
