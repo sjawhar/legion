@@ -506,16 +506,19 @@ func TestDispatchListenerStaysSingleAndAuthenticated(t *testing.T) {
 // controller, every node's proxy and the front door's Tailscale Serve learn of its removal only
 // after the kubelet has signalled it, while envoy-dispatch closes its HTTP listener as that signal
 // arrives (packages/envoy/cmd/dispatch/shutdown.go). The app's container therefore waits before it
-// is signalled, so a pod still being sent requests still answers them, and the pod's grace period
-// covers that wait with the server's own drain budget untouched.
+// is signalled, and since the kubelet runs that wait inside the pod's one grace period, the pod
+// asks for the wait on top of the server's own drain budget, so the wait costs the server nothing.
+// This pins the pair the deployment renders; the inequality they must satisfy is
+// TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown's.
 func TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
+	const wait = 5
 	template := deploymentPodTemplate(t, m, "example-dispatch")
-	require.EqualValues(t, 30, template["spec"].(map[string]any)["terminationGracePeriodSeconds"])
+	require.EqualValues(t, wait+dispatchServerStopGrace, template["spec"].(map[string]any)["terminationGracePeriodSeconds"])
 	app := podContainer(t, template, "envoy-dispatch")
-	require.Equal(t, map[string]any{"preStop": map[string]any{"exec": map[string]any{"command": []any{"sleep", "5"}}}},
+	require.Equal(t, map[string]any{"preStop": map[string]any{"exec": map[string]any{"command": []any{"sleep", strconv.Itoa(wait)}}}},
 		app["lifecycle"])
 }
 

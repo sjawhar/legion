@@ -174,7 +174,7 @@
       }
     ],
     "serviceAccountName": "example-dispatch",
-    "terminationGracePeriodSeconds": 30,
+    "terminationGracePeriodSeconds": 35,
     "volumes": [
       {
         "csi": {

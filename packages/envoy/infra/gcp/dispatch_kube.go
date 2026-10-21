@@ -291,16 +291,22 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	// proxy and Tailscale Serve, learn of a terminating pod only after the kubelet has sent it
 	// SIGTERM, while envoy-dispatch closes its HTTP listener as that signal arrives
 	// (packages/envoy/cmd/dispatch/shutdown.go). The pre-stop wait holds the container open across
-	// that propagation window, so a pod still being sent requests still answers them. It runs
-	// before the process is signalled, inside the pod's 30 s grace period, so it takes nothing
-	// from the server's own drain budget, and the image (debian:bookworm-slim) carries /bin/sleep.
+	// that propagation window, so a pod still being sent requests still answers them, and the image
+	// (debian:bookworm-slim) carries /bin/sleep. The kubelet runs the hook first and signals the
+	// process only once it returns, both inside the one terminationGracePeriodSeconds, so a wait is
+	// taken out of the server's shutdown unless the pod's budget covers both: the 35 s below is
+	// these 5 s of routing window plus the 30 s cmd/dispatch/shutdown.go builds its shutdown for
+	// (stopGrace = 30 * time.Second). The two values are coupled and neither may be raised alone; a
+	// wait the grace period does not cover spends the document service's five-second reserve and
+	// kills a write still waiting on a lock mid-commit.
 	// Only the app's container waits: the front door and the listener are single-replica Recreate
-	// workloads with no second pod to route to, so a wait there would only lengthen their outage.
+	// workloads with no second pod to route to, so a wait there would only lengthen their outage,
+	// and neither sets a grace period.
 	appPreStop := &corev1.LifecycleArgs{PreStop: &corev1.LifecycleHandlerArgs{
 		Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("sleep"), pulumi.String("5")}},
 	}}
 	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), corev1.PodSpecArgs{
-		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(30), EnableServiceLinks: pulumi.Bool(false),
+		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(35), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{
 			corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources("200m", "256Mi"), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
 		},
