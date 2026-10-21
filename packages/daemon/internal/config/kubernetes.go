@@ -657,7 +657,7 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 		if entry.Kind != yaml.MappingNode {
 			return nil, fmt.Errorf("%s must be a mapping", field)
 		}
-		fields, err := members(entry, field, "name", "secret", "config_map", "projected")
+		fields, err := members(entry, field, append([]string{"name"}, volumeSources...)...)
 		if err != nil {
 			return nil, err
 		}
@@ -668,8 +668,8 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 		switch {
 		case named[volume.Name]:
 			return nil, fmt.Errorf("%s names %s twice", key, volume.Name)
-		case setCount(fields, "secret", "config_map", "projected") != 1:
-			return nil, fmt.Errorf("%s must set exactly one of secret, config_map, projected", field)
+		case setCount(fields, volumeSources...) != 1:
+			return nil, fmt.Errorf("%s must set exactly one of %s", field, strings.Join(volumeSources, ", "))
 		}
 		named[volume.Name] = true
 		var name string
@@ -683,8 +683,12 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 			if name, items, err = readObjectSource(fields["config_map"], field+".config_map"); err == nil {
 				volume.ConfigMap = &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
 			}
-		default:
+		case fields["projected"] != nil:
 			volume.Projected, err = readProjected(fields["projected"], field+".projected")
+		case fields["persistent_volume_claim"] != nil:
+			volume.PersistentVolumeClaim, err = readClaimSource(fields["persistent_volume_claim"], field+".persistent_volume_claim")
+		default:
+			volume.NFS, err = readNFSSource(fields["nfs"], field+".nfs")
 		}
 		if err != nil {
 			return nil, err
@@ -692,6 +696,62 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 		volumes = append(volumes, volume)
 	}
 	return volumes, nil
+}
+
+// volumeSources are the sources a `pod.volumes` entry may name, exactly one each: an object of the
+// daemon's namespace (secret, config_map, projected), or an existing share — a
+// PersistentVolumeClaim of the namespace, or an NFS export the nodes reach.
+var volumeSources = []string{"secret", "config_map", "projected", "persistent_volume_claim", "nfs"}
+
+// readClaimSource is a PersistentVolumeClaim source: the name of a claim the operator made in the
+// daemon's namespace, a DNS-1123 subdomain as the API server requires of a claim's name. Whether a
+// pod mounts it read-only is its `volume_mounts` entry's (read_only); the source sets nothing of
+// its own.
+func readClaimSource(value *yaml.Node, key string) (*corev1.PersistentVolumeClaimVolumeSource, error) {
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "name")
+	if err != nil {
+		return nil, err
+	}
+	name, err := requiredString(fields["name"], key+".name", "")
+	if err != nil {
+		return nil, err
+	}
+	if len(validation.IsDNS1123Subdomain(name)) != 0 {
+		return nil, fmt.Errorf("%s.name %q is no PersistentVolumeClaim's name: a claim is named with lowercase letters, digits, '-' and '.', starting and ending with a letter or digit, in at most 253 characters", key, name)
+	}
+	return &corev1.PersistentVolumeClaimVolumeSource{ClaimName: name}, nil
+}
+
+// readNFSSource is an NFS source: the server, an IP address or a DNS name the nodes resolve, with no
+// scheme, port, path or brackets (the kubelet mounts `<server>:<path>` and brackets an IPv6
+// address itself), and the export's clean absolute path. Whether a pod mounts it read-only is its
+// `volume_mounts` entry's (read_only).
+func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error) {
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "server", "path")
+	if err != nil {
+		return nil, err
+	}
+	server, err := requiredString(fields["server"], key+".server", "")
+	if err != nil {
+		return nil, err
+	}
+	if net.ParseIP(server) == nil && len(validation.IsDNS1123Subdomain(strings.ToLower(server))) != 0 {
+		return nil, fmt.Errorf("%s.server %q must be an IP address or a DNS name, with no scheme, port, path or brackets", key, server)
+	}
+	exportPath, err := requiredString(fields["path"], key+".path", "")
+	if err != nil {
+		return nil, err
+	}
+	if !path.IsAbs(exportPath) || path.Clean(exportPath) != exportPath {
+		return nil, fmt.Errorf("%s.path %s must be a clean absolute path", key, exportPath)
+	}
+	return &corev1.NFSVolumeSource{Server: server, Path: exportPath}, nil
 }
 
 // setCount is how many of names fields sets.
