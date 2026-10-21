@@ -2,53 +2,85 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-69",
-  "completed": "2026-10-21T00:05:00Z",
-  "round": 3,
-  "answeredFailures": [
-    "Failure 1: the corrected `du` bullet ended '`du -x` and `df -x` are the ones to avoid here', putting `df -x` beside `du -x` as a one-filesystem walk. GNU df has no such flag. Fixed at 04589b7aa2ec80e06846eeeac347476d6df3c44a: `du -x` stays named as the blind walk, which is measured, and the `df -x` half is replaced by the real caveat — df answers for the filesystem that holds the path it is given, so a path under a volume measures that volume and says nothing about the 1 GiB container-filesystem budget, while a path the container filesystem itself holds names `/`, the budgeted one.",
-    "Failure 2: the bullet closed 'Verified twice, in two different role containers of this pod, and it is how the 4.4 GiB of Go caches quoted above was found.' The attribution is not in the record. Fixed: the clause is deleted and nothing replaces it; 'Verified twice, in two different role containers of this pod.' stands, and the 4.4 GiB figure keeps its place in the Evidence paragraph above, which is what the record does support.",
-    "The same `df -x` clause was in the pull request body's `E2E (implementer)` line, which squashes into main's commit message, and is corrected there too.",
-    "No permanent test, for the reasons the tester, the architect and this role have already recorded: a grep over prose is a source-text test this repository's conventions forbid, and the repository has no checker over docs/solutions/."
+  "completed": "2026-10-21T00:50:00Z",
+  "round": 4,
+  "answeredReviewFindings": [
+    "Important (Evidence attribution): the note sent a reader to dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05 for an implementer-container measurement, and that comment records the planner container's. Fixed at abac0eb5af69edede61ef1a7c626fcaefb563ff2: the comment is now cited for what it holds — the first in-pod reading, taken at 22:20Z in this issue's planner container, devices 83 for /tmp, /home/legion and ~/.cache, 56 for .config, 97 for /var/run/legion/state, 87 for /legion, du -sx / at 42 MB — and the bullets' figures are attributed to this issue's implementer container, recorded on sjawhar/legion#2088 and its handoffs and reproduced in the tester's and reviewer's containers, with the overlay-per-container reason the device numbers differ. Thread PRRT_kwDORFy7ds6uk1jB answered and resolved.",
+    "Important (not charged is not free): the in-memory emptyDirs were listed with no word that a write there spends the container's memory limit. Fixed: a paragraph after the not-charged list, with both readings and the per-role limits. Thread PRRT_kwDORFy7ds6uk1jG answered and resolved.",
+    "Minor (front matter): \"sjawhar/legion#2088\" added as the last related_issues entry. Thread PRRT_kwDORFy7ds6uk1jJ answered and resolved."
   ],
+  "auditOfEveryClaim": {
+    "why": "The architect's rule for this push, after three rounds that each failed the same way: run every command the note names in this container, open every citation in full, and delete any sentence that survives the question 'did I measure or open this?' unanswered.",
+    "commandsRun": [
+      "go env GOMODCACHE GOCACHE -> /home/legion/go/pkg/mod and /home/legion/.cache/go-build (both under the home directory, as the charged list says; the figures are now in the bullet).",
+      "grep ' /tmp ' /proc/mounts -> no line.",
+      "stat -c '%n dev=%d' over all twelve listed paths -> /tmp, /home/legion, /home/legion/.cache, /home/legion/.local/state all 114; /legion 118; /legion/feed 121; sessions 134; /home/legion/.config 56; /var/run/legion/state 128, private 130, gh 124, launcher 127.",
+      "df -k --output=used / around a 200 MiB dd under /tmp -> 38,280 -> 243,080 -> 38,280 KiB, a delta of exactly 204,800 KiB.",
+      "stat -c 'blocks=%b' /tmp/probe -> 409600; du -sk /tmp/probe -> 204800; du -sk /tmp -> 217413; du -sx -k / -> 42348 unchanged; du -x -a -d1 -k / -> 0 for /tmp; du -sh /tmp -> 213M.",
+      "df -k --output=target,used /legion /home/legion/.cache / -> /legion 663016; / 243080 for both of the other two.",
+      "df -x -> df: option requires an argument -- 'x'.",
+      "printenv TMPDIR -> unset.",
+      "dd bs=1M count=100 into /var/run/legion/private with /sys/fs/cgroup/memory.current -> 766,550,016 to 871,407,616 bytes, exactly the 104,857,600 written; free -k shared 102,520 KiB.",
+      "ls /var/run/secrets/kubernetes.io -> No such file or directory; kubectl get --raw /api -> connection to localhost:8080 refused.",
+      "TMPDIR=<dir> apt-get download hello -> E: Unable to locate package (the image carries no apt lists), which is why the staging claim could not be verified here and is attributed instead."
+    ],
+    "citationsOpened": [
+      "dispatch://INFRA-51/comment/c347b4be-f447-40ef-b80f-b79686e74f9c (the cluster read): carries the eleven eviction events, every one naming the implementer container and the 1Gi limit, the whole-pod eviction with infra-64's architect killed at once, and the '/tmp is memory-backed' sentence this change corrects. It names no nodes/proxy refusal.",
+      "dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05 (the planner's reply): the planner container, 22:20Z, devices 83/56/97/87, du -sx / 42 MB. Not the implementer's numbers — this is review finding 1.",
+      "dispatch://INFRA-51/comment/1a7ce2b2-076d-4609-8ea0-fcda1e35a5bf: 1.5 GiB module cache, 2.9 GiB build cache, roughly 4.4 GiB, 368 MiB after relocation; names no command, which is why round 3 deleted the du attribution.",
+      "packages/daemon/internal/runtime/sandbox/testdata/golden/root.json: the six role containers mount /legion, /legion/feed, the sessions directory, /home/legion/.config and four /var/run/legion/* and no /tmp; the Memory-medium tmp volume is workspace-fetch's with TMPDIR=/tmp; no role container has a TMPDIR entry; launcher-<role> and gh-<role> are Secret volumes; automountServiceAccountToken is false and no ServiceAccount is named.",
+      "packages/daemon/internal/config/kubernetes.go defaultResources: ephemeral storage 20Gi implementer and tester, 10Gi the others, request 1Gi each; memory 1Gi architect, planner, merger, 4Gi reviewer, 6Gi implementer and tester.",
+      "packages/daemon/internal/runtime/sandbox/live_lifecycle_test.go gkeEphemeralStorageClamped: the doc comment records the clamp confirmed live 2026-10-17 against every role container of a real production issue pod.",
+      "packages/daemon/internal/runtime/sandbox/live_operator_test.go:44-49: the live assertion that a pod runs with the operator's ServiceAccount and automountServiceAccountToken false.",
+      "docs/kubernetes.md:1188-1194 and :1703-1705: ephemeral storage is what a role container writes outside every volume, the kubelet evicts the pod of the container that passed it, and a role container mounts no /tmp.",
+      "docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md: the Extends target exists and carries the apt-get download / dpkg-deb -x recipe and the three cache variables.",
+      "sjawhar/legion#2083: carries the 299 passed, 21 skipped, 0 failed in 16.1 m figure verbatim and the sentence that the suite runs in a worker pod once Postgres, the browsers and TMPDIR live on the issue volume rather than /tmp — the record the TMPDIR bullet now attributes its staging claim to."
+    ],
+    "sentencesDeleted": [
+      "'nobody inside a role container can read the kubelet's own per-container accounting, because the cluster refuses nodes/proxy'. No record carries the nodes/proxy reason and a container with no API access cannot tell a refusal from an absence. Replaced by what is shown: the pod sets automountServiceAccountToken false and names no ServiceAccount, /var/run/secrets/kubernetes.io does not exist, kubectl answers connection refused, so neither the accounting nor the event is readable from inside — measure with df and du, read the event from the cluster.",
+      "'apt-get download, dpkg-deb -x and the Playwright browser install all stage through TMPDIR', asserted flatly. This change never ran it and cannot here. Now attributed to INFRA-44, which paid for it, with sjawhar/legion#2083 as the record; the measured half (no role container sets TMPDIR, so they default to the charged /tmp) is unchanged.",
+      "'df -k --output=used / reads 14,392 KiB at rest' and 'du -sk /tmp prints 217364', both absolute readings that do not reproduce once the container holds more. Now stated as readings at their moment, with the delta named as what reproduces (a later run in this container read 38,280 -> 243,080 -> 38,280 KiB for the same probe) and the directory total explained as the probe plus whatever else the directory holds."
+    ]
+  },
   "proof": [
     {
-      "criterion": "Failure 1: the note no longer names a df flag that does not exist, and the caveat that replaces it is the measured one.",
-      "surface": "A live Legion role container — this issue's own implementer container in its Agent Sandbox pod, the same surface the note is about.",
-      "command": "df -x; df -x / | wc -l; df -k --output=target,used /legion /home/legion/.cache /",
-      "observed": "`df -x` prints `df: option requires an argument -- 'x'` and `Try 'df --help' for more information.` — GNU df's -x is --exclude-type and takes an argument, so there is no one-filesystem df. `df -x /` is read as 'exclude filesystems of type /', excludes nothing and prints 21 lines, the header and every mount of the container. `df -k --output=target,used` names `/legion` for /legion (652476 KiB) and `/` for both /home/legion/.cache and / (38176 KiB each, the same figure), which is exactly the caveat the note now states: df answers for the filesystem holding the path, so a path under a volume measures that volume while a path the container filesystem holds measures the budget.",
-      "headSha": "04589b7aa2ec80e06846eeeac347476d6df3c44a",
-      "negativeControl": "The architect's own example for this clause was that `df ~/.cache` says nothing about the budget. Measured, it does: /home/legion/.cache and / report the same mount point and the same used figure, because ~/.cache is on the container filesystem. The note therefore states the volume case (/legion) and not that example — the measurement refused half the instruction, which is the whole point of the clause it replaces, and the architect was told.",
-      "deviationFromInstruction": "The architect asked for 'df /legion or df ~/.cache says nothing about the 1 GiB budget'. Only the /legion half is true here, so the note carries that half alone."
+      "criterion": "Review finding 1: every citation the note makes holds the figures the note says it holds.",
+      "surface": "The cited records themselves, opened in full through the Dispatch CLI and the repository, and the note at the pushed head.",
+      "command": "dispatch read --ref dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05; dispatch read --ref dispatch://INFRA-51/comment/c347b4be-f447-40ef-b80f-b79686e74f9c; dispatch read --ref dispatch://INFRA-51/comment/1a7ce2b2-076d-4609-8ea0-fcda1e35a5bf; gh pr view 2083 --repo sjawhar/legion --json body; grep -n -F 'planner container' <note>",
+      "observed": "The 0ce1448c comment says 'Measured at 22:20Z inside the planner container of dispatch://INFRA-69's pod' and gives devices 83, 56, 97 and 87 with du -sx / at 42 MB — none of the 114/118/128/130/124 or the df figures the note's bullets carry. The note now cites it for exactly that reading and attributes the bullets to this issue's implementer container and to this pull request. The cluster read c347b4be carries the eleven events and the whole-pod eviction; 1a7ce2b2 carries the 4.4 GiB and no command; #2083 carries the 299-passed figure and the TMPDIR sentence the bullet now attributes.",
+      "headSha": "abac0eb5af69edede61ef1a7c626fcaefb563ff2",
+      "negativeControl": "The same grep over the previous head (jj file show -r 568499f769f4) finds the old sentence attributing the measurement to the implementer container at that comment, and finds no 'planner container' — so the check distinguishes this head from the one the reviewer failed rather than passing on any text."
     },
     {
-      "criterion": "Failure 2: the note attributes no method the record it cites does not record.",
-      "surface": "The cited record itself, read through the Dispatch CLI, and the note at the pushed head.",
-      "command": "dispatch read --ref dispatch://INFRA-51/comment/1a7ce2b2-076d-4609-8ea0-fcda1e35a5bf; grep -n -F 'was found' <note>; grep -c -F '4.4 GiB' <note>",
-      "observed": "The comment says 'Measured from inside a live implementer pod of dispatch://INFRA-57's tree, at 22:13Z, rather than inferred from eviction text', and gives about 1.5 GiB of Go module cache, about 2.9 GiB of Go build cache, roughly 4.4 GiB against the 1 GiB limit, and 368 MiB after relocation. It names no command anywhere in its body. The note's attribution clause is gone (`grep -F 'was found'` finds nothing) and the 4.4 GiB figure still appears once, in the Evidence paragraph that cites the record for the sizes alone.",
-      "headSha": "04589b7aa2ec80e06846eeeac347476d6df3c44a",
-      "negativeControl": "The grep for the deleted clause over the previous head (`jj file show -r 925cac4e9994`) still finds it, so the check distinguishes this head from the one the tester failed rather than passing on any text; and `grep -c -F '4.4 GiB'` is still 1, so the fix removed the attribution without taking the figure with it."
+      "criterion": "Review finding 2: a write to an in-memory emptyDir spends the container's memory limit, and the note now says so.",
+      "surface": "A live Legion role container — this issue's implementer container — reproducing the reviewer's reading in a second container.",
+      "command": "cat /sys/fs/cgroup/memory.current; dd if=/dev/zero of=/var/run/legion/private/probe bs=1M count=100; cat /sys/fs/cgroup/memory.current; free -k; rm -f /var/run/legion/private/probe; cat /sys/fs/cgroup/memory.current",
+      "observed": "memory.current 766,550,016 -> 871,407,616 bytes for the 100 MiB write, a delta of exactly 104,857,600, with free -k reporting shared at 102,520 KiB; the removal returns it to 868,184,064. The reviewer's container read 708,227,072 -> 813,051,904 for the same write. The note now carries both readings, the OOM consequence, and the per-role memory limits from defaultResources.",
+      "headSha": "abac0eb5af69edede61ef1a7c626fcaefb563ff2",
+      "negativeControl": "The ephemeral-storage instrument is the control: the same class of write under /tmp moves df -k --output=used / by exactly its size while leaving every volume alone, and this write moves memory.current while leaving / alone — the two budgets are separately observable, so the new paragraph is not a restatement of the storage finding.",
+      "deviationFromReview": "The reviewer attributed its own reading to '.the reviewer container'; the note instead says 'a second role container of the same pod' and points both readings at sjawhar/legion#2088, because a reader cannot open a reviewer's handoff — retro deletes .legion/INFRA-69/ before the merge."
     },
     {
-      "criterion": "The change is still documentation only and the repository's own checks pass at the head.",
-      "surface": "The workspace at the pushed head and the pull request on GitHub.",
-      "command": "jj -R \"$LEGION_WORKSPACE\" diff --name-only (before the split); jj -R \"$LEGION_WORKSPACE\" diff --git; grep -n -F 'df -x' <note>; grep -c -F 'du -x' <note>; bash .github/scripts/check-private-names.sh; gh run list --commit 04589b7aa2ec80e06846eeeac347476d6df3c44a",
-      "observed": "The round's diff is one file and one hunk, inside the `du` bullet; nothing else in the repository changed. `grep -F 'df -x'` finds nothing; `grep -c -F 'du -x'` is 5, so the blind-walk finding the tester verified is intact. check-private-names.sh exits 0 over 4688 files. CI at this head: Tests run 39517199481; PR Title run 39517199454 — the pull request's CI line carries their settled jobs.",
-      "headSha": "04589b7aa2ec80e06846eeeac347476d6df3c44a",
-      "negativeControl": "check-private-names.sh is the only required lint lane that can bite a markdown file, and it fails any text naming a *.ts.net host; the note cites dispatch:// references only, and a grep for ts.net or a Dispatch web address over it returns nothing."
+      "criterion": "The audit the architect ordered: every command the note names runs here and every citation holds what the note says, or the sentence is gone.",
+      "surface": "This role container and the cited records; the full sweep is in auditOfEveryClaim above.",
+      "command": "the eleven command groups and eleven citations listed in auditOfEveryClaim",
+      "observed": "Every command reproduces. Three sentences did not survive and are recorded in auditOfEveryClaim.sentencesDeleted: the nodes/proxy reason, the flat TMPDIR staging assertion, and two absolute figures restated as deltas. grep -F 'nodes/proxy' over the note now finds nothing, 'sjawhar/legion#2083' appears twice (front matter and the TMPDIR bullet), '/home/legion/go/pkg/mod' appears in the charged list, and all twelve listed paths are still present. check-private-names.sh exits 0 over 4689 files; the diff is one file.",
+      "headSha": "abac0eb5af69edede61ef1a7c626fcaefb563ff2",
+      "negativeControl": "The audit found defects rather than confirming the note, which is what makes it a check: three sentences were deleted and two figures restated. A sweep that had passed everything would have been evidence that the question was not being asked."
     }
   ],
   "filesChanged": [
-    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — one hunk inside the `du` bullet: the `df -x` half of the closing advice replaced by the measured df caveat, and the clause attributing the 4.4 GiB discovery to `du` deleted."
+    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — six hunks: the front-matter pull request; the Go-cache bullet showing go env's output; the memory paragraph after the not-charged list; the TMPDIR bullet's staging claim attributed to INFRA-44 and sjawhar/legion#2083; the Evidence attribution split into the planner's recorded reading and the implementer's figures; the df and du figures restated as deltas; and the closing sentence rewritten from what this container can show."
   ],
   "trickyParts": [
-    "Both of this round's defects entered the same way the note's original error did: a plausible sentence written beside a measured one. `df -x` was carried over from the instruction this role worked from, and the `du` attribution was an inference from a record that gives sizes and no command. The only thing that caught either was running the command and reading the record.",
-    "The replacement clause could not be written as instructed: `df ~/.cache` does report the budget here, because ~/.cache is on the container filesystem. The note states the /legion case alone."
+    "Four rounds, five defects, one class: a sentence nobody had run or opened sitting beside sentences someone had. Two were the architect's by instruction (df -x, and df ~/.cache saying nothing about the budget), one a citation that named the wrong container, one an inherited mechanism this change never ran, and one an instrument claim that was true of du -x and false of du. Every one was caught by running the command or opening the record, and none by reading the prose. That is the finding this issue should leave behind, and it belongs in retro.",
+    "A note cannot cite a Legion handoff: retro deletes .legion/<issue>/ before the merge, so a figure whose only home is implement.json becomes unopenable the moment the change lands. Anything a reader must be able to check belongs in the pull request body, which survives as main's commit message, or in a Dispatch record."
   ],
   "deviations": [
-    "The architect's instruction named `df /legion or df ~/.cache` as the paths that say nothing about the budget. Measured in this container, /home/legion/.cache and / report the same mount point and the same used figure, so only the /legion half is true and the note carries that half alone. Reported to the architect with the measurement."
+    "The reviewer suggested attributing its memory reading to the reviewer container; the note says 'a second role container of the same pod' and points both readings at sjawhar/legion#2088, since the reviewer's handoff will not exist after retro."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Two follow-ups stay filed and out of this diff: dispatch://INFRA-70 (the three out-of-scope carriers of the corrected claim) and dispatch://INFRA-71 (`bunx biome check .` resolving an unrelated registry package in a container with no node_modules)."
+    "Two follow-ups stay filed and out of this diff: dispatch://INFRA-70 (the three out-of-scope carriers of the corrected claim) and dispatch://INFRA-71 (bunx biome check . resolving an unrelated registry package in a container with no node_modules)."
   ]
 }
