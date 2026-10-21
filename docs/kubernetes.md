@@ -1224,15 +1224,18 @@ line of one deployment, so the apply this change needs is the image digest alone
 deployment edit. The new size reaches the volumes created after that apply and no others: it
 rides in the Sandbox's `volumeClaimTemplates`, evaluated when the claim is created, and an
 issue's Sandbox outlives its pods, so every issue already running keeps the 20 GiB it was created
-with — which fits once the duplication is gone, and does not before it. The issue this change was
-written on reached **17 GiB of its 20, 3.0 GiB free** (measured 01:32Z on 2026-10-21), with 14 GiB
-of that in six private per-role copies of the Go build and module caches, the layout this change
-deletes; removing one role's copy returned 5.5 GiB in a minute. The shared layout's worst case for
-an issue that works all six roles is about 8.5 GiB — one temporary directory, one cache home, one
-data home, one bun install cache and one Go pair — against live volumes measured at 2.1 to 2.7 GiB
-of their 20 (01:45Z). So what was filling the disk is the duplication, and the already-running
-volumes fit because it is being removed. Size it knowing that moving these
-writes onto
+with, and gains the shared scratch of this layout rather than losing anything it already holds.
+That fits by the arithmetic alone: the shared layout's worst case for an issue that works all six
+roles is about 8.5 GiB — one temporary directory, one cache home, one data home, one bun install
+cache and one Go pair — against live volumes measured at 2.1 to 2.7 GiB of their 20 (01:45Z on
+2026-10-21). A larger figure is on record and is not a production one: the volume this change was
+written on reached **17 GiB of its 20, 3.0 GiB free** (01:32Z on 2026-10-21) with 14 GiB of that
+in six per-role copies of the Go build and module caches — an intermediate layout no shipped image
+ever produced, since a role container at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
+no `BUN_INSTALL_CACHE_DIR`, and the Go pair is new on the volume here. The remedy for a volume
+near full is manual, because nothing prunes: delete the stale `/legion/scratch/<role>` directories
+of roles that are not running, which returned 5.5 GiB on that volume in about a minute. Size it
+knowing that moving these writes onto
 the volume removes the alarm they used to ring: an ephemeral-storage overrun was a kubelet
 eviction with a pod event naming the container, where ENOSPC on the PVC is no event at all and
 surfaces as unexplained failures in jj, in the session transcripts, in `workspace-init` and in
