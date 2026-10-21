@@ -1,6 +1,7 @@
 package api
 
 import (
+	"maps"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -276,9 +277,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			Resources:      roleResourcesSettingsOf(block.RepositoryCache.Resources),
 		},
 	}
-	for label, value := range block.Scheduling.NodeSelector {
-		settings.Scheduling.NodeSelector[label] = value
-	}
+	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)
 	for i, toleration := range block.Scheduling.Tolerations {
 		settings.Scheduling.Tolerations[i] = TolerationSettings{Key: toleration.Key, Operator: toleration.Operator, Value: toleration.Value, Effect: toleration.Effect}
 	}
@@ -309,9 +308,7 @@ func roleResourcesSettingsOf(reservation config.RoleResources) RoleResourcesSett
 // gitHubAppSettingsOf is app's id and installations, and nothing of its key.
 func gitHubAppSettingsOf(app config.GitHubApp) GitHubAppSettings {
 	settings := GitHubAppSettings{AppID: app.AppID, Installations: make(map[string]string, len(app.Installations))}
-	for owner, id := range app.Installations {
-		settings.Installations[owner] = id
-	}
+	maps.Copy(settings.Installations, app.Installations)
 	return settings
 }
 

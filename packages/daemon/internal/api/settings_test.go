@@ -232,11 +232,12 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	// (b) runtime.kubernetes, and one App.
 	runtimeKeys := keysOf(t, top["runtime"])
 	assertKeys(t, "settings.runtime", runtimeKeys, []string{"name", "kubernetes"})
-	assertKeys(t, "settings.runtime.kubernetes", keysOf(t, runtimeKeys["kubernetes"]), []string{
+	kubernetesKeys := keysOf(t, runtimeKeys["kubernetes"])
+	assertKeys(t, "settings.runtime.kubernetes", kubernetesKeys, []string{
 		"namespace", "image", "storage_class", "issue_volume", "scheduling", "resources", "session_store",
 		"agent_secrets", "plugins", "setup", "repository_cache",
 	})
-	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, keysOf(t, runtimeKeys["kubernetes"])["repository_cache"]), []string{
+	assertKeys(t, "settings.runtime.kubernetes.repository_cache", keysOf(t, kubernetesKeys["repository_cache"]), []string{
 		"volume", "refresh_minutes", "retain_hours", "resources",
 	})
 	apps := keysOf(t, top["github_apps"])
