@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-791",
+  "completed": "2026-10-21T16:40:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2096",
+  "headSha": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
+  "proof": [
+    {
+      "criterion": "Done when 1 and 3 (the daemon side): GET /legion/v1/state names max_fix_attempts, worker_boot_timeout_seconds and the rest of the daemon's non-secret settings as its legion.yaml sets them, with no App key in the answer.",
+      "surface": "The real `legion` binary built from the head (`go build ./cmd/legion`), booted in the implementer's pod over an embedded Postgres 16.4 (zonky jar, port 15791) as Stage 1 boots it: a legion.yaml with project, port 15794, postgres_dsn carrying a planted password, state_dir, operator_token_file, max_fix_attempts: 5, worker_boot_timeout_seconds: 90, projects: {FIXTURE: {}}, github_apps with inline PEM fixtures and one installation; tmux and omp are stubs (no agent launched); the PEM is no key and the password opens nothing (trust auth).",
+      "command": "curl -s http://127.0.0.1:15794/legion/v1/state | jq -e '.settings | has(\"max_fix_attempts\") and .max_fix_attempts == 5 and .worker_boot_timeout_seconds == 90 and (has(\"postgres_dsn\") | not) and (has(\"operator_token_file\") | not) and (.github_apps.implement | keys == [\"app_id\",\"installations\"])'; curl -s http://127.0.0.1:15794/legion/v1/state | jq -e '[.. | strings | select(test(\"BEGIN|PRIVATE KEY|postgres://|<planted password>|<PEM fixture body>\"))] | length == 0'; grep -c -E 'BEGIN|PRIVATE KEY|postgres://|<planted password>' state.json; jq -e '[.settings | .. | select(. == null)] | length == 0' state.json; ./legion state --json --port 15794 > state-cli.json && bun run parse.ts state-cli.json (LegionStateResponse.parse from packages/contracts/src/legion-api.ts)",
+      "observed": "true; true; 0; true; `strict parse OK: settings.max_fix_attempts = 5 worker_boot_timeout_seconds = 90`. The served settings block: 33 top-level keys (project, port, bind, state_dir, runtime {name: tmux}, admission_cap 4, daemon_url, worker_stream_port, omp_launch_prefix [], provider_keys [], the seven *_seconds durations, the four counts, envoy_url, nats_urls [], projects {FIXTURE: {merge: {by_hand: []}, slack_channels: []}}, gates, github_apps {implement: {app_id: \"1001\", installations: {example: \"2001\"}}, review: {app_id: \"1002\", installations: {}}}, linger_hours 72, production_check_hours 336, review_round_cap 3, max_fix_attempts 5, worker_backends {}, controller operator, capabilities {decided: {}}); no postgres_dsn, no *_file key, no private_key. The plain `legion state` view is unchanged (its four header lines). The same predicates held at the pre-merge head 818b9654 (port 15792) and at the merge head defed47c (port 15793).",
+      "headSha": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
+      "negativeControl": "(a) The production LEGION daemon before this change, read from this pod: `curl -s \"$LEGION_DAEMON_URL/legion/v1/state\" | jq 'has(\"settings\")'` -> false (daemon.project LEGION, boot 56). (b) The LEGION controller's own `read_state`, asked over its role topic (Envoy id a33d4681ca927eb621f16d4b12871b29) and answered at 2026-10-21T15:30:46Z (id b74e5adff9a887cc0b345a694d7537d4): \"No top-level key named `settings`\"; its top-level keys were daemon, admission, issues, pendingStatusWrites, heldOutboxRows, strandedClaims, controllerLocator, agentSecretsLogin, capabilities, repositories, meta. (c) The served body with `settings` deleted -> `LegionStateResponse.safeParse(...).success` false; with max_fix_attempts as the string \"5\" -> false. (d) The branch's first fixture shape (`projects.FIXTURE.repo: example/fixture`) is refused by main's loader at boot: `legion start: Unknown key \"projects.FIXTURE.repo\": the project's repositories are Dispatch's mapping`, so the fixture became `FIXTURE: {}` in the proof and in Stage 1."
+    },
+    {
+      "criterion": "Done when 2: no operator action is given to the controller; the controller's legion tool operations stay read_state and set_status, and no claim or restart route is added under packages/daemon/internal/api/.",
+      "surface": "The pull request's diff against main (jj diff --from main@origin --to legion/LEGION-791).",
+      "command": "jj diff --from main@origin --to legion/LEGION-791 --git -- packages/daemon/internal/api/server.go | grep -c HandleFunc; jj diff --from main@origin --to legion/LEGION-791 --name-only | grep -c 'packages/pi-legion/src/tools.ts'",
+      "observed": "server.go has no diff in this pull request (0 HandleFunc lines, the file is not in the diff); packages/pi-legion/src/tools.ts is not in the diff (0). The only new file under packages/daemon/internal/api/ is settings.go, a pure projection with no route.",
+      "headSha": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
+      "negativeControl": "The same grep over the diff of main's own contract-32 change (59214edf's predecessor, sjawhar/legion#1986) does add routes under internal/api/; the predicate is not vacuous. Also: `jq -e '.settings' state.json` on the pre-change production daemon answers null (the field does not exist there), so the check distinguishes the heads."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/api/settings.go (new): api.Settings and nested types, SettingsOf allowlist",
+    "packages/daemon/internal/api/settings_test.go (new): TestSettingsOfClassifiesEveryConfigField (reflect walk over config.Config and every nested config type; emitted/excluded tables), TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret, TestSettingsOfAMinimalConfigurationResolvesTheDefaults",
+    "packages/daemon/internal/api/state.go: State.Settings (required)",
+    "packages/daemon/internal/api/version.go: DaemonAPIVersion 35 and its entry",
+    "packages/daemon/internal/api/state_golden_test.go: settingsFixtureFile (maximal kubernetes legion.yaml), minimalSettingsFile, loadSettingsFile/settingsFixtureConfig/minimalSettingsConfig, populatedState(t)",
+    "packages/daemon/internal/daemon/daemon.go: source.settings built once in serve, assigned in State()",
+    "packages/daemon/internal/daemon/daemon_test.go: TestTheStateCarriesTheDaemonsSettingsAndNoSecret",
+    "packages/daemon/internal/projection/state_golden_test.go: state.Settings from config.Load of a minimal file",
+    "packages/contracts/fixtures/daemon-api/{state,state-stage3,state-operator-claim,state-controller-claim,version}.json: regenerated",
+    "packages/contracts/src/legion-api.ts: legionSettings (z.looseObject, two typed keys), LegionStateResponse.settings required",
+    "packages/contracts/src/legion-api.test.ts: the settings contract test",
+    "packages/pi-legion/package.json: daemonApiVersion 35; AGENTS.md contract prose; CHANGELOG.md entry; extensions/legion.test.ts, extensions/legion-phase-stall-omp.test.ts, scripts/skill-scenarios/daemon-standin.ts: settings on the typed state literals",
+    "packages/claude-envoy/package.json: daemonApiVersion 35; CHANGELOG.md; dist/envoy-channel.js and legion/skills/legion-controller/SKILL.md rebuilt by `bun run build`",
+    "scripts/e2e/stage1-skeleton.sh: fixture plants max_fix_attempts, projects: {FIXTURE: {}}, github_apps with PEM fixtures; a jq assertion on the served settings",
+    "skills/legion-controller/SKILL.md, docs/site/src/content/docs/legion/running-legion.md, AGENTS.md, docs/kubernetes.md: name the field",
+    ".legion/LEGION-791/plan.json: six lines redacted (the private project key, which check-private-names refuses)"
+  ],
+  "trickyParts": [
+    "Main moved 90 commits past the branch's fork point while the plan was written: contracts 30-34 were taken (per-owner credentials, the issue's repository, the repository cache with a `repositories` state field, LEGION-781, INFRA-31). GitHub reported the pull request CONFLICTING at its first push, so the base was brought in by one forward merge (defed47c, never a rebase); the contract this change takes is 35, not the plan's 30. Fingerprint 9768c1fd... -> 820213fe..., changed (PR comment 6320513520).",
+    "main removed config.Project.Repo (a project's repositories are Dispatch's mapping), so `projects.<KEY>.repo` is not a settings key and a fixture naming it is refused at load; the plan's table listed `repo?`.",
+    "Four legion.yaml keys main added since the fork are emitted as settings so the allowlist test stays green: production_check_hours (hours, like linger_hours), worker_backends ({<role>: <backend>}), runtime.kubernetes.setup (argv, [] when none, as omp_launch_prefix), runtime.kubernetes.repository_cache {volume, refresh_minutes, retain_hours, resources}. None is a credential, a credential source or a credential file path.",
+    "packages/claude-envoy (new on main) pins the contract in its manifest, its test holds it to version.json, and its committed dist/ bundle inlines the number and the strict state reader; check-dist runs in CI's Legion Envoy and Contracts workflow for any packages/contracts change. Bumped to 35 and rebuilt (the simplify pass's reviewer found it).",
+    "Stage 1's fixture project key is FIXTURE, not the daemon's own project: readTmux resolves host git/jj and the clone credential only for cfg.Projects[cfg.Project], so the live proof still launches nothing and needs nothing new; github_apps and projects must come together (resolveStage3).",
+    "The planner's committed plan.json named the deployment repository's Dispatch project key six times; the required lint job's check-private-names refuses it, so a commit of this round redacts those lines in place (the Dispatch plan document is the planner's record).",
+    "The pod's shared embedded Postgres database carries a stale LEGION-1 issue row from an earlier run that fails two internal/daemon state tests on pristine main too; the lanes were run against a fresh database (legion791_fresh) and pass there.",
+    "skills/legion-controller/SKILL.md is held under 500 lines by pi-legion's skills-guard test; main's file is at 498, so the read_state clause is two lines and the ConfigMap sentence lives in docs/kubernetes.md."
+  ],
+  "deviations": [
+    "Contract number 35 instead of the plan's 30 (main took 30-34 while the plan was written).",
+    "`projects.<KEY>.repo` is not emitted: the field no longer exists in config on main.",
+    "The controller skill's settings sentence is shorter than the plan's T5 text (the 500-line skill guard).",
+    "The plan's T6 production-like surface and negative controls were run as written; the second negative control's reply came from the LEGION controller at 15:30:46Z."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The daemon's `claude-envoy` plugin is a third declarer of the daemon API contract beside pi-legion and version.json, with a committed bundle; a contract bump is now four manifests/fixtures and one rebuild."
+  ]
+}
