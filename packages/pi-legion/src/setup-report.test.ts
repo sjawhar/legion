@@ -64,12 +64,15 @@ test("an install this role's own generation failed is read from the state direct
   expect(notice?.content).toContain('reason "install-timeout", exit status 124');
   expect(notice?.content).toContain("error: failed to resolve @oh-my-pi/pi-utils");
   // What the agent is to do about it: no check command of this repository can run here, CI's
-  // required jobs are the authority meanwhile, and the retry is the setup script, never a bare
-  // `bun install`, whose download cache would evict the pod.
+  // required jobs are the authority meanwhile, and the retry is the setup script rather than a
+  // bare `bun install`, which takes neither the lock the roles share nor the marker — the reason
+  // the notice gives, since a role container's own BUN_INSTALL_CACHE_DIR already names the
+  // issue's volume and the cache is not what makes the bare command wrong there.
   expect(notice?.content).toContain("check commands cannot run here");
   expect(notice?.content).toContain("CI's required jobs are the authority");
   expect(notice?.content).toContain("sh scripts/legion-setup.sh");
-  expect(notice?.content).toMatch(/Never a bare `bun install`/);
+  expect(notice?.content).toContain("takes the lock every role of this issue shares");
+  expect(notice?.content).toMatch(/A bare `bun install` does none of those three/);
 });
 
 test("a state directory this environment does not name is never read", () => {

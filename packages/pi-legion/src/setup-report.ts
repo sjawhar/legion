@@ -86,9 +86,12 @@ export function setupReportNotice(
       "\n\nUntil they are installed, this repository's own check commands cannot run here: each " +
       "says so rather than passing silently, so a check you cannot run is no evidence that it " +
       "passes. CI's required jobs are the authority for lint, types and the unit suites meanwhile." +
-      "\n\nTo retry the install by hand, run `sh scripts/legion-setup.sh` from your workspace. " +
-      "Never a bare `bun install`: its download cache would land on the container's own disk, " +
-      "whose breach evicts this pod and every role's work in it.",
+      "\n\nTo retry the install by hand, run `sh scripts/legion-setup.sh` from your workspace: " +
+      "it takes the lock every role of this issue shares, installs with the cache this pod " +
+      "names, and records what happened. A bare `bun install` does none of those three — it can " +
+      "run beside another role's install of the same workspace, it leaves no marker, and where " +
+      "nothing names a cache its downloads land on the container's own disk, whose breach " +
+      "evicts this pod.",
   };
 }
 

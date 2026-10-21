@@ -46,6 +46,7 @@ fi
 echo "repo-tool: $tool is not installed" >&2
 echo "  tried: $local_bin" >&2
 echo "  tried: $root_bin" >&2
-echo "  remedy: run 'bun install' at the repository root ($root); a Legion role container" >&2
-echo "  installs them automatically through scripts/legion-setup.sh" >&2
+echo "  remedy: in a Legion role container, run 'sh scripts/legion-setup.sh' from the workspace" >&2
+echo "  ($root): it installs these packages as Legion does, under the lock the roles share." >&2
+echo "  Anywhere else, 'bun install' at the repository root." >&2
 exit 1
