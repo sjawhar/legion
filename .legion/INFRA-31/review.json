@@ -2,49 +2,54 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T02:25:00Z",
-  "decision": "changes_requested",
-  "round": 11,
+  "completed": "2026-10-21T02:50:00Z",
+  "decision": "approved",
+  "round": 12,
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:1235",
-      "description": "The remedy written in place of the false cause cannot be executed as written. The paragraph tells an operator to delete the stale /legion/scratch/<role> directories of roles that are not running, and a plain rm -rf cannot: the go command writes the module cache read-only, mode 555 on every extracted module directory, so rm exits 1 and leaves bytes behind. I reproduced it myself rather than taking the tester's number — one 391 KB module downloaded into a scratch GOMODCACHE, then the delete the sentence names: 31 Permission denied lines, exit 1, 83 KB of the 391 KB surviving, and chmod -R u+w first makes it exit 0 and remove cleanly. One detail my run adds that the scale measurement does not show: what survives is the extracted module source, while the re-downloadable cache/download goes, so the partial delete removes the cheap half and keeps the expensive one. The tester measured the same failure on the real volume at scale: 11,393 denied lines, exit 1, 147 MB left. Every per-role directory of the intermediate layout holds such a cache — that is what the 14 GiB was — so an operator who follows the sentence gets a partial reclaim and an error to diagnose, in the one paragraph of this change that has now been corrected twice. One clause closes it, and half a sentence is worth adding beside it: rm exits 1, so a scripted remedy fails loudly rather than silently, which is the one mercy in the current shape."
-    }
+  "keyFindings": [],
+  "approvedHead": "the commit this handoff push makes, named by SHA in the submitted review",
+  "whatTheLastFindingNeededAndGot": "docs/kubernetes.md:1236 now reads 'chmod -R u+w the stale /legion/scratch/<role> directories of roles that are not running and then delete them', with the reason stated rather than asserted: the go command writes every extracted module directory read-only at mode 555, so a plain rm -rf exits 1 with a Permission denied line per file and leaves bytes, and what it leaves is the extracted source while what it removes is the re-downloadable cache/download — the reclaim frees the cheap half and keeps the expensive one. The non-zero exit is named as the one mercy, since a scripted remedy fails loudly rather than silently. Both halves I asked for are there, and the consequence I derived myself in round 11 is in the document rather than only in the review.",
+  "whatIDerivedForThisApproval": [
+    "The clause's scope, which is what makes it true: in my own round-11 run the extracted module directories were mode 555 and mod/cache/download was 755, so 'every extracted module directory' is the right scope and a fixture with no extracted module would see the naive delete succeed. The architect reports exactly that from a small fixture of his own, which is an argument for leaving the wording as it is rather than narrowing it.",
+    "The reclaim's direction, from my own run: 83 KB of 391 KB surviving, the survivors being the extracted source and the removed part the download cache.",
+    "CI at the code head 7da7a8133267, read with per_page=100 and --paginate: lint, typecheck, test and pr-title all completed and success.",
+    "compare 7da7a8133267...<this head> all under .legion/.",
+    "The pull request's threads read on GitHub rather than from the body: 32 total, 0 unresolved.",
+    "The body read at this head, which is now part of the round: no stale 'Open as this round's finding' marker survives, every resolved entry is struck and attributed to its fixing commit, and the one stale line left was my own 'Look at first', which I rewrote in this round rather than leaving for the merger to quote."
   ],
-  "fixedThisRound": {
-    "theInventedCause": "Answered in 0085e4b45a48, and answered fully. Both the causal clause and :1227's conditional are gone; the arithmetic carries the argument on its own (2.1 to 2.7 GiB live plus 8.5 GiB worst case inside 20); the 17 GiB keeps its 01:32Z stamp and is marked as this workspace's under an intermediate layout no shipped image produced, with the merge-base reason named in the document itself — a role container there is told no GOCACHE, no GOMODCACHE and no BUN_INSTALL_CACHE_DIR; and the paragraph now says a running volume gains the shared scratch rather than losing anything it holds. I checked the document rather than the diff summary, and the sentence pair that contradicted each other at :1220 and :1233 no longer does."
-  },
   "ci": {
-    "verdict": "all four required checks green at the code head",
+    "verdict": "green",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "0085e4b45a48161bad81287d86ad5c52120056e4",
-    "read": "Read with per_page=100 and --paginate: lint, typecheck, test and pr-title all completed and success. gh api compare 0085e4b45a48...6cc2f5a5abb3 prints true for all paths under .legion/. This is the first round where all four were green at the code head at the time I read them; it does not change the verdict, since a finding stands, but it means CI is not what the next round waits on."
+    "ciHead": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
+    "nonRequired": "dispatch and dispatch-memory were in_progress at the read, not red. A red `dispatch` on this branch belongs to dispatch://INFRA-76, an Inbox test failing across the project; this change touches 0 files under packages/dispatch or packages/proof-editor against the merge base, which I derived rather than cited."
   },
-  "threads": {
-    "openedByMe": 1,
-    "answered": "PRRT_kwDORFy7ds6umAjh — my round-ten inline comment on the invented cause. Answered at this head naming 0085e4b45a48 as the fix, with what it fixed, and recording that the remedy sentence written in its place is a new sentence rather than a survival of that one. Accepted; the implementer may resolve it.",
-    "botThreads": 0
-  },
-  "bodyCorrection": "My round-ten entry in the body's Not proven / risk list still ended 'Open as this round's finding' for a sentence that no longer exists at this head. The tester recorded it rather than failing on it. I struck it and filed this round's in its place. That is the third stale line of mine in that artifact, and one of them crossed a round boundary with nobody acting; the merger quotes Outcome and Not proven / risk into READY, so none may survive into the approval. I now re-read the body at the head as part of the round rather than trusting what I remember writing.",
-  "methodNote": "The tester found this finding and measured it at scale. I reproduced it myself before filing rather than carrying the figure, which is the rule I adopted two rounds ago after importing a subagent's sentence into a review: the lead is worth acting on, the value is mine to derive. The reproduction also produced a fact the scale run did not — which half of the cache survives — which is the argument for re-deriving rather than quoting.",
+  "thermonuclear": "Run at every round's head where the diff touched runtime code, last at 9b8c6ccc: code-quality found the invented cause, deep-review returned approve on the code and the Dockerfile. Every push since has been documentation only — rounds 11 and 12 changed one paragraph of docs/kubernetes.md and nothing else — so no runtime code has entered the change since the pair last cleared it.",
   "fastFollow": [
-    "The scratch.go extraction from manifest.go, which should collapse the rationale now restated across about fifteen sites rather than relocate it, and fold the state home's regained mount assertions into one helper with the sibling test's copy; bunInstallArgs and runStart's shared stubbing belongs in the same pass.",
-    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
-    "The drift fence's reverse walk over every role rather than one rendered spec.",
-    "A test for configure's refusal of a non-positive RegistrationIntervals, safe only while the loader's positive-count key and installLockWait's one-second floor both stand."
+    "Extract the scratch layout out of manifest.go into scratch.go, collapsing the rationale now restated across about fifteen sites rather than relocating it, and fold the state home's regained mount assertions into one helper with the sibling test's copy; bunInstallArgs and runStart's shared stubbing belongs in the same pass.",
+    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23, whose 103-byte path sits under a 107-byte sun_path with no margin named.",
+    "Give the drift fence a reverse walk over every role rather than one rendered spec: there are exactly ten /legion variables and none is kind-specific, so the fence can assert the set rather than a sample.",
+    "A test for configure's refusal of a non-positive RegistrationIntervals, which is safe only while the loader's positive-count key and installLockWait's one-second floor both stand."
   ],
   "forTheMerger": {
-    "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the review body.",
+    "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the approval body.",
+    "rule": "Read the run, not the lane. Every shape below is a way a lane's name misleads, and the run id settles all of them.",
     "ciShapes": [
-      "The default check-runs page is 30 and these commits carry 25 to 39; read with per_page=100 and --paginate or required names fall off it.",
-      "A push that carries code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
-      "A required workflow can have many runs on one head, because pr-title fires on every pull-request edit; the newest decides, and a run cancelled because a later one superseded it leaves no verdict rather than a red one.",
-      "While a pull request is CONFLICTING, GitHub runs no `on: pull_request` workflow for any of its activity.",
-      "The non-required `dispatch` and `dispatch-memory` lanes have rarely settled on this branch."
+      "The default check-runs page is 30 and these commits carry 25 to 39 runs; read with per_page=100 and --paginate or required names fall off the page and a green head reads as missing.",
+      "A superseded run shows completed/cancelled while a later run of the same workflow succeeded: dispatch at 0085e4b45a48 is the worked example.",
+      "A push carrying code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
+      "pr-title fires on every pull-request edit, so one head carries many runs of it; the newest decides.",
+      "While a pull request is CONFLICTING, GitHub runs no on: pull_request workflow for any of its activity.",
+      "A genuinely failing non-required lane may belong to another issue: dispatch://INFRA-76 is the Inbox test failing across this project, and this change touches 0 files under packages/dispatch or packages/proof-editor."
     ]
+  },
+  "forTheRetro": {
+    "theParentLesson": "A derived pin is worth more than a correct constant, and it holds one level up as well: the value you assert in a review must be re-derived from the file at the head, because a citation inside a subagent's finding is a claim rather than a reading. Both of this issue's documentation failures were a single asserted value inside an argument that was otherwise sound, and in both the contradicting evidence was already in the session that asserted it.",
+    "theSharperForm": "The architect's generalisation, which I would put above mine: writing to strengthen an argument rather than to describe a system. Neither failure was careless in the ordinary sense; both made the case better, which is why neither was checked. The sentence that makes the argument stronger is the one to re-derive first.",
+    "theSystemProperty": "Both failures were claims about a production system neither role can read. A claim about production in operator-facing documentation, written by roles with no production read, should name what it rests on.",
+    "theNarrowingThatMatters": "The rule is about the value, not the source. The thermonuclear pair found this issue's two most useful items and an agent found my own stale body line; an entry that said 'do not trust agent findings' would have cost more than both errors. Carry the lead, re-derive the clause.",
+    "theGraceZeroFlinch": "When the measured grace was zero I wanted to call it a margin and did not, and the round that followed found the race. A number that makes a design look safe is the one to measure twice.",
+    "myOwnPattern": "Three stale lines of mine reached the PR body, one crossing a round boundary with nobody acting, because I wrote each entry when I filed the finding and never read it again — it aged exactly one round behind the document every time. Reading the body at the head is now part of the round, beside reading CI."
   }
 }
