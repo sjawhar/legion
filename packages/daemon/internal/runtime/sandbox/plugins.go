@@ -194,7 +194,13 @@ func installLockWait(boot time.Duration, intervals int) int {
 //     variable for every role container (roleEnvironment, manifest.go; runtimeOwned refuses anyone
 //     else setting it, and TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes pins that the
 //     runtime names it), and a default would silence, for the one variable this script is about,
-//     the `set -u` abort that is how a broken invariant should announce itself.
+//     the `set -u` abort that is how a broken invariant should announce itself. flock is named by
+//     the absolute path for the reason bun is, and the image is held to that exact path rather
+//     than to flock being on PATH: the apt line, the build's toolchain check and the toolchain
+//     capability row all ask only for the name, so a base that kept flock and moved it would pass
+//     every one of them and fail every installing launch. The build's final step resolves `flock`
+//     and refuses anything but /usr/bin/flock, which is where the declaration and this use are
+//     held to agree (packages/daemon/docker/worker.Dockerfile).
 //   - The retry covers what no lock of ours can reach: an agent's own `bun install` filling the
 //     same cold entry at the same moment. One retry, then the failure branch.
 func installBlock(stateHome string, generation uint64, plugins *runtime.PluginInstall, lockWait int) string {

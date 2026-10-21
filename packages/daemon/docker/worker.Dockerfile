@@ -636,7 +636,13 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
 # other path, so git's absolute path is as fixed as jj's and the real gh's (/usr/local/bin, copied
 # above) and a pod environment can name all three; gh resolves to the /opt/legion/bin/gh script and
-# the real gh behind it runs. The Envoy plugin's `dispatch` shim runs its bundled CLI under
+# the real gh behind it runs. flock is pinned the same way, and for a reason the other gates do not
+# cover: the install Legion renders for an installing launch calls it as /usr/bin/flock
+# (installBlock, packages/daemon/internal/runtime/sandbox/plugins.go), while the apt line, the
+# toolchain check above and the toolchain capability row all ask only that `flock` be on PATH — so
+# a base that kept flock and moved it would pass every one of those and fail every installing
+# launch. The declaration and the use have to agree on the path, and this is where they are held
+# to it. The Envoy plugin's `dispatch` shim runs its bundled CLI under
 # the image's bun and prints its help, so a pi-envoy packed without bin/ or dist/dispatch.js, or an
 # image without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's
 # own test. Then `legion probe-image` runs the three launch probes through
@@ -674,6 +680,7 @@ RUN set -eu; \
     stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
+    flock="$(command -v flock)"; echo "flock: $flock"; test "$flock" = /usr/bin/flock; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     gh="$(command -v gh)"; echo "gh: $gh"; test "$gh" = /opt/legion/bin/gh; /usr/local/bin/gh --version; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \

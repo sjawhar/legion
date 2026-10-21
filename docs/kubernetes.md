@@ -1221,7 +1221,14 @@ Nothing prunes `/legion/scratch`: it grows for the life of the issue, across eve
 this change raises `issue_volume`'s default from `20Gi` to `50Gi` (`defaultIssueVolume`,
 `packages/daemon/internal/config/kubernetes.go`) — a default every project takes rather than a
 line of one deployment, so the apply this change needs is the image digest alone, with no
-deployment edit. Size it knowing that moving these writes onto
+deployment edit. The new size reaches the volumes created after that apply and no others: it
+rides in the Sandbox's `volumeClaimTemplates`, evaluated when the claim is created, and an
+issue's Sandbox outlives its pods, so every issue already running keeps the 20 GiB it was created
+with — which fits, since the roles now share one temporary directory, one cache home, one data
+home, one bun install cache and one Go pair, about 8.5 GiB of scratch for an issue that works all
+six roles, against live volumes measured at 2.1 to 2.7 GiB of their 20 and this issue's own at
+7.7 GiB under the duplicating layout this change replaces. Size it knowing that moving these
+writes onto
 the volume removes the alarm they used to ring: an ephemeral-storage overrun was a kubelet
 eviction with a pod event naming the container, where ENOSPC on the PVC is no event at all and
 surfaces as unexplained failures in jj, in the session transcripts, in `workspace-init` and in
