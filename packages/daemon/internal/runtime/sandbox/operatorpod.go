@@ -80,20 +80,24 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // launch sets would reach the agent's container twice, and one that places Oh My Pi's sessions
 // would move them off the store Legion resumes them from; a volume name would be in the pod twice;
 // a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
-// runs from hides it or is hidden by it; and a mount at, under, or above the agents' state home
-// (xdgStateHome), under which every role's agent has a state home of its own (roleStateHome), would
-// have every role's shim refuse to start naming the directory it could not make — the shim makes
-// Oh My Pi's profile directory under the role's state home before Oh My Pi starts
-// (podsafety.EnsureStateHome), which a read-only or foreign mount there refuses — at launch rather
-// than here, at `--check-config`. A provider key must name a variable nothing else in the pod sets,
-// since the shim refuses one its own environment names and would replace one Oh My Pi's
-// environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod
-// sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the session
-// database's URL key (sessionDSNKey, "" when sessions are files), which the shim would export into
-// Oh My Pi's environment under the provider key's name. launchSecrets are the secrets every
-// launch's spec carries, by name, and providersSecrets those of them the providers Secret carries,
-// none of which may be the session database's URL key. configure runs it, and the daemon before
-// its boot and for `legion start --check-config`.
+// runs from hides it or is hidden by it; and a mount at, under, or above xdgStateHome
+// (/home/legion/.local/state), the path Legion reserves in the image's home directory: no role's
+// agent keeps its Oh My Pi state there any more — every role's state home is its own, under the
+// issue's scratch on its volume (roleStateHome), which legionMountPaths() already fences through
+// TreeRoot — and the image makes nothing there either, but Legion names it to the issue pod's
+// workspace-init (xdgEnvironment), so an operator's mount over it is refused here, at
+// `--check-config`, rather than left to surprise someone in a pod. (An operator's
+// pod.VolumeMounts reaches the role containers and the image probe's and no init container, so
+// this row speaks for the name rather than for workspace-init.) A provider key must name a
+// variable nothing else in the pod sets, since the shim refuses one its own environment names
+// and would replace one Oh My
+// Pi's environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the
+// pod sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the
+// session database's URL key (sessionDSNKey, "" when sessions are files), which the shim would
+// export into Oh My Pi's environment under the provider key's name. launchSecrets are the
+// secrets every launch's spec carries, by name, and providersSecrets those of them the providers
+// Secret carries, none of which may be the session database's URL key. configure runs it, and
+// the daemon before its boot and for `legion start --check-config`.
 func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets, providersSecrets []string, sessionDSNKey string) error {
 	if slices.Contains(providersSecrets, sessionDSNKey) {
 		return fmt.Errorf("runtime.kubernetes.session_dsn_secret %s is the providers Secret's key the pod mounts as the launch secret %s: name a key of its own for the session database's URL",
@@ -131,7 +135,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	}{
 		{legionMountPaths(), "Legion mounts in every pod", "one of Legion's"},
 		{imageOwned, "the worker image owns", "one of the image's"},
-		{[]string{xdgStateHome}, "every role's agent keeps its Oh My Pi state under", "the agents' state home"},
+		{[]string{xdgStateHome}, "Legion reserves in the image's home directory", "Legion's reserved state home"},
 	}
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {

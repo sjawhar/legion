@@ -257,6 +257,85 @@ func TestEnsureStateHomeMakesOhMyPisStateRootUnderTheStateHome(t *testing.T) {
 	})
 }
 
+// EnsureScratch makes every directory the runtime tells a role to write what it writes without
+// being told where — TMPDIR, XDG_CACHE_HOME, XDG_DATA_HOME, GOCACHE, GOMODCACHE and
+// BUN_INSTALL_CACHE_DIR — with every parent, since `go` and `bun` make their own cache
+// directories but nothing makes the temporary directory a role is told, and mktemp fails where it
+// does not exist. A name the environment leaves unset or empty, or sets to a relative path, makes
+// nothing; XDG_STATE_HOME is EnsureStateHome's alone, untouched here; and a directory that cannot
+// be made is a refusal naming the variable and the path, so a role whose volume cannot be written
+// never starts half-configured.
+func TestEnsureScratchMakesEveryDirectoryTheRoleIsToldToWriteUnder(t *testing.T) {
+	t.Run("every told directory, with its parents", func(t *testing.T) {
+		scratch := filepath.Join(t.TempDir(), "legion", "scratch", "tester")
+		told := map[string]string{
+			"TMPDIR":                filepath.Join(scratch, "tmp"),
+			"XDG_CACHE_HOME":        filepath.Join(scratch, "cache"),
+			"XDG_DATA_HOME":         filepath.Join(scratch, "data"),
+			"GOCACHE":               filepath.Join(scratch, "go", "build"),
+			"GOMODCACHE":            filepath.Join(scratch, "go", "mod"),
+			"BUN_INSTALL_CACHE_DIR": filepath.Join(scratch, "bun", "install", "cache"),
+		}
+		stateHome := filepath.Join(scratch, "state")
+		environ := []string{"XDG_STATE_HOME=" + stateHome, "XDG_CONFIG_HOME=/run/legion/config", "OMP_PROFILE=legion"}
+		for name, dir := range told {
+			environ = append(environ, name+"="+dir)
+		}
+		if err := EnsureScratch(environ); err != nil {
+			t.Fatal(err)
+		}
+		for name, dir := range told {
+			info, err := os.Stat(dir)
+			if err != nil {
+				t.Errorf("the directory %s names: %v", name, err)
+				continue
+			}
+			if !info.IsDir() || info.Mode().Perm() != 0o700 {
+				t.Errorf("%s names %s, which is %v, want a directory at mode 0700", name, dir, info.Mode())
+			}
+		}
+		if _, err := os.Stat(stateHome); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the state home %s: %v, want it left to EnsureStateHome", stateHome, err)
+		}
+	})
+	for name, environ := range map[string][]string{
+		"unset": {"XDG_CONFIG_HOME=/run/legion/config", "OMP_PROFILE=legion"},
+		"empty": {"TMPDIR=", "XDG_CACHE_HOME=", "XDG_DATA_HOME=", "GOCACHE=", "GOMODCACHE=", "BUN_INSTALL_CACHE_DIR="},
+		"relative": {
+			"TMPDIR=tmp", "XDG_CACHE_HOME=.cache", "XDG_DATA_HOME=share/data",
+			"GOCACHE=go/build", "GOMODCACHE=go/mod", "BUN_INSTALL_CACHE_DIR=bun/install/cache",
+		},
+	} {
+		t.Run("a value that is "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			// The working directory a relative value would be made under, were it the shim's to
+			// resolve: nothing of it is the shim's, so nothing lands here.
+			t.Chdir(dir)
+			if err := EnsureScratch(environ); err != nil {
+				t.Fatalf("%q: %v", environ, err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("with every value %s, EnsureScratch made %v", name, entries)
+			}
+		})
+	}
+	t.Run("a file where the directory should go", func(t *testing.T) {
+		scratch := t.TempDir()
+		if err := os.WriteFile(filepath.Join(scratch, "go"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		blocked := filepath.Join(scratch, "go", "build")
+		err := EnsureScratch([]string{"TMPDIR=" + filepath.Join(scratch, "tmp"), "GOCACHE=" + blocked})
+		if err == nil || !strings.Contains(err.Error(), "GOCACHE") || !strings.Contains(err.Error(), blocked) {
+			t.Fatalf("EnsureScratch = %v, want a refusal naming GOCACHE and %s", err, blocked)
+		}
+	})
+}
+
 // On the pinned Oh My Pi, a repository's own settings reach the agent under Apply's environment as
 // they reach any agent session: its .omp/config.yml's remote compaction endpoint is read as the
 // repository set it, and an operator overlay named after Legion's reads the operator's own endpoint
