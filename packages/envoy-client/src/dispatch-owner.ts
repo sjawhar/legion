@@ -87,6 +87,8 @@ export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
         ...(version === undefined ? {} : { version: Number(version) }),
       };
     }
+    // An ask or comment has no version, so a versioned one names nothing.
+    if (version !== undefined) return null;
     if (targetID === undefined || (targetKind !== "ask" && targetKind !== "comment")) return null;
     return {
       owner: { kind: "project", project },

@@ -641,7 +641,56 @@ const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 
 /** How a refusal names the owner whose asks or comments a prefix was matched against. */
 function refOwnerName(ref: ParsedDispatchRef): string {
-  return ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
+  return ref.owner.kind === "issue"
+    ? ref.owner.issue
+    : `${ref.owner.project}/${ref.artifact ?? ref.id}`;
+}
+
+/** The owner fields of an ask or comment a reference is checked against. */
+interface RefItem {
+  readonly id: string;
+  readonly issue_key: string | null;
+  readonly artifact_id?: string | null;
+  readonly anchor?: { readonly artifact_id: string } | null;
+  readonly block_artifact?: { readonly id: string };
+  readonly approval?: { readonly artifact_id: string };
+}
+
+/**
+ * Refuses an ask or comment a reference names under an owner it is not on. A full id is read as
+ * it is, whatever owner the reference names, so the item read is held to that owner: its issue,
+ * or for a project document's reference, that document (`documentId`, read only then).
+ */
+async function refuseItemOffRef(
+  tool: string,
+  kind: "ask" | "comment",
+  ref: ParsedDispatchRef,
+  refText: string,
+  item: RefItem,
+  documentId: () => Promise<string>
+): Promise<void> {
+  if (ref.owner.kind === "issue") {
+    if (item.issue_key === ref.owner.issue) return;
+  } else if (item.issue_key === null) {
+    const id = await documentId();
+    if (
+      [
+        item.artifact_id,
+        item.anchor?.artifact_id,
+        item.block_artifact?.id,
+        item.approval?.artifact_id,
+      ].includes(id)
+    ) {
+      return;
+    }
+  }
+  const where =
+    item.issue_key === null
+      ? "another document"
+      : `${item.issue_key}; name it dispatch://${item.issue_key}/${kind}/${item.id}`;
+  throw new ToolInputError(tool, [
+    `${refText} names ${kind} ${item.id} on ${refOwnerName(ref)}, but it is on ${where}`,
+  ]);
 }
 
 /**
@@ -742,16 +791,17 @@ function openAskHints(asks: readonly Pick<OpenAsk, "id" | "question">[]): string
 
 /**
  * The ask uuid `dispatch_edit_ask`, `dispatch_resolve_ask`, and `dispatch_follow` write to.
- * A full uuid passes through unread; an 8+ hex prefix resolves against this session's own
- * open asks; anything else is refused before the write, naming those asks so the next call
- * carries a real id. An open-asks read that fails never masks that rule.
+ * A full uuid passes through; an 8+ hex prefix resolves against this session's own open asks;
+ * anything else is refused before the write, naming those asks so the next call carries a real
+ * id. An open-asks read that fails never masks that rule. An ask named by a dispatch:// reference
+ * is read first and refused unless it is on the issue or document the reference names.
  */
 async function resolveAskArgument(
   tool: string,
   args: ToolArguments,
   client: DispatchClient,
   sessionId: string | undefined
-): Promise<string> {
+): Promise<{ readonly id: string; readonly read?: AskRead }> {
   const id = askId(args);
   if (normalizeUUID(id) === undefined && !idPrefixPattern.test(id)) {
     const asks = await sessionOpenAsks(client, sessionId).catch(() => undefined);
@@ -759,7 +809,19 @@ async function resolveAskArgument(
       asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`,
     ]);
   }
-  return resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
+  const resolved = await resolveIdPrefix(tool, "ask", id, "this session", () =>
+    sessionOpenAsks(client, sessionId)
+  );
+  const reference = stringArg(args, "ask");
+  // `argumentProblems` refused a dispatch:// value that is not an ask reference.
+  const ref = reference.startsWith("dispatch://") ? parseDispatchRef(reference) : null;
+  if (ref === null) return { id: resolved };
+  const read = await client.getAsk(resolved);
+  await refuseItemOffRef(tool, "ask", ref, reference, read.ask, async () => {
+    const document = await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true });
+    return document.artifact.id;
+  });
+  return { id: resolved, read };
 }
 
 /** The validated reply target; `argumentProblems` refused anything that is not a message id. */
@@ -790,14 +852,14 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
     case "dispatch_follow": {
       const ask = optionalString(args, "ask");
       if (ask?.startsWith("dispatch://") && parseDispatchRef(ask)?.kind !== "ask") {
-        problems.push(documentItemProblem(ask) ?? askIdProblem);
+        problems.push(itemRefProblem(ask) ?? askIdProblem);
       }
       break;
     }
     case "dispatch_resolve_comment": {
       const comment = optionalString(args, "comment");
       if (comment?.startsWith("dispatch://") && parseDispatchRef(comment)?.kind !== "comment") {
-        problems.push(documentItemProblem(comment) ?? commentIdProblem);
+        problems.push(itemRefProblem(comment) ?? commentIdProblem);
       }
       break;
     }
@@ -907,10 +969,13 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
   );
   if (!documentPage) return undefined;
   const [, project, slug] = documentPage;
-  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}${versionOf("version")}`;
+  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}`;
   const item = itemFromSearch(url.search);
   if (item === null) return undefined;
-  return item === undefined ? document : `${document}/${item.kind}/${item.id}`;
+  // An ask or comment has no version; the page's version selector names the document's.
+  return item === undefined
+    ? `${document}${versionOf("version")}`
+    : `${document}/${item.kind}/${item.id}`;
 }
 
 const refGrammarProblem =
@@ -971,18 +1036,29 @@ function innerRefProblem(
 
 const documentItemPattern =
   /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
+const versionedProjectItemPattern =
+  /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)@v\d+\/(ask|comment)\/([^/]+)$/;
 
 /**
- * The refusal of an ask or comment on an issue's document written through the document,
- * `dispatch://KEY/artifact/<slug>/comment/<id>`, or undefined for any other value. Dispatch
- * addresses such an item by its issue alone (its reference grammar has no such form, so a body
- * citing it never links), and the refusal names that spelling.
+ * The refusal of an ask or comment reference Dispatch does not address, naming the one it does,
+ * or undefined for any other value: an item on an issue's document written through the document,
+ * `dispatch://KEY/artifact/<slug>/comment/<id>` (Dispatch addresses it by its issue alone, and
+ * its reference grammar has no such form, so a body citing it never links), and an item on a
+ * project document written at a version, which an ask or comment does not have.
  */
-function documentItemProblem(value: string): string | undefined {
-  const match = value.match(documentItemPattern);
-  if (match === null) return undefined;
-  const [, issue, kind, id] = match;
-  return `${value} names ${kind === "ask" ? "an ask" : "a comment"} through its document, which Dispatch does not address; name it dispatch://${issue}/${kind}/${id}`;
+function itemRefProblem(value: string): string | undefined {
+  const throughDocument = value.match(documentItemPattern);
+  if (throughDocument !== null) {
+    const [, issue, kind, id] = throughDocument;
+    return `${value} names ${kind === "ask" ? "an ask" : "a comment"} through its document, which Dispatch does not address; name it dispatch://${issue}/${kind}/${id}`;
+  }
+  const versioned = value.match(versionedProjectItemPattern);
+  if (versioned !== null) {
+    const [, project, slug, kind, id] = versioned;
+    const item = kind === "ask" ? "an ask" : "a comment";
+    return `${value} names ${item} at a document version, which ${item} does not have; name it dispatch://${project}/artifact/${slug}/${kind}/${id}`;
+  }
+  return undefined;
 }
 
 /**
@@ -993,7 +1069,7 @@ function documentItemProblem(value: string): string | undefined {
 function ownerConflictProblems(
   tool: string,
   args: ToolArguments,
-  ref: ParsedDispatchRef | null,
+  parsedRef: ParsedDispatchRef | null,
   refText: string | undefined
 ): string[] {
   const problems: string[] = [];
@@ -1002,6 +1078,10 @@ function ownerConflictProblems(
   const project = optionalString(args, "project");
   const artifact = optionalString(args, "artifact");
   const version = optionalNumber(args, "version");
+  // A dispatch ask beside an issue or project cites its ref and takes nothing else from it, so
+  // the ref may name any other issue or document.
+  const ref =
+    tool === "dispatch_ask" && (issue !== undefined || project !== undefined) ? null : parsedRef;
   // The document a ref names: an issue's spec or artifact, or the project document it is on.
   const refDocument =
     ref === null
@@ -1012,10 +1092,12 @@ function ownerConflictProblems(
           ? ref.id
           : undefined;
   if (ref !== null && refText !== undefined) {
-    const refOwner = ref.owner.kind === "issue" ? ref.owner.issue : refOwnerName(ref);
+    const refOwner = refOwnerName(ref);
+    // An external issue reference is compared once Dispatch has resolved it to its key.
     if (
       issue !== undefined &&
-      (ref.owner.kind !== "issue" || canonicalExternalIssueRef(issue) !== ref.owner.issue)
+      (ref.owner.kind !== "issue" ||
+        (nativeIssueKeyPattern.test(issue) && issue !== ref.owner.issue))
     ) {
       problems.push(
         `issue ${issue} and ref ${refText} name two owners; --ref ${refText} alone acts on ${refOwner}, and --issue ${issue} alone acts on ${issue}`
@@ -1069,6 +1151,11 @@ function ownerConflictProblems(
         `${command} acts on the live document, so the version ref ${refText} names would be dropped: drop its @v${ref.version}`
       );
     }
+    if (ref.version !== undefined && tool === "dispatch_read") {
+      problems.push(
+        `dispatch read prints the live document's summary, so the version ref ${refText} names would be dropped: read that version with dispatch doc-read --ref ${refText}`
+      );
+    }
   }
   // A comment or an ask on an issue lands on one of its documents only when it quotes it; the
   // document a call names without a quote would be dropped.
@@ -1086,7 +1173,7 @@ function ownerConflictProblems(
     const anchorArtifact = anchor === null ? undefined : optionalString(anchor, "artifact");
     if (!projectOwned && artifact !== undefined && anchor === null) {
       problems.push(
-        `${command} opens the ask on the issue unless anchor quotes a document, so artifact ${artifact} would be dropped: add --anchor-json '{"quote": "<exact text>"}' to ask about a passage of it, or drop --artifact`
+        `${command} opens the ask on the issue unless anchor quotes a document, so artifact ${artifact} would be dropped: add --anchor-json '${JSON.stringify({ artifact, quote: "<exact text>" })}' to ask about a passage of it, or drop --artifact`
       );
     }
     if (artifact !== undefined && anchorArtifact !== undefined && anchorArtifact !== artifact) {
@@ -1164,7 +1251,7 @@ async function resolveOwnerArguments(
     ref = parseDispatchRef(refText);
     if (ref === null) {
       problems.push(
-        documentItemProblem(refText) ??
+        itemRefProblem(refText) ??
           (tool === "dispatch_ask" && !refText.startsWith("dispatch://")
             ? "ref must be a dispatch:// reference"
             : refGrammarProblem)
@@ -1182,6 +1269,11 @@ async function resolveOwnerArguments(
   const versionFromRef =
     tool === "dispatch_doc_read" && args.version === undefined ? ref?.version : undefined;
   const refVersion = versionFromRef === undefined ? {} : { version: versionFromRef };
+  // A dispatch ask beside an issue or project cites its ref and takes nothing else from it.
+  const ownerRef =
+    tool === "dispatch_ask" && (issueArgument !== undefined || projectArgument !== undefined)
+      ? null
+      : ref;
 
   if (issueArgument !== undefined && projectArgument !== undefined) {
     problems.push("exactly one of issue and project is required");
@@ -1190,10 +1282,11 @@ async function resolveOwnerArguments(
     if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push(`project is not a project key: ${PROJECT_KEY_RULE}`);
     }
-    const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
+    const refDocument =
+      ownerRef?.owner.kind === "project" ? (ownerRef.artifact ?? ownerRef.id) : undefined;
     if (
-      ref?.owner.kind === "project" &&
-      (ref.owner.project !== projectArgument ||
+      ownerRef?.owner.kind === "project" &&
+      (ownerRef.owner.project !== projectArgument ||
         (artifactArgument !== undefined && artifactArgument !== refDocument))
     ) {
       problems.push("project and ref must name the same document");
@@ -1210,19 +1303,19 @@ async function resolveOwnerArguments(
       owner: { kind: "project", project: projectArgument },
     };
   }
-  if (ref?.owner.kind === "project") {
+  if (ownerRef?.owner.kind === "project") {
     return {
       args: {
         ...args,
-        project: ref.owner.project,
-        ...(artifactArgument === undefined ? { artifact: ref.artifact ?? ref.id } : {}),
+        project: ownerRef.owner.project,
+        ...(artifactArgument === undefined ? { artifact: ownerRef.artifact ?? ownerRef.id } : {}),
         ...refVersion,
       },
       ref,
-      owner: ref.owner,
+      owner: ownerRef.owner,
     };
   }
-  if (issueArgument !== undefined || ref !== null) {
+  if (issueArgument !== undefined || ownerRef !== null) {
     const issue =
       typeof issueArgument === "string"
         ? canonicalExternalIssueRef(issueArgument)
@@ -2556,6 +2649,22 @@ export async function executeDispatchTool(
           issue: await resolveExistingIssue(client, ownerArguments.owner.issue),
         }
       : ownerArguments.owner;
+  // An external issue reference beside an issue ref is compared here, once Dispatch has resolved
+  // it to the key the ref spells (`ownerConflictProblems` compares native keys before any request).
+  const issueArgument = optionalString(input.args, "issue");
+  const refText = optionalString(ownerArguments.args, "ref");
+  if (
+    input.tool !== "dispatch_ask" &&
+    owner?.kind === "issue" &&
+    issueArgument !== undefined &&
+    refText !== undefined &&
+    ownerArguments.ref?.owner.kind === "issue" &&
+    owner.issue !== ownerArguments.ref.owner.issue
+  ) {
+    throw new ToolInputError(input.tool, [
+      `issue ${issueArgument} and ref ${refText} name two owners; --ref ${refText} alone acts on ${ownerArguments.ref.owner.issue}, and --issue ${issueArgument} alone acts on ${owner.issue}`,
+    ]);
+  }
   const issue = () => {
     if (owner?.kind !== "issue") throw new Error("issue is required");
     return owner.issue;
@@ -3004,7 +3113,7 @@ export async function executeDispatchTool(
     }
     case "dispatch_resolve_ask": {
       const kind = stringArg(args, "kind") as "retracted" | "resolved";
-      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
+      const { id } = await resolveAskArgument(input.tool, args, client, input.sessionId);
       const ask = await client.resolveAsk(id, {
         kind,
         reason: stringArg(args, "reason"),
@@ -3034,6 +3143,14 @@ export async function executeDispatchTool(
         document = artifact;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () =>
           client.getArtifactComments(artifact.id)
+        );
+      }
+      // A full id is resolved as it is, so the comment is read first and held to the owner the
+      // reference names before it is resolved.
+      if (ref !== null) {
+        const read = await client.getComment(id);
+        await refuseItemOffRef(input.tool, "comment", ref, reference, read.comment, async () =>
+          document === undefined ? "" : document.id
         );
       }
       const comment = await client.resolveComment(id, actor);
@@ -3103,7 +3220,7 @@ export async function executeDispatchTool(
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
-      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
+      const { id } = await resolveAskArgument(input.tool, args, client, input.sessionId);
       const ask = await client.editAsk(id, {
         ...(question === undefined ? {} : { question }),
         ...(Array.isArray(options)
@@ -3582,13 +3699,18 @@ export async function executeDispatchTool(
     case "dispatch_follow": {
       const sessionId = input.sessionId?.trim();
       if (!sessionId) throw new Error("host session id is required for dispatch follow");
-      const ask = await resolveAskArgument(input.tool, args, client, sessionId);
+      const { id: ask, read: refRead } = await resolveAskArgument(
+        input.tool,
+        args,
+        client,
+        sessionId
+      );
       const action = stringArg(args, "action");
       if (action === "unfollow") {
         await client.unfollowAsk(ask, sessionId, actor);
         return { text: `Unfollowed ask ${ask}.`, details: { ask } };
       }
-      const read = await client.getAsk(ask);
+      const read = refRead ?? (await client.getAsk(ask));
       await client.followAsk(ask, sessionId, actor);
       return {
         text: `Following ask ${ask}: its answer and replies reach this session directly.`,
@@ -3631,15 +3753,24 @@ export async function executeDispatchTool(
           ...showImages(pictures),
         };
       }
+      // A project document's id, read once for an ask or comment its ref names: the prefix match
+      // and the check that the item read is on that document share it.
+      let refDocumentId: Promise<string> | undefined;
+      const documentIdOf = (ref: ParsedDispatchRef) => {
+        refDocumentId ??= resolveDocument(ref.owner, ref.artifact).then(
+          (resolved) => resolved.artifact.id
+        );
+        return refDocumentId;
+      };
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
         const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () =>
           ref.owner.kind === "issue"
             ? client.listIssueAsks(ref.owner.issue)
-            : client.getArtifactAsks(
-                (await resolveDocument(ref.owner, ref.artifact)).artifact.id,
-                "all"
-              )
+            : client.getArtifactAsks(await documentIdOf(ref), "all")
+        );
+        await refuseItemOffRef(input.tool, "ask", ref, stringArg(args, "ref"), askRead.ask, () =>
+          documentIdOf(ref)
         );
         const askRef = refTarget(ref, "ask", askRead.ask.id);
         const [pictures, graph] = await Promise.all([
@@ -3665,11 +3796,17 @@ export async function executeDispatchTool(
           async () =>
             ref.owner.kind === "issue"
               ? client.getComments(ref.owner.issue)
-              : client.getArtifactComments(
-                  (await resolveDocument(ref.owner, ref.artifact)).artifact.id
-                )
+              : client.getArtifactComments(await documentIdOf(ref))
         );
         const comment = await client.getComment(id);
+        await refuseItemOffRef(
+          input.tool,
+          "comment",
+          ref,
+          stringArg(args, "ref"),
+          comment.comment,
+          () => documentIdOf(ref)
+        );
         const commentRef = refTarget(ref, "comment", id);
         const [pictures, graph] = await Promise.all([
           picturesOf(datedBodies([comment.comment, ...comment.replies])),
