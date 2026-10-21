@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- A `dispatch` write ends with `(not subscribed to KEY; envoy_subscribe …)` only when the Envoy
+  listener's record of the session's topics holds none that receives every event on the issue or
+  document (`subscriptionCovers`, the listener's wildcard rule). It used to end every write that
+  way, whatever the session followed. The command reads the record (`GET /v1/interests/<session>`,
+  and Envoy's settings with it) only for a write that would carry the note; with Envoy off, or no
+  answer from the listener, the write says nothing about subscriptions. `executeDispatchTool` takes
+  `subscriptions`, a function answering the session's topics, or null when they cannot be read.
+- `dispatch read --ref dispatch://KEY/ask/<id>` finds an ask in a document by the id of its
+  `:::ask{#<id>}` block as well as by the ask's own id, whole or as a unique prefix of 8 or more
+  hex characters, and prints the ask's own id (`Ask id:`), which the writes to an ask take. A
+  spec's ask block id can look like an ask id, so the read used to answer `matches none of the
+  asks` for its prefix and `not found` for the whole id.
 - The `dispatch` command waits for its stdout and stderr writes before it exits. Bun's
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit

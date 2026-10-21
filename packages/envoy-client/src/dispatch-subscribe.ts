@@ -38,6 +38,21 @@ export function dispatchFollowNotice(
 }
 
 /**
+ * Whether a subscription to `topic` receives every event on `owner`, under the listener's
+ * wildcard rule (`routing.Match`): its tokens match the owner's subject token for token (`*`
+ * matching any one), then end in `>`. An event type can span tokens (`ask.answered`), so a
+ * topic that names a token past the owner's subject, `*` included, receives only some of them.
+ */
+export function subscriptionCovers(topic: string, owner: OwnerTopic): boolean {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">") return true;
+    if (index >= base.length || (part !== "*" && part !== base[index])) return false;
+  }
+  return false;
+}
+
+/**
  * Extracts the topics a subscription.removed notice says a human removed
  * from sessionID's own interests, when raw is a dispatch envelope carrying
  * that event and sessionID is the one it names. The event also reaches the

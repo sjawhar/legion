@@ -15,8 +15,14 @@ import {
 } from "./dispatch-session-state";
 import { dispatchFollowNotice } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
-import { handedConfigFile, sessionConfigFile, sessionDispatchSettings } from "./session-settings";
+import {
+  handedConfigFile,
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionEnvoySettings,
+} from "./session-settings";
 import { ToolInputError } from "./tool-input-errors";
+import { createEnvoyClient, EnvoyApiError } from "./transport";
 
 export interface DispatchCliIo {
   /** Where the text the model reads goes: results, refusals and notices alike. */
@@ -47,6 +53,10 @@ const STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's
 function stateWriteFailed(problem: string): string {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
+
+/** How long a write waits on the listener for the session's subscriptions, per attempt (the
+ *  client tries twice), after the write itself has landed. */
+const SUBSCRIPTIONS_TIMEOUT_MS = 1_000;
 
 /**
  * The output, at most `limit` characters (unbounded for a host that shows all of it). Within the
@@ -196,6 +206,25 @@ export async function runDispatchCli(
     return USAGE;
   }
   const config: ActiveDispatchConfig = resolution;
+  // A write's result names an owner the session is not subscribed to only from the listener's
+  // record of the session's topics, read (Envoy's settings with it) when the write asks; with
+  // Envoy off, or no answer from it, the result says nothing about subscriptions. A session the
+  // listener has no record of holds none.
+  const subscriptions = async (): Promise<readonly string[] | null> => {
+    const envoy = sessionEnvoySettings(file, env, { cwd: io.cwd, nats: false });
+    if (!envoy.enabled) return null;
+    const listener = createEnvoyClient({
+      baseUrl: envoy.url,
+      fetch: io.fetchImpl ?? fetch,
+      token: envoy.token,
+      timeoutMs: SUBSCRIPTIONS_TIMEOUT_MS,
+    });
+    try {
+      return (await listener.getInterest(sessionId)).topics;
+    } catch (error) {
+      return error instanceof EnvoyApiError && error.details.status === 404 ? [] : null;
+    }
+  };
 
   let follows: Set<string>;
   try {
@@ -223,6 +252,7 @@ export async function runDispatchCli(
       config,
       env,
       ...(io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl }),
+      subscriptions,
     });
     text = result.text;
     for (const warning of result.warnings ?? []) {

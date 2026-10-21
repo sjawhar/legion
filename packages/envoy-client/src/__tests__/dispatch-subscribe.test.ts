@@ -1,5 +1,46 @@
 import { describe, expect, test } from "bun:test";
-import { dispatchFollowNotice, subscriptionRemovedTopics } from "../dispatch-subscribe";
+import { documentTopicOf, issueTopic } from "../dispatch-owner";
+import {
+  dispatchFollowNotice,
+  subscriptionCovers,
+  subscriptionRemovedTopics,
+} from "../dispatch-subscribe";
+
+describe("subscriptionCovers", () => {
+  test("a topic covers an owner when it receives every event on it, as the listener matches", () => {
+    const issue = issueTopic("DSP-42");
+    for (const topic of [
+      "notifications.dispatch.issue.DSP-42.>",
+      "notifications.dispatch.issue.*.>",
+      "notifications.dispatch.issue.>",
+      "notifications.dispatch.>",
+      "notifications.>",
+      ">",
+    ]) {
+      expect([topic, subscriptionCovers(topic, issue)]).toEqual([topic, true]);
+    }
+    for (const topic of [
+      "notifications.dispatch.issue.DSP-42",
+      // An event type can span tokens (`ask.answered`), which `*` stops short of.
+      "notifications.dispatch.issue.DSP-42.*",
+      "notifications.dispatch.issue.DSP-42.ask.>",
+      "notifications.dispatch.issue.DSP-4.>",
+      "notifications.dispatch.issue.DSP-420.>",
+      "notifications.dispatch.issue.DSP-42.comment.created",
+      "notifications.dispatch.document.DSP.spec.>",
+      "notifications.agent.ses-1",
+      "notifications.role.reviewer",
+    ]) {
+      expect([topic, subscriptionCovers(topic, issue)]).toEqual([topic, false]);
+    }
+    const document = documentTopicOf("CORE", "runbook-md");
+    expect(subscriptionCovers("notifications.dispatch.document.CORE.runbook-md.>", document)).toBe(
+      true
+    );
+    expect(subscriptionCovers("notifications.dispatch.document.CORE.*.>", document)).toBe(true);
+    expect(subscriptionCovers("notifications.dispatch.issue.>", document)).toBe(false);
+  });
+});
 
 describe("dispatchFollowNotice", () => {
   test("names the ask, its issue, and the opt-in subscribe line for a result that follows an ask", () => {

@@ -39973,6 +39973,69 @@ async function readPictures(client, addresses, shown) {
   return { lines, images, shown: showing };
 }
 
+// ../envoy-client/src/dispatch-subscribe.ts
+function dispatchFollowNotice(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue: issue2, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  let owner;
+  if (typeof issue2 === "string" && issue2 !== "") {
+    owner = issueTopic(issue2);
+  } else if (typeof document === "string") {
+    const [project, slug] = document.split("/", 2);
+    if (!project || !slug)
+      return null;
+    owner = { label: document, topic: documentTopicOf(project, slug).topic };
+  } else {
+    return null;
+  }
+  return {
+    ask,
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
+  };
+}
+function subscriptionCovers(topic, owner) {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">")
+      return true;
+    if (index >= base.length || part !== "*" && part !== base[index])
+      return false;
+  }
+  return false;
+}
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope2;
+  try {
+    envelope2 = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope2 !== "object" || envelope2 === null)
+    return;
+  const { source, payload } = envelope2;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
+
 // ../envoy-client/src/search-answer.ts
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
@@ -40059,8 +40122,11 @@ function resolvedTopic(resolved) {
     throw new Error("issue document is missing its issue");
   return issueTopic(resolved.issue.key);
 }
-function notSubscribed(owner) {
-  return `(not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
+async function notSubscribed(owner, subscriptions) {
+  const topics = await subscriptions?.();
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+    return "";
+  return ` (not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
 }
 function followsAsk(owner) {
   return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
@@ -40340,6 +40406,37 @@ async function resolveIdPrefix(tool, kind, id, ownerName, list) {
   ]);
 }
 var askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
+async function readAskRef(tool, id, ownerName, client, list) {
+  const fullID = normalizeUUID(id);
+  if (fullID !== undefined) {
+    try {
+      return await client.getAsk(fullID);
+    } catch (error48) {
+      if (!(error48 instanceof DispatchServiceError) || error48.status !== 404)
+        throw error48;
+      const blocks = (await list()).filter((ask) => ask.block_id?.toLowerCase() === fullID);
+      if (blocks.length !== 1 || blocks[0] === undefined)
+        throw error48;
+      return client.getAsk(blocks[0].id);
+    }
+  }
+  const asks = await list();
+  let matches = asks.filter((ask) => ask.block_id === id);
+  if (matches.length === 0) {
+    if (!idPrefixPattern.test(id)) {
+      throw new ToolInputError(tool, [
+        `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`
+      ]);
+    }
+    const prefix = id.toLowerCase();
+    matches = asks.filter((ask) => ask.id.toLowerCase().startsWith(prefix) || (ask.block_id?.toLowerCase().startsWith(prefix) ?? false));
+  }
+  if (matches.length === 1 && matches[0] !== undefined)
+    return client.getAsk(matches[0].id);
+  throw new ToolInputError(tool, [
+    matches.length === 0 ? `ask id ${id} matches none of the asks on ${ownerName}; use the full id` : `ask id ${id} matches ${matches.length} asks on ${ownerName}; use the full id`
+  ]);
+}
 async function sessionOpenAsks(client, sessionId) {
   const session = sessionId?.trim();
   if (!session)
@@ -40962,6 +41059,7 @@ function askSummary({ ask, replies, answers }, graph) {
     "Options:",
     ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
     `State: ${ask.state}`,
+    `Ask id: ${ask.id}`,
     "Answer:",
     ...answer === null ? ["- none"] : [
       `- By: ${answer.user}`,
@@ -41427,7 +41525,7 @@ async function executeDispatchTool(input) {
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
             ...adviceLines
           ].join(`
 `),
@@ -41544,7 +41642,7 @@ async function executeDispatchTool(input) {
       });
       return {
         text: [
-          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          `${after.key}: ${changes.join("; ")}${await notSubscribed(issueTopic(after.key), input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -41577,8 +41675,7 @@ async function executeDispatchTool(input) {
         text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
-        text: [text, notSubscribed(issueTopic(issueKey))].join(`
-`),
+        text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
         details: { issue: issueKey, status: after.status, claim: held }
       };
     }
@@ -41834,7 +41931,10 @@ ${followsAsk(askOwner)}`,
         };
       }
       return {
-        text: [`Posted comment ${comment.id} ${notSubscribed(commentOwner2)}`, ...adviceLines].join(`
+        text: [
+          `Posted comment ${comment.id}${await notSubscribed(commentOwner2, input.subscriptions)}`,
+          ...adviceLines
+        ].join(`
 `),
         details: {
           ...commentDetails,
@@ -41856,7 +41956,7 @@ ${followsAsk(askOwner)}`,
       };
       const comment = resolved.owner.kind === "project" ? await client.artifactSuggest(resolved.artifact.id, suggestionInput) : await client.suggest(issue2(), suggestionInput);
       return {
-        text: `Posted suggestion ${comment.id} ${notSubscribed(resolvedTopic(resolved))}`,
+        text: `Posted suggestion ${comment.id}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
         details: writeResultDetails(resolved, { comment: comment.id })
       };
     }
@@ -41914,7 +42014,7 @@ ${followsAsk(askOwner)}`,
       const adviceLines = renderAdvice(input.tool, issueKey, message.advice, {});
       return {
         text: [
-          `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
+          `Posted message ${message.id} (${messageRef})${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -41952,7 +42052,7 @@ ${followsAsk(askOwner)}`,
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
-          `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
+          `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
           ...tokenTrailer,
           ...adviceLines
         ].join(`
@@ -42075,7 +42175,7 @@ ${trailer.join(`
       });
       return {
         text: [
-          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
+          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})${await notSubscribed(uploadOwner, input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -42137,9 +42237,8 @@ ${trailer.join(`
       }
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
-        const askRead = await client.getAsk(id);
-        const askRef = refTarget(ref, "ask", id);
+        const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
+        const askRef = refTarget(ref, "ask", askRead.ask.id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(askTexts(askRead)),
           graphSections(client, askRef)
@@ -42397,59 +42496,6 @@ function pruneSessions(root, now) {
   }
   ensureDirectory(root);
   writeFileSync(stamp, "", { mode: PRIVATE_FILE });
-}
-
-// ../envoy-client/src/dispatch-subscribe.ts
-function dispatchFollowNotice(details) {
-  if (typeof details !== "object" || details === null)
-    return null;
-  const { follows, issue: issue2, document } = details;
-  if (typeof follows !== "object" || follows === null)
-    return null;
-  const { ask } = follows;
-  if (typeof ask !== "string" || ask === "")
-    return null;
-  let owner;
-  if (typeof issue2 === "string" && issue2 !== "") {
-    owner = issueTopic(issue2);
-  } else if (typeof document === "string") {
-    const [project, slug] = document.split("/", 2);
-    if (!project || !slug)
-      return null;
-    owner = { label: document, topic: documentTopicOf(project, slug).topic };
-  } else {
-    return null;
-  }
-  return {
-    ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
-  };
-}
-function subscriptionRemovedTopics(raw, sessionID) {
-  let envelope2;
-  try {
-    envelope2 = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof envelope2 !== "object" || envelope2 === null)
-    return;
-  const { source, payload } = envelope2;
-  if (source !== "dispatch" || typeof payload !== "string")
-    return;
-  let event;
-  try {
-    event = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const parsedEvent = DispatchEventSchema.safeParse(event);
-  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
-    return;
-  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
-  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
-    return;
-  return parsedPayload.data.topics ?? [];
 }
 
 // ../envoy-client/src/nats-auth.ts
@@ -43188,6 +43234,11 @@ function sessionDispatchSettings(file2, env, options) {
     warnings: config2.kind === "read" ? config2.warnings : [],
     missing: config2.kind === "read" ? config2.missing : null
   };
+}
+function sessionEnvoySettings(file2, env, options) {
+  if (file2.path === null)
+    return offWithError(file2.error);
+  return envoySettings(env, readEnvoyConfig(file2.path, env, options), { nats: options.nats });
 }
 
 // ../envoy-client/src/slack-post.ts

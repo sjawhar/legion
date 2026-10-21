@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- The `dispatch` command (`dist/dispatch.js`) ends a write with `(not subscribed to KEY; …)` only
+  when none of the session's Envoy subscriptions, as the listener records them, receives every
+  event on the issue or document; it used to end every write that way.
+- The `dispatch` command (`dist/dispatch.js`) finds an ask in a spec by its `:::ask{#<id>}` block
+  id in `dispatch read --ref dispatch://KEY/ask/<id>`, whole or as a unique 8+ hex prefix, and
+  prints the ask's own id (`Ask id:`).
+- The `dispatch` skill: a typed answer that disagrees with the selected option is the answer; a
+  changed decision on an answered ask is a new ask, since an answered ask cannot be retracted;
+  repeated measurements go in one artifact edited in place; and `dispatch read` takes an ask
+  block's id, while the writes to an ask take the ask's own.
 - A session whose deliveries are channel notifications Claude Code did not load registers with no
   delivery mode instead of `aside` (a Legion pane, whose deliveries go to the bridge's inbox, is
   unaffected). Claude Code drops a notification from a channel it did not load without telling the
