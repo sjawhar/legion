@@ -281,6 +281,39 @@ check "and the budget it waited out" "$(contains "$(field detail)" "whole 2s bud
 check "no marker is left" "$(is "$(exists "$marker")" false)"
 check_clean
 
+echo "case: a run that never got the lock leaves the marker another role wrote"
+# The holder writes the marker as its last act inside the lock, so a `-w` that expires in that
+# window must not delete a marker that is true: this run looked at no node_modules and learned
+# nothing about what is installed. Deleting it would cost every later role of the issue a full
+# reinstall for a fact this run never observed.
+fixture lock-held-marker
+mkdir -p "$state" "$cache"
+ready="$case_root/holder-ready"
+(
+  exec 9< "$cache"
+  flock 9
+  : > "$ready"
+  exec sleep 30
+) &
+holder=$!
+for _ in $(seq 200); do
+  if [ -e "$ready" ]; then
+    break
+  fi
+  sleep 0.05
+done
+check "the holder took the cache's lock" "$(exists "$ready")"
+printf 'a marker another role wrote\n' > "$marker"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=2 STUB_MODE=ok
+kill "$holder" > /dev/null 2>&1 || true
+wait "$holder" > /dev/null 2>&1 || true
+check "exits 0" "$(is "$status" 0)"
+check "reports the lock" "$(is "$(field reason)" 'lock-timeout')"
+check "and leaves the other role's marker exactly as it was" \
+  "$(is "$(cat "$marker")" 'a marker another role wrote')"
+check_clean
+
 echo "case: another install filled the cache under this one (the cold-entry race)"
 fixture cold-race
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
@@ -350,6 +383,38 @@ check "and carries timeout's status" "$(is "$(field exitStatus)" 124)"
 check "no marker is left" "$(is "$(exists "$marker")" false)"
 stub_pid=$(sed -n 's/^pid: //p' "$record" | tail -n 1)
 check "the stub's process is gone" "$(kill -0 "$stub_pid" > /dev/null 2>&1 && echo false || echo true)"
+check_clean
+
+echo "case: the hold bounds how long one attempt keeps the cache's lock"
+# The lock is not ours alone: the daemon's own plugin install takes the same inode in the same
+# container and fails the launch when its wait runs out, so an install that cannot finish inside
+# LEGION_SETUP_LOCK_HOLD yields the lock rather than the budget's whole 270 s. The budget here is
+# large, so only the hold can end this run — and the lock must be free the moment it does.
+fixture lock-hold
+began=$(date +%s)
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=120 LEGION_SETUP_LOCK_HOLD=1 STUB_MODE=hang
+elapsed=$(($(date +%s) - began))
+echo "  the run took ${elapsed}s against a 120s budget and a 1s hold"
+check "exits 0" "$(is "$status" 0)"
+check "the hold ended it, not the budget" "$(at_most "$elapsed" 15)"
+check "the report names the timeout" "$(is "$(field reason)" 'install-timeout')"
+check "and carries timeout's status" "$(is "$(field exitStatus)" 124)"
+check "it vouches for nothing: no marker" "$(is "$(exists "$marker")" false)"
+# The release is the point of the bound: another process must be able to take the lock at once.
+flock -w 2 "$cache" true && took=true || took=false
+check "and the lock is free the moment the run ends" "$(is "$took" true)"
+# What the next role's locked re-check must judge: a tree a cut-off install left behind, with no
+# marker, is reinstalled rather than taken for a finished one — the marker is the only thing
+# standing between a half-written node_modules and a role that skips the install.
+mkdir -p "$workspace/node_modules/.bin"
+printf '#!/bin/sh\necho 2.3.5\n' > "$workspace/node_modules/.bin/biome"
+chmod 755 "$workspace/node_modules/.bin/biome"
+: > "$record"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=ok
+check "the next role installs over what the cut-off run left" "$(is "$(calls)" 1)"
+check "and only then is a marker written" \
+  "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
 check_clean
 
 echo "case: the report identifies the run that wrote it, whatever bun printed"

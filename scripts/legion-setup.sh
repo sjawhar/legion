@@ -40,7 +40,11 @@
 # between its SIGTERM and its SIGKILL, 275 s against that 360 s deadline, which leaves the launch
 # the rest. Against it, a measured 54 s for the first install of 1,986 packages and about 0.3 s
 # when they are already there and `bun.lock` has not moved. Whichever wait runs out is a report,
-# not a non-zero exit.
+# not a non-zero exit. A second bound sits inside that one: `LEGION_SETUP_LOCK_HOLD` (60 s) is the
+# longest one attempt may hold the cache's lock, because the daemon's own plugin install waits on
+# that same inode and fails the launch when its wait runs out — sized against that wait's
+# derivation where it is set out below, and the first thing to lower in a deployment that lowers
+# `worker_boot_timeout_seconds`.
 #
 # It writes only under the issue volume — the workspace root the `/workspaces/` component names
 # (`/legion`), or `$LEGION_WORKSPACE/.legion-setup`, which `.gitignore` holds, when that cannot be
@@ -97,6 +101,39 @@ remaining() {
   fi
   printf '%s\n' "$left"
 }
+
+# A second bound, on the only part of the run that makes another process wait: how long one
+# attempt may hold `/usr/bin/flock` on the cache. That inode is not ours alone — the daemon's own
+# plugin install takes it in this same container (plugins.go:225), waiting `installLockWait`,
+# `RegistrationDeadline/3`, twice, and then exiting 1, which fails the launch before Oh My Pi
+# starts; three such launches end the role in `worker-died`. A hold bounded only by the whole
+# budget could therefore stop five other roles from starting, which is the one thing this install
+# must never do, so the locked region yields instead: an install that cannot finish inside the
+# hold releases the lock, writes no marker, reports what happened to its agent, and leaves the
+# next role to install with whatever the cache now holds.
+#
+# The number, defended against the derivation rather than against today's value. The daemon's wait
+# is `installLockWait` = `RegistrationDeadline(worker_boot_timeout_seconds,
+# worker_boot_registration_deadline_intervals)/3`, floored at 1 s (plugins.go:139-141), so it is
+# `boot × intervals / 3`: 120 s at the defaults (60 × 6 / 3), 60 s if a deployment halves the boot
+# timeout, 1 s at the floor. A role container is told none of those three settings — its
+# environment carries no boot timeout, no interval count and no deadline, which I checked
+# (`roleEnvironment`, manifest.go) — so this script cannot derive the bound and must assume one:
+# 60 s, half the daemon's wait at its defaults, which leaves a plugin install that began waiting
+# the instant this one took the lock its whole second wait afterwards, and is headroom rather than
+# a cut-off against a measured 37 s install.
+#
+# What that fixed number costs where the assumption does not hold: at half the default boot
+# timeout the daemon waits 60 s twice and this hold can consume the first of the two, leaving the
+# retry to carry the launch; below that, and at the floor where two 1 s waits already consume the
+# deadline by design, a 60 s hold would retire a role that queued behind it. Such a deployment
+# sets `LEGION_SETUP_LOCK_HOLD` below its own `installLockWait` — which is why the knob exists,
+# why it is the first thing `docs/kubernetes.md` says beside this bound, and why the paragraph
+# there that sizes `installLockWait` now names this script among the holders of that inode.
+lock_hold=${LEGION_SETUP_LOCK_HOLD:-60}
+case "$lock_hold" in
+  '' | *[!0-9]* | 0) lock_hold=60 ;;
+esac
 
 # The report's path comes before the install root below, and not after it as everything else
 # about the report does, because the one failure this report mechanism exists for is a volume
@@ -275,8 +312,12 @@ ALREADY_INSTALLED=201
 #   * the log's truncation, because the log is this run's own file and this is the moment it
 #     starts being written — after the check above, so that a waiter arriving behind a finished
 #     install says so on the role container's own stderr rather than into a log it then deletes.
+#   * the install's own bound, which is now two numbers rather than one: what is left of the whole
+#     budget, and `lock_hold`, whichever is smaller. The first keeps this run inside the role's
+#     start; the second keeps it out of everyone else's, and both are computed here, after the
+#     lock is taken, so a wait and a hold can never add past the budget.
 # shellcheck disable=SC2016 # the arithmetic belongs to the shell under the lock, not to this one
-locked_install='deadline=$1 marker=$2 digest=$3 log=$4 already=$5
+locked_install='deadline=$1 marker=$2 digest=$3 log=$4 already=$5 hold=$6
 if [ -f "$marker" ] && [ -e node_modules/.bin/biome ] &&
   [ "$(cat "$marker" 2> /dev/null)" = "$digest" ]; then
   exit "$already"
@@ -284,6 +325,7 @@ fi
 exec > "$log" 2>&1
 left=$((deadline - $(date +%s)))
 [ "$left" -ge 1 ] || left=1
+[ "$left" -le "$hold" ] || left=$hold
 timeout -k 5 "$left" bun install --backend=copyfile --frozen-lockfile || exit $?
 printf "%s\n" "$digest" > "$marker" 2> /dev/null || true'
 
@@ -291,7 +333,8 @@ install_once() {
   [ -d "$cache" ] || rm -f -- "$cache"
   mkdir -p -- "$cache" 2> /dev/null
   BUN_INSTALL_CACHE_DIR="$cache" /usr/bin/flock -w "$(remaining)" -E "$LOCK_BUSY" -- "$cache" \
-    sh -c "$locked_install" sh "$deadline" "$marker" "$digest" "$log" "$ALREADY_INSTALLED"
+    sh -c "$locked_install" sh "$deadline" "$marker" "$digest" "$log" "$ALREADY_INSTALLED" \
+      "$lock_hold"
 }
 
 echo "legion setup: installing this bun.lock's packages into $workspace" >&2
@@ -344,13 +387,19 @@ case "$status" in
   137) reason=install-killed ;;
   *) reason=install-failed ;;
 esac
-rm -f "$marker" 2> /dev/null
 if [ "$reason" = lock-timeout ]; then
+  # No marker is touched here: this run never held the lock, never looked at node_modules, and
+  # learned nothing about what is installed. The holder writes the marker as its last act inside
+  # the lock, so a `-w` that expires in that window would otherwise delete a marker that is true
+  # and cost every later role of the issue a full reinstall.
   echo "legion setup: another install held $cache for this run's whole ${budget}s budget" >&2
   write_report lock-timeout "$status" \
     "another install held $cache for this run's whole ${budget}s budget"
   exit 0
 fi
+# Only a run that attempted an install invalidates the marker: what it found there is now
+# whatever a cut-off `bun install` left.
+rm -f "$marker" 2> /dev/null
 echo "legion setup: bun install exited $status ($reason); starting the agent without it" >&2
 write_report "$reason" "$status" "$(tail -c "$detail_bytes" "$log" 2> /dev/null)"
 exit 0

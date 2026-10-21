@@ -77,12 +77,23 @@ export function setupReportNotice(
   const exitStatus = typeof fields.exitStatus === "number" ? String(fields.exitStatus) : "unknown";
   const detail = typeof fields.detail === "string" ? fields.detail.trim() : "";
   const tail = detail.length > DETAIL_TAIL ? `…${detail.slice(-DETAIL_TAIL)}` : detail;
+  // Only the three reasons that name a `bun install` have an install log behind their detail
+  // (`scripts/legion-setup.sh`'s failure branch quotes the log's tail there). A `lock-timeout`
+  // run never held the lock and a `no-install-root` run never had a directory to write in, and
+  // neither ran an install, so introducing their detail as a log is a report asserting something
+  // that did not happen — the defect this notice exists to prevent one level up.
+  const ranInstall =
+    reason === "install-failed" || reason === "install-timeout" || reason === "install-killed";
   return {
     id: crypto.randomUUID(),
     content:
       "Legion's setup command could not install this repository's packages in this container: " +
       `reason "${reason}", exit status ${exitStatus}.` +
-      (tail === "" ? "" : ` The install log ended: ${tail}`) +
+      (tail === ""
+        ? ""
+        : ranInstall
+          ? ` The install log ended: ${tail}`
+          : ` It reported: ${tail}`) +
       "\n\nUntil they are installed, this repository's own check commands cannot run here: each " +
       "says so rather than passing silently, so a check you cannot run is no evidence that it " +
       "passes. CI's required jobs are the authority for lint, types and the unit suites meanwhile." +

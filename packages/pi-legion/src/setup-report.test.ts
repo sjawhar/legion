@@ -60,9 +60,12 @@ test("an install this role's own generation failed is read from the state direct
 
   expect(files).toEqual(["/state/legion-setup-report.json"]);
   expect(notice?.id).toMatch(/^[0-9a-f-]{36}$/);
-  // The failure as the report carries it, and the install log's tail.
+  // The failure as the report carries it, and the install log's tail — introduced as a log only
+  // because an install ran to leave one.
   expect(notice?.content).toContain('reason "install-timeout", exit status 124');
-  expect(notice?.content).toContain("error: failed to resolve @oh-my-pi/pi-utils");
+  expect(notice?.content).toContain(
+    "The install log ended: error: failed to resolve @oh-my-pi/pi-utils"
+  );
   // What the agent is to do about it: no check command of this repository can run here, CI's
   // required jobs are the authority meanwhile, and the retry is the setup script rather than a
   // bare `bun install`, which takes neither the lock the roles share nor the marker — the reason
@@ -73,6 +76,29 @@ test("an install this role's own generation failed is read from the state direct
   expect(notice?.content).toContain("sh scripts/legion-setup.sh");
   expect(notice?.content).toContain("takes the lock every role of this issue shares");
   expect(notice?.content).toMatch(/A bare `bun install` does none of those three/);
+});
+
+test.each([
+  [
+    "lock-timeout",
+    199,
+    "another install held /legion/scratch/bun/install/cache for this run's whole 270s budget",
+  ],
+  [
+    "no-install-root",
+    0,
+    "no writable install root: neither /legion nor the workspace can be written under",
+  ],
+])("a %s report, whose install never ran, introduces its detail as what it is", (reason, exitStatus, detail) => {
+  const { readFile } = reads(JSON.stringify({ ...report, reason, exitStatus, detail }));
+
+  const notice = setupReportNotice(environment, readFile);
+
+  // The script writes these two from a run that attempted no install: one never held the lock,
+  // the other had no directory to write in. Calling their detail an install log is a report
+  // asserting something that did not happen.
+  expect(notice?.content).toContain(`It reported: ${detail}`);
+  expect(notice?.content).not.toContain("The install log ended");
 });
 
 test("a state directory this environment does not name is never read", () => {
