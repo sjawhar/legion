@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-69",
+  "completed": "2026-10-21T00:30:00Z",
+  "round": 1,
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:114-117",
+      "description": "The Evidence paragraph attributes the in-pod measurement to the wrong container and to a record that does not carry it: it says the measurement was 'made in the INFRA-69 implementer container ... and posted back on the cluster read as dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05'. That comment, read at review, says 'Measured at 22:20Z inside the planner container of dispatch://INFRA-69's pod', gives device 83 for /tmp, /home/legion and ~/.cache, 56 for .config, 97 for /var/run/legion/state, 87 for /legion, and du -sx / = 42 MB; it was posted by session 01a15b61-7dc0-75bc-96b8-a99a82661dc0, the planner's claim session in this issue's record. The bullets that follow the sentence give 114/118/56/128/130/124 and df figures that appear nowhere in that comment - they are the implementer container's own later measurement, and INFRA-51 carries no comment from the implementer (its comments #11-#19 list one INFRA-69 comment, the planner's). A reader who follows the citation to verify finds a different container and different numbers. Same defect class as the two rounds the tester failed: a plausible attribution the cited record does not support."
+    },
+    {
+      "severity": "important",
+      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:46-53",
+      "description": "The 'Not charged' list names /home/legion/.config, /var/run/legion/private and /var/run/legion/state as in-memory emptyDirs with no word that a write there spends the container's memory limit instead. Measured in the INFRA-69 reviewer container at this head: /sys/fs/cgroup/memory.current 708,227,072 -> 813,051,904 bytes (+104,824,832, the written size) for `dd bs=1M count=100` into /var/run/legion/private, with free(1) 'shared' at 102,520 KiB. defaultResources (packages/daemon/internal/config/kubernetes.go:179-186) gives the architect, planner and merger a 1Gi memory limit, so a reader who reads 'not charged' and moves a large download onto one of those tmpfs mounts trades the eviction for an OOM kill - the same silent kill this note exists to prevent. One clause fixes it; the ephemeral-storage verdict itself is right (docs/kubernetes.md:1189-1191)."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md:15-18",
+      "description": "related_issues gains \"INFRA-69\" but not this change's pull request, sjawhar/legion#2088. The plan's front-matter step asks for both ('add \"INFRA-69\" and this change's pull request to related_issues'), skill://legion-retro's front-matter schema names the Dispatch issue and the pull request, and every neighbouring note carries its own PR (INFRA-43 -> #2084, LEGION-780 -> #1982, LEGION-668 -> #1878). No deviation recorded in implement.json. Fix in the same push; the retro convention forbids a later retro editing this file's front matter, so the gap would be permanent."
+    }
+  ],
+  "verifiedAtHead": {
+    "head": "1bff105ac9fe1a12986ef59492ab3fb729c3dd6c",
+    "ciHead": "04589b7aa2ec80e06846eeeac347476d6df3c44a",
+    "ci": "Required set from the base's rulesets: lint, typecheck, test, pr-title (branch protection carries none). All four present, completed and success on the CI head's check-runs; GitHub compare 04589b7a...1bff105a is 'ahead' and lists only .legion/INFRA-69/implement.json and .legion/INFRA-69/test.json, so the code under review is the CI head's.",
+    "threads": "gh api graphql reviewThreads: 0 nodes, and no prior review on the pull request.",
+    "e2eLines": "Both present in the live body: E2E (implementer) at 62539c0449d7 and E2E (tester) at 1bff105a, each naming a live role container, commands, observations and a negative control.",
+    "thermonuclear": "Not run: the diff is one docs/solutions/ markdown file plus .legion/ handoffs, no runtime code, so the pair is skipped per the reviewer's docs-only rule.",
+    "ownMeasurement": "Reproduced the note's claims in the reviewer container: no /tmp line in /proc/mounts; /tmp, /home/legion, ~/.cache, ~/.local/state all dev=176 against /legion 180, /legion/feed 183, sessions 196, .config 56, /var/run/legion/{state,private,gh,launcher} 190/192/186/189; df / used 13,628 -> 218,428 -> 13,632 KiB around a 200 MiB write under /tmp; du -sk /tmp/probe 204800 while du -sx -k / stays 42348 and du -x -a -d1 -k / prints 0 for /tmp; du -sh /tmp 201M; df -k --output=target,used /home/legion/.cache names / (218,432) and /legion names /legion (658,336); df -x refuses ('option requires an argument'). Citations checked: golden root.json gives the six role containers /legion, /legion/feed(ro), the sessions dir, /home/legion/.config and four /var/run/legion/* and no /tmp, with the Memory-medium tmp volume mounted by workspace-fetch alone (TMPDIR=/tmp); defaultResources 20Gi implementer/tester, 10Gi others over a 1Gi request; gkeEphemeralStorageClamped's doc comment records the 2026-10-17 live confirmation; docs/kubernetes.md:1189 and :1703-1705 carry the prose; the Extends target exists. automountServiceAccountToken is false and /var/run/secrets/kubernetes.io is absent, so the note's 'nothing inside the container can read the event' holds.",
+    "planDeparture": "Judged once, accepted: the plan edits the note in place rather than writing a superseding file (skill://legion-retro's rule). Its stated reason holds - the rule governs a retro's own durable output and the hazard is two trees editing one file in the same hour, while this issue's whole deliverable is that file, no other tree edits it, and a successor would leave the wrong cause unmarked in the file other notes link to."
+  }
+}
