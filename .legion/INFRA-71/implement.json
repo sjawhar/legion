@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-71",
+  "completed": "2026-10-21T07:35:00Z",
+  "proof": [
+    {
+      "criterion": "AC1 — in a role container where the repository's packages are not installed, no command the repository tells an agent to run reports a passing lint, including in a container where a plain `bunx biome` has already fetched the squatted package into bun's own cache.",
+      "surface": "This issue's own role container (worker image, bun 1.3.14), the shared workspace with no node_modules, poisoned first by one `bunx biome check .`, which left /tmp/bunx-1000-biome@latest behind.",
+      "command": "bunx biome check . ; bunx biome --version ; bunx --no-install biome check . ; bun run lint packages/pi-legion/ ; bun run typecheck ; (cd packages/pi-legion && bun run lint) ; scripts/repo-tool.sh biome check .",
+      "observed": "Every command the repository now prescribes exits 1 with the wrapper's message — `repo-tool: biome is not installed` or `tsc is not installed`, the two paths tried (./node_modules/.bin/<tool> and the repository root's) and the remedy naming `bun install` and scripts/legion-setup.sh. Nothing reports a check it did not run.",
+      "headSha": "7487f0440e6515e2d968e267079496e9e25652f5",
+      "negativeControl": "In that same container the pre-change form `bunx biome check .` exits 0 having checked no file, `bunx biome --version` answers 0.3.3 (the squatted package, not the pinned Biome 2.4.11), and `bunx --no-install biome check .` also exits 0 once the plain form has run once there — the state the spec says the failure needs."
+    },
+    {
+      "criterion": "AC2 — the required lint job fails if the vulnerable form reappears in any file that prescribes a command for lint, types or tests.",
+      "surface": "`.github/scripts/check-check-commands.sh` on the real tree and its own harness (a miniature repository per case with the real script symlinked in), as CI's required lint and test jobs run them; the lint job itself passed on this head (run 39558307948, job lint, 3m8s).",
+      "command": ".github/scripts/check-check-commands.sh ; .github/scripts/check-check-commands.test.sh",
+      "observed": "The guard exits 0 with `every prescribed biome, tsc, tsserver and playwright command runs through scripts/repo-tool.sh (13 manifest(s), 8 workflow(s), 92 shell script(s), 536 guide(s))`; its suite reports `Results: 53 passed, 0 failed`.",
+      "headSha": "7487f0440e6515e2d968e267079496e9e25652f5",
+      "negativeControl": "`bunx biome check <package>/` put back into AGENTS.md's commands block and into packages/contracts' lint recipe: the guard exits 1 naming `packages/contracts/package.json:41` and `AGENTS.md:52`, each with its reason. Both files were restored byte-for-byte afterwards (jj diff --stat unchanged)."
+    },
+    {
+      "criterion": "AC3 (pre-merge proxy) — the packages are in place, the lint command answers with the version bun.lock pins and its `Checked N files` line, nothing of the install is on the container's own filesystem, and the workspace's tracked files, bun.lock among them, are unchanged by it.",
+      "surface": "A throwaway copy of this tree on the issue volume (/legion/workspaces/infra-71-proof), with no node_modules and a cold cache, run exactly as the deployment's setup line runs it. The full line — a role container created after the deployment names the script, before the agent's first turn — is the production check.",
+      "command": "env LEGION_WORKSPACE=/legion/workspaces/infra-71-proof LEGION_ISSUE=INFRA-71 LEGION_ROLE=implementer LEGION_GENERATION=1 LEGION_STATE_DIR=/legion/proof-state sh scripts/legion-setup.sh ; ./node_modules/.bin/biome --version ; bun run lint . ; cksum bun.lock ; find /tmp $HOME -newer <a marker taken just before the run>",
+      "observed": "Exit 0 after `1986 packages installed [29.01s]` from a cold cache. node_modules/.bin/biome is `Version: 2.4.11`, the version bun.lock pins, and `bun run lint .` prints `Checked 1079 files in 33s`. `cksum bun.lock` is 581893351 340936 before and after. The cache (1,395,623,403 bytes) and the lock, log and marker are on the issue volume; no report is written. The container's own disk took exactly one empty file, /tmp/.<hex>-00000000.hm (0 bytes, bun's own temp), and nothing else: ~/.bun and ~/.cache/bun are byte-identical before and after (113,086,919 and 1,605,253 bytes — the squatted package the AC1 control fetched, not this install's). A second run with BUN_INSTALL_CACHE_DIR set, as an issue pod now sets it, installs into that directory (1,395,645,249 bytes there) and makes none of its own.",
+      "headSha": "7487f0440e6515e2d968e267079496e9e25652f5",
+      "negativeControl": "In that same copy immediately before the run, `bun run lint .` exits 1 with the wrapper's `biome is not installed` message."
+    },
+    {
+      "criterion": "AC4 — a role whose install failed still starts, with what failed in front of its agent in its first turn.",
+      "surface": "The same throwaway copy with failures injected, and a real Oh My Pi pane (LEGION_TEST_OMP=/opt/omp/bin/omp, pi-shared's omp harness `runLegionPane`, this checkout's two plugins).",
+      "command": "LEGION_SETUP_INSTALL_TIMEOUT=1 sh scripts/legion-setup.sh ; BUN_CONFIG_REGISTRY=http://127.0.0.1:1/ sh scripts/legion-setup.sh with the cache moved aside ; LEGION_SETUP_LOCK_WAIT=1 sh scripts/legion-setup.sh against a held lock ; bun test on a throwaway runLegionPane case that writes the report into the pane's LEGION_STATE_DIR",
+      "observed": "Every injection exits 0, leaves no marker, and writes $LEGION_STATE_DIR/legion-setup-report.json carrying this run's issue, role and generation: `install-timeout` with exitStatus 124; `install-failed` with exitStatus 1 and a 999-character bounded detail; `lock-timeout` after 1.1 s. On the real binary, the pane whose report matches its own issue, role and generation carries `Legion's setup command could not install this repository's packages`, the reason, and the `sh scripts/legion-setup.sh` retry in its first turn's provider request.",
+      "headSha": "7487f0440e6515e2d968e267079496e9e25652f5",
+      "negativeControl": "The same pane with a report whose generation is 9 rather than its own carries no such text (2 pass, 0 fail across the pair), and a successful run deletes a stale report, leaving 0 files in the state directory. AC4's daemon half — no launch failure charged, no worker-died, the issue not held — is daemon behaviour conditioned on exit 0 and is the production check."
+    },
+    {
+      "criterion": "AC5 — a second role of the same issue, starting while the packages are already there, installs nothing (restated per the plan's departure 3 against the issue's one shared cache).",
+      "surface": "The same throwaway copy, a second run under another role's identity after a successful one.",
+      "command": "du -sb /legion/bun/cache ; env LEGION_ROLE=reviewer … sh scripts/legion-setup.sh ; du -sb /legion/bun/cache ; find node_modules -newer /legion/bun/state/installed | wc -l",
+      "observed": "`this bun.lock's packages are already installed; nothing to do` in 0.053 s, exit 0; the shared cache is byte-identical across the run (1,395,623,403 bytes before and after); bun is never run; 0 files under node_modules are newer than the marker.",
+      "headSha": "7487f0440e6515e2d968e267079496e9e25652f5",
+      "negativeControl": "Remove node_modules/.bin/biome and run again: the marker alone does not satisfy the guard and it installs (`Checked 1009 installs across 1200 packages`)."
+    }
+  ],
+  "filesChanged": [
+    "scripts/repo-tool.sh (new): resolves a pinned node_modules/.bin tool, never PATH, and otherwise exits 1 naming the tool, both paths and the remedy.",
+    "scripts/legion-setup.sh, scripts/legion-setup.test.sh (new): Legion's role-container setup command and its 92-case suite against a stub bun, wired into the test job.",
+    ".github/scripts/check-check-commands.sh and .test.sh (new), wired into pr-and-main.yaml's lint and test jobs: the standing guard and its 53 cases.",
+    "The lint, typecheck and playwright recipes of every workspace manifest, the root manifest's new lint and typecheck recipes, five CI steps and the two broker media scripts.",
+    "AGENTS.md, README.md, packages/dispatch/AGENTS.md, packages/pi-legion/AGENTS.md, packages/pi-shared/AGENTS.md, docs/site/media/README.md and thirteen docs/solutions/ notes: the prescribed commands, and the deleted claim that bunx resolved the real Biome.",
+    "packages/pi-legion/src/first-turn-notice.ts and src/setup-report.ts (new), src/workspace-recreated.ts, extensions/legion.ts, their tests and the CHANGELOG: the report becomes a first-turn notice.",
+    "docs/kubernetes.md (the setup section and the LEGION_STATE_DIR row), .gitignore."
+  ],
+  "trickyParts": [
+    "The shared workspace is deliberately left WITHOUT node_modules: AC1's state is the uninstalled one, every later role of this issue mounts this workspace, and installing here would destroy the state the tester must reproduce. Every install proof ran in a throwaway copy on the issue volume, which was removed at the end of the phase.",
+    "To reproduce AC1's state, poison the container first with one `bunx biome check .` in the workspace, which leaves /tmp/bunx-<uid>-biome@latest. Without it the plain form behaves the same, but `bunx --no-install biome check .` refuses rather than passing, and the spec's point is that it passes once the plain form has run.",
+    "The container has no PyYAML on python3's default path, so the repository's python guards cannot be run here as CI runs them. A copy extracted at /legion/pytools with PYTHONPATH=/legion/pytools runs them; check-image-trigger-paths.sh sets PYTHONPATH itself, so it needs a symlink in .github/scripts for the one run (removed afterwards). CI's runner has PyYAML, so no script changed for this.",
+    "A bun install run by hand in a role container must name BUN_INSTALL_CACHE_DIR on the issue volume: the default cache lands on the container's own ephemeral disk, whose breach evicts the whole pod. The notice's retry advice therefore names the script and not a bare `bun install`.",
+    "packages/pi-legion's suite showed one failure in a single run and none in five further runs at the same head; the failing case's name was not captured before it stopped reproducing. Treated as a flake, not a change of this branch."
+  ],
+  "deviations": [
+    "The throwaway copy is at /legion/workspaces/infra-71-proof rather than the plan's /legion/infra-71-proof, so the script's own root derivation (${LEGION_WORKSPACE%/workspaces/*}) fires exactly as it does in a role container instead of falling back to .legion-setup.",
+    "The guard's prescriptive markdown set also covers docs/site/media/README.md, which carried a `bunx playwright install chromium`; the plan named only docs/site/README.md.",
+    "The simplify pass applied four findings at 37b089b1 (new head e222c5aa): two callerless workspace-recreated wrappers deleted, before_agent_start's early return restored, two duplicated blocks in legion-setup.sh folded, two stale comments corrected.",
+    "GitHub reported the pull request CONFLICTING, which is also why no workflow had run on it, so main was forward-merged (7487f044; fingerprint 8e02b86d… → 1af1d137…, changed — the comment on the PR records both). Main had replaced TestBunCacheHomeIsMountedFromNoVolume, the test the plan's T12 added a sentence to, with TestTheIssuesRolesShareOneScratchAndOneGoCachePair, which pins the opposite arrangement: every role container of an issue pod is now told the issue's own BUN_INSTALL_CACHE_DIR under its scratch on the issue volume. Main's side was taken whole, T12's sentence dropped with the test it annotated, and scripts/legion-setup.sh now installs with the BUN_INSTALL_CACHE_DIR the deployment names, falling back to /legion/bun/cache only where nothing names one — so the repository carries one convention for bun's cache, not two. One new test case pins it, and docs/kubernetes.md says it.",
+    "Every proof above was re-run at the merged head after that merge."
+  ],
+  "openQuestions": [
+    "Nothing of half B runs in a pod until a person pins a worker image built from this merge commit (pi-legion's reader of the report ships in it) and adds the one `runtime.kubernetes.setup` line: `[/bin/sh, -c, 'if [ -r ./scripts/legion-setup.sh ]; then sh ./scripts/legion-setup.sh; fi']`. The architect has said that is a child issue on the deployment's repository, filed after this merges.",
+    "AC3's full line, AC4's daemon half and AC5's two-role form are production-check criteria, not pre-merge ones (the architect's decision on the plan's §7).",
+    "main's Tests lane was red before this branch existed (the architect's standing note of 2026-10-20 23:42Z); the forward merge GitHub's conflict forced brings that red into this branch's lane. A failing job on this head is to be read against main's own result for the same job before it is charged to this change."
+  ],
+  "discoveredComplexity": [
+    "The repository's own python guards are unrunnable in a role container as shipped (no PyYAML). That is a gap in what an agent can check locally, and it is not this issue's to fix.",
+    "Two prescriptive files the plan did not name carried a vulnerable command (docs/site/media/README.md) or a false environment contract (packages/pi-legion/AGENTS.md said LEGION_GENERATION is read by nothing in that package); both are corrected here.",
+    "main's new issue-scoped scratch (TMPDIR, XDG_CACHE_HOME, XDG_DATA_HOME and BUN_INSTALL_CACHE_DIR on the issue volume for every role container) landed while this issue was in flight and overlaps half B's reason for existing: it is what makes the install's cache the pod's business rather than this script's."
+  ]
+}
