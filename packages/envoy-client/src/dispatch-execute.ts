@@ -109,7 +109,7 @@ import {
   type ToolImage,
   toolImage,
 } from "./dispatch-pictures";
-import { subscriptionCovers } from "./dispatch-subscribe";
+import { ownerSubscribeLine } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
 import { pageSummaryText, searchAnswer } from "./search-answer";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
@@ -198,13 +198,18 @@ async function notSubscribed(
   owner: OwnerTopic,
   subscriptions: ExecuteDispatchToolInput["subscriptions"]
 ): Promise<string> {
-  const topics = await subscriptions?.();
-  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner))) return "";
+  if (ownerSubscribeLine(owner, await subscriptions?.()) === null) return "";
   return ` (not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
 }
 
-function followsAsk(owner: OwnerTopic): string {
-  return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+/** What an ask write says the session follows, with the line that subscribes it to every event on
+ *  `owner` when no subscription of its covers the owner (`ownerSubscribeLine`). */
+async function followsAsk(
+  owner: OwnerTopic,
+  subscriptions: ExecuteDispatchToolInput["subscriptions"]
+): Promise<string> {
+  const subscribe = ownerSubscribeLine(owner, await subscriptions?.());
+  return `You follow this ask: its answer and replies reach you directly.${subscribe === null ? "" : ` ${subscribe}`}`;
 }
 const triageAdviceShown = new Set<string>();
 
@@ -2921,7 +2926,7 @@ export async function executeDispatchTool(
       ];
       return {
         text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${await followsAsk(askOwner, input.subscriptions)}`,
           ...adviceLines,
         ].join("\n"),
         details: {
@@ -3009,7 +3014,7 @@ export async function executeDispatchTool(
             : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
-            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
+            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
             ...adviceLines,
           ].join("\n"),
           details: {

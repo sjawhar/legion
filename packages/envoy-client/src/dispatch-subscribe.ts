@@ -6,11 +6,13 @@ import { documentTopicOf, issueTopic, type OwnerTopic } from "./dispatch-owner";
  * The follow notice the `dispatch` command prints once per ask after a result whose
  * `details.follows.ask` says the calling session now follows that ask (it opened it,
  * replied to it, or asked to follow it). No result subscribes the session to the
- * owner; the notice names the `envoy_subscribe` line for whoever wants every event.
+ * owner; the notice names the `envoy_subscribe` line for whoever wants every event, when
+ * `topics`, the session's subscriptions, holds none that covers the owner (`ownerSubscribeLine`).
  * Returns null for any other result: reads, unfollows and errors.
  */
 export function dispatchFollowNotice(
-  details: unknown
+  details: unknown,
+  topics: readonly string[] | null = null
 ): { readonly ask: string; readonly text: string } | null {
   if (typeof details !== "object" || details === null) return null;
   const { follows, issue, document } = details as {
@@ -31,10 +33,24 @@ export function dispatchFollowNotice(
   } else {
     return null;
   }
+  const subscribe = ownerSubscribeLine(owner, topics);
   return {
     ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`,
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`,
   };
+}
+
+/**
+ * `For every event on <owner>: envoy_subscribe <topic>`, the line that subscribes a session to
+ * every event on `owner`, when `topics`, the session's subscriptions, hold none that covers it.
+ * Null when one does, and when `topics` is null: nothing then says what the session receives.
+ */
+export function ownerSubscribeLine(
+  owner: OwnerTopic,
+  topics: readonly string[] | null | undefined
+): string | null {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner))) return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
 }
 
 /**

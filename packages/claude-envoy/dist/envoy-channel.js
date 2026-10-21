@@ -39974,7 +39974,7 @@ async function readPictures(client, addresses, shown) {
 }
 
 // ../envoy-client/src/dispatch-subscribe.ts
-function dispatchFollowNotice(details) {
+function dispatchFollowNotice(details, topics = null) {
   if (typeof details !== "object" || details === null)
     return null;
   const { follows, issue: issue2, document } = details;
@@ -39994,10 +39994,16 @@ function dispatchFollowNotice(details) {
   } else {
     return null;
   }
+  const subscribe = ownerSubscribeLine(owner, topics);
   return {
     ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`
   };
+}
+function ownerSubscribeLine(owner, topics) {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+    return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
 }
 function subscriptionCovers(topic, owner) {
   const base = owner.topic.slice(0, -".>".length).split(".");
@@ -40123,13 +40129,13 @@ function resolvedTopic(resolved) {
   return issueTopic(resolved.issue.key);
 }
 async function notSubscribed(owner, subscriptions) {
-  const topics = await subscriptions?.();
-  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+  if (ownerSubscribeLine(owner, await subscriptions?.()) === null)
     return "";
   return ` (not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
 }
-function followsAsk(owner) {
-  return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+async function followsAsk(owner, subscriptions) {
+  const subscribe = ownerSubscribeLine(owner, await subscriptions?.());
+  return `You follow this ask: its answer and replies reach you directly.${subscribe === null ? "" : ` ${subscribe}`}`;
 }
 var triageAdviceShown = new Set;
 function adviceMemory() {
@@ -41851,7 +41857,7 @@ async function executeDispatchTool(input) {
       return {
         text: [
           `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${followsAsk(askOwner)}`,
+${await followsAsk(askOwner, input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -41917,7 +41923,7 @@ ${followsAsk(askOwner)}`,
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
-            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
+            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner2, input.subscriptions)}`,
             ...adviceLines
           ].join(`
 `),
@@ -43748,7 +43754,8 @@ function createEnvoyClient(config2) {
   const apiToken = config2.token;
   const request = async (path2, init) => {
     const url2 = `${baseUrl}${path2}`;
-    for (let attempt = 0;attempt < 2; attempt += 1) {
+    const attempts = config2.retry === false ? 1 : 2;
+    for (let attempt = 0;attempt < attempts; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -43760,7 +43767,7 @@ function createEnvoyClient(config2) {
           signal: AbortSignal.timeout(timeoutMs)
         });
       } catch (error49) {
-        if (attempt === 0) {
+        if (attempt + 1 < attempts) {
           await waitForRetry();
           continue;
         }
@@ -43775,7 +43782,7 @@ function createEnvoyClient(config2) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt === 0) {
+      if (response.status >= 500 && attempt + 1 < attempts) {
         await waitForRetry();
         continue;
       }

@@ -43,27 +43,40 @@ describe("subscriptionCovers", () => {
 });
 
 describe("dispatchFollowNotice", () => {
-  test("names the ask, its issue, and the opt-in subscribe line for a result that follows an ask", () => {
-    expect(
-      dispatchFollowNotice({ issue: "DSP-42", ask: "ask-1", follows: { ask: "ask-1" } })
-    ).toEqual({
+  test("names the ask, its issue, and the subscribe line only when no subscription covers the issue", () => {
+    const details = { issue: "DSP-42", ask: "ask-1", follows: { ask: "ask-1" } };
+    const follows =
+      "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop).";
+    const subscribe =
+      " For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.";
+    expect(dispatchFollowNotice(details, ["notifications.agent.ses-1"])).toEqual({
       ask: "ask-1",
-      text: "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.",
+      text: `${follows}${subscribe}`,
     });
+    expect(dispatchFollowNotice(details, [])?.text).toBe(`${follows}${subscribe}`);
+    expect(dispatchFollowNotice(details, ["notifications.dispatch.issue.DSP-42.>"])?.text).toBe(
+      follows
+    );
+    expect(dispatchFollowNotice(details, ["notifications.dispatch.>"])?.text).toBe(follows);
+    // Subscriptions that could not be read say nothing about what the session receives.
+    expect(dispatchFollowNotice(details, null)?.text).toBe(follows);
+    expect(dispatchFollowNotice(details)?.text).toBe(follows);
   });
 
   test("names a project document by project/slug with the document topic", () => {
-    expect(
-      dispatchFollowNotice({
-        project: "CORE",
-        document: "CORE/design-notes",
-        artifact: "artifact-1",
-        ask: "ask-1",
-        follows: { ask: "ask-1" },
-      })?.text
-    ).toBe(
+    const details = {
+      project: "CORE",
+      document: "CORE/design-notes",
+      artifact: "artifact-1",
+      ask: "ask-1",
+      follows: { ask: "ask-1" },
+    };
+    expect(dispatchFollowNotice(details, [])?.text).toBe(
       "Following ask ask-1 on CORE/design-notes: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on CORE/design-notes: envoy_subscribe notifications.dispatch.document.CORE.design-notes.>."
     );
+    expect(
+      dispatchFollowNotice(details, ["notifications.dispatch.document.CORE.design-notes.>"])?.text
+    ).not.toContain("envoy_subscribe");
   });
 
   test("returns null for reads, unfollows, and results without an owner", () => {

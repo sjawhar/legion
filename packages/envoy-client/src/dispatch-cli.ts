@@ -54,9 +54,9 @@ function stateWriteFailed(problem: string): string {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
 
-/** How long a write waits on the listener for the session's subscriptions, per attempt (the
- *  client tries twice), after the write itself has landed. */
-const SUBSCRIPTIONS_TIMEOUT_MS = 1_000;
+/** How long a result waits on the listener for the session's subscriptions, after the write
+ *  itself has landed: one attempt, no retry, since the read is best effort. */
+const SUBSCRIPTIONS_TIMEOUT_MS = 1_500;
 
 /**
  * The output, at most `limit` characters (unbounded for a host that shows all of it). Within the
@@ -206,24 +206,31 @@ export async function runDispatchCli(
     return USAGE;
   }
   const config: ActiveDispatchConfig = resolution;
-  // A write's result names an owner the session is not subscribed to only from the listener's
-  // record of the session's topics, read (Envoy's settings with it) when the write asks; with
-  // Envoy off, or no answer from it, the result says nothing about subscriptions. A session the
-  // listener has no record of holds none.
-  const subscriptions = async (): Promise<readonly string[] | null> => {
-    const envoy = sessionEnvoySettings(file, env, { cwd: io.cwd, nats: false });
-    if (!envoy.enabled) return null;
-    const listener = createEnvoyClient({
-      baseUrl: envoy.url,
-      fetch: io.fetchImpl ?? fetch,
-      token: envoy.token,
-      timeoutMs: SUBSCRIPTIONS_TIMEOUT_MS,
-    });
+  // A result names an owner the session is not subscribed to, or the line that subscribes it,
+  // only from the listener's record of the session's topics, read (Envoy's settings with it) once,
+  // when a result first asks; with Envoy off, or no answer from it, a result says nothing about
+  // subscriptions. A session the listener has no record of holds none. The write has landed by
+  // the time a result asks, so nothing here may throw: any failure is null, never a refusal.
+  let topics: Promise<readonly string[] | null> | undefined;
+  const readTopics = async (): Promise<readonly string[] | null> => {
     try {
+      const envoy = sessionEnvoySettings(file, env, { cwd: io.cwd, nats: false });
+      if (!envoy.enabled) return null;
+      const listener = createEnvoyClient({
+        baseUrl: envoy.url,
+        fetch: io.fetchImpl ?? fetch,
+        token: envoy.token,
+        timeoutMs: SUBSCRIPTIONS_TIMEOUT_MS,
+        retry: false,
+      });
       return (await listener.getInterest(sessionId)).topics;
     } catch (error) {
       return error instanceof EnvoyApiError && error.details.status === 404 ? [] : null;
     }
+  };
+  const subscriptions = (): Promise<readonly string[] | null> => {
+    topics ??= readTopics();
+    return topics;
   };
 
   let follows: Set<string>;
@@ -266,10 +273,12 @@ export async function runDispatchCli(
     } catch (error) {
       problems.push(messageFor(error));
     }
-    const notice = dispatchFollowNotice(result.details);
-    if (notice !== null && !follows.has(notice.ask)) {
-      follows.add(notice.ask);
-      notes.push(notice.text);
+    const followed = dispatchFollowNotice(result.details);
+    if (followed !== null && !follows.has(followed.ask)) {
+      follows.add(followed.ask);
+      notes.push(
+        dispatchFollowNotice(result.details, await subscriptions())?.text ?? followed.text
+      );
     }
     entry = { tool, details: result.details };
     code = OK;

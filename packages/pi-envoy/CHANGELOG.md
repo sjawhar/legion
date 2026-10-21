@@ -7,7 +7,8 @@
 - A `dispatch` write ends with `(not subscribed to KEY; …)` only when none of the session's Envoy
   subscriptions, as the listener records them, receives every event on the issue or document; it
   used to end every write that way. With Envoy off or the listener not answering, the write says
-  nothing about subscriptions.
+  nothing about subscriptions. An ask or an ask reply names its `envoy_subscribe` line under the
+  same rule.
 - `dispatch read --ref dispatch://KEY/ask/<id>` finds an ask in a spec by its `:::ask{#<id>}`
   block id too, whole or as a unique 8+ hex prefix, where it answered `matches none of the asks`
   or `not found`, and prints the ask's own id (`Ask id:`).

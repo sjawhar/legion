@@ -239,8 +239,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
     expect(result.text).toBe(
       `Asked ask-1 on DSP-41 (urgency med): ${releaseQuestion}\n` +
-        "You follow this ask: its answer and replies reach you directly. " +
-        "For every event on DSP-41: envoy_subscribe notifications.dispatch.issue.DSP-41.>"
+        "You follow this ask: its answer and replies reach you directly."
     );
   });
 
@@ -6459,6 +6458,8 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: fetchImpl as typeof fetch,
+      // The session holds no subscription that covers DSP-42: the reply names the line that would.
+      subscriptions: async () => ["notifications.agent.session-1"],
     });
 
     expect(result.text).toBe(
@@ -6558,12 +6559,13 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: fetchImpl as typeof fetch,
+      // A subscription covers DSP-42 already: the reply names no line to subscribe with.
+      subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
     });
 
     expect(result.text).toBe(
       `Replied on ask ${askID} (comment comment-2; ask now waiting on agent). ` +
-        "You follow this ask: its answer and replies reach you directly. " +
-        "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
+        "You follow this ask: its answer and replies reach you directly."
     );
     expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
     expect(requests).toEqual([
@@ -6647,8 +6649,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       `Replied on ask ${askID} (comment comment-3). ` +
-        "You follow this ask: its answer and replies reach you directly. " +
-        "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
+        "You follow this ask: its answer and replies reach you directly."
     );
     expect(result.details).not.toHaveProperty("ask_waiting_on");
   });
