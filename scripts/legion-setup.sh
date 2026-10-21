@@ -40,7 +40,7 @@
 # between its SIGTERM and its SIGKILL, 275 s against that 360 s deadline, which leaves the launch
 # the rest. Against it, a measured 54 s for the first install of 1,986 packages and about 0.3 s
 # when they are already there and `bun.lock` has not moved. Whichever wait runs out is a report,
-# not a non-zero exit. A second bound sits inside that one: `LEGION_SETUP_LOCK_HOLD` (60 s) is the
+# not a non-zero exit. A second bound sits inside that one: `LEGION_SETUP_LOCK_HOLD` (90 s) is the
 # longest one attempt may hold the cache's lock, because the daemon's own plugin install waits on
 # that same inode and fails the launch when its wait runs out — sized against that wait's
 # derivation where it is set out below, and the first thing to lower in a deployment that lowers
@@ -118,21 +118,25 @@ remaining() {
 # `boot × intervals / 3`: 120 s at the defaults (60 × 6 / 3), 60 s if a deployment halves the boot
 # timeout, 1 s at the floor. A role container is told none of those three settings — its
 # environment carries no boot timeout, no interval count and no deadline, which I checked
-# (`roleEnvironment`, manifest.go) — so this script cannot derive the bound and must assume one:
-# 60 s, half the daemon's wait at its defaults, which leaves a plugin install that began waiting
-# the instant this one took the lock its whole second wait afterwards, and is headroom rather than
-# a cut-off against a measured 37 s install.
+# (`roleEnvironment`, manifest.go) — so this script cannot derive the bound and must assume one.
+# 90 s: under the daemon's 120 s wait at its defaults, so a plugin install that began waiting the
+# instant this one took the lock never sees its first wait expire, and above the whole measured
+# spread of a cold install of 1,986 packages on this volume — 33, 37, 45 and 59 seconds across
+# four runs at this head, the variance being the registry's rather than the backend's. A bound
+# inside that spread would be the worse failure: every role cut off at the hold, each leaving the
+# next a warmer cache, until one happens to finish.
 #
 # What that fixed number costs where the assumption does not hold: at half the default boot
-# timeout the daemon waits 60 s twice and this hold can consume the first of the two, leaving the
-# retry to carry the launch; below that, and at the floor where two 1 s waits already consume the
-# deadline by design, a 60 s hold would retire a role that queued behind it. Such a deployment
-# sets `LEGION_SETUP_LOCK_HOLD` below its own `installLockWait` — which is why the knob exists,
-# why it is the first thing `docs/kubernetes.md` says beside this bound, and why the paragraph
-# there that sizes `installLockWait` now names this script among the holders of that inode.
-lock_hold=${LEGION_SETUP_LOCK_HOLD:-60}
+# timeout the daemon waits 60 s twice, and this hold can consume the first of the two and 30 s of
+# the second, leaving the retry short rather than whole; below that, and at the floor where two
+# 1 s waits already consume the deadline by design, a 90 s hold would retire a role that queued
+# behind it. Such a deployment sets `LEGION_SETUP_LOCK_HOLD` below its own `installLockWait` —
+# which is why the knob exists, why it is the first thing `docs/kubernetes.md` says beside this
+# bound, and why the paragraph there that sizes `installLockWait` now names this script among the
+# holders of that inode.
+lock_hold=${LEGION_SETUP_LOCK_HOLD:-90}
 case "$lock_hold" in
-  '' | *[!0-9]* | 0) lock_hold=60 ;;
+  '' | *[!0-9]* | 0) lock_hold=90 ;;
 esac
 
 # The report's path comes before the install root below, and not after it as everything else
