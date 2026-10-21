@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
+	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
@@ -369,8 +370,9 @@ func main() {
 
 	// LEGION-567: the delivery timeline's 5-minute GitHub-App reconcile runs regardless of NATS
 	// (it never touches it); the NATS consumer that catches events between reconcile passes needs
-	// a connected client, exactly like the outbox above.
-	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
+	// a connected client, exactly like the outbox above. Both take the event broker: each writes
+	// issue.deployed on a pull request's issue once its shipping run is known (LEGION-781).
+	go delivery.NewReconcile(database.Pool, appCtx.GitHub(), broker).Run(ctx)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
 		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a
@@ -379,7 +381,7 @@ func main() {
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
 		}
-		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub())
+		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub(), broker)
 		if err != nil {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)
@@ -388,6 +390,10 @@ func main() {
 			cancel()
 			stopIntakes()
 		}()
+		// LEGION-781: the start, naming the stamped build commit, goes on the bus once the
+		// publisher is open, and is retried until the stream acknowledges it or the shutdown
+		// context ends; a binary with no stamped commit publishes none.
+		go startup.PublishStarted(ctx, natsClient, buildCommit, time.Now, slog.Default())
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}

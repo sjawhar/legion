@@ -40,7 +40,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 33, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 34, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -60,7 +60,7 @@
 
 ### Changed
 
-- The plugin declares daemon API contract 33 in `package.json`'s `legion.daemonApiVersion`
+- The plugin declares daemon API contract 34 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-31): under the Kubernetes runtime the roles of an issue now share one scratch on the
   issue's volume, and the daemon tells every role container of a pod the same temporary directory,
   cache home, data home and bun install cache under it (`/legion/scratch/tmp`,
@@ -71,7 +71,7 @@
   The state home is the one directory a role keeps to itself, `/legion/scratch/state/<role>`,
   since Oh My Pi's browser broker lock is an abstract unix socket named from the state root and
   such a name is one across every container of a pod. Nothing this plugin reads or writes moved;
-  a session of it registers with a daemon at 33.
+  a session of it registers with a daemon at 34.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
   an Oh My Pi session keeps; Claude Code holds none, so the tools behave as before.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and

@@ -32,6 +32,9 @@ const (
 	OutboxKindIssueBranch       OutboxKind = "issue_branch"
 	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
 	OutboxKindReadyMerge        OutboxKind = "ready_merge"
+	OutboxKindCheckCompare      OutboxKind = "check_compare"
+	OutboxKindCheckLook         OutboxKind = "check_look"
+	OutboxKindCheckBound        OutboxKind = "check_bound"
 )
 
 // OutboxLane is which executor of an issue runs a kind. An issue's rows run on two lanes side by
@@ -41,9 +44,11 @@ const (
 // stopped the roles). It also carries the issue's pull-request mutations, the disarm
 // (auto_merge_disable) and the READY merge's submission (ready_merge), which must never run beside
 // each other: a disarm and a submit of one pull request at once would race on GitHub, and the lane
-// (with outboxLaneFree across daemons) is what keeps them apart. The board lane runs the issue's
-// Dispatch writes and notice publishes beside them, so a status write or a notice never waits
-// behind a start pulling an image, and a slow publish never holds a stop back.
+// (with outboxLaneFree across daemons) is what keeps them apart; and the production check's rows
+// (check_compare, check_look, check_bound), which start and end the implementer's looks in order
+// with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
+// notice publishes beside them, so a status write or a notice never waits behind a start pulling
+// an image, and a slow publish never holds a stop back.
 type OutboxLane string
 
 const (
@@ -54,7 +59,7 @@ const (
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge},
+	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
 	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
 }
 
@@ -306,6 +311,17 @@ type SuperviseRequest struct {
 	Linger uint64 `json:"linger,omitempty"`
 	// Reason is why a suspend stops the claim, for the line the suspended claim logs.
 	Reason string `json:"reason,omitempty"`
+	// CheckLook is the look of the issue's production check a start starts, 0 for a phase start.
+	// A check start runs after the close, where the issue has no phase and its tree may linger, so
+	// the outbox fences it on the open check and its look (the row acts only while the check is
+	// open at that look with the look open) instead of on the generation and the lingering tree.
+	CheckLook int `json:"checkLook,omitempty"`
+	// CheckOpenedAt is the check instance the look belongs to (ProductionCheck.OpenedAt, its ID):
+	// a later merge of the same issue replaces the check and counts its looks from one again, so a
+	// start row of the replaced check's look 1 would otherwise act on the new check's. The outbox
+	// finishes a start without acting when the issue's check is not the one it names; zero names
+	// no instance (a row queued before the field) and is not fenced.
+	CheckOpenedAt time.Time `json:"checkOpenedAt,omitzero"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
@@ -403,6 +419,40 @@ type ReadyMerge struct {
 }
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
+
+// CheckCompare wakes a production check from a build: a GitHub compare of the check's merge
+// commit with Build, the commit a daemon boot or a Dispatch start reported itself built from,
+// which the executor runs as the implement App and which starts the look Look when the build
+// contains the merge. Cause names what asked for it (`daemon boot`, `dispatch start` or
+// `dispatch build`), for the look's wake. OpenedAt is the check instance the compare was queued
+// for (ProductionCheck.OpenedAt): the executor compares nothing once a later merge replaced it;
+// zero names no instance and is not fenced.
+type CheckCompare struct {
+	Look     int       `json:"look"`
+	Cause    string    `json:"cause"`
+	Build    string    `json:"build"`
+	OpenedAt time.Time `json:"openedAt,omitzero"`
+}
+
+func (CheckCompare) OutboxKind() OutboxKind { return OutboxKindCheckCompare }
+
+// CheckLook is a look's bound: due at the look's wake plus the look bound, it ends look Look of
+// the issue's production check as a pending report would, when the look is still open then.
+// OpenedAt is the check instance the look is of (ProductionCheck.OpenedAt): a later merge of the
+// same issue replaces the check and counts its looks from one again, and a bound row of the
+// replaced check's look must not end the new check's; zero names no instance and is not fenced.
+type CheckLook struct {
+	Look     int       `json:"look"`
+	OpenedAt time.Time `json:"openedAt,omitzero"`
+}
+
+func (CheckLook) OutboxKind() OutboxKind { return OutboxKindCheckLook }
+
+// CheckBound is the whole check's bound, due at its bound_at: it starts the check's last look, or
+// defers while a look is open.
+type CheckBound struct{}
+
+func (CheckBound) OutboxKind() OutboxKind { return OutboxKindCheckBound }
 
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
@@ -514,6 +564,24 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindCheckCompare:
+		value := CheckCompare{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
+	case OutboxKindCheckLook:
+		value := CheckLook{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
+	case OutboxKindCheckBound:
+		value := CheckBound{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -547,7 +615,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if length := dispatch.MessageBodyLength(value.Reason); length > MessagePostLimit {
 			return fmt.Errorf("a status write's reason is %d characters, over the %d a message holds", length, MessagePostLimit)
 		}
-	case MessagePost, GateSeed, LingerClose, IssueBranch:
+	case MessagePost, GateSeed, LingerClose, IssueBranch, CheckBound:
 	case IssueSuspend:
 		if value.Tree == "" || value.Generation == 0 || value.TreeGeneration == 0 {
 			return fmt.Errorf("issue suspension requires its tree and both workflow generations")
@@ -586,6 +654,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Quiesce != "" && (value.Op != "start" || value.Quiesce == value.Role) {
 			return fmt.Errorf("a supervise quiesce names another role than its start's, and only a start carries one")
 		}
+		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
+			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")
+		}
 	case MergeQueuePublish:
 		if value.Role == "" {
 			return fmt.Errorf("merge queue publish requires role")
@@ -600,6 +671,17 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	case ReadyMerge:
 		if value.Number <= 0 || value.Head == "" {
 			return fmt.Errorf("READY merge requires its pull request number and head")
+		}
+	case CheckCompare:
+		if value.Look <= 0 {
+			return fmt.Errorf("check compare requires the look it starts")
+		}
+		if value.Build == "" || value.Cause == "" {
+			return fmt.Errorf("check compare requires the build commit and what asked for it")
+		}
+	case CheckLook:
+		if value.Look <= 0 {
+			return fmt.Errorf("check look bound requires the look it bounds")
 		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)

@@ -159,7 +159,7 @@ cleanup() {
   # stands. The status stays the failure's either way, since the checkpoints after it never ran.
   [ -n "${ok:-}" ] || [ "$check" != smoke-main-clean ] || [ -n "$audit_failed" ] ||
     [ -s "$evidence/pane-endpoint-violation.txt" ] || [[ $status =~ ^(129|130|143)$ ]] ||
-    printf 'stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed, the workflow under test through its daemon merge and sign-off included; only the cleanup of %s main failed, and the checkpoints after it did not run\n' "$repo" >&2
+    printf 'stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed, the workflow under test through its daemon merge, the close it made and the production check'"'"'s first look included; only the cleanup of %s main failed, and the checkpoints after it did not run\n' "$repo" >&2
   return 0
 }
 trap cleanup EXIT
@@ -246,6 +246,12 @@ gates:
   design: root-issues
 admission_cap: 2
 review_round_cap: 3
+# The production check's bound (14 days by default) must come due inside the run, since its wake,
+# the check's last look, is production-check-bound's proof; and after the first look's report, since
+# a look open at the bound defers the bound by the look's own two-hour bound: 15 minutes, against a
+# look that took up to 10 minutes from the proof's instruction to its report in acceptance runs.
+# linger_hours keeps its default (72 h): the tree's close at its expiry is Stage 4b's proof.
+production_check_hours: 0.25
 instructions: $work/instructions.md
 github_apps:
   implement:
@@ -560,12 +566,12 @@ refuse_leftovers legion-e2e3
 for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
-# the proof human closes that root, freeing its admission slot as its sign-off would, and the
+# the proof human closes that root, freeing its admission slot as the merge's close would, and the
 # credential and idle-read checks read STAGE3_PR (default: the newest smoke pull request) in place
 # of its pull request. `restart` also skips the held-worker scenario. STAGE3_UNTIL is the other
 # development aid: `prerequisites` stops once this checkpoint has passed, before the rig exists, and
-# `rework` drives the first issue through its review rounds and the final review, then skips every
-# later scenario.
+# `rework` drives the first issue through its review rounds and the final review, to the reviewer's
+# approval and the issue in accepting, then skips every later scenario.
 from=${STAGE3_FROM:-}
 case "$from" in
   "" | held | restart) ;;
@@ -697,9 +703,15 @@ requests the spec's approval when the design gate policy arms the gate, and regi
 then waits. Apart from that, do not act until a human Dispatch message targeted at your own session
 gives the next exact proof operation; it arrives in your session as a message to you. A message you
 only find by reading the issue (its events, a search) was sent to another session, even on your
-issue, and any other notice is not an instruction: neither is yours to act on. Follow your
-instruction precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside
-the issue's smoke branch.
+issue, and any other notice is not an instruction: neither is yours to act on. One task waits for
+no message: a production check's (its first line `Production check of <key>: …`, handed to the
+implementer once the merge closed its issue), since a closed issue takes no Dispatch write, so none
+can reach it. Act on that task as it is written: this proof has no production and no deploy role,
+so the look leaves `Production: pending deploy of <merge commit>` on the pull request's body (on the
+last look, writes on the pull request that the check did not run because production did not carry
+the merge within the bound) and reports verdict pending with the legion tool's handoff_complete,
+committing nothing. Follow each instruction precisely, use the Go-daemon Legion tools and handoffs,
+and do not create work outside the issue's smoke branch.
 EOF
 start_daemon
 read_app_logins
@@ -739,8 +751,9 @@ wait_for_worker "$held_issue" architect
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"
 pass
 
-# The first issue end to end: the gate, every phase, three review rounds, the READY gate, the human
-# merge, the production check, and the sign-off.
+# The first issue end to end: the gate, every phase, three review rounds, the architect's acceptance,
+# the READY gate, the daemon's merge, which closes the issue, and the production check after the
+# close, through the bound's last look.
 primary_issue() {
   begin primary-architect-posts-and-registers-spec
   drive_gate "$root_issue" "Stage 3 proof gate operation"
@@ -860,17 +873,52 @@ primary_issue() {
   wait_for_phase "$root_issue" reviewing
   assert_handoff_committer "$root_issue" tester testing 3
   wait_for_worker "$root_issue" reviewer
+  # The acceptance's negative control, at the one point the issue stands still in reviewing: the
+  # tester's completion started the reviewer, which waits for the proof's instruction, so a sign_off
+  # sent now meets the daemon's one rule for it, accepted in accepting alone, and is refused
+  # (SIGNOFF_OUTSIDE_ACCEPTING), read in the architect's session by the refusal's own sentence, and
+  # moves nothing.
+  send_agent "$root_issue" architect "Stage 3 proof acceptance control: $root_issue is still in reviewing, before the reviewer's decision; call the legion tool's sign_off for $root_issue now anyway, record its exact refusal, and then wait: do not retry it."
+  until_true 180 "the architect to observe the SIGNOFF_OUTSIDE_ACCEPTING refusal" session_contains "$root_issue" architect "$root_issue is in phase reviewing, not accepting; this sign-off changed nothing"
+  issue_phase "$root_issue" reviewing >/dev/null || fail "$root_issue left reviewing on a sign_off sent before the reviewer's decision"
+  note "a sign_off in reviewing was refused SIGNOFF_OUTSIDE_ACCEPTING and moved nothing (negative control)"
   approve_as_reviewer "$root_issue"
-  # The approval starts the implementer's retro, whose task names the phase; the resumed implementer
-  # may finish it before the proof's instruction reaches it, so the wait is for the issue to leave
-  # reviewing, not to sit in retro.
-  until_true 600 "$root_issue to leave reviewing for retro" issue_phase_in "$root_issue" retro merging
+  # The approval moves the issue to accepting, where no worker starts and the board keeps
+  # needs_review: the tree's architect, told by the reviewer's phase-finished notice, accepts with
+  # sign_off (retro-handoff) or sends the issue back. The wait is for accepting itself, read within
+  # a poll of the reviewer's completion; the architect acts on no notice under the proof's
+  # instructions, so the issue stands there until the proof's prompt.
+  until_true 600 "$root_issue to leave reviewing for accepting" issue_phase "$root_issue" accepting
+  state_file accepting
+  until_true 180 "the architect to receive the reviewer's phase-finished notice, its acceptance cue" notice_delivered "$root_issue" architect \
+    "$(notice_needle phase-finished "$root_issue")"'\n  message:\n    kind: phase-finished\n    role: reviewer\n    phase: reviewing'
+  # No worker starts at accepting: the implementer's claim holds no retro task (a start row's task
+  # is the claim's `pending` until the turn it started ends), and the daemon queued no status write.
+  pending_phase=$(claim_pending_phase "$root_issue" implementer)
+  [ "$pending_phase" != retro ] || fail "the implementer of $root_issue holds a retro task at accepting: the approval started a worker"
+  jq -e --arg issue "$root_issue" '[.pendingStatusWrites[]? | select(.issue == $issue)] | length == 0' "$evidence/accepting.json" >/dev/null ||
+    fail "a status write is pending for $root_issue at accepting, which writes none: $(jq -c --arg issue "$root_issue" '[.pendingStatusWrites[]? | select(.issue == $issue)]' "$evidence/accepting.json")"
+  dispatch_status_is "$root_issue" needs_review >/dev/null ||
+    fail "the board shows $root_issue $(dispatch_get "issues/$root_issue" | jq -r .status) at accepting, want needs_review, which the move to accepting leaves alone"
   assert_handoff_committer "$root_issue" reviewer reviewing 3
   assert_review_of_own_handoff "$root_issue" 3 APPROVED
+  note "the reviewer's approval moved $root_issue to accepting: no worker started (the implementer's claim holds ${pending_phase:+a $pending_phase task, }no retro task), the board still needs_review with no status write pending, and the architect holds the reviewer's phase-finished notice"
   pass
   [ "$until" != rework ] || return 0
 
   begin retro-handoff
+  # The architect's acceptance: at accepting its sign_off moves the issue to retro, the daemon's
+  # one status write there (retro), and starts the implementer's retro. The prompt is the proof's
+  # instruction to accept; what the architect reads before it is its own instructions'.
+  send_agent "$root_issue" architect "Stage 3 proof acceptance: the reviewer approved pull request #$pr_number and $root_issue is in accepting; read the evidence as your instructions say and accept it with the legion tool's sign_off for $root_issue now."
+  wait_for_phase "$root_issue" retro 600
+  phase_change_logged "$root_issue" accepting retro sign_off ||
+    fail "the daemon log has no \"workflow: phase changed\" line moving $root_issue from accepting to retro on sign_off"
+  until_true 60 "the daemon's retro status on the Dispatch board" dispatch_status_is "$root_issue" retro
+  note "the architect's sign_off at accepting moved $root_issue to retro (workflow: phase changed from=accepting to=retro trigger=sign_off) and the board to retro"
+  # The sign-off starts the implementer's retro, whose task names the phase; the resumed implementer
+  # may finish it before the proof's instruction reaches it, so the prompt goes only while the
+  # issue sits in retro.
   if issue_phase "$root_issue" retro >/dev/null; then
     wait_for_worker "$root_issue" implementer
     send_agent "$root_issue" implementer "Stage 3 proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
@@ -880,7 +928,6 @@ primary_issue() {
   # minutes, so this wait allows 1200 s.
   wait_for_phase "$root_issue" merging 1200
   retro_reported "$root_issue" || fail "$root_issue reached merging with no implementer retro completion recorded"
-  until_true 60 "the daemon's retro status on the Dispatch board" dispatch_status_is "$root_issue" retro
   wait_for_worker "$root_issue" merger
   note "the implementer's retro completion advanced $root_issue to merging"
   pass
@@ -964,23 +1011,37 @@ primary_issue() {
   # this run's window.
   hold_smoke_main
   await_ready_merge "$repo" "$pr_number" --delete-branch
-  wait_for_phase "$root_issue" production_check 300
-  # The resumed implementer's task names production_check, and it may record the check before the
-  # proof's instruction reaches it; its completion is observed, not its instruction.
-  if ! production_check_reported "$root_issue" >/dev/null 2>&1; then
-    wait_for_worker "$root_issue" implementer
-    send_agent "$root_issue" implementer "Stage 3 proof production check: verify the merged smoke change through its repository surface, record the production-check handoff and required PR/Dispatch record, then complete the phase."
-  fi
-  until_true 600 "the implementer's production-check completion to be recorded" production_check_reported "$root_issue"
-  until_true 180 "the architect to receive the production-check phase-finished notice" notice_delivered "$root_issue" architect \
-    "$(notice_needle phase-finished "$root_issue")"'\n  message:\n    kind: phase-finished\n    role: implementer\n    phase: production_check'
-  if issue_phase "$root_issue" production_check >/dev/null 2>&1; then
-    send_agent "$root_issue" architect "Stage 3 proof sign-off: the implementer's production check for $root_issue is recorded; use the Go-daemon sign-off operation for $root_issue now."
-  fi
-  wait_for_phase "$root_issue" "done"
+  # The merge closes the issue: awaiting_merge and a merged pull request write done, the daemon's
+  # one status write after retro. A root's close frees its slot and lingers the tree, every member's
+  # claims suspended, and opens the production check on the merge commit, whose first look the
+  # daemon hands the implementer in its live pane: its claim alone comes back, resumed on its kept
+  # session, while the other five stay suspended.
+  wait_for_phase "$root_issue" "done" 300
+  phase_change_logged "$root_issue" awaiting_merge "done" pull_request_merged ||
+    fail "the daemon log has no \"workflow: phase changed\" line moving $root_issue from awaiting_merge to done on pull_request_merged"
   until_true 60 "the daemon's done status on the Dispatch board" dispatch_status_is "$root_issue" "done"
+  check_opened_on "$root_issue" "$merge_when_clean_commit" ||
+    fail "$root_issue's production check reads $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
+  state_file check-opened
   await_tree_suspended "$root_issue" "the lingering tree's architect to be suspended"
-  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit; the daemon resumed production_check, the implementer's completion reached the architect, and its sign-off closed the issue; the tree lingers with its architect suspended"
+  # The implementer is live at its first look, the five other claims suspended; an implementer that
+  # reported the look before this read is suspended again already, which the next wait judges.
+  first_look_handed() { claim_states_are "$root_issue" "ready working idle" suspended || check_look_reported "$root_issue" 1; }
+  until_true 300 "the close to leave the implementer live at its first look, the five other claims of $root_issue suspended" first_look_handed
+  first_look_claims=$(issue_claim_states "$root_issue" | paste -sd ',' -)
+  # The first look. The task the daemon handed the implementer is the whole instruction: the proof
+  # sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
+  # ISSUE_CLOSED), and the fixture's instructions say a check task waits for no message. The smoke
+  # repository is neither the deploy repository nor a Legion production, so the look's verdict is
+  # pending: the check stays open with its first look reported, and the daemon suspends the
+  # implementer's claim, session kept, until the next wake. Its report is the observation, read from
+  # the daemon's state below.
+  # A look took up to 10 minutes from its task to its report in acceptance runs.
+  until_true 600 "the implementer's pending report on the first look of $root_issue's production check" check_look_reported "$root_issue" 1
+  until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" suspended suspended
+  [ -n "$(issue_worker_session "$root_issue" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
+  state_file check-look-1
+  note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $root_issue (phase changed awaiting_merge → done on pull_request_merged; the board done) and opened its production check on that commit; the close suspended the architect, planner, tester, reviewer and merger and handed the implementer the first look in its live pane (claims at the look: $first_look_claims); its pending report left the check open ($(jq -c --arg issue "$root_issue" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")) and suspended its claim, session kept"
   pass
 
   begin smoke-main-clean
@@ -989,6 +1050,29 @@ primary_issue() {
   [ -z "$leftovers" ] || fail "$repo main still carries proof leftovers: $(tr '\n' ' ' <<<"$leftovers")"
   note "$repo main carries no .legion/ handoff and no docs/solutions/ learning"
   release_smoke_main
+  pass
+
+  begin production-check-bound
+  # The check's bound (production_check_hours 0.25: 15 minutes after the close) is its last wake: the
+  # daemon starts the last look, the implementer's pane comes back on its kept session, told look 2,
+  # woken by the bound, the last look. The wait runs from here, after the first look's report and
+  # the smoke main's cleanup: what remains of the 15 minutes, and a bound deferred by a look still
+  # open when it came due (by the look's own two-hour bound) fails here by name rather than hanging.
+  # The last look's pending closes the check as not_run: the implementer's claim is retired, its
+  # session dropped (issue_close), and the state omits the check.
+  until_true 900 "the bound to wake the last look of $root_issue's production check" last_look_started "$root_issue"
+  state_file check-look-2
+  # The daemon's task names the last look and its rule (write on the pull request that the check
+  # did not run within the bound, report pending), and the proof sends the closed issue nothing: the
+  # close of the check is the observation.
+  until_true 600 "the last look's pending report to close $root_issue's production check" check_closed "$root_issue"
+  check_look_logged "$root_issue" 2 bound ||
+    fail "the daemon log records no look 2 of $root_issue's production check woken by the bound as the last look: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check look started")' "$evidence/logs/daemon.log" | tail -2 | tr '\n' ' ')"
+  check_closed_as "$root_issue" not_run ||
+    fail "the daemon log records no close of $root_issue's production check as not_run: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check closed")' "$evidence/logs/daemon.log" | tail -1)"
+  until_true 120 "the check's close to retire the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" retired suspended
+  state_file check-closed
+  note "the bound woke look 2 of $root_issue's production check (the state at the wake: $(jq -c --arg issue "$root_issue" '.issues[$issue].check | if . == null then "already closed" else {looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: look 2, cause bound, last); its pending closed the check as not_run, the state omits it, and the implementer's claim is retired while the five others stay suspended: $(issue_claim_states "$root_issue" | paste -sd ',' -)"
   pass
 }
 
@@ -1045,7 +1129,7 @@ if [ -z "$from" ]; then
   primary_issue
 else
   begin "development-run-from-$from"
-  # The proof human closes the first root, which frees its admission slot as its sign-off would.
+  # The proof human closes the first root, which frees its admission slot as the merge's close would.
   set_status "$root_issue" "done"
   await_tree_suspended "$root_issue" "the closed tree's architect to be suspended"
   pr_number=${STAGE3_PR:-$(gh -R "$repo" pr list --state all --limit 1 --json number --jq '.[0].number')}
@@ -1228,8 +1312,9 @@ status_actors() {
   pass
 }
 # Every workflow notice is for the architect that owns its issue, on that architect's role topic:
-# the run's pr-blocked, production-check phase-finished and worker-died reach their architects
-# (checked where each is written), and no phase-worker session of the run receives any notice.
+# the run's pr-blocked, the reviewer's phase-finished at its approval (the architect's acceptance
+# cue) and worker-died reach their architects (checked where each is written), and no phase-worker
+# session of the run receives any notice.
 notices_reach_architects_alone() {
   begin notices-reach-architects-alone
   local sessions="$profile_agent/sessions" negative="$work/worker-notice-negative" worker

@@ -1733,6 +1733,46 @@ export type IssueReleasedEventPayload = IssueClaimEventPayload & {
   readonly previous_claim: IssueClaim;
 };
 
+/**
+ * `issue.deployed`: the delivery timeline's word that the issue's pull request reached production,
+ * written once per pull request the moment the timeline first knows the production run that
+ * shipped it (by intake or by the reconcile), with the system actor `delivery-timeline`, and
+ * published on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`) as every
+ * issue event is. `repo` and `number` name the pull request, `run_id` the production run, and
+ * `completed_at` when that run's production job completed, in UTC. The Legion daemon wakes the
+ * issue's production check on it. Strict: the Go writer
+ * (`packages/envoy/internal/dispatch/delivery/deployed.go`) emits exactly these four fields.
+ */
+export const IssueDeployedEventPayloadSchema = z.strictObject({
+  repo: z.string(),
+  number: z.number().int().positive(),
+  run_id: z.number().int().positive(),
+  completed_at: z.iso.datetime(),
+});
+
+export type IssueDeployedEventPayload = z.infer<typeof IssueDeployedEventPayloadSchema>;
+
+/**
+ * The subject Dispatch publishes its own start on, directly on the bus rather than through the
+ * outbox (it is no issue's, document's or project's event), as an Envoy envelope with `source`
+ * `dispatch` whose payload is `DispatchServerStartedPayload`. Mirrored by `startup.Subject` in
+ * `packages/envoy/internal/dispatch/startup`, and matched whole by the Legion daemon's intake.
+ */
+export const DISPATCH_SERVER_STARTED_SUBJECT = "notifications.dispatch.server.started";
+
+/**
+ * The payload of a `server.started` envelope: the build commit Dispatch was stamped with (a
+ * Dispatch built without one publishes no start) and when the process started, in UTC. The Legion
+ * daemon compares the commit with the merges of its open production checks. Strict: the Go writer
+ * emits exactly these two fields.
+ */
+export const DispatchServerStartedPayloadSchema = z.strictObject({
+  commit: z.string().min(1),
+  started_at: z.iso.datetime(),
+});
+
+export type DispatchServerStartedPayload = z.infer<typeof DispatchServerStartedPayloadSchema>;
+
 interface DispatchEventBase {
   readonly id: number;
   readonly issue_key: string | null;
@@ -1785,6 +1825,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "issue.released";
       readonly payload: IssueReleasedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "issue.deployed";
+      readonly payload: IssueDeployedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.created";

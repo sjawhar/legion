@@ -99,11 +99,10 @@ test("each phase's word and role mirror the daemon's tables", async () => {
 });
 
 test("every other completion reports the commit the workspace stands on", async () => {
-  // Retro, the production check and the merger's READY write no file; a role reporting a phase
-  // it does not run reports @- too, and the daemon refuses it naming whose phase it is.
+  // Retro and the merger's READY write no file; a role reporting a phase it does not run reports
+  // @- too, and the daemon refuses it naming whose phase it is.
   for (const [phase, role] of [
     ["retro", "implementer"],
-    ["production_check", "implementer"],
     ["merging", "merger"],
     ["implementing", "tester"],
     ["admitted", "architect"],

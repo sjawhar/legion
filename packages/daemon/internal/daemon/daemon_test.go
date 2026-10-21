@@ -325,7 +325,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+	if err := run(ctx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	count, firstBootAt := boots(t, cfg)
@@ -337,7 +337,7 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 	}
 
 	rebindHeldPorts(t, &cfg)
-	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+	if err := run(ctx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	countAgain, firstBootAgain := boots(t, cfg)
@@ -357,7 +357,7 @@ func TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword(t *testing.T) {
 
 	refused := make(chan error, 1)
 	go func() {
-		refused <- run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+		refused <- run(context.Background(), cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
 	}()
 
 	select {
@@ -387,7 +387,7 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.listen = nil
 
-	err := run(context.Background(), cfg, quietLogger(), o)
+	err := run(context.Background(), cfg, Build{}, quietLogger(), o)
 	if err == nil {
 		t.Fatal("run returned no error although another listener held its port")
 	}
@@ -600,7 +600,7 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
 		base:   "http://127.0.0.1:" + strconv.Itoa(cfg.Port),
 	}
-	go func() { d.done <- run(ctx, cfg, log, o) }()
+	go func() { d.done <- run(ctx, cfg, Build{}, log, o) }()
 	t.Cleanup(d.stop)
 	// Each poll is bounded by a second, so within bounds the wait whatever a poll meets: until the
 	// daemon serves, the held listener queues the connection unanswered.
@@ -842,7 +842,7 @@ func TestWorkflowBootServingNoRepositoryReportsWhatItLeftOut(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
 			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
 			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
 		})
@@ -897,7 +897,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, logger, overrides{
+		done <- run(ctx, cfg, Build{}, logger, overrides{
 			listen:         heldListen,
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
@@ -1016,7 +1016,7 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: github.url,
@@ -1086,7 +1086,7 @@ func TestRunRefusesToBootWithoutTheNotificationStream(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: repositoriesGitHub(t),
@@ -1111,7 +1111,7 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, cfg, Build{}, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
 			githubAPI: repositoriesGitHub(t),

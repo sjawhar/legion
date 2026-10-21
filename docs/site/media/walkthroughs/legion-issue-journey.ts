@@ -7,6 +7,7 @@ import type { Page } from "@playwright/test";
 
 import { expect } from "../harness";
 import {
+  accept,
   admit,
   DELIVERY_DATE,
   file,
@@ -69,24 +70,24 @@ const legionIssueJourney: Walkthrough<Seeded> = {
       id: "done",
       narration: [
         { at: 0.3, text: "Legion took this issue to done:" },
-        { at: "production", text: "checked in production," },
-        { at: "signoff", text: "and signed off." },
+        { at: "signoff", text: "its architect accepted the change," },
+        { at: "merge", text: "and the merge closed it." },
       ],
       open: async (page, seeded) => {
         await openConversation(page, seeded.done);
         await expect(page.getByRole("combobox", { name: "Status" })).toHaveValue("done");
         await expect(turns(page)).toContainText("Signed off.");
       },
-      act: async (page, _seeded, cue) => {
+      act: async (page, seeded, cue) => {
         await linger(page, 0.6);
         await highlight(page, page.getByRole("combobox", { name: "Status" }));
         cue("status");
         await linger(page, 1.2);
-        await highlight(page, turns(page).getByText(/^Production:/));
-        cue("production");
-        await linger(page, 1.2);
         await highlight(page, turns(page).getByText(/^Signed off\./));
         cue("signoff");
+        await linger(page, 1.2);
+        await highlight(page, turns(page).getByText(readyLine(seeded.done, SAVED_CART)));
+        cue("merge");
         await linger(page, 1.8);
       },
     },
@@ -212,7 +213,10 @@ const legionIssueJourney: Walkthrough<Seeded> = {
           if (index === 0) cue("phases");
           await linger(page, 1.1);
         }
-        await linger(page, 0.6);
+        // The architect's acceptance of the reviewed head moves the issue to retro.
+        await accept(seeded.next, DELIVERY_DATE);
+        await expect(pill).toHaveValue("retro");
+        await linger(page, 1.7);
       },
     },
     {
