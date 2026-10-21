@@ -60,10 +60,6 @@ As a surface's owner, run `dispatch issues --project <KEY> --priority 0 --priori
   - **Unrecorded practice**: someone does the issue's work by hand more than once. The tell is your own messages. Fix the status.
   - **Unreachable route**: the priority filter above never finds it, whatever its priority. List it on its own with `dispatch issues --project <KEY> --route-status no_holder --limit 250`. A route is unowned only when two reads ten minutes apart both list it, since a restarting session is absent for minutes. Check with the second `dispatch issues`, not `envoy_role_get`, which releases an absent holder's claim. Then staff the role, re-route to a live holder, or clear the route and assign. `unknown` means the listener did not answer.
 
-## Search paging
-
-The first line names the total. The last line names the next `--offset`. Each kind lists at most its best 100: past that, narrow the query or add `--project`.
-
 ## Syncing a project's architecture model
 
 `dispatch architecture-sync --project CORE` imports the model now. It prints the commit, or the error, and keeps the old model. No source configured answers `SOURCE_NOT_FOUND`.

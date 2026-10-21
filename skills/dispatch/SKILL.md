@@ -79,7 +79,7 @@ A decision a human must make is an `:::ask{#slug}` block at the end of the secti
 
 ## Search first
 
-- Search as `skill://dispatch-first` says before you plan, file, ask or post. `dispatch search --help` has the syntax and paging. A paraphrase can match by meaning. Without an embedder, search says so and ranks by keyword. Never paste a passage: a query over 1,000 characters is refused. Cite the hit (`dispatch://KEY`) or say "no prior issue".
+- Search as `skill://dispatch-first` says before you plan, file, ask, post, start a design document or start work. `dispatch search --help` has the syntax and paging. A paraphrase can match by meaning. Without an embedder, search says so and ranks by keyword. Never paste a passage: a query over 1,000 characters is refused. Cite the hit (`dispatch://KEY`) or say "no prior issue".
 - `POSSIBLE_DUPLICATE` compares title words only. Read the candidates. Reference the existing issue, or use `--force` for new work. Then give the new title the difference, and open its spec with the distinction, citing the named issue.
 - **Symptom versus cause.** Work goes on the issue whose title names the fix. The symptom's issue gets a pointer. Before you post a finding, search for the failing component's name. A symptom issue that gathers messages with no human reply is the sign.
 
@@ -122,7 +122,7 @@ EOF
 
 - Before you say you wait on a human, run `dispatch open-asks`. Add `--project <KEY>` to see every open ask in a project.
 - **Unsettled product shape needs a decision before implementation.** Product shape can come from a page, navigation entry, table key, customer-scoping rule or persisted sidecar. If the human has not settled it, write a decision block in the work's document before the first implementation commit. In a Legion tree the architect writes it. A lane's schema choice or a two-lane contract does not settle product shape. A behaviour the human asked for in words is settled, with each choice inside it. Routine work needs no approval.
-- **Anything you are blocked on a human for is visible in Dispatch.** Make each blocker a `dispatch ask` the moment you know. Blockers are a to-do, a permission, a credential or grant renewal, a human-only setting, a review click, or a conflict between two of their rules. Start with the problem and why, then constraints, options with costs, and your recommendation. For a human-only action, state what it changes and risks. Never make the action the question. A to-do only in a spec, comment, message or PR body reaches no Inbox.
+- **Anything you are blocked on a human for is visible in Dispatch.** An agent waits on a human only through an open ask. Make each blocker a `dispatch ask` the moment you know. Blockers are a to-do, a permission, a credential or grant renewal, a human-only setting, a review click, or a conflict between two of their rules. Start with the problem and why, then constraints, options with costs, and your recommendation. For a human-only action, state what it changes and risks. Never make the action the question. A to-do only in a spec, comment, message or PR body reaches no Inbox.
 - First try to make the step unnecessary: a value on the machine, a permission you hold, an API that replaces the click.
 - One ask per item, `--urgency high` when work halts on it. Keep working on everything else.
 - **Ask once.** Do not raise an open ask again in each message. The open ask is the request.
@@ -150,7 +150,7 @@ A human approves one version. A later version makes the approval stale, unless t
 - If the human asks for approval while a block is open, name each open block and ask them to answer or waive it. For a waiver, `dispatch resolve-ask --kind resolved` with their words as `--reason`, write the decision into the text, then request.
 - A request carries nothing new. An unagreed point first gets a decision block with your recommendation. A choice that is yours (gate 1), where the human will not want a say, leaves the spec. An inference you cannot defend in a block leaves the spec.
 - `--summary` is one to three sentences on what they approve, with no commentary and no question. After an earlier approval, one sentence on what changed.
-- Never put "Approve" options in a `dispatch ask`. Details: [Approval requests](skill://dispatch/references/documents.md#approval-requests).
+- Only humans approve. Never put "Approve" options in a `dispatch ask`. Details: [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
 ## The Spec
 
