@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-62",
-  "completed": "2026-10-21T01:30:00Z",
-  "round": "review round 1 — the reviewer's two findings and three minors answered; the head below is the one the tester and reviewer read next",
+  "completed": "2026-10-21T02:20:00Z",
+  "round": "test round 2 — the tester's red test answered: the app pod's grace period now covers the pre-stop wait and the server's shutdown. Every headSha below was corrected in this round: the previous write cited f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46, which is not a commit (GitHub answers 422 for it); the real commit of that round is f8ec21dfc724e27e1b75c84ba4ff763902708436, and every id in this file is now one `jj log -r <id>` resolves.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2089",
-  "head": "f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46",
+  "head": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
   "base": "envoy-infra-integration at ba3f6b7e2bbf0a8119bd8b597980904f3b4ab6e2",
   "proof": [
     {
@@ -13,7 +13,7 @@
       "surface": "The pulumi-resource-envoy-infra plugin built from this commit, driven through its own Construct RPC server — the entry point the Pulumi CLI's engine calls — with a throwaway driver over provider.New() and integration.NewServer(...).Construct(...), the same server pulumitest.Construct uses.",
       "command": "cd packages/envoy/infra && go build -p 1 -ldflags \"-X main.version=1.2.3\" -o /legion/scratch/pulumi-resource-envoy-infra ./cmd/pulumi-resource-envoy-infra && go run -p 1 ./dispatchproof  (the driver, removed again after the run; its output is quoted below)",
       "observed": "With replicas: 3 the plugin registered 35 resources, among them kubernetes:apps/v1:Deployment example-dispatch replicas=3 strategy={\"rollingUpdate\":{\"maxSurge\":1,\"maxUnavailable\":0},\"type\":\"RollingUpdate\"}, example-dispatch-tailnet replicas=1 strategy={\"type\":\"Recreate\"} and example-dispatch-listener replicas=1 strategy={\"type\":\"Recreate\"}. With replicas unset the app Deployment is replicas=1 strategy={\"type\":\"Recreate\"} with no rollingUpdate key (gcp/testdata/dispatch-pod.golden and TestDispatchDeploymentRecreatesOneReplicaByDefault at the same head).",
-      "headSha": "f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46 (re-run there after the pre-stop change; the same observation held at 0ae5a902d601)",
+      "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1 (re-run at each head that changed the rendering: f8ec21dfc724e27e1b75c84ba4ff763902708436, then here)",
       "negativeControl": "The same Construct call with replicas: 0 answered `rpc error: code = Unknown desc = envoy-infra:gcp:Dispatch example-dispatch: replicas 0 must be at least 1` and registered 0 resources — the refusal names the input and nothing is registered before it."
     },
     {
@@ -21,7 +21,7 @@
       "surface": "The same plugin Construct server at replicas: 3, reading the registered Services, NetworkPolicies and each Deployment's dependency list.",
       "command": "cd packages/envoy/infra && go run -p 1 ./dispatchproof  (output saved at /legion/scratch/construct-proof-2.txt)",
       "observed": "Services example-dispatch (8766, selector app=example-dispatch), example-dispatch-tailnet (1055, selector app=example-dispatch-tailnet) and example-dispatch-listener (9020, selector app=example-dispatch-listener). Policies: example-dispatch admits podSelector app=example-dispatch-tailnet on 8766; example-dispatch-tailnet admits 1055 from app=example-dispatch and app=example-dispatch-listener alone; example-dispatch-listener admits 9020 from app=example-dispatch alone. Both the app and the listener Deployments carry the front door's Deployment and Service URNs in their dependency lists (`waits-for=[… $kubernetes:apps/v1:Deployment::example-dispatch-tailnet … $kubernetes:core/v1:Service::example-dispatch-tailnet]`), and the front door's own list holds only the cluster.",
-      "headSha": "f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46 (re-run there after the pre-stop change; the same observation held at 0ae5a902d601)",
+      "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1 (re-run at each head that changed the rendering: f8ec21dfc724e27e1b75c84ba4ff763902708436, then here)",
       "negativeControl": "Each of the six arrangement assertions in gcp/dispatch_test.go was run against a one-line inversion of the production code before being accepted (for example TS_SOCKS5_SERVER back to 127.0.0.1:1055, the front door's replicas set to the app's count, the DependsOn removed) and each failed with the property it names; the production files were restored byte-identically afterwards (sha256 of dispatch_kube.go equal before and after)."
     },
     {
@@ -29,7 +29,7 @@
       "surface": "The pinned Pulumi CLI v3.268.0 (the version .github/actions/install-pulumi installs, checked against its SHA-256) reading the plugin binary built from this commit, and the Go SDK that CLI generates from it, compiled by a throwaway consumer program.",
       "command": "pulumi package get-schema ./pulumi-resource-envoy-infra | jq '.resources[\"envoy-infra:gcp:Dispatch\"].inputProperties.replicas, .resources[\"envoy-infra:gcp:Dispatch\"].requiredInputs' ; pulumi package gen-sdk ./pulumi-resource-envoy-infra --language go --out sdk ; go build ./... in a program that sets Replicas",
       "observed": "The schema answers {\"type\":\"integer\",\"plain\":true} for replicas and lists it in no requiredInputs (the 13 required inputs are region, hostname, tailnetDnsName, tags, tailnetAuthKey, envoyImage, tailscaleImage, cloudSqlProxyImage, natsUrl, natsSeedSecret, signInClientId, signInClientSecret, signInDomain). gen-sdk generated `Replicas *int` on DispatchArgs, and a program setting `Replicas: &three` built against it.",
-      "headSha": "f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46 (the schema and SDK are unchanged by this round; built from the same source tree)",
+      "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1 (the schema and the generated SDK are unchanged by the last two rounds, which touched no input; the plugin was built from this tree)",
       "negativeControl": "The same program with `Replicas: pulumi.String(\"3\")` failed to compile: `cannot use pulumi.String(\"3\") (constant \"3\" of string type pulumi.String) as *int value in struct literal` — the input is the plain int the schema declares, not an untyped passthrough."
     },
     {
@@ -37,24 +37,32 @@
       "surface": "The tree at this head, the file a Dispatch contributor reads before writing a migration.",
       "command": "grep -n \"A migration runs while the build before it is still serving\" packages/envoy/cmd/dispatch/README.md ; grep -n \"Database migrations\" packages/envoy/infra/README.md packages/envoy/AGENTS.md",
       "observed": "The rule stands at the end of \"## Database migrations\" in packages/envoy/cmd/dispatch/README.md, immediately before \"### Pre-deploy census\": what a migration may add, what it must split across two releases, what the census does not cover, and why the five-second pgmigrate.LockTimeout bites harder while a deployment rolls. It is pointed at from the gcp:Dispatch section of packages/envoy/infra/README.md and from packages/envoy/AGENTS.md's internal/pgmigrate row. The census section's opening sentence, which claimed a deployment runs the census, now says no deployment of this component does and names the by-hand recipe.",
-      "headSha": "f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46",
+      "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
       "negativeControl": "bash .github/scripts/check-private-names.sh over the whole tree passed (4361 files), so the new prose names no private host, company or repository; the same grep against the base commit ba3f6b7e finds the rule in no file."
     },
     {
       "criterion": "Review round 1, finding 1: the rollout must keep serving while a pod leaves routing, and the operator documentation must say what it guarantees rather than claiming a gapless roll.",
       "surface": "The same plugin Construct RPC server, reading the app pod's container lifecycle and the pod's grace period, and the operator file an operator reads to decide whether a release is safe during the working day.",
-      "command": "cd packages/envoy/infra && go run -p 1 ./dispatchproof  (the throwaway driver, removed after the run; output at /legion/scratch/construct-proof-3.txt), then sed -n '200,216p' packages/envoy/infra/README.md",
-      "observed": "`container envoy-dispatch lifecycle={\"preStop\":{\"exec\":{\"command\":[\"sleep\",\"5\"]}}} grace=30` on Deployment example-dispatch, and `lifecycle=null` on the front door's tailscale container and the listener's envoy-listener container, which are single-replica Recreate workloads with no second pod to route to. The hook runs before SIGTERM, inside the unchanged 30 s grace, so cmd/dispatch/shutdown.go's own drain budget is untouched; the image is debian:bookworm-slim, which carries /bin/sleep. The README paragraph now says a new pod is ready before an old one stops and a stopping pod keeps serving for five seconds after it is removed from routing, and names what is unmeasured: whether that loses no request across a real release, which the consuming stack's release measures with a poll every 250 ms.",
-      "headSha": "f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46",
-      "negativeControl": "TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates pins the hook and the 30 s grace: dropping the Lifecycle field from the app container fails it, and the same rendering is pinned byte-for-byte by gcp/testdata/dispatch-pod.golden, whose lifecycle block was added by hand with the test."
+      "command": "cd packages/envoy/infra && go run -p 1 ./dispatchproof  (the throwaway driver, removed after the run; output at /legion/scratch/construct-proof-4.txt), then sed -n '200,220p' packages/envoy/infra/README.md",
+      "observed": "`container envoy-dispatch lifecycle={\"preStop\":{\"exec\":{\"command\":[\"sleep\",\"5\"]}}} grace=35` on Deployment example-dispatch, and `lifecycle=null` on the front door's tailscale container and the listener's envoy-listener container, which are single-replica Recreate workloads with no second pod to route to and set no grace period. The image is debian:bookworm-slim, which carries /bin/sleep. The README paragraph says a new pod is ready before an old one stops, that a stopping pod keeps serving for five seconds after it is removed from routing, why the pod asks for 35 seconds rather than 30, and what is unmeasured: whether five seconds loses no request across a real release, which the consuming stack's release measures with a poll every 250 ms.",
+      "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
+      "negativeControl": "TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates pins the rendered pair exactly — the five-second wait and a grace period of that wait plus the server's own thirty — so dropping the Lifecycle field or putting the grace period back to 30 fails it, and gcp/testdata/dispatch-pod.golden pins the same rendering byte for byte."
     },
     {
       "criterion": "Review round 1, finding 2: the front-door arrangement must be asserted in the configuration production runs, not only at the default.",
       "surface": "The component's rendered NetworkPolicy under `allowedNamespaces: [envoy, legion]`, the shape the consuming stack passes.",
       "command": "cd packages/envoy/infra && go test -p 1 -count=1 -run 'TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces' ./gcp/",
       "observed": "The test now reads the policy through a shared reader — policyIngressRules(t, m, name, count) for the policy's own podSelector, its Ingress type and its rule count, and ingressPods(t, rule, port) for one rule's pod peers — and pins exactly two rules: the named namespaces on 8766, and a second whose single peer is podSelector app=example-dispatch-tailnet on 8766, which is what Serve needs and what no namespace selector covers.",
-      "headSha": "f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46",
+      "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
       "negativeControl": "Turning the policy block's append into an assignment — the silent failure the reviewer named, which leaves every tailnet reader without the app — fails the test with `\"[map[from:[map[podSelector:map[matchLabels:map[app:example-dispatch-tailnet]]]] ports:[map[port:8766]]]]\" should have 2 item(s), but has 1`; dispatch_kube.go was restored byte-identically (sha256 eafa3ab27a1a9ad976fb7d86a4031d2dd5516970a264aa4b74c3b278fd86f4c6 before and after)."
+    },
+    {
+      "criterion": "Test round 2's failure: the pre-stop wait must not be taken out of the server's shutdown. The kubelet runs preStop first and signals the process only when it returns, inside the one terminationGracePeriodSeconds, so a five-second wait inside a thirty-second budget left envoy-dispatch twenty-five seconds where its shutdown is built for thirty.",
+      "surface": "The tester's own red test against the rendered pod, run unmodified, and the rendered pod through the plugin's Construct RPC server.",
+      "command": "cd packages/envoy/infra && go test -p 1 -count=1 -run 'TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown' ./gcp/ -v ; go run -p 1 ./dispatchproof",
+      "observed": "The app pod now asks for terminationGracePeriodSeconds 35 — the five seconds of routing window plus the thirty cmd/dispatch/shutdown.go's stopGrace builds the server's shutdown for — and the driver renders `container envoy-dispatch lifecycle={\"preStop\":{\"exec\":{\"command\":[\"sleep\",\"5\"]}}} grace=35`. The tester's test passes unmodified: `--- PASS: TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown`, and `jj diff --from 51f3c6a0897290ee16d810cef815092c29b2f9f1 packages/envoy/infra/gcp/dispatch_test.go` shows that test and its helpers (dispatchServerStopGrace, toInt) unchanged — the only hunk is this implementer's own exact-value test, which asserted 30 and now asserts the wait plus the server's grace.",
+      "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
+      "negativeControl": "With the grace period back at 30 the tester's test fails, naming what the pod would spend (`the kubelet kills the pod … leaving envoy-dispatch 25 seconds after SIGTERM where its shutdown is built for 30`), and the implementer's exact-value test fails with it; 35 was restored and every check re-run."
     }
   ],
   "objectInventory": [
