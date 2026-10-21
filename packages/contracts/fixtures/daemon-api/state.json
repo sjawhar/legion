@@ -17,6 +17,47 @@
     ]
   },
   "issues": {
+    "LEGION-207": {
+      "key": "LEGION-207",
+      "generation": 2,
+      "phase": "done",
+      "status": "done",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
+      "workers": {
+        "implementer": {
+          "claim": {
+            "session": "ses_implementer_207",
+            "state": "working",
+            "pluginContract": 0
+          },
+          "handoffCommit": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+          "rounds": 1
+        }
+      },
+      "pullRequest": {
+        "repo": "acme/widgets",
+        "number": 1239,
+        "head": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+        "reviewDecision": "approved",
+        "fixAttempts": 0
+      },
+      "check": {
+        "repo": "acme/widgets",
+        "pullRequest": 1239,
+        "mergeCommit": "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
+        "openedAt": "2026-09-22T08:40:12Z",
+        "looks": 2,
+        "lookOpen": true,
+        "lastWake": {
+          "kind": "issue.deployed",
+          "detail": "run 38230245571 completed 2026-09-22T09:10:44Z",
+          "at": "2026-09-22T09:10:51Z"
+        },
+        "nextWakeAt": "2026-10-06T08:40:12Z",
+        "last": false
+      }
+    },
     "LEGION-208": {
       "key": "LEGION-208",
       "generation": 3,

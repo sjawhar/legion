@@ -65,7 +65,7 @@ Add an entry to a set's `shots`:
   a wait for that state.
 - `element` (optional): capture one element instead of the viewport.
 - `prepare` (optional): API writes that move the seeded data on before the page opens. Shots run
-  in the order declared, so the Legion set follows one issue from handover to sign-off.
+  in the order declared, so the Legion set follows one issue from handover to the merge that closes it.
 - `allowEmpty` (optional): the `aria-label`s of empty states this shot may show.
 
 Before every capture the runner waits for loading skeletons, images and fonts, then refuses a

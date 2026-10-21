@@ -489,7 +489,7 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
   counted head and every head pushed on top of it until a push lands on a head CI judged green) no
-  longer sends the work back by itself, so the issue waits in testing, review, retro or merging for
+  longer sends the work back by itself, so the issue waits in testing, review, acceptance, retro or merging for
   the architect, or for a worker's own decision such as a reviewer's request for changes. A `READY`
   is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
@@ -533,8 +533,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   and while the design gate is closed. The refusal names the head and the directory, the check or workflow, or the spec version
   that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
   failure, and the merger completes again. None of the head checks applies to a pull request a
-  person already merged: its `READY` is published unread, and the issue goes on to its production
-  check. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
+  person already merged: its `READY` is published unread, and the merge closes the issue the moment
+  it reaches `awaiting_merge`. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
   for a pull request that deletes it.
 
 An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red

@@ -46,6 +46,13 @@ const (
 // with `-ldflags "-X main.revision=<commit>"`; empty otherwise.
 var revision string
 
+// builtFromRepository is the repository this binary is built from: with revision, what the boot
+// compares the open production checks of that repository against (daemon.Build), and so what a
+// release build's boot wakes — a check whose merge the build carries. A Go constant is never
+// empty, so a non-release build's empty revision is what makes its boot compare nothing, as does
+// a deployment whose configured repository is another (the smoke rig's).
+const builtFromRepository = "sjawhar/legion"
+
 // release is the legion-v* version a release binary was built for, linked in by the release
 // workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.
 var release string
@@ -352,7 +359,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		}
 	}()
 
-	if err := daemon.Run(ctx, cfg, log); err != nil {
+	if err := daemon.Run(ctx, cfg, daemon.Build{Revision: revision, Repository: builtFromRepository}, log); err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
@@ -452,6 +459,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
@@ -486,6 +494,50 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 	}
 	return fmt.Sprintf("pending Dispatch status writes: %d; the oldest, for %s, has failed %d attempts, next at %s: %s",
 		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
+}
+
+// issueCheck is one open production check (api.CheckView) with the issue it belongs to.
+type issueCheck struct {
+	issue string
+	check api.CheckView
+}
+
+// openChecks is every open production check the state's issues carry, oldest opened first and then
+// by issue key, so the oldest is the one named whatever order the map came in.
+func openChecks(issues map[string]api.Issue) []issueCheck {
+	var checks []issueCheck
+	for key, issue := range issues {
+		if issue.Check != nil {
+			checks = append(checks, issueCheck{issue: key, check: *issue.Check})
+		}
+	}
+	slices.SortFunc(checks, func(a, b issueCheck) int {
+		return cmp.Or(a.check.OpenedAt.Compare(b.check.OpenedAt), cmp.Compare(a.issue, b.issue))
+	})
+	return checks
+}
+
+// checksSummary is the one line an operator reads for the production checks still open: how many,
+// and the oldest — its issue, pull request and merge commit, which look it is on, what woke that
+// look and when, and when the check is bound.
+func checksSummary(checks []issueCheck) string {
+	if len(checks) == 0 {
+		return "open production checks: none"
+	}
+	oldest := checks[0]
+	merge := oldest.check.MergeCommit
+	if len(merge) > 7 {
+		merge = merge[:7]
+	}
+	if merge == "" {
+		merge = "an unrecorded merge"
+	}
+	look := fmt.Sprintf("look %d", oldest.check.Looks)
+	if wake := oldest.check.LastWake; wake != nil {
+		look += fmt.Sprintf(" woken by %s at %s", wake.Kind, wake.At.UTC().Format(time.RFC3339))
+	}
+	return fmt.Sprintf("open production checks: %d; the oldest, %s #%d at %s, %s, bound %s",
+		len(checks), oldest.issue, oldest.check.PullRequest, merge, look, oldest.check.NextWakeAt.UTC().Format(time.RFC3339))
 }
 
 // heldSummary is the one line an operator reads for the lifecycle rows the daemon holds behind

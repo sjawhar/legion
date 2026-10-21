@@ -144,9 +144,12 @@ type Config struct {
 	Gates             Gates
 	GitHubApps        GitHubApps
 	// Linger is how long a finished tree keeps its workspace before it closes (`linger_hours`).
-	Linger         time.Duration
-	ReviewRoundCap int
-	MaxFixAttempts int
+	Linger time.Duration
+	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
+	// after the close before its last look (`production_check_hours`, 14 days by default).
+	ProductionCheckBound time.Duration
+	ReviewRoundCap       int
+	MaxFixAttempts       int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
@@ -261,6 +264,7 @@ type fileConfig struct {
 	Gates                  *Gates
 	GitHubApps             *GitHubApps
 	Linger                 *time.Duration
+	ProductionCheckBound   *time.Duration
 	ReviewRoundCap         *int
 	MaxFixAttempts         *int
 	Controller             *string
@@ -390,7 +394,9 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "github_apps":
 			file.GitHubApps, err = readGitHubApps(value, key)
 		case "linger_hours":
-			file.Linger, err = readLingerHours(value, key)
+			file.Linger, err = readHours(value, key)
+		case "production_check_hours":
+			file.ProductionCheckBound, err = readHours(value, key)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
@@ -729,12 +735,12 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 	return &read, nil
 }
 
-// readLingerHours is `linger_hours`: a positive number of hours, a decimal among them (0.3 is 18
-// minutes), bounded as the shipped key is, by the timer bound in whole hours (config.ts
-// MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read as zero: the
-// engine arms the deadline it is given, so a zero would close a finished tree at once and take
-// its workspace with it.
-func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
+// readHours is a key in hours (`linger_hours`, `production_check_hours`): a positive number of
+// hours, a decimal among them (0.3 is 18 minutes), bounded as the shipped key is, by the timer
+// bound in whole hours (config.ts MAX_TIMER_HOURS). A value too small to be a nanosecond is
+// refused, never read as zero: the engine arms the deadline it is given, so a zero would close a
+// finished tree at once and take its workspace with it, or bound a check before its first look.
+func readHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
 	}
@@ -748,11 +754,11 @@ func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
 	if hours > maxTimerSeconds/3600 {
 		return nil, fmt.Errorf("%s must be at most %d", key, maxTimerSeconds/3600)
 	}
-	linger := time.Duration(math.Round(hours * float64(time.Hour)))
-	if linger <= 0 {
+	duration := time.Duration(math.Round(hours * float64(time.Hour)))
+	if duration <= 0 {
 		return nil, fmt.Errorf("%s must be a positive number", key)
 	}
-	return &linger, nil
+	return &duration, nil
 }
 
 // validURL is the shipped `validateUrl` (config.ts) for the URLs this daemon dials or
@@ -820,15 +826,16 @@ func underConfig(path, configDir string) string {
 // path in it is relative to the file, never to the cwd a command was launched from.
 func resolve(file fileConfig, env func(string) string, configDir string) (Config, error) {
 	cfg := Config{
-		Port:           defaultPort,
-		Bind:           defaultBind,
-		Runtime:        Runtime{Name: defaultRuntimeName},
-		AdmissionCap:   defaultAdmissionCap,
-		EnvoyURL:       defaultEnvoyURL,
-		Gates:          Gates{Design: DesignGateRootIssues},
-		Linger:         72 * time.Hour,
-		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
+		Port:                 defaultPort,
+		Bind:                 defaultBind,
+		Runtime:              Runtime{Name: defaultRuntimeName},
+		AdmissionCap:         defaultAdmissionCap,
+		EnvoyURL:             defaultEnvoyURL,
+		Gates:                Gates{Design: DesignGateRootIssues},
+		Linger:               72 * time.Hour,
+		ProductionCheckBound: 336 * time.Hour,
+		ReviewRoundCap:       3,
+		MaxFixAttempts:       3,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")

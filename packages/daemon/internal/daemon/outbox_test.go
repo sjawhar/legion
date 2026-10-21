@@ -83,6 +83,9 @@ type outboxDispatch struct {
 	postErr        error
 	approval       dispatch.Approval
 	approvalErr    error
+	build          string
+	buildErr       error
+	buildAsked     int
 }
 
 func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -111,6 +114,10 @@ func (d *outboxDispatch) MessageBodiesSince(context.Context, string, time.Time) 
 }
 func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return d.approval, d.approvalErr
+}
+func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
+	d.buildAsked++
+	return d.build, d.buildErr
 }
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
@@ -253,7 +260,7 @@ func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
 func TestAnOldTreeCloseOfAHandedOverChildFinishesAtTheGenerationFence(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "child", Phase: phase.ProductionCheck, Generation: 2, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "child", Phase: phase.Retro, Generation: 2, Status: "retro"}
 	putOutboxIssue(t, pool, records, issue)
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: "LEGION-207", Role: claim.RoleImplementer, Generation: 1, Linger: 1}, time.Now())
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
@@ -1043,15 +1050,15 @@ func TestAResumeStartDeliversItsTaskUnlessTheClaimHoldsTheOneItResumes(t *testin
 		{name: "a held task of an earlier phase", claim: supervise.Claim{State: supervise.StateQueued,
 			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Implement it.", Generation: 1, Phase: phase.Implementing}}},
 		{name: "a held task of an earlier generation", claim: supervise.Claim{State: supervise.StateQueued,
-			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Check it.", Generation: 0, Phase: phase.ProductionCheck}}},
+			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Run the retro.", Generation: 0, Phase: phase.Retro}}},
 		{name: "a confirmed task on an uncertain launch", claim: supervise.Claim{State: supervise.StateLaunchUncertain, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl",
-			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Check it.", Generation: 1, Phase: phase.ProductionCheck, ConfirmedAt: confirmed}}},
+			Pending: &supervise.Delivery{ID: "outbox:30", Task: "Run the retro.", Generation: 1, Phase: phase.Retro, ConfirmedAt: confirmed}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			ctx := context.Background()
-			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
+			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Retro, Generation: 1, Status: "retro"}
 			putOutboxIssue(t, pool, records, issue)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
@@ -1064,8 +1071,8 @@ func TestAResumeStartDeliversItsTaskUnlessTheClaimHoldsTheOneItResumes(t *testin
 				t.Fatal(err)
 			}
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir()}
-			start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
-				Task: "Carry on the production check.", ResumeTask: true}, time.Now())
+			start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.Retro,
+				Task: "Carry on the retro.", ResumeTask: true}, time.Now())
 			start.ID = 92
 
 			if err := runner.execute(ctx, start); err == nil || !strings.Contains(err.Error(), "deliver to claim") {
@@ -1130,7 +1137,7 @@ func TestAResumeStartHoldsBackItsTaskForTheTurnTheClaimIsWorking(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Retro, Generation: 1, Status: "retro"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
@@ -1139,13 +1146,13 @@ func TestAResumeStartHoldsBackItsTaskForTheTurnTheClaimIsWorking(t *testing.T) {
 	}
 	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer,
 		State: supervise.StateWorking, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl",
-		Pending: &supervise.Delivery{ID: "outbox:30", Task: "Check it.", Generation: 1, Phase: phase.ProductionCheck, ConfirmedAt: time.Now().Add(-time.Minute)}}, "")
+		Pending: &supervise.Delivery{ID: "outbox:30", Task: "Run the retro.", Generation: 1, Phase: phase.Retro, ConfirmedAt: time.Now().Add(-time.Minute)}}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir()}
-	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
-		Task: "Carry on the production check.", ResumeTask: true}, time.Now())
+	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: 1, Phase: phase.Retro,
+		Task: "Carry on the retro.", ResumeTask: true}, time.Now())
 	start.ID = 92
 
 	if err := runner.execute(ctx, start); err != nil {
@@ -1443,15 +1450,16 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 // so when that turn ends the task is still pending on a claim that can be prompted: it was queued
 // for a phase the issue has left, so it is dropped rather than sent (PhaseHolds), and the claim's
 // next start, for the issue's next phase or round, hands the live worker the new start's own task
-// rather than the finished phase's — for the next round, or for retro, never "Phase: implementing"
-// again — without relaunching it.
+// rather than the finished phase's — for the next round, or for retro once the architect accepts
+// the approved head, never "Phase: implementing" again — without relaunching it.
 func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		review intake.PullRequestReview
+		accept bool
 		want   string
 	}{
-		{name: "approved into retro", review: intake.PullRequestReview{State: "APPROVED"}, want: "Phase: retro."},
+		{name: "approved, accepted into retro", review: intake.PullRequestReview{State: "APPROVED"}, accept: true, want: "Phase: retro."},
 		{name: "changes requested into the next round", review: intake.PullRequestReview{State: "CHANGES_REQUESTED", Body: "scripted changes requested, round 3"}, want: "round 3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1565,6 +1573,9 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			apply("review:after-round-2", review)
 			apply("handoff:reviewer:reviewing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-2"})
+			if tc.accept {
+				apply("signoff", intake.SignOff{Issue: issue.Key})
+			}
 			implementerLaunches := func() int {
 				n := 0
 				for _, call := range rt.Calls() {

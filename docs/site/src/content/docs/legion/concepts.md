@@ -1,6 +1,6 @@
 ---
 title: Concepts
-description: The controller, the architect, the phase workers, admission and the legion label, the design gate, handoffs, review, READY and the production check.
+description: The controller, the architect, the phase workers, admission and the legion label, the design gate, handoffs, review, the architect's acceptance, READY, the merge that closes the issue and the production check after it.
 sidebar:
   order: 2
 ---
@@ -80,7 +80,7 @@ admission to close. The architect:
 4. splits large work into child issues and releases them in waves, when one pull request would be
    too much;
 5. decides what to do when a phase gets stuck, a review round cap is reached, or CI keeps failing;
-6. signs the issue off once the production check is recorded, which closes it.
+6. accepts the issue once the reviewer approves it, reading the tester's and the implementer's evidence, or sends it back; the merge then closes it.
 
 The architect writes no code. A child issue runs the same phases as its root, with a pull request
 of its own, inside the same tree.
@@ -97,12 +97,12 @@ comes back, with everything it knew, the next time its role is needed.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
+| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, with no required check or workflow failed or missing, and submits the merge. | implement App |
-| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. | none |
-| `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
+| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue. | none |
 
-A failed test, red CI on the head in testing, review, retro or merging (a check or workflow the
+A failed test, red CI on the head in testing, review, acceptance, retro or merging (a check or workflow the
 base branch requires), or a review that requests changes sends the issue back to `implementing`,
 and the change goes through the tester again before the reviewer sees it. Two reds are the
 exception: one the tester planned, with its own failing tests, and red CI within the fix attempt
@@ -236,7 +236,7 @@ Legion uses GitHub's own review mechanisms rather than labels:
 
 ## READY and the merge
 
-When the reviewer has approved and retro is done, the merger sends **READY**. The daemon accepts
+When the reviewer has approved, the architect has accepted and retro is done, the merger sends **READY**. The daemon accepts
 it only when the pull request's head is the approved one plus only retro's notes, no check the base
 branch requires has failed or is missing on it, and no workflow its rulesets require has failed or
 has no run on the head; a required check or workflow still running is no reason to wait. It posts
@@ -285,14 +285,32 @@ and posts on the issue, and tells that role, that the `READY` is withdrawn, nami
 
 ## The production check
 
-After the merge, the daemon starts the implementer once more: the agent that wrote the change
-drives it in production through a user's own access path and records what it observed, on the pull
-request and on the issue. A defect it finds becomes a new child issue of the tree. Only once that
-record exists does the architect sign off, which moves the issue to `done`.
+The merge closes the issue: once the pull request merges, the daemon writes `done`, and nothing is
+left of the issue to develop. What is left is to see the change work in production, and that is
+work after the close: the implementer — the agent that wrote the change — is handed a production
+check in its live session as the issue closes. Each look of the check reaches the deploy as your
+deployment instructions say (the merge commit published to your deploy role, with no reply
+awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
+the implementer drove the change in production through a user's own access path and wrote the
+pull request's `Production:` line, naming the merge commit and what woke the look; `pending`,
+when production does not carry the merge yet; or `fail`, a defect, filed as a new issue of its own
+in the project, linked to the pull request and the closed issue. The record lives on the pull
+request alone: Dispatch refuses a write on a closed issue.
 
-A finished tree **lingers** for `linger_hours` (72 by default) with its workspace kept, in case work
-resumes; then its pods and volume are deleted. Setting a done root back to `todo` runs it again as a
-new generation, starting from its architect.
+Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its
+conversation and the issue's volume kept, and the daemon wakes the check — the pod comes back and
+the same agent takes the next look — when Dispatch's delivery timeline reports the pull request
+deployed (its `issue.deployed` event), or, for Legion's own repository, when a Legion daemon boots
+or Dispatch starts on a build that contains the merge. A look is bounded at two hours, and the
+whole check at `production_check_hours` (336, fourteen days, by default): the wake at that bound is
+the last look, and a `pending` there closes the check as not run, which the implementer writes on
+the pull request. `legion state` prints how many checks are open and the oldest of them.
+
+A child's close releases its pod at once and its volume when the check closes; a root's close frees
+its admission slot, and the finished tree **lingers** for `linger_hours` (72 by default) with its
+workspace kept, in case work resumes; then its pods and volume are deleted, once no member's check
+is open. Setting a done root back to `todo` runs it again as a new generation, starting from its
+architect.
 
 ## Supervision
 

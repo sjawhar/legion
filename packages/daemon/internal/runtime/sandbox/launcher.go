@@ -417,7 +417,8 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 		files = map[string]string{}
 	}
 	files[bootTokenKey] = l.spec.BootToken
-	agentArgv := startArgv(roleStateHome(l.spec.Role), l.spec.Generation, l.spec.Plugins, r.setup, l.agentArgv(r.agent))
+	agentArgv := startArgv(roleStateHome(l.spec.Role), l.spec.Generation, l.spec.Plugins, r.setup, l.agentArgv(r.agent),
+		installLockWait(r.bootTimeout, r.registrationIntervals))
 	return shimwire.LauncherStart{
 		ID: "start-" + fmt.Sprint(l.spec.Generation), Generation: l.spec.Generation,
 		Argv: append(shim, append([]string{"--"}, agentArgv...)...), Env: values, Files: files,

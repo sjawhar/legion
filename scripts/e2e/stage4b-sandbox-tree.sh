@@ -648,7 +648,12 @@ pod_commands() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
   pod_exec "$1" "$2" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" " " <"$f" 2>/dev/null; echo; done'
 }
-pod_runs() { pod_commands "$1" "$2" | grep -qF -- "$3"; }
+# pod_runs POD ROLE COMMAND: a process whose command line contains COMMAND runs in ROLE's
+# container. The list is captured whole and the variable judged: a `grep -q` downstream of the
+# live kubectl would exit at its match and hand kubectl SIGPIPE while it still writes the rest of
+# /proc, which pipefail reports as 141, a running command read as absent (lib/rig.sh). A list that
+# could not be read is neither running nor stopped: the read fails, as the caller's wait expects.
+pod_runs() { local out; out=$(pod_commands "$1" "$2") || return 1; grep -qF -- "$3" <<<"$out"; }
 pod_file() { pod_exec "$1" "$2" test -s "$3"; }
 # takeover_lines ROW TESTER prints the daemon log's lines of a CI-red takeover, one JSON object a
 # line: the implementer's start held and going on, and the tester's claim TESTER interrupted for
@@ -1142,7 +1147,16 @@ projects:
 gates:
   design: "${design_gate:-off}"
 admission_cap: $admission_cap
-linger_hours: 0.3
+# The merge closes tree 1, and its linger runs from that close: done's first production-check look
+# and its suspension, the smoke main's cleanup and mid-turn-carry's release of child 4's hold (which
+# must land inside the linger) all run in it, so 30 minutes, not the 18 the earlier order's close
+# left them; close then waits for the expiry.
+linger_hours: 0.5
+# The production check's bound (14 days by default) must come due inside the run, since its wake,
+# the check's last look, is production-check-bound's proof; and after the first look's report, since
+# a look open at the bound defers the bound by the look's own two-hour bound: 15 minutes, against a
+# look that took up to 10 minutes from the proof's instruction to its report in acceptance runs.
+production_check_hours: 0.25
 controller_wake_interval_seconds: 60
 instructions: $work/instructions.md
 github_apps:
@@ -2456,12 +2470,15 @@ cut_at_completion_call() {
 
 # ---- teardown ------------------------------------------------------------------------------------
 
-# The daemon's two durable consumers are named by the Dispatch project key (intake's
-# dispatchConsumerName and githubConsumerName): legion-go-LEGSMOKE-dispatch and -github.
+# The daemon's durable consumers are named by the Dispatch project key (intake's
+# dispatchConsumerName, githubConsumerName and dispatchServerConsumerName): legion-go-LEGSMOKE-dispatch,
+# -github and -dispatch-server. delete_consumers lists every consumer under that prefix and deletes
+# each, so a durable the daemon gains reaches the teardown without being named here: one left
+# behind fails hygiene and refuses the next run at prerequisites.
 consumers_prefix="legion-go-$project-"
 delete_consumers() {
   local name
-  for name in "${consumers_prefix}dispatch" "${consumers_prefix}github"; do
+  for name in $(nats_stream consumers "$nats_url" "$stream" "$consumers_prefix" | jq -r .name); do
     case "$(nats_stream delete "$nats_url" "$stream" "$name" 2>&1)" in
       deleted) note "deleted the run's durable consumer $name from production NATS" ;;
       absent) ;;
@@ -2564,7 +2581,7 @@ cleanup() {
   if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
     if [ -n "$smoke_main_cleaning" ] && [ -z "$teardown_failed" ] && [ ! -s "$evidence/pane-endpoint-violation.txt" ]; then
-      echo "stage 4b e2e: FAIL (fixture teardown, in check $check): every checkpoint before $check passed, and $check failed only at the cleanup of $repo main, after tree 1's merge, production check and sign-off; the rest of $check and the checkpoints after it did not run"
+      echo "stage 4b e2e: FAIL (fixture teardown, in check $check): every checkpoint before $check passed, and $check failed only at the cleanup of $repo main, after tree 1's merge, which closed it, with its production check's first look under way; the rest of $check and the checkpoints after it did not run"
     else
       echo "stage 4b e2e: FAIL (check $check)"
     fi
@@ -3109,8 +3126,16 @@ phase (one that says its previous process was ended), runs `sleep 300` as one ba
 timeout set to 600 seconds) before it replies WAITING: the proof holds a tree by ending an
 implementer's launches while its task is outstanding, an end that lands after the task's turn is
 over charges nothing, and the end takes up to a minute to land on a loaded host, so that turn must
-last long enough to be ended inside. Follow that instruction precisely, use the Go-daemon Legion
-tools and handoffs, and do not create work outside the issue's smoke branch.
+last long enough to be ended inside. A production check's task (its first line `Production check of
+<key>: …`, handed to the implementer once the merge closed its issue) is no phase's task line and
+waits for no targeted message: a closed issue takes no Dispatch write, so none can reach it. Run no
+`sleep 300` on it; act on the task as it is written. This proof has no production and no deploy
+role: no production carries the merge, so the look leaves `Production: pending deploy of <merge
+commit>` on the pull request's body (on the last look, writes on the pull request that the check
+did not run because production did not carry the merge within the bound) and reports verdict
+pending with the legion tool's handoff_complete, committing nothing. Follow each instruction
+precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
+smoke branch.
 
 ## Scope of this proof
 
@@ -4194,7 +4219,10 @@ fail_me=$(jq -cn --arg branch "legion/$tree1" --arg content "$(printf 'Stage 4b 
 note "the proof human committed .fail-me to legion/$tree1 as $fail_me while the tester's witness command ran"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 900
 on_tree "$tree1" until_true 120 "tree 1's interrupted tester to go idle on its session in its first pod" resident_idle "$tree1" tester
-! pod_runs "$tester_pod" tester "/usr/bin/sleep 1207" || fail "the tester's witness command still runs after its turn was interrupted"
+# The witness is asserted gone from a list read whole: `! pod_runs` would take a list that could
+# not be read for one with no witness on it.
+witness_commands=$(pod_commands "$tester_pod" tester) || fail "the tester's container's process list could not be read after its turn was interrupted"
+! grep -qF -- "/usr/bin/sleep 1207" <<<"$witness_commands" || fail "the tester's witness command still runs after its turn was interrupted"
 ! pod_file "$tester_pod" tester "$witness" || fail "the tester's interrupted witness command wrote $witness"
 # The row that held the implementer's start: the tester's own "the interrupted turn is over"
 # (takeover_over), logged whenever a start was genuinely held for this claim's turn, not the
@@ -4332,13 +4360,41 @@ review_thread "$bot_thread_id" >"$evidence/bot-thread-at-approval.json" ||
 [ "$decision" = approve ] ||
   fail "the reviewer requested changes again on its re-review of pull request #$pr_number; its thread then read $(jq -c . "$evidence/review-thread-at-approval.json")"
 note "the reviewer approved pull request #$pr_number at its head; its thread then read isResolved $(jq -r .isResolved "$evidence/review-thread-at-approval.json"), the bot's isResolved $(jq -r .isResolved "$evidence/bot-thread-at-approval.json")"
-on_tree "$tree1" until_true 900 "$tree1 to leave reviewing for retro" issue_phase_in "$tree1" retro merging
+# The approval moves tree 1 to accepting, where no worker starts and the board keeps needs_review:
+# the tree's architect, told by the reviewer's phase-finished notice, accepts with sign_off or sends
+# the issue back. The wait is for accepting itself, read within a poll of the reviewer's completion;
+# the architect acts on no notice under the proof's instructions, so the issue stands there until
+# the proof's prompt. Its sign_off moves the issue to retro, the daemon's one status write there,
+# and starts the implementer's retro.
+on_tree "$tree1" until_true 900 "$tree1 to leave reviewing for accepting" issue_phase "$tree1" accepting
+state_file accepting
+until_true 180 "the architect to receive the reviewer's phase-finished notice, its acceptance cue" notice_delivered "$tree1" architect \
+  "$(notice_needle phase-finished "$tree1")"'\n  message:\n    kind: phase-finished\n    role: reviewer\n    phase: reviewing'
+# No worker starts at accepting: the implementer's claim holds no retro task (a start row's task is
+# the claim's `pending` until the turn it started ends; the implementer may still be in the turn
+# that resolves the bot's thread, so its state alone says nothing), and the daemon queued no status
+# write.
+pending_phase=$(claim_pending_phase "$tree1" implementer)
+[ "$pending_phase" != retro ] || fail "the implementer of $tree1 holds a retro task at accepting: the approval started a worker"
+jq -e --arg issue "$tree1" '[.pendingStatusWrites[]? | select(.issue == $issue)] | length == 0' "$evidence/accepting.json" >/dev/null ||
+  fail "a status write is pending for $tree1 at accepting, which writes none: $(jq -c --arg issue "$tree1" '[.pendingStatusWrites[]? | select(.issue == $issue)]' "$evidence/accepting.json")"
+dispatch_status_is "$tree1" needs_review >/dev/null ||
+  fail "Dispatch shows $tree1 $(dispatch_get "issues/$tree1" | jq -r .status) at accepting, want needs_review, which the move to accepting leaves alone"
+send_agent "$tree1" architect "Stage 4b proof acceptance: the reviewer approved pull request #$pr_number and $tree1 is in accepting; read the evidence as your instructions say and accept it with the legion tool's sign_off for $tree1 now."
+on_tree "$tree1" wait_for_phase "$tree1" retro 900
+phase_change_logged "$tree1" accepting retro sign_off ||
+  fail "the daemon log has no \"workflow: phase changed\" line moving $tree1 from accepting to retro on sign_off"
+until_true 120 "the daemon's retro status on the Dispatch board" dispatch_status_is "$tree1" retro
+note "the reviewer's approval moved $tree1 to accepting (no worker started, the board still needs_review, the architect holding the reviewer's phase-finished notice); the architect's sign_off moved it to retro (workflow: phase changed from=accepting to=retro trigger=sign_off), the board retro"
+# The sign-off starts the implementer's retro, whose task names the phase; the resumed implementer
+# may finish it before the proof's instruction reaches it, so the prompt goes only while the issue
+# sits in retro.
 if issue_phase "$tree1" retro >/dev/null; then
   on_tree "$tree1" wait_for_worker "$tree1" implementer
   send_agent "$tree1" implementer "Stage 4b proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
 fi
 on_tree "$tree1" wait_for_phase "$tree1" merging 1800
-note "$tree1 moved planner → implementer → tester → reviewer (changes requested) → implementer → tester → reviewer (approved) → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
+note "$tree1 moved planner → implementer → tester → reviewer (changes requested) → implementer → tester → reviewer (approved) → accepting (the architect's sign_off) → retro → merging with real agents; $repo#$pr_number changes $smoke_file"
 pass
 
 begin review-thread
@@ -5622,7 +5678,7 @@ until [ -n "$planner_killed" ]; do
 done
 note "killed $tree4's planner mid-turn (process $planner_killed in pod $ended_pod_uid)"
 interrupted_needle="Your previous turn on this task was interrupted when your process died."
-planner_resent() { claim_session_text "$tree4" planner | grep -qF "$interrupted_needle"; }
+planner_resent() { session_contains "$tree4" planner "$interrupted_needle"; }
 on_tree "$tree4" until_true 600 "$tree4's planner to be sent its task again, told its turn was interrupted" planner_resent
 send_agent "$tree4" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 on_tree "$tree4" wait_for_phase "$tree4" implementing "$plan_seconds"
@@ -5719,6 +5775,25 @@ pass
 
 begin "done"
 on_tree "$tree1" wait_for_worker "$tree1" merger
+# The merge closes tree 1 (awaiting_merge and a merged pull request write done), and the daemon
+# submits the READY head's merge itself the moment it accepts READY: on a head whose `gate` check
+# has passed, the close can follow awaiting_merge by seconds. So what must be in place at the close
+# is in place before the merger's READY. The smoke main is held from here until the cleanup below
+# has emptied it (hold_smoke_main), on an open descriptor: start no background child before
+# release_smoke_main, or it inherits the descriptor and holds the smoke main past this run's
+# window; `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed. And child
+# 4's planner starts its hold, so its turn is in flight when tree 1 closes (the close's suspension
+# of it is then held for the turn, mid-turn-carry) and short enough to stay under the bash tool's
+# timeout until mid-turn-carry releases it: one shell loop polling for the release file, bounded at
+# 250 polls of 13 s (54 minutes, over the merger's READY, the merge's wait of up to 300 s, the
+# first look of the production check and its suspension, the smoke main's cleanup and
+# mid-turn-carry's steps to the release, which the linger bounds at 30 minutes from the close),
+# whose /usr/bin/sleep 13 marks it in the planner's container.
+hold_smoke_main
+send_agent "$child4" planner "Stage 4b proof mid-turn hold: run exactly this as one bash tool call, with the tool's timeout at least 3600 seconds, and change nothing else: i=0; until [ -e $child4_release ] || [ \$i -ge 250 ]; do /usr/bin/sleep 13; i=\$((i+1)); done; test -e $child4_release && echo RELEASED. When it finishes, reply RELEASED and end your turn; call no other tool."
+child4_holds() { issue_worker_state "$child4" planner working && pod_runs "$child4_pod" planner "/usr/bin/sleep 13"; }
+on_issue "$child4" until_true 300 "$child4's planner to run its hold in pod $child4_pod" child4_holds
+note "$child4's planner runs its hold, a turn in flight, while tree 1 merges and closes"
 send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
 on_tree "$tree1" wait_for_phase "$tree1" awaiting_merge 900
 # READY is posted with every review thread on the pull request resolved: the implementer resolved
@@ -5746,44 +5821,70 @@ jq --arg id "$thread_id" 'map(if .id == $id then .isResolved = false else . end)
 expect_failure unresolved-thread-at-ready threads_all_resolved "$evidence/review-threads-unresolved-negative.json" "$thread_id"
 note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/review-threads-at-ready.json") review threads, 0 unresolved, the reviewer's $thread_id and the bot's $bot_thread_id among them"
 # The daemon submits the READY head's merge itself; await_ready_merge reads the pull request until
-# it merges and never merges it by hand. The hold is an open descriptor (hold_smoke_main): start no
-# background child before release_smoke_main below, or it inherits the descriptor and holds the
-# smoke main past this run's window. `9>&- 7>&-` does not close it: its number is allocated at
-# runtime, not fixed.
-hold_smoke_main
+# it merges and never merges it by hand.
 await_ready_merge "$repo" "$pr_number" --delete-branch
-on_tree "$tree1" wait_for_phase "$tree1" production_check 600
-# Child 4's planner starts its hold now, before the production check completes and the architect
-# signs off on its own, so its turn is in flight when tree 1 closes, and short enough to stay under
-# the bash tool's timeout until mid-turn-carry releases it: one shell loop polling for the release
-# file, bounded at 250 polls of 13 s, whose /usr/bin/sleep 13 marks it in the planner's container.
-send_agent "$child4" planner "Stage 4b proof mid-turn hold: run exactly this as one bash tool call, with the tool's timeout at least 3600 seconds, and change nothing else: i=0; until [ -e $child4_release ] || [ \$i -ge 250 ]; do /usr/bin/sleep 13; i=\$((i+1)); done; test -e $child4_release && echo RELEASED. When it finishes, reply RELEASED and end your turn; call no other tool."
-child4_holds() { issue_worker_state "$child4" planner working && pod_runs "$child4_pod" planner "/usr/bin/sleep 13"; }
-on_issue "$child4" until_true 300 "$child4's planner to run its hold in pod $child4_pod" child4_holds
-note "$child4's planner runs its hold, a turn in flight, while tree 1 finishes"
-if ! production_check_reported "$tree1" >/dev/null 2>&1; then
-  on_tree "$tree1" wait_for_worker "$tree1" implementer
-  send_agent "$tree1" implementer "Stage 4b proof production check: verify the merged smoke change through its repository surface, record the production-check handoff and required PR/Dispatch record, then complete the phase."
-fi
-# The task line delivered for the new phase opens a sleep 300 turn before the implementer reads the operation, so the budget carries that turn.
-on_tree "$tree1" until_true 1200 "the implementer's production-check completion" production_check_reported "$tree1"
-if issue_phase "$tree1" production_check >/dev/null 2>&1; then
-  send_agent "$tree1" architect "Stage 4b proof sign-off: the implementer's production check for $tree1 is recorded; use the Go-daemon sign-off operation for $tree1 now."
-fi
+# The merge closes tree 1: awaiting_merge and a merged pull request write done, the daemon's one
+# status write after retro. A root's close frees its slot and lingers the tree (linger_hours 0.5),
+# every member's claims suspended, and opens the production check on the merge commit, whose first
+# look the daemon hands the implementer in the still-live pod: its claim alone comes back, resumed
+# on its kept session, while the other five stay suspended, and the root's Sandbox stays Running
+# for the look (the look's start supersedes the linger's suspension of the issue).
 on_tree "$tree1" wait_for_phase "$tree1" "done" 900
+phase_change_logged "$tree1" awaiting_merge "done" pull_request_merged ||
+  fail "the daemon log has no \"workflow: phase changed\" line moving $tree1 from awaiting_merge to done on pull_request_merged"
 until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_is "$tree1" "done"
+check_opened_on "$tree1" "$merge_when_clean_commit" ||
+  fail "$tree1's production check reads $(daemon_state | jq -c --arg issue "$tree1" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
+state_file check-opened
+# The implementer is live at its first look, the five other claims suspended (the close's; the
+# architect's, planner's, tester's, reviewer's and merger's turns are over, so each lands at once);
+# an implementer that reported the look before this read is suspended again already, which the
+# wait after the prompt judges.
+first_look_handed() { claim_states_are "$tree1" "ready working idle" suspended || check_look_reported "$tree1" 1; }
+until_true 300 "the close to leave the implementer live at its first look, the five other claims of $tree1 suspended" first_look_handed
+first_look_claims=$(issue_claim_states "$tree1" | paste -sd ',' -)
+# The first look. The task the daemon handed the implementer is the whole instruction: the proof
+# sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
+# ISSUE_CLOSED), and the fixture's instructions say a check task waits for no targeted message. The
+# smoke repository is neither the deploy repository nor a Legion production, so the look's verdict is
+# pending: the check stays open with its first look reported, and the daemon suspends the
+# implementer's claim, session kept, and the issue's Sandbox with its volume, so the pod goes. Its
+# report is the observation, read from the daemon's state below.
 # The smoke main's cleanup is the fixture's teardown, not the workflow under test. It stays inside
 # this checkpoint, so a STAGE4B_UNTIL=done run still cleans the smoke main, and smoke_main_cleaning
-# tells the EXIT trap's verdict that a failure here is the cleanup's.
+# tells the EXIT trap's verdict that a failure here is the cleanup's. It runs while the implementer
+# works its look, inside the linger either way.
 smoke_main_cleaning=1
 clean_smoke_main
 release_smoke_main
 smoke_main_cleaning=
-note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit; the production check and the sign-off closed $tree1"
+timeout_hook=limit_pending_blocked # clean_smoke_main leaves the hook empty
+# A look took up to 10 minutes from its task to its report in acceptance runs.
+on_tree "$tree1" until_true 600 "the implementer's pending report on the first look of $tree1's production check" check_look_reported "$tree1" 1
+# root_parked: the root's Sandbox is Suspended and its pod gone, the pending report's suspension of
+# the issue (kubectl get pods -l legion.dev/issue=<tree 1>: nothing); root_running: it is Running
+# again with a pod, a look's wake. Each read is held to its exit status (see child1_released).
+root_parked() {
+  local mode pods
+  mode=$(op get sandbox "$root_pod" -o jsonpath='{.spec.operatingMode}') && [ "$mode" = Suspended ] &&
+    pods=$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$tree1" -o name) && [ -z "$pods" ]
+}
+root_running() {
+  local mode pods
+  mode=$(op get sandbox "$root_pod" -o jsonpath='{.spec.operatingMode}') && { [ -z "$mode" ] || [ "$mode" = Running ]; } &&
+    pods=$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$tree1" -o name) && [ -n "$pods" ]
+}
+until_true 600 "the pending report to suspend the root's Sandbox $root_pod and take its pod" root_parked
+assert_one_bound_pvc "$tree1" " between the looks of its production check"
+until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $tree1" claim_states_are "$tree1" suspended suspended
+[ -n "$(issue_worker_session "$tree1" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
+state_file check-look-1
+note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $tree1 (phase changed awaiting_merge → done on pull_request_merged; Dispatch done) and opened its production check on that commit; the close handed the implementer the first look in the live pod (claims at the look: $first_look_claims), and its pending report left the check open ($(jq -c --arg issue "$tree1" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")), suspended its claim with its session, and parked Sandbox $root_pod Suspended with PVC ${found%% *} Bound and no pod"
 # The close is what stops the roles the tree kept live: each claim of tree 1 is suspended, its
-# session kept for a re-admission to resume. The daemon's suspension of a role in a turn waits for
-# that turn to end, however long it takes, so the wait is long, and a role still unsuspended when it
-# runs out is named with whether its suspension is held for a turn.
+# session kept for a re-admission to resume, the implementer's by its look's pending report. The
+# daemon's suspension of a role in a turn waits for that turn to end, however long it takes, so the
+# wait is long, and a role still unsuspended when it runs out is named with whether its suspension
+# is held for a turn.
 tree1_roles_suspended() {
   local role
   for role in architect planner implementer tester reviewer merger; do issue_worker_state "$tree1" "$role" suspended || return 1; done
@@ -5796,7 +5897,7 @@ tree1_roles_unsuspended() {
 timeout_hook=tree1_roles_unsuspended
 until_true 1800 "the close to suspend every role of $tree1" tree1_roles_suspended
 timeout_hook=limit_pending_blocked
-note "the close suspended the architect, planner, implementer, tester, reviewer and merger of $tree1"
+note "the close suspended the architect, planner, tester, reviewer and merger of $tree1, and its first look's pending report the implementer"
 # The close suspends every member of the tree, child 3's planner with them: child 3 is left mid-run,
 # in the phase recorded here, which carried-child requires it keep in its own tree. Its Dispatch
 # status is recorded too: the daemon writes none before testing (workflow's table), so a child left
@@ -5902,9 +6003,10 @@ sandbox_now=$(op get sandbox "$child4_pod" -o jsonpath='{.metadata.uid} {.metada
 [ "$sandbox_now" = "$child4_sandbox_uid $tree1 Running" ] ||
   fail "$child4's Sandbox while its planner's turn runs is '$sandbox_now', want '$child4_sandbox_uid $tree1 Running'"
 note "$child4 is a tree of its own at generation 2 in planning, by $carry_path; its starts wait for the planner's turn, nothing of the new tree launched, and its Sandbox is still tree 1's and Running"
-# The turn must end on the release, inside tree 1's linger (linger_hours 0.3): at its expiry the new
-# tree's hold would cut it instead, which the verdict refuses. So the release goes in only with a
-# minute of the linger left, read from the daemon's own line for tree 1's linger.
+# The turn must end on the release, inside tree 1's linger (linger_hours 0.5, from the merge that
+# closed it): at its expiry the new tree's hold would cut it instead, which the verdict refuses. So
+# the release goes in only with a minute of the linger left, read from the daemon's own line for
+# tree 1's linger.
 tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" '[.[] | select(.tree == $tree)] | last | .until // empty')
 [ -n "$tree1_until" ] || fail "the daemon logged no linger for $tree1"
 left=$(($(date -u -d "$tree1_until" +%s) - $(date -u +%s)))
@@ -5954,34 +6056,115 @@ take_out "$child4"
 note "$child4 taken out: Dispatch shows it in backlog and its tree's pods are gone"
 pass
 
+begin production-check-bound
+# The check's bound (production_check_hours 0.25: 15 minutes after the close) is its last wake: the
+# daemon starts the last look, the root's Sandbox goes Running again and its pod comes back, the
+# implementer resumed on its kept session, told look 2, woken by the bound, the last look. The wait
+# runs from here, after done and mid-turn-carry: what remains of the 15 minutes, and a bound
+# deferred by a look still open when it came due (by the look's own two-hour bound) fails here by
+# name rather than hanging. The last look's pending closes the check as not_run: the implementer's
+# claim is retired, its session dropped (issue_close), the state omits the check, and the root's
+# Sandbox is Suspended again, its volume kept for the close at linger expiry, its pod gone. It runs
+# before node-release, which needs tree 1's pods gone for good, and the tree's close at its linger
+# expiry (close) waits for no open check once it has closed.
+until_true 900 "the bound to wake the last look of $tree1's production check" last_look_started "$tree1"
+state_file check-look-2
+# The pod comes back for the look: 1 to 3 minutes in acceptance runs, placed on the pool like any.
+# An implementer that reported the last look before this read has had its pod taken again. The
+# daemon's task names the last look and its rule (write on the pull request that the check did not
+# run within the bound, report pending), and the proof sends the closed issue nothing: the close of
+# the check is the observation.
+last_look_pod_back() { root_running || check_closed "$tree1"; }
+on_tree "$tree1" until_true 900 "the bound's look to set the root's Sandbox $root_pod Running and bring its pod back" last_look_pod_back
+until_true 600 "the last look's pending report to close $tree1's production check" check_closed "$tree1"
+check_look_logged "$tree1" 2 bound ||
+  fail "the daemon log records no look 2 of $tree1's production check woken by the bound as the last look: $(log_lines "workflow: production check look started" | tail -2 | tr '\n' ' ')"
+check_closed_as "$tree1" not_run ||
+  fail "the daemon log records no close of $tree1's production check as not_run: $(log_lines "workflow: production check closed" | tail -1)"
+until_true 120 "the check's close to retire the implementer's claim beside the five suspended claims of $tree1" claim_states_are "$tree1" retired suspended
+until_true 600 "the check's close to suspend the root's Sandbox $root_pod again and take its pod" root_parked
+assert_one_bound_pvc "$tree1" " after its production check closed"
+state_file check-closed
+note "the bound woke look 2 of $tree1's production check (the state at the wake: $(jq -c --arg issue "$tree1" '.issues[$issue].check | if . == null then "already closed" else {looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: look 2, cause bound, last), Sandbox $root_pod Running with its pod back; its pending closed the check as not_run, the state omits it, the implementer's claim is retired while the five others stay suspended ($(issue_claim_states "$tree1" | paste -sd ',' -)), and the Sandbox is Suspended again with PVC ${found%% *} Bound and no pod"
+pass
+
 begin node-release
-# Tree 1 lingers (linger_hours 0.3): the Sandboxes of its issues still alive stay Suspended, each
-# with its own PVC Bound, and no pod of the run is left on any node a pod of tree 1 ran on. No pod
-# asks for or keeps off a node (LEGION-632): a node empties when the pods on it stop, and the pool
-# consolidates an empty node after consolidateAfter. So each such node is gone, unless another
-# project's pod is now on it (a production daemon running beside the run places where the pool has
-# room, the node tree 1 emptied included); that pod keeps the node from the moment it is bound,
-# Pending through its init containers included. Either case passes for each node, and the note says
-# which it saw where. Every node any pod of tree 1 — the root's, its children's, the replacements the
-# fence and the stream move made — was on is read from the pod watch.
+# Tree 1 lingers (linger_hours 0.5, from the merge that closed it): the Sandboxes of its issues still
+# alive stay Suspended, each with its own PVC Bound, and no pod of tree 1 is left on any node a pod
+# of tree 1 ran on. No pod asks for or keeps off a node (LEGION-632): a node empties when the pods on
+# it stop, and the pool consolidates an empty node after consolidateAfter. So each such node is gone,
+# unless another pod keeps it, placed there because the pool had room: another project's (a
+# production daemon running beside the run), the run's repository cache (legion.dev/cache=true, one
+# per repository of the project, which lives as long as the daemon and is no tree's), or another
+# tree of the run's — a carried child's own tree launches at tree 1's linger expiry, which falls in
+# this wait when the production check ran long, and nothing says where it lands. Such a pod keeps
+# the node from the moment it is bound, Pending through its init containers included, and the node
+# then stays, carrying no pod of tree 1; either case passes for each node, and the note says which
+# it saw where. Every node any pod of tree 1 — the root's, its children's, the replacements the
+# fence and the stream move made, the pod the check's last look brought back — was on is read from
+# the pod watch.
+# The checkpoint's own reads of tree 1's Sandboxes and volumes come first, since the nodes take up
+# to consolidateAfter and their drain each, and tree 1's linger (read from the daemon's line, as
+# mid-turn-carry reads it) may expire while they wait: at the expiry the close deletes the root's
+# and child 2's Sandboxes with their volumes and hands child 3's to its own tree, so the reads are
+# made again after the waits only while the linger still runs, and otherwise left to close and
+# carried-child, which judge that state.
 tree1_nodes=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | sort -u | grep .) ||
   fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
+tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" '[.[] | select(.tree == $tree)] | last | .until // empty')
+[ -n "$tree1_until" ] || fail "the daemon logged no linger for $tree1"
+# tree1_lingers: at least a minute of the linger the daemon logged for tree 1 is left, by the
+# driver's clock, so the reads that follow it end before the close starts deleting.
+tree1_lingers() { [ "$(date -u +%s)" -lt "$(($(date -u -d "$tree1_until" +%s) - 60))" ]; }
+# tree1_parked WHEN: tree 1's root, child 2 (parked) and child 3 (mid-run) each have one Sandbox,
+# Suspended, and one PVC, Bound; WHEN says when the read was made, for a failure's message.
+tree1_parked() {
+  local issue
+  [ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' $1, want its one, Suspended"
+  for issue in "$child2" "$child3"; do
+    [ "$(issue_sandbox_modes "$issue")" = Suspended ] || fail "tree 1's child $issue's Sandboxes are '$(issue_sandbox_modes "$issue" | paste -sd ' ' -)' $1, want its one, Suspended"
+  done
+  for issue in "$tree1" "$child2" "$child3"; do
+    assert_one_bound_pvc "$issue" " $1"
+  done
+}
+tree1_parked "before tree 1's nodes were released"
+# node_pods_judged reads a node's pods (`kubectl get pods -o json`) and prints what holds the wait
+# and what keeps the node: `holding`, the names of the run's pods on it that are tree 1's (its tree
+# label) or carry no tree label and are not the repository cache, and `others`, each other Legion
+# pod as `<project label>/<name> <phase>`: another project's, the run's repository cache
+# (legion.dev/cache=true), or another tree of the run's. A pod that has Succeeded or Failed holds
+# nothing and keeps nothing, and a pod with no project label is no Legion pod and is not counted.
+node_pods_judged() {
+  jq -c --arg run "$run_label" --arg tree "$tree1" '
+    [.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed" and .metadata.labels["legion.dev/project"] != null)
+      | {name: .metadata.name, phase: .status.phase, project: .metadata.labels["legion.dev/project"],
+         tree: .metadata.labels["legion.dev/tree"], cache: (.metadata.labels["legion.dev/cache"] == "true")}]
+    | {holding: [.[] | select(.project == $run and (.cache | not) and (.tree == null or .tree == $tree)) | .name],
+       others: [.[] | select(.project != $run or .cache or (.tree != null and .tree != $tree)) | "\(.project)/\(.name) \(.phase)"]}'
+}
+# node_released NODE: the node is gone, or carries no pod of tree 1 while another pod keeps it; a
+# node with no pod at all is not released until the pool takes it. Each read is held to its exit
+# status (see child1_released). node_release says which.
 node_release=
 node_released() {
-  local out pods others
+  local out pods judged holding others
   out=$(timeout 120 kubectl --context "$operator" get node "$1" -o name --ignore-not-found) || return 1
   if [ -z "$out" ]; then
     node_release="node $1 is gone"
     return 0
   fi
   pods=$(timeout 120 kubectl --context "$operator" -n "$namespace" get pods --field-selector "spec.nodeName=$1" -o json) || return 1
-  jq -e --arg run "$run_label" '[.items[] | select(.metadata.labels["legion.dev/project"] == $run and .status.phase != "Succeeded" and .status.phase != "Failed")] | length == 0' <<<"$pods" >/dev/null || return 1
-  others=$(jq -r --arg run "$run_label" '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed") | (.metadata.labels["legion.dev/project"] // empty) as $p | select($p != $run) | "\($p)/\(.metadata.name) \(.status.phase)"] | join(", ")' <<<"$pods")
+  judged=$(node_pods_judged <<<"$pods") || return 1
+  holding=$(jq -r '.holding | join(", ")' <<<"$judged")
+  [ -z "$holding" ] || return 1
+  others=$(jq -r '.others | join(", ")' <<<"$judged")
   [ -n "$others" ] || return 1
-  node_release="node $1 stays, carrying no pod of the run while another project's pod is on it ($others)"
+  node_release="node $1 stays, carrying no pod of tree 1 while other pods keep it ($others)"
 }
-# A timed-out wait says what the node held: a pod of the run that never left, another project's pod,
-# or nothing the pool ever deleted.
+# A timed-out wait says what the node held: a pod of tree 1 that never left, a pod that keeps the
+# node, or nothing the pool ever deleted; each pod with its project and tree labels, or `cache` for
+# the repository cache.
 report_node_release() {
   local out
   if ! out=$(timeout 120 kubectl --context "$operator" get node "$node" -o name --ignore-not-found 2>&1); then
@@ -5992,31 +6175,34 @@ report_node_release() {
     note "node $node no longer exists"
     return
   fi
-  note "node $node still exists; its pods (namespace/name, project label, phase):"
+  note "node $node still exists; its pods (namespace/name, project label, tree label or cache, phase):"
   timeout 120 kubectl --context "$operator" get pods -A --field-selector "spec.nodeName=$node" -o json |
-    jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(.status.phase)"'
+    jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(if .metadata.labels["legion.dev/cache"] == "true" then "cache" else .metadata.labels["legion.dev/tree"] // "-" end) \(.status.phase)"'
 }
 releases=
 for node in $tree1_nodes; do
   timeout_hook=report_node_release
-  until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
+  until_true 1500 "tree 1's node $node to be released, or to carry no pod of tree 1 while another pod keeps it" node_released "$node"
   timeout_hook=limit_pending_blocked
   releases+="${releases:+; }$node_release"
 done
 at=$(date -u +%FT%TZ)
-[ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' after its nodes were released ($releases), want its one, Suspended"
-for issue in "$child2" "$child3"; do
-  [ "$(issue_sandbox_modes "$issue")" = Suspended ] || fail "tree 1's child $issue's Sandboxes are '$(issue_sandbox_modes "$issue" | paste -sd ' ' -)' after tree 1's nodes were released, want its one, Suspended"
-done
-for issue in "$tree1" "$child2" "$child3"; do
-  assert_one_bound_pvc "$issue" " after tree 1's nodes were released ($releases)"
-done
-note "at $at: $releases; the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) are Suspended, each PVC Bound ($(grep -c . <<<"$tree1_nodes") nodes carried a pod of tree 1)"
+if tree1_lingers; then
+  tree1_parked "after tree 1's nodes were released ($releases)"
+  parked_note="the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) are Suspended, each PVC Bound, as before the waits"
+else
+  parked_note="tree 1's linger expired at $tree1_until while its nodes were waited for, so its Sandboxes and volumes are now the close's (close) and the hand-over's (carried-child) to judge; before the waits the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) were Suspended, each PVC Bound"
+fi
+note "at $at: $releases; $parked_note ($(grep -c . <<<"$tree1_nodes") nodes carried a pod of tree 1)"
 pass
 
 begin close
-# At linger expiry the tree's cleanup foreground-deletes every Sandbox of tree 1, each with the
-# volume it owns: the root's and child 2's, kept from child-release (child 1's went with its done).
+# At linger expiry (30 minutes from the merge that closed tree 1, the daemon's `until` for its
+# linger, which node-release read; the expiry may already have passed while node-release waited,
+# and the reads below hold either way; the close waits while a member's production check is open,
+# which production-check-bound saw closed) the tree's cleanup
+# foreground-deletes every Sandbox of tree 1, each with the volume it owns: the root's, kept through
+# its production check, and child 2's, kept from child-release (child 1's went with its done).
 # Child 3's, left mid-run, is handed over instead: its hand-over is pending at the cleanup (production
 # Dispatch rides the write out), so the cleanup relabels its Sandbox for the child's own tree and
 # leaves it Suspended with its volume (runtime/sandbox/cleanup.go handOverSandbox); or the child's
@@ -6308,7 +6494,7 @@ jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.
   fail "Sandbox pods carry a value of their Sandbox's Secret, name a Secret the check never saw, or the pod watch holds unreadable lines: $(jq -c '{leaks, unseen, unreadable}' "$work/secret-leaks.json")"
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
 note "every container of each, the init containers included, reserves its role's cpu and memory as both request and limit and its role's ephemeral-storage limit over its request (the node-disk bound) under the run's reservations $run_resources (overrides: $(resources_block | tail -n +2 | sed 's/^ *//' | paste -sd ';' -)); each pod is Guaranteed and carries no affinity"
-note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
+note "no pod's command, args or environment carries a credential of its Sandbox's Secrets: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed; keys judged: \(.judged | join(", ")); keys excluded as no credential: \(.excluded | join(", "))"' "$work/secret-leaks.json")"
 # Negative controls: a recorded pod with another runtime class, one whose tester container bursts
 # past its request, one pinned to a node by an affinity, and a pod the watch never recorded. Each
 # of the first three is the last ready pod event the watch recorded (wrong_runtime_control, and

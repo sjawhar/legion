@@ -199,19 +199,16 @@ func (e *Engine) reaskRound(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	return err
 }
 
-// merged records the pull request merged, whatever the issue's phase, and advances an issue that
-// awaited the merge. A merge before awaiting_merge is the architect's to act on, as the shipped
-// daemon routes it: it is told, and the issue moves on to the production check once it reaches
-// awaiting_merge (transition). A redelivered merge changes nothing. A merge is the one fact GitHub
-// never sends again, so one that lands while the tree lingers still moves the issue on to its
-// production check, and starts nobody: re-admission starts its implementer there
-// (admit's startMidPhaseChildren), as it does for every mid-phase child.
+// merged records the pull request merged, with its merge commit, whatever the issue's phase, and
+// closes an issue that awaited the merge (closeMerged). A merge before awaiting_merge is the
+// architect's to act on, as the shipped daemon routes it: it is told, and the merge closes the
+// issue once it reaches awaiting_merge (transition). A redelivered merge changes nothing.
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil || pr.State == record.PullRequestMerged {
 		return intake.Result{}, err
 	}
-	pr.State = record.PullRequestMerged
+	pr.State, pr.MergeSHA = record.PullRequestMerged, fact.MergeSHA
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -220,25 +217,61 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 		return intake.Result{}, err
 	}
 	if issue.Phase == phase.AwaitingMerge {
-		lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
-		if err != nil {
-			return intake.Result{}, err
-		}
-		if !lingers {
-			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
-		}
-		row, ok := e.row(issue.Phase, TriggerPullRequestMerged, "", Snapshot{Phase: issue.Phase, HasPR: true})
-		if !ok {
-			return intake.Result{}, nil
-		}
-		issue.Phase = row.To
-		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
-			return intake.Result{}, err
-		}
-		return intake.Result{}, e.clearHandoff(ctx, tx, issue.Key, RoleFor(row.To))
+		return intake.Result{}, e.closeMerged(ctx, tx, *issue, pr)
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
 		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not awaiting_merge", pr.Number, issue.Key, issue.Phase)})
+}
+
+// closeMerged closes issue, which awaits its merge (or is held from awaiting_merge, a hold the
+// upgrade's data move left, which the close clears), on its merged pull request pr. In a running
+// tree the close is the table's row to done (transition), which leaves: a child's close retires
+// five of its claims and opens its production check in the implementer's live session, and a
+// root's lingers its tree and opens its check behind the linger's rows (leave). A merge is the one
+// fact GitHub never sends again, so one that lands while the tree lingers, where no transition
+// runs, still closes the issue: it writes what leave would that a lingering tree allows — the
+// phase done, the status done, the pull request disarmed, a child's architect told child-closed —
+// and opens the check, whose first look is a wake, since the linger suspended the implementer. It
+// retires nobody and suspends nothing: the linger's own rows already did, and the tree's close
+// retires every member's claims. The boot's sweep closes a migrated issue the same way (booted).
+func (e *Engine) closeMerged(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	if issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge {
+		issue.Phase, issue.Hold = phase.AwaitingMerge, nil
+	}
+	if issue.Phase != phase.AwaitingMerge {
+		return nil
+	}
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
+	if err != nil {
+		return err
+	}
+	if !lingers {
+		return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+	}
+	row, ok := e.row(issue.Phase, TriggerPullRequestMerged, "", Snapshot{Phase: issue.Phase, HasPR: true})
+	if !ok {
+		return nil
+	}
+	if err := e.status(ctx, tx, issue, row.Status); err != nil {
+		return err
+	}
+	issue.Phase, issue.Hold, issue.ReadyPendingVersion = row.To, nil, nil
+	if row.Status != "" {
+		issue.Status = row.Status
+	}
+	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
+		return err
+	}
+	e.logOnCommit(ctx, "workflow: a lingering tree's member closed at its merge", "issue", issue.Key, "tree", issue.Tree, "pullRequest", pr.Number, "status", issue.Status)
+	if err := e.disarmOpen(ctx, tx, issue.Key); err != nil {
+		return err
+	}
+	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
+		if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "child-closed", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is done", issue.Key)}); err != nil {
+			return err
+		}
+	}
+	return e.openCheck(ctx, tx, issue, *pr, true)
 }
 
 // closed records the pull request closed unmerged, which a re-admitted generation drops, and tells

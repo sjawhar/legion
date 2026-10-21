@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -37,16 +38,18 @@ const BackfillWindow = 28 * 24 * time.Hour
 // duplicate.
 const reconcileOverlap = time.Hour
 
-// Reconcile wires the five-minute ticker to the database and the GitHub App client. A nil GitHub
-// client (no App credentials) leaves it idle, exactly like architecture.Importer and Intake.
+// Reconcile wires the five-minute ticker to the database, the GitHub App client and the event
+// broker the issue.deployed events go through (RecordDeployedEvents). A nil GitHub client (no App
+// credentials) leaves it idle, exactly like architecture.Importer and Intake.
 type Reconcile struct {
 	pool   *store.Pool
 	github *githubapp.Client
+	events *events.Broker
 }
 
 // NewReconcile builds a Reconcile.
-func NewReconcile(pool *store.Pool, github *githubapp.Client) *Reconcile {
-	return &Reconcile{pool: pool, github: github}
+func NewReconcile(pool *store.Pool, github *githubapp.Client, broker *events.Broker) *Reconcile {
+	return &Reconcile{pool: pool, github: github, events: broker}
 }
 
 // HasApp reports whether the GitHub App credentials needed to do any work are configured.
@@ -141,6 +144,14 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 		record("attribute stored pull requests", err)
 	} else if changed > 0 {
 		slog.Info("dispatch delivery: attributed stored pull requests", "changed", changed)
+	}
+	// Last, over everything this pass stored and what intake stored since the previous one: the
+	// issue.deployed of every pull request whose shipping run is now known. Its failure is the
+	// pass's, so last_error names it, and the rows it did not reach wait for the next pass.
+	if written, err := RecordDeployedEvents(ctx, r.pool, settings, r.events, now); err != nil {
+		record("record issue.deployed events", err)
+	} else if written > 0 {
+		slog.Info("dispatch delivery: recorded issue.deployed", "events", written, "by", "reconcile")
 	}
 
 	if len(failures) > 0 {

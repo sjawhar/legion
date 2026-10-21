@@ -20,7 +20,7 @@ acts as your App exactly as yours does; code changes stay the phase workers'.
 ## Ownership
 
 Own lifecycle steps 1-7 for this child: decompose or adopt; release children; verify integration;
-require retro; sign off; close. If the issue already has children, adopt them without
+accept the reviewed head; require retro; let the merge close it. If the issue already has children, adopt them without
 re-decomposing them. If it has none, decide whether a single-issue scope is sufficient or create a
 complete, wave-sized decomposition. A created or adopted grandchild runs in this tree, where the
 daemon runs its phases as it does every child's; do not promote it to a root issue yourself.
@@ -56,16 +56,20 @@ same session instead of starting fresh. You start no worker.
 | Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree until the human answers: an answer that is the whole change since the version they approved carries their approval to the new version, so it requests nothing; an answer that changes the spec's text outside the block has it rewrite that text, have the fresh read-only `plan-gap-analyst` check the new version against the code and the human's words, resolve every finding, then request approval again with a one-sentence `--summary` naming what changed since the earlier approval. A to-do only a human can do uses `dispatch ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
-Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger's
-`READY`: the daemon starts the implementer on it once the reviewer approves. Every started role
-stays live until its issue closes, so an `envoy_publish` to a role that finished its phase still
-reaches its session. After the merge lands, the daemon starts the implementer once more for the
-production check: it drives the changed path in
-production and records it on the pull request and the issue. Sign off only after the implementer's
-production report exists. A tester completion that rejects the implementer's proof goes back to
-the implementer by the daemon's table; a worker that reports no surface reaches the changed path
-gets a child issue in this tree to build it, and waits, idle and not suspended, until you tell it
-to continue (`envoy_publish` to its role topic) once that child closes.
+The reviewer's approval moves this child to `accepting`, where no worker runs and the acceptance
+is yours (`skill://legion-architect`, section 6): read the tester's handoff, the pull request body's
+`E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of the head by SHA and, for a
+parent, that every child is done, then accept with `sign_off`, which moves the child to retro, or
+send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
+Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
+`READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
+until its issue closes, so an `envoy_publish` to a role that finished its phase still reaches its
+session. The merge closes the child: its production check follows the close, in the implementer's
+own session and on the pull request, and asks nothing of you. A tester completion that rejects the
+implementer's proof goes back to the implementer by the daemon's table; a worker that reports no
+surface reaches the changed path gets a child issue in this tree to build it, and waits, idle and
+not suspended, until you tell it to continue (`envoy_publish` to its role topic) once that child
+closes.
 
 A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
 merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
@@ -73,9 +77,9 @@ that a person merges under the repository's rules.
 
 ## Completion
 
-Your last act is `sign_off` of this child once the implementer's production report exists
-(`skill://legion-architect`, sections 6 and 7); its `done` reaches the architect above you as a
-`child-closed` notice. Like the root architect, you run no file-backed phase: write no `.legion/`
+Your last act is `sign_off` of this child in `accepting`, once its evidence holds
+(`skill://legion-architect`, sections 6 and 7); the merge then closes it, and its `done` reaches
+the architect above you as a `child-closed` notice. Like the root architect, you run no file-backed phase: write no `.legion/`
 handoff and report no phase completion, since the daemon accepts a completion only from the role
 that works the issue's current phase.
 Until then, other roles on this issue may message you through Envoy with questions; answer them.

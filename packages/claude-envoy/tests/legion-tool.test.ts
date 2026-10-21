@@ -69,7 +69,7 @@ test("declares the three phase-worker operations under one op, and names the Env
       op: { enum: ["read_record", "handoff_complete", "request_backward_move"] },
       issue: { type: "string" },
       summary: { type: "string" },
-      verdict: { enum: ["pass", "fail"] },
+      verdict: { enum: ["pass", "pending", "fail"] },
       ready: { type: "boolean" },
       reason: { type: "string" },
     },
@@ -79,7 +79,7 @@ test("declares the three phase-worker operations under one op, and names the Env
     "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete",
   )
   expect(definition.description).toContain(
-    "arm nothing. request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. What a later phase needs",
+    "arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
   )
   expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })

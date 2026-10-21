@@ -173,6 +173,18 @@ check "the install's output reaches the role container's log" "$(contains "$out"
 check "no report is written" "$(is "$(exists "$report")" false)"
 check_clean
 
+echo "case: the deployment already names bun's download cache"
+fixture pod-cache
+pod_cache=$case_root/pod/bun/install/cache
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  BUN_INSTALL_CACHE_DIR="$pod_cache" STUB_MODE=ok
+check "exits 0" "$(is "$status" 0)"
+check "the install uses the deployment's cache, not one of its own" \
+  "$(contains "$(cat "$record")" "^cache: $pod_cache\$")"
+check "and makes none beside the state" "$(is "$(exists "$install_root/bun/cache")" false)"
+check "while the marker still goes beside the state" "$(is "$(exists "$marker")" true)"
+check_clean
+
 echo "case: the marker matches and the packages are there"
 fixture already-installed
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=ok

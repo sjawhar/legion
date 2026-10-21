@@ -387,28 +387,16 @@ type WaitingPullRequest struct {
 // not shipped by then, oldest merge first and those merged in one instant by id (as
 // ListPullRequestsInWindow orders them), up to maxPullRequestsPerWindow, each with the run that
 // shipped it afterwards: what the timeline's waiting line starts its window from. A pull request
-// ships with the earliest-finishing successful production job of a run on main that GitHub created
-// after its merge (containment.go, with ListRuns' "main"), judged by Production.Conclusion. One
-// merged before the latest creation among the runs whose job finished before at had shipped by then,
-// and every one merged at or after it had not: that creation, read through
-// delivery_runs_kind_created newest first, is the one bound this needs. A run on another branch, or
-// one stored before head_branch was (null until the reconcile's backfill fills it), ships nothing
-// here either. The shipping run is read here rather than from the window's own runs, which start at
-// the window and so can miss a run created before it.
+// ships by shippingRunJoin's rule. One merged before the latest creation among the runs whose job
+// finished before at had shipped by then, and every one merged at or after it had not: that
+// creation, read through delivery_runs_kind_created newest first, is the one bound this needs. The
+// shipping run is read here rather than from the window's own runs, which start at the window and
+// so can miss a run created before it.
 func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo string, production Production, at time.Time) ([]WaitingPullRequest, error) {
 	rows, err := pool.Query(ctx, `
 		select `+PullRequestColumns+`, ship.run_id, ship.completed_at
 		from delivery_pull_requests pr
-		left join lateral (
-			select r.run_id, j.completed_at
-			from delivery_runs r
-			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = any($2)
-			where r.repo = $1 and r.kind = 'deploy' and r.head_branch = 'main' and j.conclusion = 'success'
-				and ($5::text is null or j.apply_step is distinct from $5 or j.apply_step_conclusion = 'success')
-				and j.completed_at is not null and `+runCreatedAt+` > pr.merged_at
-			order by j.completed_at
-			limit 1
-		) ship on true
+		`+shippingRunJoin("$1", "$2", "$5")+`
 		where pr.repo = $1 and pr.merged_at < $3 and pr.merged_at >= coalesce((
 			select `+runCreatedAt+`
 			from delivery_runs r
@@ -437,6 +425,30 @@ func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo
 		waiting = append(waiting, w)
 	}
 	return waiting, rows.Err()
+}
+
+// shippingRunJoin is the SQL of when a deploy ships a pull request, the one statement of the rule
+// FirstShippingApply states in Go (containment.go), which TestTheWaitingSQLAgreesWithTheShippingRule
+// keeps in step with it: a lateral join on the alias pr of delivery_pull_requests that finds, as
+// ship.run_id and ship.completed_at (both null while nothing has shipped it), the earliest-finishing
+// successful production job of a deploy run on main that GitHub created after pr's merge
+// (runCreatedAt), judged by Production.Conclusion. A run on another branch, or one stored before
+// head_branch was (null until the reconcile's backfill fills it), ships nothing. repo, jobNames and
+// applyStep are the placeholders of the query that embeds it, bound to the deploy repository,
+// Production.JobNames and Production.ApplyStep. ListPullRequestsWaitingAt and listUnrecordedShipped
+// (deployed.go) both embed it, so the timeline's waiting line and the issue.deployed event cannot
+// disagree on which run shipped a pull request.
+func shippingRunJoin(repo, jobNames, applyStep string) string {
+	return `left join lateral (
+			select r.run_id, j.completed_at
+			from delivery_runs r
+			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = any(` + jobNames + `)
+			where r.repo = ` + repo + ` and r.kind = 'deploy' and r.head_branch = 'main' and j.conclusion = 'success'
+				and (` + applyStep + `::text is null or j.apply_step is distinct from ` + applyStep + ` or j.apply_step_conclusion = 'success')
+				and j.completed_at is not null and ` + runCreatedAt + ` > pr.merged_at
+			order by j.completed_at
+			limit 1
+		) ship on true`
 }
 
 // DeletePullRequest removes a stored row: a provisional row written from an envelope alone

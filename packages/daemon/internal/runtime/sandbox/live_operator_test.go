@@ -175,7 +175,7 @@ func (r *liveRig) checkPodBaseline() error {
 	want := map[string]string{
 		"PI_CONFIG_FILES": overlay + ":" + operatorOverlays,
 		"PI_CONFIG_DIR":   ".omp", "OMP_SESSION_STORAGE": "file",
-		"XDG_STATE_HOME": stateHome,
+		"XDG_STATE_HOME": stateHome, "TMPDIR": scratchRoot + "/tmp",
 	}
 	for name, value := range r.pod.Env {
 		if name != "PI_CONFIG_FILES" {
@@ -199,6 +199,11 @@ func (r *liveRig) checkPodBaseline() error {
 		return fmt.Errorf("%s is no directory in the root's container (%v); the shim must make Oh My Pi's profile directory under the role's state home before Oh My Pi starts, or Oh My Pi reads no state home and its broker lock is one name across the pod", profileDir, err)
 	}
 	note("operator", "exec test -d %s: a directory, made by the shim before Oh My Pi started", profileDir)
+	tmp := want["TMPDIR"]
+	if _, err := r.exec(root, "test", "-d", tmp); err != nil {
+		return fmt.Errorf("%s, the agent's TMPDIR, is no directory in the root's container (%v); the shim must make the issue's scratch directories before Oh My Pi starts, since nothing else creates the temporary directory a role is told and a role told one that does not exist fails its first mktemp", tmp, err)
+	}
+	note("operator", "exec test -d %s: the agent's TMPDIR, a directory, made by the shim before Oh My Pi started", tmp)
 	if shim["PI_CONFIG_FILES"] != operatorOverlays {
 		return fmt.Errorf("the shim (pid %s) has PI_CONFIG_FILES=%q, want the operator's %q alone", shimPid, shim["PI_CONFIG_FILES"], operatorOverlays)
 	}

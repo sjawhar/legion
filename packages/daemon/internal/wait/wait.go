@@ -2,12 +2,14 @@
 // effect cannot act yet, and will once something else happens — a turn ends, a stop lands, a
 // tree's cleanup confirms. An error that is a wait (errors.Is(err, ErrWaiting)) is retried on the
 // outbox's backoff and logged as a wait, never as a failure; each wait keeps its own sentinel or
-// message, so its callers still tell one wait from another.
+// message, so its callers still tell one wait from another. A wait that knows when it ends
+// (Until) names that moment, and the outbox runs the row again then instead of on its backoff.
 package wait
 
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrWaiting is what every wait matches.
@@ -31,3 +33,26 @@ func (w *waiting) Error() string { return w.err.Error() }
 func (w *waiting) Unwrap() error { return w.err }
 
 func (w *waiting) Is(target error) bool { return target == ErrWaiting }
+
+// Until is a wait that names when to run the row again: at, instead of the outbox's backoff
+// (UntilAt reads it back). It is a wait as any other (errors.Is matches ErrWaiting), with text as
+// its message: for an effect whose next chance is a known moment — a lingering tree's close
+// waiting for a member's production check, bounded at a time the record holds — rather than
+// something that happens.
+func Until(at time.Time, text string) error {
+	return &until{waiting: waiting{err: errors.New(text)}, at: at}
+}
+
+// UntilAt is the moment a wait in err's chain named with Until, and whether one did.
+func UntilAt(err error) (time.Time, bool) {
+	var w *until
+	if !errors.As(err, &w) {
+		return time.Time{}, false
+	}
+	return w.at, true
+}
+
+type until struct {
+	waiting
+	at time.Time
+}

@@ -81,6 +81,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The reviewer's pair rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) are the
+  one copy of these skills: the operator's dotfiles copies are gone. Each is shorter, and each
+  report now starts with `Verdict: APPROVE at <sha>` or `Verdict: CHANGES at <sha>`, which a PR
+  gate reads from the first line of a posted report. The deep review keeps its eight Security
+  Guidelines rows (`agent-def` and `transport` included) and its rule that a security finding
+  with no stated exploit path is hardening, not a finding.
+
 - The daemon client, the handoff-commit lookup and the jj lock come from `@legion/pi-shared`
   (`./daemon-client`, `./handoff-commit`, `./git-lock`), so `claude-envoy`'s Legion tool uses the
   same code (sjawhar/legion#2032). No behavior change.
@@ -101,6 +108,28 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   - `request_backward_move` checks `to` (a backward target) and `reason` before it mints a grant,
     so a refused call mints none; a blank or non-string `to` is refused as `requires to`, and any
     other value outside the backward targets as `request_backward_move's to is one of …`.
+- Daemon API contract 34 (INFRA-31): under the Kubernetes runtime the roles of an issue share one
+  scratch on the issue's volume, and every role container of a pod, a workflow role's and the
+  project controller's, is told the same four directories of it —
+  `TMPDIR=/legion/scratch/tmp`, `XDG_CACHE_HOME=/legion/scratch/cache`,
+  `XDG_DATA_HOME=/legion/scratch/data` and
+  `BUN_INSTALL_CACHE_DIR=/legion/scratch/bun/install/cache` — so the values naming where a role
+  writes what nothing told it where to put all point onto that volume rather than at the
+  container's own filesystem. `GOCACHE` and `GOMODCACHE`, which the runtime did not set before,
+  name the issue's one pair beside uv's cache, `/legion/go/build` and `/legion/go/mod`.
+  `XDG_STATE_HOME` (whose `/home/legion/.local/state/<role>` contract 18 declared) is the one
+  per-role directory and is now `/legion/scratch/state/<role>`: Oh My Pi names its browser
+  broker's lock from the state root, the name is an abstract unix socket, and an abstract socket
+  name is one name across every container of a pod, so one state home would block every role's
+  broker but the first. A shared cache costs nothing the pod does not already share, and a pair
+  of Go caches is 751 MiB of build cache and 375 MiB of module cache for this repository, so six
+  per-role copies would have been five redundant ones, about 5.5 GiB. Every name above is the
+  runtime's own and a spec or an operator's pod env is refused for setting them.
+  `XDG_CONFIG_HOME` is unchanged, the pod's shared in-memory volume, and `workspace-init`, the
+  one init container told any XDG home, keeps every value it had. A role container is admitted
+  with about a gigabyte of ephemeral storage on GKE Autopilot, and a container past that limit
+  has its whole pod evicted — every role of the issue runs in that one pod — which the Go, bun
+  and browser caches a build fills had reached. Install this release's pair with a daemon at 34.
 - Daemon API contract 32 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
   repository gets a repository cache pod running the image's `legion workspace-init cache`, and
   an issue pod's `workspace-init fetch` fills a fresh feed from that cache alone and fetches only

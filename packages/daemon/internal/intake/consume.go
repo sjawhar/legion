@@ -78,25 +78,35 @@ type RetryLater struct {
 func (r *RetryLater) Error() string { return r.Err.Error() }
 func (r *RetryLater) Unwrap() error { return r.Err }
 
-// Consumers are this project's two durable JetStream consumers, created before intake runs so a
+// Consumers are this project's three durable JetStream consumers, created before intake runs so a
 // daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
 // set GitHub intake hears and decodes, which SetRepositories replaces under mu.
 type Consumers struct {
 	spec     ConsumerSpec
 	stream   jetstream.Stream
 	dispatch jetstream.Consumer
-	github   jetstream.Consumer
+	// server is the durable on Dispatch's own start (serverStartedSubject), a durable of its own
+	// rather than a second filter subject on the Dispatch consumer: the NATS server in use
+	// withholds some of one durable's messages when its FilterSubjects set mixes a wildcard
+	// subject with another (measured in packages/envoy/internal/dispatch/delivery/intake.go,
+	// githubIntakeSubject), silently, with the message counted pending and never delivered.
+	server jetstream.Consumer
+	github jetstream.Consumer
 
 	mu    sync.Mutex
 	repos []ghrepo.Repository
 }
 
-// OpenConsumers creates or updates this project's Dispatch and GitHub durable consumers. A consumer
-// created here starts at the next message, so a first daemon on a stream that already holds history
-// (production keeps 72 hours of it) does not replay it into admission. Boot opens the consumers before
-// it reads its Dispatch listing, so the listing covers the state before them and the consumers
-// everything published since, including what lands while the listing is read. A consumer that exists keeps its position and the policy that
-// created it, and takes the rest of this boot's configuration.
+// OpenConsumers creates or updates this project's Dispatch, Dispatch-server and GitHub durable
+// consumers. A consumer created here starts at the next message, so a first daemon on a stream that
+// already holds history (production keeps 72 hours of it) does not replay it into admission, nor
+// Dispatch's earlier starts into the production checks: the daemon's own boot covers its own build,
+// and a Dispatch-only change the daemon's build does not carry waits for the check's bound. Boot
+// opens the consumers before it reads its Dispatch listing, so the listing covers the state before
+// them and the consumers everything published since, including what lands while the listing is
+// read. A consumer that exists keeps its position and the policy that created it — so a Dispatch
+// start published while the daemon was down is delivered once it is back — and takes the rest of
+// this boot's configuration.
 func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec) (*Consumers, error) {
 	spec, err := normalizedSpec(spec)
 	if err != nil {
@@ -116,11 +126,20 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	if err != nil {
 		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
 	}
+	server, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
+		Durable:       dispatchServerConsumerName(spec.Project),
+		FilterSubject: serverStartedSubject,
+		AckPolicy:     jetstream.AckExplicitPolicy,
+		AckWait:       spec.AckWait,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open the Dispatch server durable consumer: %w", err)
+	}
 	github, err := openConsumer(ctx, stream, githubConsumerConfig(spec, spec.Repositories))
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, github: github, repos: slices.Clone(spec.Repositories)}, nil
+	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, server: server, github: github, repos: slices.Clone(spec.Repositories)}, nil
 }
 
 func githubConsumerConfig(spec ConsumerSpec, repositories []ghrepo.Repository) jetstream.ConsumerConfig {
@@ -192,13 +211,19 @@ func (c *Consumers) DispatchTarget(ctx context.Context) (int64, error) {
 }
 
 // DispatchPosition is the Dispatch consumer's own current position, read fresh from JetStream:
-// the measurement Reconcile holds against DispatchTarget (DispatchConsumerPosition.Reached).
+// the measurement Reconcile holds against DispatchTarget (DispatchConsumerPosition.Reached). It
+// reads through a handle of its own (stream.Consumer: one CONSUMER.INFO request, the handle's
+// cached info that answer) rather than c.dispatch.Info: nats.go's Info writes the handle's cached
+// info under no lock and Run's Consume reads it as it starts, so a position read while Run starts
+// raced on the shared handle (the race detector's find in the daemon's retained-event test), and a
+// fresh handle shares nothing with the one Run consumes. Nothing here may wait for Run instead:
+// the boot's reconcile reads the position before Run starts, and pollHoldRelease beside it.
 func (c *Consumers) DispatchPosition(ctx context.Context) (DispatchConsumerPosition, error) {
-	info, err := c.dispatch.Info(ctx)
+	consumer, err := c.stream.Consumer(ctx, dispatchConsumerName(c.spec.Project))
 	if err != nil {
 		return DispatchConsumerPosition{}, fmt.Errorf("read Dispatch consumer info: %w", err)
 	}
-	return positionOf(info), nil
+	return positionOf(consumer.CachedInfo()), nil
 }
 
 func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
@@ -208,7 +233,7 @@ func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
 	}
 }
 
-// Run consumes both durable consumers until ctx ends, and returns the error of either one that
+// Run consumes the three durable consumers until ctx ends, and returns the error of the one that
 // stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
 // rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
 // logged then acknowledged. The Dispatch consumer's own position, and admission's hold on it, are
@@ -222,6 +247,7 @@ func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Han
 	group.Go(func() error {
 		return consumeConsumer(consumeContext, dispatch, c.spec, c.repositories, pool, handlers)
 	})
+	group.Go(func() error { return consumeConsumer(consumeContext, c.server, c.spec, c.repositories, pool, handlers) })
 	group.Go(func() error { return consumeConsumer(consumeContext, github, c.spec, c.repositories, pool, handlers) })
 	return group.Wait()
 }
@@ -470,6 +496,10 @@ func githubRepositoryPrefix(repo ghrepo.Repository) string {
 
 func dispatchConsumerName(project string) string {
 	return "legion-go-" + project + "-dispatch"
+}
+
+func dispatchServerConsumerName(project string) string {
+	return "legion-go-" + project + "-dispatch-server"
 }
 
 func githubConsumerName(project string) string {

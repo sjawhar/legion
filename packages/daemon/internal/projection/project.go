@@ -50,6 +50,16 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	if err != nil {
 		return api.State{}, err
 	}
+	// The open production checks, by issue: the check is read once for the whole state, since a
+	// closed check shows nothing and the open ones are few.
+	openChecks, err := s.OpenProductionChecks(ctx, tx)
+	if err != nil {
+		return api.State{}, err
+	}
+	checks := make(map[string]record.ProductionCheck, len(openChecks))
+	for _, check := range openChecks {
+		checks[check.Issue] = check
+	}
 
 	claimViews := make(map[claim.Token]api.ClaimView, len(claims))
 	for _, current := range claims {
@@ -151,6 +161,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				ApprovedVersion: gate.ApprovedVersion,
 			}
 		}
+		if check, ok := checks[issue.Key]; ok {
+			view.Check = checkView(check)
+		}
 		projected.Issues[issue.Key] = view
 	}
 
@@ -215,4 +228,18 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		}
 	}
 	return projected, nil
+}
+
+// checkView is an open production check as the state shows it (api.CheckView): the last wake is
+// shown once a look has woken, and the next wake is the check's bound, the moment its last look
+// starts.
+func checkView(check record.ProductionCheck) *api.CheckView {
+	view := &api.CheckView{
+		Repo: check.Repo, PullRequest: check.Number, MergeCommit: check.MergeSHA, OpenedAt: check.OpenedAt,
+		Looks: check.Looks, LookOpen: check.LookOpen, NextWakeAt: check.BoundAt, Last: check.Last,
+	}
+	if check.LastWakeAt != nil {
+		view.LastWake = &api.CheckWakeView{Kind: check.LastWakeKind, Detail: check.LastWakeDetail, At: *check.LastWakeAt}
+	}
+	return view
 }

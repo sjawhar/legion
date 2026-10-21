@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -331,7 +330,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 // only because GitHub gives that account write access to the repository, which the consumer reads
 // before the fact reaches the engine: the review's whole path, decode, permission read and apply,
 // runs through the real consumer.
-func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
+func TestCapturedApprovedReviewFlowsThroughConsumeToAccepting(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "captured review", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
@@ -350,14 +349,14 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	stop := startConsume(t, js, pool, testEngine(config.DesignGateRootIssues, nil), writers)
 	defer stop()
 	publishCaptured(t, js, "notifications.github.sjawhar.legion.pr.42.review", "../intake/testdata/github/review.json")
-	testwait.Eventually(t, "captured approval reaches retro", func() bool {
+	testwait.Eventually(t, "captured approval reaches accepting", func() bool {
 		var gotPhase, status string
 		if err := pool.QueryRow(ctx, "select phase, status from issues where key = $1", "LEGION-208").Scan(&gotPhase, &status); err != nil {
 			return false
 		}
-		return gotPhase == string(phase.Retro) && status == "retro"
+		return gotPhase == string(phase.Accepting) && status == "needs_review"
 	})
-	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"notice"})
 	mu.Lock()
 	defer mu.Unlock()
 	if want := []string{"sjawhar/legion reviewer"}; !slices.Equal(asked, want) {
@@ -381,40 +380,6 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	if rounds := implementerRounds(t, pool); rounds != 3 {
 		t.Fatalf("implementer rounds = %d, want 3", rounds)
 	}
-}
-
-// The production check is the implementer's last phase. Its completion moves no phase — the
-// architect's sign-off does — so the completion is what tells the architect the check is done.
-func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T) {
-	pool := migratedPool(t)
-	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "U"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "retro"})
-
-	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{Generation: 1,
-		Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "the merged change serves", Commit: "retro",
-	}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact production check: %v", err)
-	}
-	var gotPhase string
-	if err := pool.QueryRow(ctx, "select phase from issues where key = $1", "LEGION-208").Scan(&gotPhase); err != nil {
-		t.Fatalf("read phase: %v", err)
-	}
-	if gotPhase != string(phase.ProductionCheck) {
-		t.Fatalf("phase = %q, want production_check until the architect signs off", gotPhase)
-	}
-	var notice record.Notice
-	var payload []byte
-	if err := pool.QueryRow(ctx, "select payload from outbox where kind = 'notice'").Scan(&payload); err != nil {
-		t.Fatalf("read the one notice: %v", err)
-	}
-	if err := json.Unmarshal(payload, &notice); err != nil {
-		t.Fatalf("decode notice %s: %v", payload, err)
-	}
-	if want := (record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.ProductionCheck, Summary: "the merged change serves"}); !reflect.DeepEqual(notice, want) {
-		t.Fatalf("notice = %+v, want %+v", notice, want)
-	}
-	assertOutboxKinds(t, pool, []string{"notice"})
 }
 
 // The merger is started with the head the review round approved, from the round's recorded
@@ -549,27 +514,33 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 	}
 }
 
-// Linger suspends, and its expiry stops, every claim the tree holds — the root architect admission
-// started and a worker that never reported a handoff included, neither of which has a phase row.
-// Every expiry row names the root generation whose linger it expires, a child's too, which keeps
-// the earlier generation of the run that admitted it.
-func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
+// The merge of a root's pull request while it awaits the merge closes it: linger suspends, and its
+// expiry stops, every claim the tree holds — the root architect admission started and a worker that
+// never reported a handoff included, neither of which has a phase row. A redelivered merge changes
+// nothing. Every expiry row names the root generation whose linger it expires, a child's too, which
+// keeps the earlier generation of the run that admitted it. The close opens the root's production
+// check, whose first look the implementer reports here before the linger ends, since the tree's
+// close waits for an open check (check_test.go).
+func TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 7, Status: "retro", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "production-check"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger", HandoffCommit: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return now }}, nil)
 
-	if _, err := intake.ApplyFact(ctx, pool, "api", "signoff", intake.SignOff{Issue: "LEGION-208"}, engine, admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact signoff: %v", err)
+	merged := intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}
+	if _, err := intake.ApplyFact(ctx, pool, "github", "merged", merged, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact merged: %v", err)
 	}
-	if _, err := intake.ApplyFact(ctx, pool, "api", "signoff-echo", intake.SignOff{Issue: "LEGION-208"}, engine, admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact signoff echo: %v", err)
+	if _, err := intake.ApplyFact(ctx, pool, "github", "merged-echo", merged, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact merged echo: %v", err)
 	}
+	assertPhase(t, pool, phase.Done)
 	var lingerUntil time.Time
 	if err := pool.QueryRow(ctx, "select linger_until from issues where key = $1", "LEGION-208").Scan(&lingerUntil); err != nil {
 		t.Fatalf("read linger deadline: %v", err)
@@ -583,7 +554,7 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 			everyClaim[issue+"/"+string(role)]++
 		}
 	}
-	// The close suspends every claim once, the implementer the sign-off moves off among them: no
+	// The close suspends every claim once, the merger whose READY the merge ended among them: no
 	// transition suspends a worker of its own.
 	suspended := superviseRequests(t, pool, "suspend")
 	if !sameCounts(suspended, everyClaim) {
@@ -591,7 +562,9 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
 	assertOutboxCount(t, pool, "dispatch_status", 1)
-
+	if result, err := intake.ApplyFact(ctx, pool, "api", "check:LEGION-208:1:pass", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass", Summary: "driven"}, engine, admissionStub{}); err != nil || result.Refusal != nil {
+		t.Fatalf("ApplyFact the check's pass = %+v, %v", result.Refusal, err)
+	}
 	if _, err := intake.ApplyFact(ctx, pool, "timer", "linger-current", intake.LingerExpired{Issue: "LEGION-208", Generation: 7}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact current linger expiry: %v", err)
 	}
@@ -665,8 +638,10 @@ func assertOutboxCount(t *testing.T, pool *pgxpool.Pool, kind string, want int) 
 	}
 }
 
-// Every forward row applies through intake with its status, start and notice, and none suspends the
-// worker whose phase it ends: a role stays live from its first assignment until its issue closes.
+// Every forward row short of the close applies through intake with its status, start and notice,
+// and none suspends the worker whose phase it ends: a role stays live from its first assignment
+// until its issue closes. (The merge's row is the close itself, which suspends the tree:
+// TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace.)
 func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -710,7 +685,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			fact: func() intake.Fact {
 				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}
 			},
-			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
+			wantPhase: phase.Accepting, wantStatus: "needs_review", wantOutbox: []string{"notice"},
 		},
 		{
 			name: "retro completion", current: phase.Retro, role: claim.RoleImplementer,
@@ -730,14 +705,11 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"notice", "dispatch_message"},
 		},
 		{
-			name: "merged pull request", current: phase.AwaitingMerge,
-			setup: func(t *testing.T, pool *pgxpool.Pool) {
-				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
-			},
+			name: "sign-off", current: phase.Accepting,
 			fact: func() intake.Fact {
-				return intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}
+				return intake.SignOff{Issue: "LEGION-208"}
 			},
-			wantPhase: phase.ProductionCheck, wantStatus: "retro", wantOutbox: []string{"supervise", "notice"},
+			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise"},
 		},
 	}
 	for _, tc := range cases {
@@ -770,8 +742,8 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 }
 
 // assertStartTasksNamePhase requires every worker start a fact enqueued to name the phase it starts:
-// the implementer runs implementing, retro, and production_check under one role, and the task is
-// all that tells a resumed implementer which one it is in.
+// the implementer runs implementing and retro under one role, and the task is all that tells a
+// resumed implementer which one it is in.
 func assertStartTasksNamePhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
 	t.Helper()
 	rows, err := pool.Query(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'")
@@ -797,7 +769,7 @@ func fixtureStatus(current phase.Phase) string {
 	switch current {
 	case phase.Testing:
 		return "testing"
-	case phase.Reviewing:
+	case phase.Reviewing, phase.Accepting:
 		return "needs_review"
 	case phase.Retro, phase.Merging, phase.AwaitingMerge:
 		return "retro"
@@ -809,9 +781,10 @@ func fixtureStatus(current phase.Phase) string {
 // Every backward edge applies through intake, and the worker that asked for it is not stopped: its
 // assignment ends with the move, and the start of the phase it moved to delivers the next one.
 // Every move a backward row serves applies, and counts the implementer one round, as every move
-// back to an earlier phase does.
+// back to an earlier phase does. A move onto accepting starts nobody: the tree's architect, whose
+// phase it is, is already live.
 func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
-	for _, from := range []phase.Phase{phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.ProductionCheck} {
+	for _, from := range []phase.Phase{phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging} {
 		for _, to := range requiredBackwardTargets(from) {
 			t.Run(string(from)+"-to-"+string(to), func(t *testing.T) {
 				pool := migratedPool(t)
@@ -827,7 +800,14 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 				if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != 0 {
 					t.Fatalf("the move back from %s to %s suspended %v, want the requesting %s left running", from, to, suspended, role)
 				}
-				if started := superviseRequests(t, pool, "start"); started["LEGION-208/"+string(RoleFor(to))] != 1 {
+				started := superviseRequests(t, pool, "start")
+				if RoleFor(to) == claim.RoleArchitect {
+					if len(started) != 0 {
+						t.Fatalf("the move back to %s started %v, want nobody started for the architect's phase", to, started)
+					}
+					return
+				}
+				if started["LEGION-208/"+string(RoleFor(to))] != 1 {
 					t.Fatalf("the move back to %s started %v, want its %s started once", to, started, RoleFor(to))
 				}
 			})
@@ -837,8 +817,9 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 
 // A backward move no backward row serves is refused, and nothing moves or is counted: to
 // awaiting_merge, which no worker holds; to the phase the issue is already in or a later one; out
-// of awaiting_merge, where no worker holds a phase; by a role that does not run the phase; or to no
-// phase at all, which the row lookup would otherwise take to match any row.
+// of awaiting_merge, where no worker holds a phase; by a role that does not run the phase, the
+// implementer's from accepting among them; or to no phase at all, which the row lookup would
+// otherwise take to match any row.
 func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -846,7 +827,8 @@ func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
 		requester claim.Role
 		to        phase.Phase
 	}{
-		{"production_check to awaiting_merge", phase.ProductionCheck, claim.RoleImplementer, phase.AwaitingMerge},
+		{"accepting to awaiting_merge", phase.Accepting, claim.RoleArchitect, phase.AwaitingMerge},
+		{"accepting by the implementer", phase.Accepting, claim.RoleImplementer, phase.Implementing},
 		{"implementing to implementing", phase.Implementing, claim.RoleImplementer, phase.Implementing},
 		{"testing to a later phase", phase.Testing, claim.RoleTester, phase.Reviewing},
 		{"out of awaiting_merge", phase.AwaitingMerge, claim.RoleImplementer, phase.Implementing},

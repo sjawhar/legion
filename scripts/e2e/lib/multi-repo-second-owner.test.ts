@@ -231,7 +231,7 @@ interface Scenario {
 // scenario runs second-owner against the stubs and the role's fakes; MULTIREPO_PROC_ROOT and
 // MULTIREPO_GITHUB_URL are accepted only beside the test-seam marker the run sets.
 async function scenario(options: Scenario = {}): Promise<Outcome> {
-  const daemon = daemonStub(stateWithPR(options.phase ?? "production_check"));
+  const daemon = daemonStub(stateWithPR(options.phase ?? "done"));
   const dispatch = dispatchStub({});
   const env = fullInputs(`http://127.0.0.1:${daemon.port}`, `http://127.0.0.1:${dispatch.port}`);
   const github = await githubStub(options.github);
@@ -861,7 +861,7 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
 
   describe("the test-only seams are refused without the marker", () => {
     async function seamRun(seam: Record<string, string>) {
-      const daemon = daemonStub(stateWithPR("production_check"));
+      const daemon = daemonStub(stateWithPR("done"));
       const dispatch = dispatchStub({});
       const env = fullInputs(
         `http://127.0.0.1:${daemon.port}`,
@@ -902,7 +902,7 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
   });
 
   test("an unrelated pod (legion.dev/issue mismatch) is refused before any exec as a role", async () => {
-    const daemon = daemonStub(stateWithPR("production_check"));
+    const daemon = daemonStub(stateWithPR("done"));
     const dispatch = dispatchStub({});
     const env = fullInputs(`http://127.0.0.1:${daemon.port}`, `http://127.0.0.1:${dispatch.port}`);
     const otherPodKubectl = `

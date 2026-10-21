@@ -41,7 +41,10 @@
 # (`/legion`), or `$LEGION_WORKSPACE/.legion-setup`, which `.gitignore` holds, when that cannot be
 # derived or written under — and the report under `$LEGION_STATE_DIR`. Never `/tmp` and never
 # `$HOME`: those are the container's own ephemeral storage, whose breach evicts the whole pod and
-# every role's work in it. The marker that makes a second run cost nothing is keyed by
+# every role's work in it. bun's download cache is the one the deployment already names in
+# `BUN_INSTALL_CACHE_DIR` — an issue pod tells every role container the issue's own, on its volume
+# — and one beside this script's state when nothing names it.
+# The marker that makes a second run cost nothing is keyed by
 # `cksum < bun.lock`, not by the issue, because a forward merge moves `bun.lock` mid-issue and a
 # `node_modules` from the lock before it fails the type check for the wrong reason. The install is
 # `--frozen-lockfile`, which is what keeps `bun.lock` unchanged under an implementer who commits
@@ -75,12 +78,11 @@ detail_bytes=1000
 # directory inside the workspace itself, which .gitignore holds. The same fallback answers a
 # derived root this user cannot write under.
 #
-# usable_root <dir>: sets root, cache and state from <dir>, true when it can be written under.
+# usable_root <dir>: sets root and state from <dir>, true when it can be written under.
 usable_root() {
   root=$1
-  cache=$root/bun/cache
   state=$root/bun/state
-  mkdir -p "$cache" "$state" 2> /dev/null && [ -w "$state" ]
+  mkdir -p "$state" 2> /dev/null && [ -w "$state" ]
 }
 derived=${workspace%/workspaces/*}
 if [ "$derived" = "$workspace" ] || [ -z "$derived" ]; then
@@ -89,6 +91,16 @@ fi
 if ! usable_root "$derived" && ! usable_root "$workspace/.legion-setup"; then
   echo "legion setup: no writable install root under $root; leaving the install to the agent" >&2
   exit 0
+fi
+
+# The download cache is the deployment's when it names one — every role container of an issue pod
+# is told the issue's own `BUN_INSTALL_CACHE_DIR` on its volume, and that one directory serving
+# every role is the point of it — and otherwise one of this script's own beside the state, so a
+# run anywhere else still keeps bun's cache off the container's own disk.
+cache=${BUN_INSTALL_CACHE_DIR:-}
+if [ -z "$cache" ]; then
+  cache=$root/bun/cache
+  mkdir -p "$cache" 2> /dev/null || true
 fi
 marker=$state/installed
 log=$state/install.log

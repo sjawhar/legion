@@ -11,6 +11,7 @@ import {
   isPhaseOp,
   legionToolDescription,
   mintClaimGrant,
+  PHASE_OP_SENTENCES,
   phaseOpParameters,
 } from "@legion/pi-shared/legion-phase-ops";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "@legion/pi-shared/pi-types";
@@ -147,12 +148,16 @@ export function createLegionTool(deps: {
   return {
     name: "legion",
     label: "legion",
-    // No sentence on read_record or request_backward_move, and the controller's operations after
-    // handoff_complete: the exact text tools.test.ts pins, so a change to the shared template
-    // cannot reach an Oh My Pi agent unnoticed.
+    // No sentence on read_record; after handoff_complete's contract the shared sentence on
+    // request_backward_move (an architect's names the issue it returns from accepting), then the
+    // architect's sign_off and the controller's operations: the exact text tools.test.ts pins, so a
+    // change to the shared template cannot reach an Oh My Pi agent unnoticed.
     description: legionToolDescription({
       envoyPublish: "envoy_publish",
       after:
+        PHASE_OP_SENTENCES.requestBackwardMove +
+        "sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
+        "other phase (SIGNOFF_OUTSIDE_ACCEPTING). " +
         "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. ",
     }),
     defaultInactive: true,
