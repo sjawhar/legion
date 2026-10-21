@@ -103,6 +103,17 @@ cold-race)
   chmod 755 node_modules/.bin/biome
   echo "stub bun: installed 1986 packages"
   ;;
+cold-race-keep-lock)
+  # The cold-entry race whose retry loses the lock. The attempt dies as `cold-race` does, and
+  # leaves a child of its own alive: flock's descriptor on the cache is inherited, so that child
+  # holds the lock the script's retry then queues for in vain — the one path that reaches
+  # flock's own 199 having taken the lock and installed under it. The pid is recorded so the
+  # case can kill the holder rather than leave it to its sleep.
+  echo "error: ENOENT: failed copying files from cache to destination"
+  sleep 30 &
+  echo "holder: $!" >> "$STUB_RECORD"
+  exit 1
+  ;;
 killed) kill -9 $$ ;;
 hang) exec sleep 300 ;;
 esac
@@ -398,7 +409,10 @@ elapsed=$(($(date +%s) - began))
 echo "  the run took ${elapsed}s against a 120s budget and a 1s hold"
 check "exits 0" "$(is "$status" 0)"
 check "the hold ended it, not the budget" "$(at_most "$elapsed" 15)"
-check "the report names the timeout" "$(is "$(field reason)" 'install-timeout')"
+# 124 is two outcomes since the hold went in, and only this one — the attempt cut off at the
+# hold with the budget still running — is worth running the script again by hand for, so it
+# carries a reason of its own rather than the budget's.
+check "the report names the hold, not the budget" "$(is "$(field reason)" 'install-hold-timeout')"
 check "and carries timeout's status" "$(is "$(field exitStatus)" 124)"
 check "it vouches for nothing: no marker" "$(is "$(exists "$marker")" false)"
 # The release is the point of the bound: another process must be able to take the lock at once.
@@ -583,6 +597,126 @@ else
   cat "$report"
 fi
 chmod 700 "$install_root" "$workspace"
+check_clean
+
+echo "case: a budget whose shape this shell cannot use is replaced by the default"
+# `*[!0-9]*` alone passes every all-digit string, and `08` reaching `$((…))` is dash's
+# `Illegal number: 08` — exit 2 from the one file that must never exit non-zero — while `060` is
+# a quiet 48 s where the operator meant 60. Each shape is refused before it reaches either, and
+# the run that follows is an ordinary one that tells the agent what it did with the value.
+for bad in 08 060 0 -9 abc 9x; do
+  fixture "budget-shape-$bad"
+  run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+    LEGION_SETUP_BUDGET="$bad" STUB_MODE=ok
+  check "LEGION_SETUP_BUDGET=$bad exits 0" "$(is "$status" 0)"
+  check "  and the packages are installed anyway" "$(is "$(calls)" 1)"
+  check "  with a marker to vouch for them" "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
+  check "  the successful run writes a report of its own" "$(is "$(field kind)" 'setting-ignored')"
+  check "  whose status is 0, because nothing failed" "$(is "$(field exitStatus)" 0)"
+  check "  and whose detail names the setting" \
+    "$(contains "$(field detail)" "^LEGION_SETUP_BUDGET=$bad is not a whole number of seconds")"
+  check "  and the default it used instead" "$(contains "$(field detail)" 'default of 270s')"
+  check_clean
+done
+
+echo "case: a budget of 0 takes the default, which is what the retry then has to spend"
+# `0` is refused for a reason of its own rather than for its shape: `timeout -k 5 0` is GNU
+# timeout's no timeout at all and `flock -w 0` is no wait. A run that took it at face value
+# would also have nothing left for the cold-entry race's retry, which is what shows here which
+# number is really in force.
+fixture budget-zero-retry
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=0 STUB_MODE=cold-race
+check "exits 0" "$(is "$status" 0)"
+check "the retry had the default budget to run in" "$(is "$(calls)" 2)"
+check "the marker is written after the retry" "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
+check "and the run still tells the agent about the 0" "$(is "$(field kind)" 'setting-ignored')"
+check_clean
+
+echo "case: a lock hold of 00 is the default, not GNU timeout's no timeout at all"
+# `00` passes an `| 0` arm that matches the single character alone, and `timeout -k 5 00` does
+# not time out: the attempt would hold the cache's lock for as long as the install ran, which is
+# the unbounded hold this bound exists to prevent. The budget is what proves it did not.
+fixture lock-hold-zeroes
+began=$(date +%s)
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=3 LEGION_SETUP_LOCK_HOLD=00 STUB_MODE=hang
+elapsed=$(($(date +%s) - began))
+echo "  the run took ${elapsed}s against a 3s budget and a refused 00 hold"
+check "exits 0" "$(is "$status" 0)"
+check "the install was bounded after all" "$(at_most "$elapsed" 15)"
+check "by the budget, since the hold fell back to 90s" "$(is "$(field reason)" 'install-timeout')"
+check "the report is the failure's" "$(is "$(field kind)" 'install-failed')"
+check "and it names the hold it could not use" \
+  "$(contains "$(field detail)" '^LEGION_SETUP_LOCK_HOLD=00 is not a whole number of seconds')"
+check "with the default it used instead" "$(contains "$(field detail)" 'default of 90s')"
+check "no marker is left" "$(is "$(exists "$marker")" false)"
+check_clean
+
+echo "case: a failing run tells the agent the setting before the log it already quotes"
+fixture setting-note-failed
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=060 STUB_MODE=fail
+check "exits 0 anyway" "$(is "$status" 0)"
+check "the report is the install's failure" "$(is "$(field kind)" 'install-failed')"
+check "with the reason the attempt died of" "$(is "$(field reason)" 'install-failed')"
+check "the setting comes first in the detail" \
+  "$(contains "$(field detail)" '^LEGION_SETUP_BUDGET=060 is not a whole number of seconds')"
+check "and what bun said is still there behind it" "$(contains "$(field detail)" 'he said "quoted"')"
+check_clean
+
+echo "case: both knobs refused in one run, both told"
+fixture both-settings
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=0 LEGION_SETUP_LOCK_HOLD=08 STUB_MODE=ok
+check "exits 0" "$(is "$status" 0)"
+check "the packages are installed" "$(is "$(calls)" 1)"
+check "the report is the successful run's own" "$(is "$(field kind)" 'setting-ignored')"
+check "it names the budget" "$(contains "$(field detail)" 'LEGION_SETUP_BUDGET=0 is not a whole number')"
+check "and the hold" "$(contains "$(field detail)" 'LEGION_SETUP_LOCK_HOLD=08 is not a whole number')"
+check "in one line of its own" "$(is "$(field detail | wc -l)" 1)"
+check_clean
+
+echo "case: a run with nothing to install still tells the agent the setting it could not use"
+# The fast path exits before any lock or install, and it is the path almost every role takes:
+# a report it merely deleted would be a sentence the operator never hears back.
+fixture setting-note-fast-path
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=ok
+check "the first run leaves no report" "$(is "$(exists "$report")" false)"
+: > "$record"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_LOCK_HOLD=00 STUB_MODE=ok
+check "exits 0" "$(is "$status" 0)"
+check "the stub never ran again" "$(is "$(calls)" 0)"
+check "and it says there was nothing to do" "$(contains "$out" 'already installed')"
+check "the report is the setting's" "$(is "$(field kind)" 'setting-ignored')"
+check "naming it" "$(contains "$(field detail)" 'LEGION_SETUP_LOCK_HOLD=00 is not a whole number')"
+: > "$record"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=ok
+check "and a run that could use every setting clears it again" "$(is "$(exists "$report")" false)"
+check_clean
+
+echo "case: a run whose retry lost the lock reports the install it did make"
+# The one path that reaches flock's 199 having held the lock: the first attempt takes it,
+# installs, dies on the cold-entry copy, and the retry queues behind someone else. Such a run
+# did write into node_modules, so the marker it found is no longer true and the install log is
+# the agent's news — neither of which holds for a run whose first attempt timed out waiting,
+# which is why the branch turns on the first attempt's status rather than on the reason.
+fixture retry-lost-lock
+mkdir -p "$state"
+printf 'a marker from before this run\n' > "$marker"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=13 STUB_MODE=cold-race-keep-lock
+holder=$(sed -n 's/^holder: //p' "$record" | tail -n 1)
+kill "$holder" > /dev/null 2>&1 || true
+check "exits 0" "$(is "$status" 0)"
+check "the first attempt installed and the retry never reached bun" "$(is "$(calls)" 1)"
+check "the run ends on the lock" "$(is "$(field reason)" 'lock-timeout')"
+check "and the report quotes the install log this run does have" \
+  "$(contains "$(field detail)" 'failed copying files from cache')"
+check "rather than the sentence of a run that never held the lock" \
+  "$(is "$(contains "$(field detail)" "for this run's whole")" false)"
+check "the marker it can no longer vouch for is gone" "$(is "$(exists "$marker")" false)"
 check_clean
 
 summary "scripts/legion-setup.sh"

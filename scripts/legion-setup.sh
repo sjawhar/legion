@@ -25,8 +25,11 @@
 # Oh My Pi from starting, charges the launch a failure, and after three of them ends the claim in
 # `worker-died` with the issue held: a failed install must reach the agent as a report it can read,
 # never as a dead role. That report is `$LEGION_STATE_DIR/legion-setup-report.json`, whose
-# `detail` is the install log's last 1000 bytes with control characters and non-ASCII bytes
-# stripped and quotes and backslashes escaped, so the file is valid JSON whatever bun printed. Its
+# `kind` is `install-failed` and whose `detail` is the install log's last 1000 bytes with
+# control characters and non-ASCII bytes stripped and quotes and backslashes escaped, so the
+# file is valid JSON whatever bun printed. A setting of this container's environment the run
+# could not use is told the same way — before that detail, or as a `setting-ignored` report of
+# its own when the install succeeded and there is no failure to carry it (`use_seconds`). Its
 # `issue`, `role` and `generation` are there for its reader to match against its own environment:
 # `LEGION_STATE_DIR` outlives a generation in a pod, and is shared by every pane of the host under
 # the tmux runtime.
@@ -78,16 +81,58 @@ if [ ! -r bun.lock ]; then
   exit 0
 fi
 
-# One bound for the whole run, from the environment: the wall clock the lock wait, the install and
-# the single retry share, defaulting to the 270 s that leaves the role's 360 s registration
-# deadline its margin. `deadline` is the instant that budget ends; every wait below is what is
-# left of it then. A value that is not a whole number of seconds would make that arithmetic a
-# fatal shell error, which is the one thing this script must never do, so it falls back to the
-# default — as write_report's status does with a status that is not a number.
-budget=${LEGION_SETUP_BUDGET:-270}
-case "$budget" in
-  '' | *[!0-9]*) budget=270 ;;
-esac
+# Both of this run's bounds are read from the environment here, through the one reader either
+# has. A value this shell cannot use must reach neither `timeout` nor its arithmetic: `$((08))`
+# is dash's fatal `Illegal number: 08`, which would be the non-zero exit the header above
+# promises this script cannot make, and `$((060))` is a silent 48 where the operator meant 60.
+# So each knob is judged against the shape it accepts — a whole number of seconds, 1 or more,
+# written without a leading zero — and a value of any other shape is replaced by the default and
+# told to the agent, who is the only one who can pass it back to the person who typed it.
+#
+# setting_note: one sentence for each setting this run could not use, empty when there is
+# nothing to tell. Every report written below carries it before its own detail, and a run that
+# succeeds writes a `setting-ignored` report of its own to carry it (report_success).
+setting_note=
+
+# use_seconds <name> <value> <default>: sets `seconds` to the whole number of seconds <value>
+# names, or to <default> when it names anything else, appending the sentence for it to
+# `setting_note`. It assigns rather than printing, because a note added inside a `$(…)` dies
+# with the subshell that made it.
+use_seconds() {
+  seconds=$2
+  case "$2" in
+    # Unset or empty is how nearly every container runs this: the default is what the script
+    # means by it, so it is no mistake and there is nothing to tell.
+    '')
+      seconds=$3
+      return 0
+      ;;
+    # A bare `0`, rejected on its own account rather than for its shape: `timeout -k 5 0` is GNU
+    # timeout's spelling of no timeout at all and `flock -w 0` is not a wait, so a 0 here would
+    # be the unbounded hold this bound exists to prevent, not the shortest one. This line is
+    # what stops that, however much it looks like an inconsistency with the arm below it.
+    0) ;;
+    # A leading zero: `08` and `060` are the octal parse above. The value is refused rather than
+    # normalised, because normalising it with `$((…))` is that same parse.
+    0*) ;;
+    # Anything that is not digits throughout: `-9`, `abc`, `9x`, `1.5`, `90 `.
+    *[!0-9]*) ;;
+    *) return 0 ;;
+  esac
+  seconds=$3
+  if [ -n "$setting_note" ]; then
+    setting_note="$setting_note "
+  fi
+  setting_note="$setting_note$1=$2 is not a whole number of seconds (1 or more, with no"
+  setting_note="$setting_note leading zero), so this run used the default of ${3}s instead."
+  return 0
+}
+
+# One bound for the whole run: the wall clock the lock wait, the install and the single retry
+# share, defaulting to the 270 s that leaves the role's 360 s registration deadline its margin.
+# `deadline` is the instant that budget ends; every wait below is what is left of it then.
+use_seconds LEGION_SETUP_BUDGET "${LEGION_SETUP_BUDGET-}" 270
+budget=$seconds
 deadline=$(($(date +%s) + budget))
 detail_bytes=1000
 
@@ -134,10 +179,8 @@ remaining() {
 # which is why the knob exists, why it is the first thing `docs/kubernetes.md` says beside this
 # bound, and why the paragraph there that sizes `installLockWait` now names this script among the
 # holders of that inode.
-lock_hold=${LEGION_SETUP_LOCK_HOLD:-90}
-case "$lock_hold" in
-  '' | *[!0-9]* | 0) lock_hold=90 ;;
-esac
+use_seconds LEGION_SETUP_LOCK_HOLD "${LEGION_SETUP_LOCK_HOLD-}" 90
+lock_hold=$seconds
 
 # The report's path comes before the install root below, and not after it as everything else
 # about the report does, because the one failure this report mechanism exists for is a volume
@@ -159,25 +202,39 @@ escape() {
     | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# write_report <reason> <exit status> <detail>: the one file the agent's first turn reads. Written
-# through a temporary name in the same directory, so a reader never sees half of it, and only when
-# LEGION_STATE_DIR names a directory this user can write to.
+# write_report <kind> <reason> <exit status> <detail>: the one file the agent's first turn reads.
+# Written through a temporary name in the same directory, so a reader never sees half of it, and
+# only when LEGION_STATE_DIR names a directory this user can write to. The kind is the caller's
+# because this file carries two of them: `install-failed`, the install whose absence the agent's
+# checks will meet, and `setting-ignored`, a run that installed everything and could not use one
+# setting of its container's environment. Whatever the kind, a setting this run refused comes
+# first in the detail: that sentence has no report of its own to wait for, and the run that
+# would have carried it may be this agent's only news of it.
 write_report() {
   if [ -z "$report" ]; then
     return 0
   fi
-  report_status=$2
+  report_status=$3
   case "$report_status" in
     '' | *[!0-9]*) report_status=1 ;;
   esac
-  if printf '{"schemaVersion":1,"kind":"install-failed","issue":"%s","role":"%s","generation":"%s","at":"%s","reason":"%s","exitStatus":%s,"detail":"%s"}\n' \
+  report_detail=$4
+  if [ -n "$setting_note" ]; then
+    if [ -n "$report_detail" ]; then
+      report_detail="$setting_note $report_detail"
+    else
+      report_detail=$setting_note
+    fi
+  fi
+  if printf '{"schemaVersion":1,"kind":"%s","issue":"%s","role":"%s","generation":"%s","at":"%s","reason":"%s","exitStatus":%s,"detail":"%s"}\n' \
+    "$1" \
     "$(printf '%s' "${LEGION_ISSUE-}" | escape)" \
     "$(printf '%s' "${LEGION_ROLE-}" | escape)" \
     "$(printf '%s' "${LEGION_GENERATION-}" | escape)" \
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    "$1" \
+    "$2" \
     "$report_status" \
-    "$(printf '%s' "$3" | escape)" \
+    "$(printf '%s' "$report_detail" | escape)" \
     > "$report.tmp" 2> /dev/null; then
     mv -f "$report.tmp" "$report" 2> /dev/null
   fi
@@ -185,10 +242,20 @@ write_report() {
   return 0
 }
 
-clear_report() {
-  if [ -n "$report" ]; then
-    rm -f "$report" 2> /dev/null
+# report_success: what a run that has this lock file's packages leaves behind. Normally nothing —
+# a failure an earlier generation wrote must not reach this agent as its own news — but a run
+# that could not use a setting of its environment has that one sentence to tell and no failing
+# report to tell it in, and the removal would swallow it. Such a run writes `setting-ignored` in
+# the removal's place: exit status 0, because nothing failed, and the sentence as its detail.
+report_success() {
+  if [ -z "$report" ]; then
+    return 0
   fi
+  if [ -n "$setting_note" ]; then
+    write_report setting-ignored setting-ignored 0 ""
+    return 0
+  fi
+  rm -f "$report" 2> /dev/null
   return 0
 }
 
@@ -213,7 +280,7 @@ if ! usable_root "$derived" && ! usable_root "$workspace/.legion-setup"; then
   # Nothing can be installed for any role of this issue, so the agent is told rather than left to
   # meet it as a check that will not run. It is the one failure that leaves no install log, so
   # the detail is what this run knows; the status is 0 because no install ran to have one.
-  write_report no-install-root 0 \
+  write_report install-failed no-install-root 0 \
     "no writable install root: neither $derived nor $workspace/.legion-setup can be written under"
   exit 0
 fi
@@ -250,7 +317,7 @@ installed() {
 # `exit` in a POSIX shell function ends the shell, so both call sites end the run the same way.
 exit_if_installed() {
   installed || return 0
-  clear_report
+  report_success
   echo "legion setup: this bun.lock's packages are already installed; nothing to do" >&2
   exit 0
 }
@@ -344,6 +411,10 @@ install_once() {
 echo "legion setup: installing this bun.lock's packages into $workspace" >&2
 install_once
 status=$?
+# The first attempt's own status, kept because `status` becomes the retry's: it is the only
+# thing that tells a run which never got the lock from one that held it, installed, and lost the
+# lock on the way back (the failure branch below turns on it).
+first_status=$status
 
 # The retry is for the cold-entry race alone, and it waits on the same remaining budget as the
 # attempt before it, so a second attempt cannot push the script past the registration deadline it
@@ -369,35 +440,50 @@ tail -n 20 "$log" >&2 2> /dev/null
 # made it safe to write; this shell only reports what that one did, and says which of the two
 # things happened rather than claiming the install either way.
 if [ "$status" -eq "$ALREADY_INSTALLED" ]; then
-  clear_report
+  report_success
   echo "legion setup: another role installed this bun.lock while this run waited; nothing to do" >&2
   exit 0
 fi
 if [ "$status" -eq 0 ]; then
-  clear_report
+  report_success
   echo "legion setup: installed this bun.lock's packages into $workspace" >&2
   exit 0
 fi
 
 # 199 is flock's own, set by -E above: another install of this issue held the cache for every
-# second this run had, and the agent must start anyway, since a failure must not hold the work up.
-# The wait was the whole budget, so that is what the report names. 124 is the install's own
-# timeout, the budget cutting it off where it stood; 137 is a SIGKILL, which on a 1 Gi role is the
-# kernel reclaiming the install's memory — a working outcome, since the next role to start
-# installs again.
+# second this run had, and the agent must start anyway, since a failure must not hold the work
+# up. 137 is a SIGKILL, which on a 1 Gi role is the kernel reclaiming the install's memory — a
+# working outcome, since the next role to start installs again. 124 is `timeout`'s, and since
+# the hold went in it is two different outcomes with one status: the whole budget ran out on a
+# slow or offline container, or this attempt reached `lock_hold` and yielded the cache's lock
+# with the budget still running. They are worth different things to the agent — only the second
+# makes running this script again by hand likely to work, which is what its notice advises — so
+# the deadline tells them apart: an attempt that ended before the budget's instant is the yield.
 case "$status" in
   "$LOCK_BUSY") reason=lock-timeout ;;
-  124) reason=install-timeout ;;
+  124)
+    if [ "$(date +%s)" -lt "$deadline" ]; then
+      reason=install-hold-timeout
+    else
+      reason=install-timeout
+    fi
+    ;;
   137) reason=install-killed ;;
   *) reason=install-failed ;;
 esac
-if [ "$reason" = lock-timeout ]; then
+# Whether this run ever held the lock is the *first* attempt's status, not the reason it ends
+# with: the retry of the cold-entry race queues for the lock again, and can lose it to another
+# role of the issue, so a run that took the lock, installed, and failed the copy out of the
+# cache also ends at $LOCK_BUSY. Only a first attempt that timed out waiting learned nothing;
+# anything else means this run held the lock, wrote into node_modules, and has an install log of
+# its own, which is what its agent must be told and what its marker must answer for.
+if [ "$first_status" -eq "$LOCK_BUSY" ]; then
   # No marker is touched here: this run never held the lock, never looked at node_modules, and
   # learned nothing about what is installed. The holder writes the marker as its last act inside
   # the lock, so a `-w` that expires in that window would otherwise delete a marker that is true
   # and cost every later role of the issue a full reinstall.
   echo "legion setup: another install held $cache for this run's whole ${budget}s budget" >&2
-  write_report lock-timeout "$status" \
+  write_report install-failed lock-timeout "$status" \
     "another install held $cache for this run's whole ${budget}s budget"
   exit 0
 fi
@@ -405,5 +491,5 @@ fi
 # whatever a cut-off `bun install` left.
 rm -f "$marker" 2> /dev/null
 echo "legion setup: bun install exited $status ($reason); starting the agent without it" >&2
-write_report "$reason" "$status" "$(tail -c "$detail_bytes" "$log" 2> /dev/null)"
+write_report install-failed "$reason" "$status" "$(tail -c "$detail_bytes" "$log" 2> /dev/null)"
 exit 0

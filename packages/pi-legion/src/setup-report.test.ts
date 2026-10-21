@@ -101,6 +101,68 @@ test.each([
   expect(notice?.content).not.toContain("The install log ended");
 });
 
+test("an install cut off where it yielded the cache's lock quotes the log it does have", () => {
+  // `install-hold-timeout` is the script's 124 with the budget still running: the attempt
+  // released the cache's lock at LEGION_SETUP_LOCK_HOLD rather than running the role's whole
+  // clock out, so unlike a `lock-timeout` it held the lock and left an install log behind.
+  const notice = noticeFor({
+    reason: "install-hold-timeout",
+    exitStatus: 124,
+    detail: "bun install v1.2.23 — resolving dependencies",
+  });
+
+  expect(notice?.content).toContain('reason "install-hold-timeout", exit status 124');
+  expect(notice?.content).toContain(
+    "The install log ended: bun install v1.2.23 — resolving dependencies"
+  );
+});
+
+// A run that installed everything and could not use one setting of its container's environment
+// writes this kind instead of deleting the report: that sentence has no failure to ride on, and
+// the agent is the only one who can carry it back to the person who set the value.
+describe("a setting-ignored report", () => {
+  const note =
+    "LEGION_SETUP_BUDGET=08 is not a whole number of seconds (1 or more, with no leading " +
+    "zero), so this run used the default of 270s instead.";
+  const settingIgnored = (overrides: Readonly<Record<string, unknown>> = {}) =>
+    noticeFor({
+      kind: "setting-ignored",
+      reason: "setting-ignored",
+      exitStatus: 0,
+      detail: note,
+      ...overrides,
+    });
+
+  test("says the packages are installed and names the setting that was not used", () => {
+    const notice = settingIgnored();
+
+    expect(notice?.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(notice?.content).toContain("installed this repository's packages in this container");
+    expect(notice?.content).toContain(note);
+    expect(notice?.content).toContain("Nothing failed to install");
+  });
+
+  test("claims no failed install, and carries none of a failure's advice", () => {
+    const notice = settingIgnored();
+
+    expect(notice?.content).not.toContain("could not install");
+    expect(notice?.content).not.toContain("check commands cannot run here");
+    expect(notice?.content).not.toContain("The install log ended");
+    expect(notice?.content).not.toContain("It reported:");
+    expect(notice?.content).not.toContain("exit status");
+  });
+
+  test("is read against this run's own issue, role and generation like any other", () => {
+    expect(settingIgnored({ generation: "1" })).toBeUndefined();
+  });
+
+  test("says so when the report names no setting at all", () => {
+    expect(settingIgnored({ detail: undefined })?.content).toContain(
+      "its report does not say which"
+    );
+  });
+});
+
 test("a state directory this environment does not name is never read", () => {
   const { files, readFile } = reads(JSON.stringify(report));
 

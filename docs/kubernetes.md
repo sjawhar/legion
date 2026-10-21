@@ -1454,22 +1454,22 @@ container moments earlier and another role's setup both meet it. A first attempt
 `ENOENT: failed copying files from cache to destination` is retried once, within what is left of
 this run's budget. Every path of it ends `exit 0`, the failures included, because the non-zero
 exit above would stop
-the agent from starting over an install it could have run without. It bounds itself once, as a
-whole: `LEGION_SETUP_BUDGET` (270 s) is the run's wall clock, and every wait inside it — the
+the agent from starting over an install it could have run without. It bounds itself twice:
+`LEGION_SETUP_BUDGET` (270 s) is the run's wall clock, and every wait inside it — the
 `flock` on the cache, the install's own `timeout`, the retry — is what is left of that budget when
 that wait begins, so the wait for the lock can never expire before the install it is waiting for
-would have. A second bound sits inside that one, on the only part of the run that makes another
-process wait: `LEGION_SETUP_LOCK_HOLD` (90 s) is the longest one attempt may hold the cache's
-lock, because the plugin install above waits on that same inode and fails the launch when its
-wait runs out. It is the first thing to lower in a deployment that lowers
-`worker_boot_timeout_seconds`, which lowers that wait with it.
-The worst case is that budget plus the 5 s `timeout` leaves between its SIGTERM and
+would have. The worst case is that budget plus the 5 s `timeout` leaves between its SIGTERM and
 its SIGKILL, 275 s inside the 360 s registration deadline this run shares with the rest of the
 role's launch, against a measured 54 s for the first install of 1,986 packages and
 about 0.3 s when they are already there — and whatever went wrong (an unreachable registry, a lock
 file that moved under the frozen install, a timeout, the kernel's OOM kill of a 1 Gi role's
 install) it writes `$LEGION_STATE_DIR/legion-setup-report.json` and exits 0, leaving no marker, so
-the next role to start installs again. The role's own pi-legion reads that report at `session_start`
+the next role to start installs again. A second bound sits inside that one, on the only part of
+the run that makes another process wait: `LEGION_SETUP_LOCK_HOLD` (90 s) is the longest one
+attempt may hold the cache's lock, because the plugin install above waits on that same inode and
+fails the launch when its wait runs out. It is the first thing to lower in a deployment that
+lowers `worker_boot_timeout_seconds`, which lowers that wait with it.
+The role's own pi-legion reads that report at `session_start`
 and saves it as a notice in the agent's first turn, matching the report's `issue`, `role` and
 `generation` against its own environment, since that directory outlives a generation in a pod and,
 under `runtime: tmux`, is shared by every pane of the host. The agent therefore starts either way
