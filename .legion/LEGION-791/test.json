@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-791",
-  "completed": "2026-10-21T17:50:01Z",
+  "completed": "2026-10-21T18:40:03Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2096",
-  "codeHeadSha": "6097442543c3d042ec55a5c4684d58cd83223215",
-  "handoffHeadSha": "2a16ebabc5a0485bb15769e8a313d3b3447b7604",
+  "codeHeadSha": "ad25fec899bbd2af4c68cac13a67d0758e6c80c1",
+  "handoffHeadSha": "198177f620b9e00f76434715b65ca9031f941e8e",
   "requiredSkillsFollowed": [
     "legion-worker (SKILL.md, references/pr-body.md)",
     "dispatch (doc-read of the spec and plan-md)"
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 1: drove the same surface independently (own embedded Postgres, own ports; the implementer's four predicates re-run verbatim; its `legion state --json` + strict parse re-run; its negative control (a) re-read from this pod; its (b), the LEGION controller's reply b74e5adff9a887cc0b345a694d7537d4 at 2026-10-21T15:30:46Z, cited not re-asked). Round 2: reproduced its before/after on URL userinfo with the round-1 binary (9b1a38ef, still in /tmp from round 1) and the round-2 binary (6097442543c3) on the same file, widened to daemon_url, a user-only entry, an IPv6 host and a path-carrying entry; its four predicates, the Stage 1 sweep regex, the strict parse and the CLI equality re-run at the new head; its throwaway nested-type proof of the derived walk re-run by overlay (Config.Vault *VaultConfig{Token, URL}); the three threads it answered read as resolved on GitHub."
+    "how": "Round 1: drove the same surface independently (own embedded Postgres, own ports; the implementer's four predicates re-run verbatim; its `legion state --json` + strict parse re-run; its negative control (a) re-read from this pod; its (b), the LEGION controller's reply b74e5adff9a887cc0b345a694d7537d4 at 2026-10-21T15:30:46Z, cited not re-asked). Round 2: reproduced its before/after on URL userinfo with the round-1 binary (9b1a38ef, still in /tmp from round 1) and the round-2 binary (6097442543c3) on the same file, widened to daemon_url, a user-only entry, an IPv6 host and a path-carrying entry; its four predicates, the Stage 1 sweep regex, the strict parse and the CLI equality re-run at the new head; its throwaway nested-type proof of the derived walk re-run by overlay (Config.Vault *VaultConfig{Token, URL}); the three threads it answered read as resolved on GitHub. Round 3: the kubernetes-only plugins mask cannot boot in a pod, so its load-and-project path was driven by a Go -overlay test calling config.Load on a kubernetes file with a pre-signed, userinfo-carrying plugin URL (a different host, port, uppercase scheme and a fragment than the implementer's) and json.Marshal(SettingsOf(cfg)); round 2's settings.go overlaid on the same file reproduced the verbatim leak; the tmux boot, sweep and strict parse re-run at the new head with the round-3 binary; the five threads read as resolved."
   },
   "failed": 0,
   "failures": [],
@@ -56,24 +56,32 @@
       "observed": "FAIL naming all three: `Config.Vault is in neither settingsEmitted nor settingsExcluded \u2026`, `VaultConfig.Token is in neither \u2026`, `VaultConfig.URL is in neither \u2026` (round 1's hand list would have named Config.Vault alone). The daemon exits 1 before serving anything: `legion start: pi-legion at /tmp/legion791/home34/.omp/plugins/node_modules/@sjawhar/pi-legion/package.json (package 10.17.0) speaks daemon API contract 34; this daemon requires 35. Install the @sjawhar/pi-legion release built from this daemon's commit into the default OMP profile.`; no planted password in that log. go.work.sum unchanged; the overlay removed.",
       "headSha": "6097442543c3d042ec55a5c4684d58cd83223215",
       "negativeControl": "The same binary with the manifest at 35 (home) booted and served the state on port 15797 (proof above); the same TestSettingsOfClassifiesEveryConfigField without the overlay is green in CI's Tests run 39644068365 at 6097442543c3, so the failure is the planted type's alone."
+    },
+    {
+      "criterion": "Reviewer round-2 finding 1 (Security[secret]), the spec's 'non-secret settings': a runtime.kubernetes.plugins source in http(s) form, which the loader stores whole with userinfo, query and fragment (a private or pre-signed tarball credential), reaches the wire with its userinfo masked and its query and fragment dropped; a version or an absolute path rides as written.",
+      "surface": "The daemon's own load-and-project path, since a kubernetes-shaped file cannot boot in a pod: a Go `-overlay` test file in internal/api (the workspace untouched, go.work.sum compared byte for byte) calling config.Load on /tmp/legion791/k8s/legion.yaml \u2014 the golden fixture's kubernetes shape with plugins `pi_legion: HTTPS://legion:<pw>@plugins.fixture.example:8443/pi-legion-10.4.0.tgz?X-Amz-Signature=<sig>#frag` and `pi_envoy: https://plugins.fixture.example/pi-envoy-10.4.0.tgz?token=<token>` \u2014 then json.Marshal(SettingsOf(cfg)), the call daemon.go's serve makes once at boot; plus the committed regenerated fixture packages/contracts/fixtures/daemon-api/state.json read through the strict TS schema; plus the tmux route re-driven with the round-3 binary (port 15797, round 2's userinfo file).",
+      "command": "go test ./internal/api/ -run TestScratchKubernetesSettingsFromFile -overlay overlay.json -count=1 -v (SCRATCH791_FILE, SCRATCH791_OUT); a Python sweep over the written bytes; bun run parse.ts packages/contracts/fixtures/daemon-api/state.json; jq -c '.settings.runtime.kubernetes.plugins' and grep -c fixture-plugin on the fixture; the Boot G tmux run: curl -s http://127.0.0.1:15797/legion/v1/state, the marker sweep, Stage 1's jq sweep, legion state --json --port 15797, bun run parse.ts g/state.json.",
+      "observed": "The loader logged both sources whole (userinfo, query, fragment; scheme lowercased); the served block: {\"pi_legion\":\"https://xxxxx@plugins.fixture.example:8443/pi-legion-10.4.0.tgz\",\"pi_envoy\":\"https://plugins.fixture.example/pi-envoy-10.4.0.tgz\"}; agent_secrets.url as written; envoy_url/nats_urls[0] masked as in round 2; sweep hits none (password, signature, token, X-Amz-Signature, ?, #frag, token=, the fixture's envoy/nats/DSN passwords, BEGIN, kubeconfig, SESSION_DSN_FIXTURE, ANTHROPIC_API_KEY_FIXTURE, the pod env value, volume Secret and ServiceAccount names, the broker token path); 0 user:password@; no forbidden/_file key; no null. The fixture: pi_envoy https://xxxxx@plugins.internal.example/pi-envoy-10.4.0.tgz, pi_legion 10.4.0, 0 fixture-plugin matches, strict parse OK (36 keys). Boot G: the four addresses masked as in round 2, max_fix_attempts 5, worker_boot_timeout_seconds 90, body and log sweep none, Stage 1 sweep true, CLI == HTTP, strict parse OK (33 keys).",
+      "headSha": "ad25fec899bbd2af4c68cac13a67d0758e6c80c1",
+      "negativeControl": "(a) The same overlay test with round 2's settings.go and settings_test.go (jj file show -r 6097442543c3) on the identical file wrote pi_legion and pi_envoy verbatim with all three planted credentials in the bytes: the leak the reviewer named, reproduced at round 2's projection and closed here. (b) The served tmux body with settings deleted \u2192 safeParse false; max_fix_attempts as \"5\" \u2192 false. (c) legion start --check-config on the kubernetes fixture refuses before projecting anything, naming only the planted operator_token_file path the pod lacks."
     }
   ],
   "ci": {
-    "head": "6097442543c3d042ec55a5c4684d58cd83223215",
-    "tests": "run 39644068365: lint, typecheck, test success; the test job's `Stage 1 live proof` step success (the real binary on a real Postgres asserting the masked envoy_url and the user:password@ sweep)",
-    "prTitle": "runs 39644068444, 39644097263, 39644097358, 39644100659, 39644102220, 39644105091, 39644106685, 39644328515 success (one per body edit)",
-    "docs": "run 39644068234 success",
-    "workerImage": "run 39644068250 success",
-    "legionEnvoyAndContracts": "run 39644068302: every job success but `dispatch` and `dispatch-memory` still in progress at 17:47Z (the Dispatch UI, which this change does not touch); the round-1 run 39634013138's same jobs finished green",
-    "handoffHead": "2a16ebabc5a0485bb15769e8a313d3b3447b7604 carries `skip-checks: true` and started no run; this handoff push is handoff-only too"
+    "head": "ad25fec899bbd2af4c68cac13a67d0758e6c80c1",
+    "tests": "run 39651734939: lint, typecheck, test success; the test job's `Stage 1 live proof` step success",
+    "prTitle": "runs 39651734878 and 39651947330 success",
+    "docs": "run 39651734920 success",
+    "workerImage": "run 39651734892 success",
+    "legionEnvoyAndContracts": "run 39651735037: every job success (contracts, pi-legion, claude-envoy check-dist among them) but `dispatch` still in progress at 18:40Z (the Dispatch UI, which this change does not touch)",
+    "handoffHead": "198177f620b9e00f76434715b65ca9031f941e8e carries `skip-checks: true` and started no run; this handoff push is handoff-only too"
   },
   "notesForTheReviewer": [
-    "Round 1's two notes on the hand-maintained reachability list and the documentary tables are answered: settingsConfigTypes() derives the set (verified by the nested-type overlay), and the planted-marker sweep now holds userinfo too; the `settingsEmitted` prose values remain the Fast-follow.",
-    "endpointOf keeps a path and drops nothing else because the loader refuses a query and a fragment on all four keys (config.go endpointURL/noQueryOrFragment/trimmedBase); runtime.kubernetes.agent_secrets.url is not passed through it but the loader refuses userinfo there (kubernetes.go:275), so no fifth address key carries one.",
-    "Operator argv stays in as the plan decided (omp_launch_prefix, which may not run `secrets`; runtime.kubernetes.setup, which every pod runs): an operator who writes a literal KEY=value secret into either would see it served; provider_keys is the sanctioned route and the loader points there.",
-    "The production check's lockstep: a daemon at 35 refuses a plugin at 34 (driven live here) and the image probe refuses the mixed pair; the legion-deploy holder's release moves the binary and runtime.kubernetes.image together."
+    "pluginSourceOf's shape test is the loader's own predicate (readPluginSource, kubernetes.go:359): url.Parse + IsAbs + scheme http/https; an absolute path is tested by path.IsAbs in the loader and falls through url.Parse's empty scheme here, so the two agree on every admitted source.",
+    "No kubernetes boot is reachable from a pod; the plugins mask is proven at the daemon's load-and-project seam (config.Load \u2192 api.SettingsOf \u2192 json.Marshal), the same call serve makes, and on the regenerated fixture; the HTTP route itself is proven on the tmux binary at this head.",
+    "Operator argv stays in as the plan decided (omp_launch_prefix, runtime.kubernetes.setup); provider_keys is the sanctioned route for a key.",
+    "The production check's lockstep: a daemon at 35 refuses a plugin at 34 (driven live in round 2) and the image probe refuses the mixed pair; the legion-deploy holder's release moves the binary and runtime.kubernetes.image together."
   ],
-  "round": 2,
+  "round": 3,
   "rounds": [
     {
       "round": 1,
@@ -89,6 +97,14 @@
       "verdict": "pass",
       "answers": "review handoff 0f0659209aeb: threads PRRT_kwDORFy7ds6u305o, \u2026305q, \u2026305t, each resolved on GitHub; the Contract change census added to the PR body",
       "proof": "proof[3..4] below"
+    },
+    {
+      "round": 3,
+      "codeHeadSha": "ad25fec899bbd2af4c68cac13a67d0758e6c80c1",
+      "handoffHeadSha": "198177f620b9e00f76434715b65ca9031f941e8e",
+      "verdict": "pass",
+      "answers": "review handoff 7da50931733f: threads PRRT_kwDORFy7ds6u5BqL (plugins source in URL form served verbatim) and PRRT_kwDORFy7ds6u5BqU (false 'each address rides endpointOf' clause) resolved on GitHub; the three minors (TS fixture sweep regex, running-legion clause, census e2e-readers row) applied",
+      "proof": "proof[5] below"
     }
   ]
 }
