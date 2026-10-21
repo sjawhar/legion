@@ -2,63 +2,62 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-791",
-  "completed": "2026-10-21T18:05:21Z",
+  "completed": "2026-10-21T18:54:42Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2096",
-  "round": 2,
-  "reviewedHead": "0aa93c2340ff2de158016b3abdd3760f0efbca36",
-  "codeHead": "6097442543c3d042ec55a5c4684d58cd83223215",
-  "decision": "changes_requested",
+  "round": 3,
+  "reviewedHead": "db1e04d7602e2044f9f410183af50fc9e31348ec",
+  "codeHead": "ad25fec899bbd2af4c68cac13a67d0758e6c80c1",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
+  "important": 0,
+  "minor": 4,
   "ci": {
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "6097442543c3d042ec55a5c4684d58cd83223215",
-    "checkRuns": "lint, typecheck, test, pr-title all completed/success at 60974425 (Tests run 39644068365, PR Title runs 39644068444/39644328515); Legion Envoy and Contracts run 39644068302 in_progress on its non-required `dispatch` job only; the PR body's CI line names runs at that commit",
+    "ciHead": "ad25fec899bbd2af4c68cac13a67d0758e6c80c1",
+    "checkRuns": "lint, typecheck, test, pr-title all completed/success at ad25fec8 (Tests run 39651734939, PR Title runs 39651734878/39651947330, Docs 39651734920, Worker Image 39651734892); Legion Envoy and Contracts run 39651735037 in_progress on its non-required `dispatch` job alone, every other job success; the PR body's CI line names runs at that commit",
     "compareOnlyLegionSince": true
   },
   "proofLines": {
-    "implementer": "present at code head 60974425: real binary over embedded Postgres with userinfo planted on envoy_url and nats_urls; negative control (e) shows the round-1 binary serving the passwords verbatim",
-    "tester": "present at code head 60974425: independent instance planting userinfo on daemon_url, envoy_url, four nats_urls shapes (password, user-only, IPv6 host, path); negative controls (a) round-1 binary verbatim, (b) overlay nested type fails the derived walk, (c) strict-parse mutations"
+    "implementer": "present at code head ad25fec8: the tmux real-binary proof re-run (every predicate true, strict parse OK) plus the kubernetes-only plugins surface driven through config.Load + SettingsOf with a planted pi_envoy URL, negative control (f) round 2's settings.go emitting the password and token verbatim",
+    "tester": "present at code head ad25fec8: independent -overlay test through config.Load with a different host, port, uppercase scheme and fragment, the whole-byte sweep, the committed fixture parsed strictly, the tmux route re-driven; negative controls (a) round 2's projection verbatim, (b) strict-parse mutations, (c) --check-config refusal"
   },
-  "round1ThreadsAnswered": [
-    "PRRT_kwDORFy7ds6u305o: fixed in 60974425 — endpointOf masks userinfo on the four address keys; fixture, planted list and Stage 1 sweep cover it; accepted",
-    "PRRT_kwDORFy7ds6u305q: fixed in 60974425 — settingsConfigTypes() derives the struct set by a reflect walk; accepted",
-    "PRRT_kwDORFy7ds6u305t: fixed in 60974425 — admission_cap comment reworded; accepted"
+  "threadsAnswered": [
+    "PRRT_kwDORFy7ds6u305o (round 1, userinfo on the four address keys): fixed in 60974425; accepted",
+    "PRRT_kwDORFy7ds6u305q (round 1, hand-listed types): fixed in 60974425; accepted",
+    "PRRT_kwDORFy7ds6u305t (round 1, admission_cap comment): fixed in 60974425; accepted",
+    "PRRT_kwDORFy7ds6u5BqL (round 2, plugins URL verbatim): fixed in ad25fec8 by pluginSourceOf → endpointOf, userinfo masked and query/fragment dropped, fixture plants a credential-bearing URL whose literals the byte sweep proves absent; accepted",
+    "PRRT_kwDORFy7ds6u5BqU (round 2, false `each address … endpointOf` universal): fixed in ad25fec8; the replacement's closing clause (`Every other string is a name, a path, a quantity or a version, never a URL`) still overstates — omp_invocation, omp_launch_prefix, runtime.kubernetes.setup, capabilities.decided and merge.by_hand are operator text emitted as written, the accepted hardening recorded since round 1 — a wording Minor in Fast-follow, not a standing finding; accepted"
   ],
-  "censusRerun": "The body's `## Contract change census` searches re-run at 60974425: readers, literals, declarers, fixtures and producers match the body exactly; the e2e-readers row omits three hits of its own grep (scripts/e2e/README.md — prose; scripts/e2e/lib/multi-repo-acceptance.test.ts — Bun.serve stubs of the route, never parsed through the strict schema; scripts/e2e/stage3-4b13b-acceptance.sh — jq reads of named keys, additive), all unaffected; rollout line is an immediate refusal at the boot gate",
-  "thermonuclear": "pair run once at 0aa93c23 (code 60974425): deep-review 1 Important Security[secret] (runtime.kubernetes.plugins.pi_legion/pi_envoy emitted verbatim while readPluginSource admits an http(s) URL with userinfo, query and fragment), 2 hardening Minors; code-quality the same Important plus the false `each address it emits is endpointOf its value` comment, Minors to Fast-follow; both verified endpointOf and the derived walk sound",
+  "censusRerun": "The body's census row for e2e readers now lists the three hits named in round 2 with their dispositions; no new boundary in round 3 (the plugins fix is a projection mask, not a loader refusal, so no contract change and no new row)",
+  "thermonuclear": "pair run once at db1e04d7 (code ad25fec8): both verify the round-2 leak closed for every form readPluginSource admits (version and absolute path pass through; http(s) URL masked, query and fragment dropped; the loader's `u.Host != \"\"` guarantee keeps endpointOf's `xxxxx` branch unreachable for a stored URL) and the planted literals absent from the regenerated fixture; both raise the overstated closing clause at settings.go:21-22 (wording over an accepted hardening), code-quality the fail-open duplicated scheme clause in pluginSourceOf (`u.IsAbs()` alone is identical today and fail-safe later), deep-review a path-signed tarball URL surviving the mask (no such provider configured) and a partial wording sweep (state.go, legion-api.ts, pi-legion AGENTS.md, docs/kubernetes.md still say only `left out`, true statements)",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/daemon/internal/api/settings.go:301",
-      "description": "Security[secret]: the round-2 mask stops at the four address keys; `runtime.kubernetes.plugins.pi_legion`/`pi_envoy` are emitted verbatim on the unauthenticated route while `readPluginSource` (config/kubernetes.go:359-363) admits any http(s) URL with a host and stores `u.String()` with userinfo, query and fragment intact — the one URL-shaped key the loader puts no credential rule on (agent_secrets.url refuses userinfo at kubernetes.go:275; the four address keys refuse a query at config.go:788-793). docs/kubernetes.md:1083-1090 names the http(s) URL as a first-class source (a private or pre-signed tarball), so a basic-auth or pre-signed credential loads and is served to anything that reaches the API port, which under runtime: kubernetes is not loopback. Fix in this PR: either refuse userinfo/query/fragment in readPluginSource as agent_secrets.url does (a contract change: add its census row with the rollout line), or mask the URL form only in kubernetesSettingsOf (endpointOf keeps the path a tarball needs but not a query, so the query must be dropped too; the exact-version and absolute-path forms must pass through unchanged); either way plant a credential-bearing pi_legion URL in settingsFixtureFile and its literal in settingsFixturePlanted so the byte sweep covers the key."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/api/settings.go:192",
-      "description": "The new doc clause `each address it emits is endpointOf its value` is false: agent_secrets.url (:298) and the plugins pair (:301) never see endpointOf. Comments in this file are the specification the next reader edits against; state the rule (the four address keys ride endpointOf; agent_secrets.url needs none because the loader refuses userinfo on it; the plugins pair's status once the finding above is settled). Ride with the fix."
+      "severity": "minor",
+      "file": "packages/daemon/internal/api/settings.go:21-22",
+      "description": "The closing clause `Every other string is a name, a path, a quantity or a version, never a URL` overstates: omp_invocation (:212), omp_launch_prefix (:213), runtime.kubernetes.setup (:286), capabilities.decided (:261) and merge.by_hand expressions (:253) are operator-authored text emitted as written and uninspected — the hardening accepted since round 1 (every pod already runs or holds them). State that explicitly so the next field addition is judged against the real rule. Wording; Fast-follow."
     },
     {
       "severity": "minor",
-      "file": "packages/contracts/src/legion-api.test.ts:679-681",
-      "description": "The cross-language fixture sweep checks state.json for `BEGIN .*PRIVATE KEY` and `postgres://` only and was not extended with the userinfo shape; the Go sweep and Stage 1 cover it, so this is lost redundancy — one `not.toMatch(/:\\/\\/[^/@\\s]+:[^/@\\s]+@/)` beside the two lines."
+      "file": "packages/daemon/internal/api/settings.go:370",
+      "description": "pluginSourceOf repeats readPluginSource's scheme allowlist, so a plugin-source scheme the loader admits later would ride verbatim with no test failing; `u.IsAbs()` alone gives identical output on today's three forms (a version and an absolute path never parse absolute) and fails safe (`xxxxx`) on an unknown scheme. Hardening; Fast-follow."
     },
     {
       "severity": "minor",
-      "file": "docs/site/src/content/docs/legion/running-legion.md:584-590",
-      "description": "Nothing a reader of the state can reach says the address keys ride with userinfo masked as `xxxxx@`, so an operator seeing `envoy_url: http://xxxxx@…` cannot learn why it differs from the file; one clause in the running-legion bullet (and the version.go 35 entry) closes it."
+      "file": "packages/daemon/internal/api/settings.go:360",
+      "description": "endpointOf keeps EscapedPath, so a tarball provider that signs in the path (no such provider is configured; S3/GCS/Azure sign in the query) would survive the plugin mask; say so in pluginSourceOf's comment. Hardening; Fast-follow."
     },
     {
       "severity": "minor",
-      "file": "PR body, Contract change census, e2e-readers row",
-      "description": "The row's own grep returns three hits the row does not list (scripts/e2e/README.md, scripts/e2e/lib/multi-repo-acceptance.test.ts, scripts/e2e/stage3-4b13b-acceptance.sh); I read each — prose, Bun.serve stubs never parsed through the strict schema, additive jq — so none is affected; list them with those dispositions."
+      "file": "packages/daemon/internal/api/state.go:65-67; packages/contracts/src/legion-api.ts:329-332; packages/pi-legion/AGENTS.md:94; docs/kubernetes.md:3689-3692; packages/contracts/src/legion-api.test.ts:682",
+      "description": "The `xxxxx@` clause reached version.go, both CHANGELOGs and running-legion.md but not the field's own doc, the TS mirror's comment, pi-legion's AGENTS.md or docs/kubernetes.md (each still true: a masked URL is not a credential), and running-legion.md names the userinfo mask but not the plugin URL's dropped query and fragment; the TS fixture sweep's regex requires a colon in the userinfo, so a single-token `https://<token>@host/` shape is covered by the Go mask but not by that redundancy check. Consistency; Fast-follow."
     }
   ],
   "notProvenRisk": [
-    "`runtime.kubernetes.plugins.pi_legion`/`pi_envoy` may be an http(s) tarball URL (docs/kubernetes.md:1083-1090); the loader admits userinfo, query and fragment on it (kubernetes.go:359-363) and `settings` emits it verbatim, so a private or pre-signed tarball credential is served on the unauthenticated route (round 2 finding).",
     "The route's reachability beyond Legion's own pods is the deployment's NetworkPolicy, which this repository does not ship; the block describes the deployment's topology (namespace, image digest, scheduling, App ids and installation ids, broker URL and audience) to whatever reaches the API port.",
-    "The daemon/image lockstep at contract 35 (a daemon at 35 refuses an image at 34 at its boot gate) was not exercised in either round; the production check is its first run."
+    "Operator-authored argv and text (`omp_invocation`, `omp_launch_prefix`, `runtime.kubernetes.setup`, `capabilities.decided`, `merge.by_hand`) ride as written and uninspected; a credential an operator writes into one of them is served. Accepted since round 1 on the ground that every pod already runs or holds them.",
+    "A tarball provider that signs in the URL path would survive the plugin-source mask; none is configured.",
+    "The daemon/image lockstep at contract 35 (a daemon at 35 refuses an image at 34 at its boot gate) was not exercised in any round; the production check is its first run.",
+    "The kubernetes-only `plugins` surface was proven through config.Load + SettingsOf and the regenerated fixture, never on a booted kubernetes daemon (no cluster reaches a pod)."
   ],
-  "fastFollow": "settingsEmitted's values are prose nothing asserts while wantTop repeats the key names (reduce to a key set or assert each value); the settings fixture consts and loaders live in state_golden_test.go though settings_test.go is their principal consumer; endpointOf and runtime/sandbox's namedURL each need one cross-reference clause naming the other and why the path differs; the TS fixture sweep's userinfo regex; the running-legion clause on the mask."
+  "fastFollow": "settings.go:21-22 closing clause names the operator text emitted as written; pluginSourceOf drops the duplicated scheme clause (`u.IsAbs()` alone); the path-signing caveat in pluginSourceOf's comment; the `xxxxx@` clause (and the plugin URL's dropped query/fragment) in state.go, legion-api.ts, pi-legion AGENTS.md, docs/kubernetes.md and running-legion.md; the TS sweep regex covering a single-token userinfo; plus the implementer's two standing items (settingsEmitted values unasserted; fixture consts in state_golden_test.go)."
 }
