@@ -2,51 +2,63 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-791",
-  "completed": "2026-10-21T17:12:02Z",
+  "completed": "2026-10-21T18:05:21Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2096",
-  "round": 1,
-  "reviewedHead": "a72da8f92bb8c2b66e4d2648d42488b8717c2320",
-  "codeHead": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
+  "round": 2,
+  "reviewedHead": "0aa93c2340ff2de158016b3abdd3760f0efbca36",
+  "codeHead": "6097442543c3d042ec55a5c4684d58cd83223215",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 1,
+  "important": 2,
+  "minor": 3,
   "ci": {
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
-    "checkRuns": "lint, typecheck, test, pr-title all completed/success at 9b1a38ef (Tests run 39634012985, PR Title runs 39634012975 and 39634724197); the PR body's CI line names those runs at that commit",
+    "ciHead": "6097442543c3d042ec55a5c4684d58cd83223215",
+    "checkRuns": "lint, typecheck, test, pr-title all completed/success at 60974425 (Tests run 39644068365, PR Title runs 39644068444/39644328515); Legion Envoy and Contracts run 39644068302 in_progress on its non-required `dispatch` job only; the PR body's CI line names runs at that commit",
     "compareOnlyLegionSince": true
   },
   "proofLines": {
-    "implementer": "present: real legion binary over embedded Postgres in the implementer's pod, command, observation, head 9b1a38ef, negative controls (a)-(d)",
-    "tester": "present: independent instance, the implementer's predicates re-run, second file shape, head 9b1a38ef, negative controls (a)-(c); verified the implementer's proof by driving the same surface"
+    "implementer": "present at code head 60974425: real binary over embedded Postgres with userinfo planted on envoy_url and nats_urls; negative control (e) shows the round-1 binary serving the passwords verbatim",
+    "tester": "present at code head 60974425: independent instance planting userinfo on daemon_url, envoy_url, four nats_urls shapes (password, user-only, IPv6 host, path); negative controls (a) round-1 binary verbatim, (b) overlay nested type fails the derived walk, (c) strict-parse mutations"
   },
-  "thermonuclear": "pair run once at a72da8f9 (code 9b1a38ef): deep-review 1 Important Security[secret] (URL userinfo emitted verbatim on the unauthenticated route), 2 hardening Minors, 1 doc-comment Minor, 1 guard-transitivity Minor; code-quality 1 Important (same userinfo exposure), 1 Important (settingsClassifiedTypes hand list non-transitive), one Fast-follow",
+  "round1ThreadsAnswered": [
+    "PRRT_kwDORFy7ds6u305o: fixed in 60974425 — endpointOf masks userinfo on the four address keys; fixture, planted list and Stage 1 sweep cover it; accepted",
+    "PRRT_kwDORFy7ds6u305q: fixed in 60974425 — settingsConfigTypes() derives the struct set by a reflect walk; accepted",
+    "PRRT_kwDORFy7ds6u305t: fixed in 60974425 — admission_cap comment reworded; accepted"
+  ],
+  "censusRerun": "The body's `## Contract change census` searches re-run at 60974425: readers, literals, declarers, fixtures and producers match the body exactly; the e2e-readers row omits three hits of its own grep (scripts/e2e/README.md — prose; scripts/e2e/lib/multi-repo-acceptance.test.ts — Bun.serve stubs of the route, never parsed through the strict schema; scripts/e2e/stage3-4b13b-acceptance.sh — jq reads of named keys, additive), all unaffected; rollout line is an immediate refusal at the boot gate",
+  "thermonuclear": "pair run once at 0aa93c23 (code 60974425): deep-review 1 Important Security[secret] (runtime.kubernetes.plugins.pi_legion/pi_envoy emitted verbatim while readPluginSource admits an http(s) URL with userinfo, query and fragment), 2 hardening Minors; code-quality the same Important plus the false `each address it emits is endpointOf its value` comment, Minors to Fast-follow; both verified endpointOf and the derived walk sound",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/internal/api/settings.go:199,216-218",
-      "description": "Security[secret]: daemon_url, envoy_url, every nats_urls entry and dispatch_url are emitted verbatim on the unauthenticated GET /legion/v1/state, and URL userinfo is where the loader itself tells operators to put NATS/Envoy credentials (config.go:774-783 'use URL userinfo or a secret for credentials'; docs/kubernetes.md:1432-1434). The repository already treats userinfo on these same four keys as a credential that never lands where anyone can read it (runtime/sandbox/addresses.go:28-31, namedURL:317-330 renders `xxxxx@`). No guard catches it: settingsForbiddenKeys keys on names, settingsFixturePlanted on planted literals, the fixture's URLs carry no userinfo, Stage 1's sweep greps BEGIN|PRIVATE KEY|postgres:// only. Fix: strip or mask userinfo before emitting (one helper; the sandbox package's convention is `scheme://xxxxx@host`), plant a userinfo URL in settingsFixtureFile and its password in settingsFixturePlanted so the byte sweep proves it, and add a userinfo marker to Stage 1's jq sweep. agent_secrets.url is already safe (kubernetes.go:275 refuses userinfo at load)."
+      "file": "packages/daemon/internal/api/settings.go:301",
+      "description": "Security[secret]: the round-2 mask stops at the four address keys; `runtime.kubernetes.plugins.pi_legion`/`pi_envoy` are emitted verbatim on the unauthenticated route while `readPluginSource` (config/kubernetes.go:359-363) admits any http(s) URL with a host and stores `u.String()` with userinfo, query and fragment intact — the one URL-shaped key the loader puts no credential rule on (agent_secrets.url refuses userinfo at kubernetes.go:275; the four address keys refuse a query at config.go:788-793). docs/kubernetes.md:1083-1090 names the http(s) URL as a first-class source (a private or pre-signed tarball), so a basic-auth or pre-signed credential loads and is served to anything that reaches the API port, which under runtime: kubernetes is not loopback. Fix in this PR: either refuse userinfo/query/fragment in readPluginSource as agent_secrets.url does (a contract change: add its census row with the rollout line), or mask the URL form only in kubernetesSettingsOf (endpointOf keeps the path a tarball needs but not a query, so the query must be dropped too; the exact-version and absolute-path forms must pass through unchanged); either way plant a credential-bearing pi_legion URL in settingsFixtureFile and its literal in settingsFixturePlanted so the byte sweep covers the key."
     },
     {
       "severity": "important",
-      "file": "packages/daemon/internal/api/settings_test.go:15-37,157-176",
-      "description": "The leak gate's claim is false one level down: settings_test.go:15 says settingsClassifiedTypes is 'config.Config and every type reachable from it', and settings.go:16-17 and the PR body sell the allowlist on 'a Config field added later fails TestSettingsOfClassifiesEveryConfigField', but the test only iterates the hand list (:159); a new nested config struct type (`Config.Vault VaultConfig{Token string}`) needs one row for Config.Vault and then every field of VaultConfig is unclassified and invisible until someone adds the type. The list is complete today (18 of 18, the tester's scratch walk). Fix: derive the set by walking reflect from config.Config through pointer/slice/map/array element types, collecting every struct whose PkgPath is the config package, and fail on a reachable type the walk did not classify."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "The pull request makes `settings` a required member of the strict LegionStateResponse and of api.State (a process boundary) and carries no `## Contract change census` (the reviewer role text; docs/solutions/legion/a-strict-schemas-new-required-field-is-censused-across-every-parser-rigs-and-stand-ins-included-LEGION-578.md). The migration itself is complete (re-run at the head: the schema's readers are pi-shared/src/daemon-client.ts, pi-legion/scripts/skill-scenarios/daemon-standin.ts (migrated), the four regenerated fixtures, the two pi-legion test literals (migrated), the claude-envoy dist bundle (rebuilt); the three contract declarers and version.json agree at 35; scripts/e2e jq reads are additive), so the body must carry the census with each hit's disposition and the rollout (an immediate refusal: the boot gate's contract 34/35 mismatch)."
+      "file": "packages/daemon/internal/api/settings.go:192",
+      "description": "The new doc clause `each address it emits is endpointOf its value` is false: agent_secrets.url (:298) and the plugins pair (:301) never see endpointOf. Comments in this file are the specification the next reader edits against; state the rule (the four address keys ride endpointOf; agent_secrets.url needs none because the loader refuses userinfo on it; the plugins pair's status once the finding above is settled). Ride with the fix."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/api/settings.go:26",
-      "description": "The comment says `admission.cap` beside admission_cap is 'the live one', but both are the same cfg.AdmissionCap (daemon.go:1376, :1616) and nothing reloads it; an incident reader comparing the two will infer a live/file split that does not exist."
+      "file": "packages/contracts/src/legion-api.test.ts:679-681",
+      "description": "The cross-language fixture sweep checks state.json for `BEGIN .*PRIVATE KEY` and `postgres://` only and was not extended with the userinfo shape; the Go sweep and Stage 1 cover it, so this is lost redundancy — one `not.toMatch(/:\\/\\/[^/@\\s]+:[^/@\\s]+@/)` beside the two lines."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/site/src/content/docs/legion/running-legion.md:584-590",
+      "description": "Nothing a reader of the state can reach says the address keys ride with userinfo masked as `xxxxx@`, so an operator seeing `envoy_url: http://xxxxx@…` cannot learn why it differs from the file; one clause in the running-legion bullet (and the version.go 35 entry) closes it."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body, Contract change census, e2e-readers row",
+      "description": "The row's own grep returns three hits the row does not list (scripts/e2e/README.md, scripts/e2e/lib/multi-repo-acceptance.test.ts, scripts/e2e/stage3-4b13b-acceptance.sh); I read each — prose, Bun.serve stubs never parsed through the strict schema, additive jq — so none is affected; list them with those dispositions."
     }
   ],
   "notProvenRisk": [
-    "The route's reachability beyond Legion's own pods is the deployment's NetworkPolicy, which this repository does not ship; the served block now describes the deployment's topology (namespace, image digest, scheduling, GitHub App ids and installation ids, broker URL and audience) to anything that reaches the daemon's API port.",
-    "The daemon/image lockstep at contract 35 (a daemon at 35 refuses an image at 34 at its boot gate) was not exercised in this round; the production check will be the first run of it."
+    "`runtime.kubernetes.plugins.pi_legion`/`pi_envoy` may be an http(s) tarball URL (docs/kubernetes.md:1083-1090); the loader admits userinfo, query and fragment on it (kubernetes.go:359-363) and `settings` emits it verbatim, so a private or pre-signed tarball credential is served on the unauthenticated route (round 2 finding).",
+    "The route's reachability beyond Legion's own pods is the deployment's NetworkPolicy, which this repository does not ship; the block describes the deployment's topology (namespace, image digest, scheduling, App ids and installation ids, broker URL and audience) to whatever reaches the API port.",
+    "The daemon/image lockstep at contract 35 (a daemon at 35 refuses an image at 34 at its boot gate) was not exercised in either round; the production check is its first run."
   ],
-  "fastFollow": "settingsEmitted's values (settings_test.go:41-126) are prose nothing asserts, so a renamed JSON tag rots them silently while wantTop (:219-228) repeats the same key names; reduce the table to a key set or assert each value against the marshalled keys. The settings fixture consts and loaders live in state_golden_test.go (:30-156) though settings_test.go is their principal consumer."
+  "fastFollow": "settingsEmitted's values are prose nothing asserts while wantTop repeats the key names (reduce to a key set or assert each value); the settings fixture consts and loaders live in state_golden_test.go though settings_test.go is their principal consumer; endpointOf and runtime/sandbox's namedURL each need one cross-reference clause naming the other and why the path differs; the TS fixture sweep's userinfo regex; the running-legion clause on the mask."
 }
