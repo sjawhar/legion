@@ -59,6 +59,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The reviewer's pair rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) are the
+  one copy of these skills: the operator's dotfiles copies are gone. Each is shorter, and each
+  report now starts with `Verdict: APPROVE at <sha>` or `Verdict: CHANGES at <sha>`, which a PR
+  gate reads from the first line of a posted report. The deep review keeps its eight Security
+  Guidelines rows (`agent-def` and `transport` included) and its rule that a security finding
+  with no stated exploit path is hardening, not a finding.
+
 - The daemon client, the handoff-commit lookup and the jj lock come from `@legion/pi-shared`
   (`./daemon-client`, `./handoff-commit`, `./git-lock`), so `claude-envoy`'s Legion tool uses the
   same code (sjawhar/legion#2032). No behavior change.
