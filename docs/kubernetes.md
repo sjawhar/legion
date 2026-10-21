@@ -1233,8 +1233,14 @@ written on reached **17 GiB of its 20, 3.0 GiB free** (01:32Z on 2026-10-21) wit
 in six per-role copies of the Go build and module caches — an intermediate layout no shipped image
 ever produced, since a role container at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
 no `BUN_INSTALL_CACHE_DIR`, and the Go pair is new on the volume here. The remedy for a volume
-near full is manual, because nothing prunes: delete the stale `/legion/scratch/<role>` directories
-of roles that are not running, which returned 5.5 GiB on that volume in about a minute. Size it
+near full is manual, because nothing prunes: `chmod -R u+w` the stale `/legion/scratch/<role>`
+directories of roles that are not running and then delete them, which returned 5.5 GiB on that
+volume in about a minute. The `chmod` is not caution — the go command writes every extracted
+module directory read-only (mode 555), so a plain `rm -rf` of a module cache exits 1 with a
+`Permission denied` line per file and leaves bytes behind, and what it leaves is the extracted
+source while what it removes is the re-downloadable `cache/download`: run without the `chmod` the
+reclaim frees the cheap half and keeps the expensive one. The non-zero exit is the one mercy in
+that shape, since a scripted remedy fails loudly rather than silently. Size it
 knowing that moving these writes onto
 the volume removes the alarm they used to ring: an ephemeral-storage overrun was a kubelet
 eviction with a pod event naming the container, where ENOSPC on the PVC is no event at all and
