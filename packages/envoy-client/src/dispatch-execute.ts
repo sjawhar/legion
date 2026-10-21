@@ -967,7 +967,10 @@ function innerRefProblem(
         ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}`
         : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
   const item = ref.kind === "ask" ? "an ask" : `a ${ref.kind}`;
-  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
+  // An issue-owned ref names its owner as the issue, even when it names the item through one of
+  // the issue's documents, so the tool would act on the issue.
+  const actsOn = ref.owner.kind === "issue" ? ref.owner.issue : owner;
+  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${actsOn} and drop the ${ref.kind}: ${fix}`;
 }
 
 // The specs are frozen module constants, so each tool's schema is built once and shared;
@@ -1054,6 +1057,15 @@ async function resolveOwnerArguments(
     } else {
       const inner = innerRefProblem(tool, ref, refText);
       if (inner !== undefined) problems.push(inner);
+      // An ask or comment on an issue's document, written through the document, goes on as
+      // Dispatch indexes it, `KEY/<kind>/<id>`: the ask a dispatch ask cites it in is then a link.
+      if (
+        ref.owner.kind === "issue" &&
+        ref.artifact !== undefined &&
+        (ref.kind === "ask" || ref.kind === "comment")
+      ) {
+        args = { ...args, ref: refTarget(ref, ref.kind, ref.id) };
+      }
     }
   }
   const issueArgument = args.issue;
@@ -1276,8 +1288,8 @@ async function refComments(client: DispatchClient, ref: ParsedDispatchRef): Prom
 
 /** The asks an ask ref's id is matched against: its issue's, or its document's when the ref names
  * one. An issue's document lists them under the issue, since the artifact routes serve only an
- * unlinked document, so they are the issue's asks anchored in that document or opened from one of
- * its ask blocks. */
+ * unlinked document, so they are the issue's asks anchored in that document, opened from one of
+ * its ask blocks, or requesting its approval. */
 async function refAsks(client: DispatchClient, ref: ParsedDispatchRef): Promise<Ask[]> {
   if (ref.owner.kind === "issue" && ref.artifact === undefined) {
     return client.listIssueAsks(ref.owner.issue);
@@ -1285,7 +1297,10 @@ async function refAsks(client: DispatchClient, ref: ParsedDispatchRef): Promise<
   const { artifact } = await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true });
   if (ref.owner.kind === "project") return client.getArtifactAsks(artifact.id, "all");
   return (await client.listIssueAsks(ref.owner.issue)).filter(
-    (ask) => ask.anchor?.artifact_id === artifact.id || ask.block_artifact?.id === artifact.id
+    (ask) =>
+      ask.anchor?.artifact_id === artifact.id ||
+      ask.block_artifact?.id === artifact.id ||
+      ask.approval?.artifact_id === artifact.id
   );
 }
 

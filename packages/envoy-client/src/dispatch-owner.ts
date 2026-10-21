@@ -124,8 +124,8 @@ export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   if (spec) return { owner, kind: "spec", id: spec };
   if (log) return { owner, kind: "log", id: log };
   if (children) return { owner, kind: "children", id: children };
-  if (artifact && (documentItemKind === "ask" || documentItemKind === "comment")) {
-    if (!documentItemID) return null;
+  if (artifact && documentItemID !== undefined) {
+    if (documentItemKind !== "ask" && documentItemKind !== "comment") return null;
     return { owner, kind: documentItemKind, id: documentItemID, artifact };
   }
   if (artifact) {

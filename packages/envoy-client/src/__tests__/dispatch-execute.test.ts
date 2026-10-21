@@ -271,6 +271,37 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  test("cites an ask or comment written through its issue document at the issue address Dispatch indexes", async () => {
+    const requests: unknown[] = [];
+    const commentID = "cccccccc-0000-4000-8000-000000000042";
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      expect(new URL(String(url)).pathname).toBe("/api/v1/issues/DSP-41/asks");
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return response({
+        id: "ask-1",
+        issue_key: "DSP-41",
+        urgency: "med",
+        question: body.question,
+      });
+    };
+
+    await executeAsk(
+      {
+        issue: "DSP-41",
+        question: changedReleaseQuestion,
+        ref: `dispatch://DSP-41/artifact/spec/comment/${commentID}`,
+      },
+      fetchImpl as typeof fetch
+    );
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        question: `${changedReleaseQuestion}\n\nRef: dispatch://DSP-41/comment/${commentID}`,
+      }),
+    ]);
+  });
+
   // A gateway in front of Dispatch answers a non-2xx with its own page. The tool result is the
   // thrown message, so through the executor the agent must get the request, the status and a
   // plain-text excerpt rather than the page's markup, for a write and for a read alike, and advice
@@ -558,7 +589,7 @@ describe("executeDispatchTool", () => {
     ]);
     const specComment = `dispatch://DSP-42/artifact/spec/comment/${commentID}`;
     expect(await problemsOf("dispatch_comment", { ref: specComment, body: "Agreed." })).toEqual([
-      `ref ${specComment} names a comment on DSP-42/spec; dispatch comment would act on DSP-42/spec and drop the comment: reply in its thread with reply_to ${commentID} and issue DSP-42 and artifact spec`,
+      `ref ${specComment} names a comment on DSP-42/spec; dispatch comment would act on DSP-42 and drop the comment: reply in its thread with reply_to ${commentID} and issue DSP-42 and artifact spec`,
     ]);
     expect(await problemsOf("dispatch_doc_read", { ref: documentAsk })).toEqual([
       `ref ${documentAsk} names an ask on CORE/runbook-md; dispatch doc-read would act on CORE/runbook-md and drop the ask: read it with dispatch read, or name CORE/runbook-md with project CORE and artifact runbook-md`,
@@ -4075,6 +4106,16 @@ describe("executeDispatchTool", () => {
       answer: null,
       created_at: "2026-09-09T00:00:00Z",
     };
+    // The document's approval request is its ask too, though no quote anchors it.
+    const approvalID = "bbbbbbbb-0000-4000-8000-000000000042";
+    const approval = {
+      ...ask,
+      id: approvalID,
+      kind: "approval",
+      question: "Approve spec.md (version 3)?",
+      anchor: null,
+      approval: { artifact_id: "artifact-42", name: "spec.md", version: 3, requested_version: 3 },
+    };
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
@@ -4090,6 +4131,7 @@ describe("executeDispatchTool", () => {
         // The same prefix names an ask on another document of the issue.
         return response([
           ask,
+          approval,
           {
             ...ask,
             id: "aaaaaaaa-0000-4000-8000-000000000043",
@@ -4099,6 +4141,9 @@ describe("executeDispatchTool", () => {
       }
       if (target.pathname === `/api/v1/asks/${askID}`) {
         return response({ ask, replies: [], answers: [] });
+      }
+      if (target.pathname === `/api/v1/asks/${approvalID}`) {
+        return response({ ask: approval, replies: [], answers: [] });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
       throw new Error(`unexpected request: ${target.pathname}`);
@@ -4123,6 +4168,24 @@ describe("executeDispatchTool", () => {
       `/api/v1/asks/${askID}`,
       `/api/v1/references?to=${encodeURIComponent(`dispatch://DSP-42/ask/${askID}`)}`,
       `/api/v1/references?from=${encodeURIComponent(`dispatch://DSP-42/ask/${askID}`)}`,
+    ]);
+
+    requests.length = 0;
+    const approvalRead = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/artifact/spec/ask/bbbbbbbb" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    expect(approvalRead.text).toContain(`Ask id: ${approvalID}`);
+    expect(requests.slice(0, 3)).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/issues/DSP-42/asks",
+      `/api/v1/asks/${approvalID}`,
     ]);
   });
 
@@ -8775,6 +8838,67 @@ test("resolving a comment through a project-document reference resolves a short 
     comment: commentUuid,
   });
   expect(requests).toContain(`/api/v1/comments/${commentUuid}/resolve`);
+});
+
+test("resolving a comment written through its issue document resolves a short id among that document's comments", async () => {
+  const commentUuid = "cccccccc-0000-4000-8000-000000000045";
+  const requests: string[] = [];
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const target = new URL(String(url));
+    requests.push(target.pathname + target.search);
+    if (target.pathname === "/api/v1/issues/DSP-42") {
+      return response({
+        key: "DSP-42",
+        primary_artifact_id: "artifact-42",
+        artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+      });
+    }
+    if (target.pathname === "/api/v1/issues/DSP-42/comments") {
+      return response([{ id: commentUuid }]);
+    }
+    if (target.pathname === `/api/v1/comments/${commentUuid}/resolve`) {
+      return response({
+        id: commentUuid,
+        issue_key: "DSP-42",
+        artifact_id: "artifact-42",
+        author: { kind: "session", id: "session-42" },
+        body: "Name the fallback.",
+        anchor: null,
+        reply_to: null,
+        ask_id: null,
+        turn: null,
+        resolved: true,
+        resolved_by: { kind: "session", id: "session-42" },
+        resolved_at: "2026-09-15T00:00:00Z",
+        edited_at: null,
+        suggestion: null,
+        created_at: "2026-09-14T00:00:00Z",
+      });
+    }
+    throw new Error(`unexpected request: ${target.pathname}`);
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_resolve_comment",
+    args: { comment: "dispatch://DSP-42/artifact/spec/comment/cccccccc" },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result).toEqual({
+    text: `Resolved comment ${commentUuid} on DSP-42.`,
+    details: { issue: "DSP-42", comment: commentUuid },
+  });
+  expect(requests).toEqual([
+    "/api/v1/issues/DSP-42",
+    "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
+    `/api/v1/comments/${commentUuid}/resolve`,
+  ]);
 });
 
 test("refuses to resolve a comment named by an ask reference", async () => {

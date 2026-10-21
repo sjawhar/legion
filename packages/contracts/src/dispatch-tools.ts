@@ -664,7 +664,8 @@ export const dispatchToolSpecs = [
       comment: z
         .string()
         .describe(
-          "Comment id (uuid), or a dispatch://KEY/comment/<id> or " +
+          "Comment id (uuid), or a dispatch://KEY/comment/<id>, " +
+            "dispatch://KEY/artifact/<slug>/comment/<id> or " +
             "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " +
             "8+ character id prefix that is unique on its owner."
         ),

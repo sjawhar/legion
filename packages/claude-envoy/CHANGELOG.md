@@ -10,6 +10,9 @@
   print the issue's summary in its place. `dispatch read --ref
   dispatch://KEY/artifact/<slug>/comment/<id>` (and `/ask/<id>`) reads that comment or ask, where it
   was refused with a second, wrong `issue is required` line.
+- The `dispatch` skill: `dispatch read` refuses an issue's document, and an ask or comment on an
+  issue's document is cited `dispatch://KEY/ask|comment/<id>`, while `dispatch read` also takes it
+  written through the document.
 - The `dispatch` command (`dist/dispatch.js`) ends a write with `(not subscribed to KEY; …)` only
   when none of the session's Envoy subscriptions, as the listener records them, receives every
   event on the issue or document; it used to end every write that way. An ask or an ask reply

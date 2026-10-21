@@ -36862,7 +36862,7 @@ var dispatchToolSpecs = [
     example: { comment: "01234567-0000-4000-8000-000000000001" },
     description: "Resolve a review comment thread once it has been addressed - typically your own comment " + "after the document was fixed. Any session or human may resolve any open comment on an " + "open issue or project document; reopening a resolved comment is human-only (the dashboard). " + "Not for asks: use dispatch resolve-ask.",
     arguments: (z2) => ({
-      comment: z2.string().describe("Comment id (uuid), or a dispatch://KEY/comment/<id> or " + "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " + "8+ character id prefix that is unique on its owner.")
+      comment: z2.string().describe("Comment id (uuid), or a dispatch://KEY/comment/<id>, " + "dispatch://KEY/artifact/<slug>/comment/<id> or " + "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " + "8+ character id prefix that is unique on its owner.")
     }),
     strict: true
   },
@@ -38304,8 +38304,8 @@ function parseDispatchRef(ref) {
     return { owner, kind: "log", id: log };
   if (children)
     return { owner, kind: "children", id: children };
-  if (artifact && (documentItemKind === "ask" || documentItemKind === "comment")) {
-    if (!documentItemID)
+  if (artifact && documentItemID !== undefined) {
+    if (documentItemKind !== "ask" && documentItemKind !== "comment")
       return null;
     return { owner, kind: documentItemKind, id: documentItemID, artifact };
   }
@@ -40625,7 +40625,8 @@ function innerRefProblem(tool, ref, refText) {
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project}${documentArgument}`;
   const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
   const item = ref.kind === "ask" ? "an ask" : `a ${ref.kind}`;
-  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
+  const actsOn = ref.owner.kind === "issue" ? ref.owner.issue : owner;
+  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${actsOn} and drop the ${ref.kind}: ${fix}`;
 }
 var toolSchemas = new Map;
 function toolSchema(tool) {
@@ -40669,6 +40670,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
       const inner = innerRefProblem(tool, ref, refText);
       if (inner !== undefined)
         problems.push(inner);
+      if (ref.owner.kind === "issue" && ref.artifact !== undefined && (ref.kind === "ask" || ref.kind === "comment")) {
+        args = { ...args, ref: refTarget(ref, ref.kind, ref.id) };
+      }
     }
   }
   const issueArgument = args.issue;
@@ -40820,7 +40824,7 @@ async function refAsks(client, ref) {
   const { artifact } = await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true });
   if (ref.owner.kind === "project")
     return client.getArtifactAsks(artifact.id, "all");
-  return (await client.listIssueAsks(ref.owner.issue)).filter((ask) => ask.anchor?.artifact_id === artifact.id || ask.block_artifact?.id === artifact.id);
+  return (await client.listIssueAsks(ref.owner.issue)).filter((ask) => ask.anchor?.artifact_id === artifact.id || ask.block_artifact?.id === artifact.id || ask.approval?.artifact_id === artifact.id);
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, use) {

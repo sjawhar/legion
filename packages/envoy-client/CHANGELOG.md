@@ -10,12 +10,14 @@
   `dispatch://KEY/artifact/<slug>[@vN]`) with `dispatch doc-read --ref <ref>`. An issue read
   prints the issue's summary whatever document it names, so `dispatch read --issue KEY --artifact
   spec.md` used to print that summary in place of the spec without a word.
-- `dispatch read`, `resolve-comment` and `resolve-ask` take an ask or comment on an issue's document
-  addressed through the document, `dispatch://KEY/artifact/<slug>/comment/<id>` (and `/ask/<id>`),
-  as a project document's always were; a prefix id is matched among that document's comments or
-  asks. The read used to refuse it with the grammar and a second, wrong `issue is required; supply
-  issue or set LEGION_ISSUE`. A `--ref` that parses as no reference is now refused with the grammar
-  alone, and `LEGION_ISSUE` never stands in for it.
+- An ask or comment on an issue's document may be addressed through the document,
+  `dispatch://KEY/artifact/<slug>/comment/<id>` (and `/ask/<id>`), as a project document's always
+  could. `dispatch read` and `resolve-comment` match a prefix id among that document's comments or
+  asks (its approval request included); `dispatch ask --ref` cites it as `dispatch://KEY/<kind>/<id>`,
+  the form Dispatch indexes; `resolve-ask`, `edit-ask` and `follow` take its id as they take
+  `dispatch://KEY/ask/<id>`'s. The read used to refuse it with the grammar and a second, wrong
+  `issue is required; supply issue or set LEGION_ISSUE`. A `--ref` that parses as no reference is
+  now refused with the grammar alone, and `LEGION_ISSUE` never stands in for it.
 - A `dispatch` write ends with `(not subscribed to KEY; envoy_subscribe …)` only when the Envoy
   listener's record of the session's topics holds none that receives every event on the issue or
   document (`subscriptionCovers`, the listener's wildcard rule). It used to end every write that
