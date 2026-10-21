@@ -2,45 +2,43 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T03:30:00Z",
+  "completed": "2026-10-21T03:55:00Z",
   "proof": [
     {
-      "criterion": "The reclaim remedy names every directory this layout puts on the volume, including the one it newly creates.",
-      "surface": "docs/kubernetes.md's issue_volume paragraph, read against roleEnvironment and podkind's pod environment, and against this volume.",
-      "command": "grep -n 'scratchRoot + \"' packages/daemon/internal/runtime/sandbox/manifest.go; grep -n UV_ packages/daemon/internal/runtime/sandbox/podkind.go; du -sh /legion/scratch/tmp/*",
-      "observed": "The renderer puts cache, data, tmp, state/<role> and the Go pair on the volume (manifest.go:728-738) and the pod adds UV_CACHE_DIR=/legion/uv/cache and UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue> (podkind.go:194-196). The clause now names /legion/scratch/cache, /legion/scratch/tmp, /legion/scratch/bun/install/cache, /legion/go and /legion/uv, keeps the per-role state home named as small and not a cache, and says why tmp cannot be left out: a role at the merge base is told no TMPDIR, so a killed build's residue died with its container, where here it lives as long as the issue. Measured on this volume before writing it: `847M /legion/scratch/tmp/go-build2602770943`, the largest single tree there, with the volume at 12G used of 20G.",
-      "headSha": "054a8de75719",
-      "negativeControl": "The previous clause, run to the end on this volume, returned 310 MB and left the 851 MB tree — the tester's round-17 measurement, which is what a named set incomplete against its own renderer costs an operator."
+      "criterion": "Every directory this layout puts on the issue volume is accounted for in the reclaim paragraph — on the delete list or in an exemption that says why — and the paragraph no longer contradicts its own sizing sentence.",
+      "surface": "docs/kubernetes.md's issue_volume paragraph, enumerated against the renderer rather than against itself.",
+      "command": "grep -n 'scratchRoot + \"' packages/daemon/internal/runtime/sandbox/manifest.go; grep -n 'UV_' packages/daemon/internal/runtime/sandbox/podkind.go; for p in /legion/scratch/cache /legion/scratch/data /legion/scratch/tmp '/legion/scratch/state/<role>' /legion/scratch/bun/install/cache /legion/go /legion/uv; do sed -n '1228,1262p' docs/kubernetes.md | grep -cF -- \"$p\"; done",
+      "observed": "The renderer's set is cache, data, tmp, state/<role>, bun/install/cache (manifest.go:731-737, 758), the Go pair under /legion/go and uv's /legion/uv (podkind.go:194-196). Each of the seven appears in the paragraph: five on the delete list (cache, tmp, bun/install/cache, /legion/go, /legion/uv), two exempted below it — the per-role state home, and /legion/scratch/data, named as the shared XDG_DATA_HOME and as the one path a rebuild cannot restore, with the instruction to measure it first and delete it only when it is the reason the volume is full. The claim sentence now says it accounts for every directory either on the list or in the two exemptions, so the sentence and the sizing sentence's 'one data home' agree about what exists.",
+      "headSha": "5c6d3ada654e",
+      "negativeControl": "The count above is the control and it is what failed before this round: `/legion/scratch/data` returned 0 at the previous head, under a sentence claiming the set was complete. Re-running it after any future change to roleEnvironment is how the claim stays checkable — a path added to the renderer and not to the paragraph returns 0 again."
     },
     {
-      "criterion": "An operator's reclaim under a running install can no longer leave the issue in a state only a person can clear.",
-      "surface": "The rendered install block's own shell fragment, executed on this pod's /usr/bin/flock.",
-      "command": "flock -w 1 -- ./missing true; stat -c '%F' ./missing; ( set -eu; cache=./cachefile; mkdir -p -- \"$cache\" ); ( set -eu; cache=./cachefile; legion_install() { [ -d \"$cache\" ] || rm -f -- \"$cache\"; mkdir -p -- \"$cache\"; /usr/bin/flock -w 1 -- \"$cache\" true; }; legion_install || legion_install )",
-      "observed": "flock on a missing path exits 0 and leaves a regular empty file, which is the state the tester's delete-mid-install rig produces. Over that file the old shape (mkdir outside legion_install) exits 1 with `mkdir: Already exists` under set -eu, before any agent, and would do so on every later installing launch of the issue. The new shape — `[ -d \"$cache\" ] || rm -f -- \"$cache\"` then `mkdir -p` inside legion_install, before each attempt's lock — clears exactly that file, reaches the install, exits 0, and leaves the path a directory; an attempt whose cache was deleted after a previous one remakes it and locks the real directory, exit 0. plugins.go:218-230, with the invariant comment rewritten to say why the mkdir is inside and what the outside shape costs.",
-      "headSha": "054a8de75719",
-      "negativeControl": "The same runs with the rm -f guard dropped reproduce `mkdir: Already exists`, exit 1 — so the guard, not the move alone, is what clears the stale file; and the move alone is what makes a deleted cache recoverable on the retry."
+      "criterion": "The between-turns rule states what the install block does not fix, so an operator is not left believing the delete is safe under a running install.",
+      "surface": "The same paragraph, read against the tester's round-18 measurements of the rendered block.",
+      "command": "read docs/kubernetes.md's between-turns sentence at this head",
+      "observed": "It now says a lock whose inode is unlinked protects nothing, so the mutual exclusion is still lost under a delete mid-install (the tester's control: B enters at 886.599 while A is inside until 888.599, against a serialised control), and that what each attempt's mkdir and non-directory removal buys is that the damage stops at that install instead of leaving a regular file that fails every later installing launch until a person clears it.",
+      "headSha": "5c6d3ada654e",
+      "negativeControl": "The tester's run of this head's block from an already-poisoned path exits 0 — the fix repairs a volume the old shape had already broken — while the old block from the same fixture exits 1 at `mkdir: File exists`, and this head's block with only the `rm -f` guard removed fails the regular-file case again. Those two controls, chosen to fail differently, are what keep the sentence's credit on the guard rather than on the move."
     },
     {
-      "criterion": "Nothing else at this head moved, and the package still builds and passes.",
-      "surface": "The daemon module in this role container.",
-      "command": "go build ./... && go test ./internal/runtime/sandbox/ ; gofmt -l packages/daemon/internal/runtime/sandbox/",
-      "observed": "`ok github.com/sjawhar/legion/daemon/internal/runtime/sandbox 136.563s`; build clean; gofmt printed nothing. The round's diff is two files, docs/kubernetes.md and plugins.go.",
-      "headSha": "054a8de75719",
-      "negativeControl": "The install block is pinned by the sandbox suite's rendered-script assertions, which read the block's text: a change to the fragment that broke the wrapper's shape fails there rather than in production. The live six-role delete-mid-install race is the tester's rig and is not claimed here."
+      "criterion": "Nothing else moved: this is a documentation round, so the code proofs of the previous head stand unre-run.",
+      "surface": "The round's diff and the repository's own text check.",
+      "command": "jj diff --stat; bash .github/scripts/check-private-names.sh",
+      "observed": "One file, docs/kubernetes.md. `check-private-names: no file or path names the private deployment repository or the company …` over 4693 files. No Go file, test, Dockerfile or workflow is touched, so `go test ./internal/runtime/sandbox/` (`ok … 136.563s`) and the install-block proofs at 054a8de75719 carry to this head.",
+      "headSha": "5c6d3ada654e",
+      "negativeControl": "If the round had touched code, the diff stat would name it; the stat is the check, and it names one markdown file."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md — the reclaim clause names every directory the layout creates, says why /legion/scratch/tmp is this layout's own new failure mode, and gives the lock reason for deleting between turns.",
-    "packages/daemon/internal/runtime/sandbox/plugins.go — installBlock makes $BUN_INSTALL_CACHE_DIR inside legion_install before each attempt's lock, after removing a non-directory at that path; the invariant comment says why."
+    "docs/kubernetes.md — /legion/scratch/data exempted with its reason, the completeness claim made checkable against the renderer, and the between-turns sentence given the limit of what the install block fixes."
   ],
   "trickyParts": [
-    "flock creates a missing lock path as a regular file and exits 0. That is why a mkdir outside the retry is a one-way failure rather than a transient one: the file persists, and every later installing launch of the issue dies at mkdir under set -eu until a person removes it.",
-    "The removal is scoped to a non-directory at exactly $BUN_INSTALL_CACHE_DIR. A directory there is never removed, so no cache is ever destroyed by the guard."
+    "The data home is exempted rather than listed because it is not re-derivable: Oh My Pi relocates its whole profile root to $XDG_DATA_HOME/omp where that directory exists, so a delete costs stored state rather than a rebuild. It is also the one unlisted path that can grow without bound, which is why the exemption tells the operator to measure it rather than to ignore it."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The round-17 finding is the round-16 finding at one more remove: my own proof's `observed` listed four shared directories from the renderer — cache, data, tmp, bun/install/cache — and the clause I then wrote carried two of them, with no sentence saying why the others were out. The observation was right and the conclusion dropped part of it, which no re-reading of the clause finds; only reading the clause back against the observation that produced it does.",
-    "A third mis-authored commit landed this round and the tester reported it against itself (7e9f3f08131f, authored legion-implementer[bot]; handoff_complete refused it and it re-committed as 2b113adafff9). The rule's sharper form: in a workspace six roles share, the guard is not `is the working copy clean` but `is @ mine`, and it must run before anything — another role included — writes. The same defect lost an uncommitted retro learning of mine into the tester's split; the architect recovered it from jj's operation log with `jj --at-op <op> file show`."
+    "Three rounds in a row on one paragraph, each a sentence that was true when written and false against the system it described: the remedy pointing at the intermediate per-role layout, the set missing tmp and uv, the set missing data under a claim of completeness. What finally made it checkable was not more care but a different kind of sentence — one whose claim can be enumerated against the renderer ('accounts for every directory this layout creates, either on its delete list or in the two exemptions below it') rather than asserted. A prose claim that cannot be mechanically checked against the code it describes will drift again.",
+    "The pull request body carried a false sentence of the architect's about a lost file, inferred from jj's operation log. It is corrected in place rather than deleted, because that section is what the merger quotes into READY and a silent removal leaves the inference in the record's history with nothing marking it wrong."
   ]
 }
