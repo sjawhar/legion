@@ -23,8 +23,12 @@ if [ "${1-}" != --install ] && [ "$#" -lt 2 ]; then
   exit 2
 fi
 
-# The toolchain's own go, never a wrapper on PATH: a version manager's shim can rewrite GOBIN.
+# The toolchain's own go, never a wrapper on PATH: a version manager's shim can rewrite GOBIN. It
+# runs with its own GOROOT: a GOROOT the environment exports (a version manager's, for an older Go
+# that switched to this toolchain because go.mod asks for a newer one) would have it compile with
+# that older release's tools, which refuse ("compile: version ... does not match go tool version").
 goroot="$(go env GOROOT)"
+export GOROOT="$goroot"
 go_cmd="$goroot/bin/go"
 go_version="$("$go_cmd" env GOVERSION)"
 
