@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-62",
-  "completed": "2026-10-21T02:20:00Z",
-  "round": "test round 2 — the tester's red test answered: the app pod's grace period now covers the pre-stop wait and the server's shutdown. Every headSha below was corrected in this round: the previous write cited f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46, which is not a commit (GitHub answers 422 for it); the real commit of that round is f8ec21dfc724e27e1b75c84ba4ff763902708436, and every id in this file is now one `jj log -r <id>` resolves.",
+  "completed": "2026-10-21T06:05:00Z",
+  "round": "review round 2 — the reviewer's two important findings answered: the coupling between the pod's grace period and cmd/dispatch's stopGrace is now enforced by a test on the side that owns the constant, and the README puts the five seconds where it belongs. The rendering is unchanged this round: the three pod goldens and the Serve golden are byte-identical, so the proofs below that read the rendering stand at the head they name.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2089",
-  "head": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
+  "head": "8f9cfe58d18d355d7f5d1bb14d90e30ec4589680",
   "base": "envoy-infra-integration at ba3f6b7e2bbf0a8119bd8b597980904f3b4ab6e2",
   "proof": [
     {
@@ -63,6 +63,22 @@
       "observed": "The app pod now asks for terminationGracePeriodSeconds 35 — the five seconds of routing window plus the thirty cmd/dispatch/shutdown.go's stopGrace builds the server's shutdown for — and the driver renders `container envoy-dispatch lifecycle={\"preStop\":{\"exec\":{\"command\":[\"sleep\",\"5\"]}}} grace=35`. The tester's test passes unmodified: `--- PASS: TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown`, and `jj diff --from 51f3c6a0897290ee16d810cef815092c29b2f9f1 packages/envoy/infra/gcp/dispatch_test.go` shows that test and its helpers (dispatchServerStopGrace, toInt) unchanged — the only hunk is this implementer's own exact-value test, which asserted 30 and now asserts the wait plus the server's grace.",
       "headSha": "6e01eacc6cca024498b267bd3a5eece355b4beb1",
       "negativeControl": "With the grace period back at 30 the tester's test fails, naming what the pod would spend (`the kubelet kills the pod … leaving envoy-dispatch 25 seconds after SIGTERM where its shutdown is built for 30`), and the implementer's exact-value test fails with it; 35 was restored and every check re-run."
+    },
+    {
+      "criterion": "Review round 2, finding 1: the 35-second grace period is coupled to cmd/dispatch's stopGrace by prose alone, and the unguarded direction — raising stopGrace — is the one an editor takes.",
+      "surface": "packages/envoy/cmd/dispatch's own test binary, which is package main and reads the unexported stopGrace directly, against the byte-exact record of the pod the component renders (packages/envoy/infra/gcp/testdata/dispatch-pod.golden). It runs in CI's envoy-go lane, the lane an editor of stopGrace already runs; the infra module cannot see that constant, which is why its own test mirrors the number.",
+      "command": "cd packages/envoy && go test -p 1 -count=1 -run 'TestDispatchPodGracePeriodCoversStopGrace' ./cmd/dispatch/ -v",
+      "observed": "PASS. The test parses the golden as JSON, reads the app pod's terminationGracePeriodSeconds and the envoy-dispatch container's preStop sleep, and requires grace - wait >= int(stopGrace/time.Second); it fails rather than skips when the file is missing, is not that JSON, carries no grace period, has no envoy-dispatch container, has no preStop exec, or whose hook is not a sleep of whole seconds. stopGrace's own comment and packages/envoy/AGENTS.md's row now name the pod as the third runtime granting those seconds and name this test as what catches the drift.",
+      "headSha": "8f9cfe58d18d355d7f5d1bb14d90e30ec4589680",
+      "negativeControl": "With stopGrace raised to 45 the test fails: `packages/envoy/infra/gcp/testdata/dispatch-pod.golden asks for 35 seconds of termination grace and spends 5 of them on envoy-dispatch's pre-stop sleep, leaving its shutdown 30 seconds where stopGrace in packages/envoy/cmd/dispatch/shutdown.go builds it for 45 … Whoever moves one of the two moves the other.` 30 was restored and the test re-run green before the push."
+    },
+    {
+      "criterion": "Review round 2, finding 2: the README put the five seconds after removal from routing, promising the propagation window covered plus five seconds of slack, where the five seconds is that window.",
+      "surface": "packages/envoy/infra/README.md, the paragraph an operator reads to decide whether a release is safe during the working day.",
+      "command": "sed -n '200,222p' packages/envoy/infra/README.md",
+      "observed": "The sentence now reads: a stopping pod keeps serving for five seconds after it is told to stop, which is the window its removal from routing has to propagate, and is what the pre-stop wait is for. The rest of the paragraph is unchanged, including the sentence three later saying whether five seconds is enough across a real release is unmeasured — which is only actionable on this reading.",
+      "headSha": "8f9cfe58d18d355d7f5d1bb14d90e30ec4589680",
+      "negativeControl": "bash .github/scripts/check-private-names.sh passed over the whole tree (4365 files), so the rewritten prose names no private host, company or repository; and the component's own tests are unchanged and green, since no rendering moved with it."
     }
   ],
   "objectInventory": [
@@ -99,6 +115,9 @@
     "The plan named DependsOn for the app Deployment alone. The simplify pass's efficiency reviewer found that the listener dials the same SOCKS5 proxy and that envoy-listener exits on a failed initial NATS connect (cmd/listener/main.go), so on a fresh create it would crash-loop into Kubernetes' backoff while the update waits out its rollout. The listener now takes the same dependency, with its own assertion.",
     "The plan's task 12 included a dispatch ask to the project owner to run the consuming stack's pulumi preview. The architect ruled at 21:05Z that this preview is INFRA-63's, which runs it in the repository where the stack lives immediately before its apply, and told this implementer not to open the ask; what INFRA-62 owes instead is the object inventory above, which is this handoff's objectInventory.",
     "The plan rendered no lifecycle hook. Review round 1 added one: the app's envoy-dispatch container waits five seconds before it is signalled, because EndpointSlice removal is asynchronous while the server closes its listener on SIGTERM. The architect decided between the reviewer's two options (add the delay, or document the residual) and chose the delay, so that a request lost during INFRA-63's measured release does not cost a pull request here, a pin bump, a regenerated SDK and a second apply to measure again."
+    ,
+    "An earlier write of this handoff and of the pull request's body cited f8ec21dfc7245cd25eec7a9ee24c6b05b1aa0d46 as review round 1's code head. That is not a commit — GitHub answers 422 for it and `jj log -r` does not resolve it; it shares its prefix with the real commit, f8ec21dfc724e27e1b75c84ba4ff763902708436, and was wrong in its tail because the tail was typed rather than read. Both artefacts were corrected and say so in their own text, and every 40-character id in each is now checked against `jj log -r <id>` before it is posted. The wrong id survives deliberately in one place, the pull request body's correction paragraph, where it is the subject: a later tidy-up that 'fixes' it there destroys the record.",
+    "The plan rendered no guard across the module boundary. Review round 2 added one: packages/envoy/cmd/dispatch/pod_grace_period_test.go reads stopGrace and the rendered pod's golden, so raising stopGrace alone now fails a test in the lane its editor runs. The reviewer offered that or an exported constant both modules derive from, and sized the test as the smaller; it costs no exported API and no module surgery."
   ],
   "openQuestions": [
     "The front door's tailscale container keeps the sidecar's 100m CPU / 128Mi, with requests equal to limits. It is now a single-replica Deployment whose userspace SOCKS5 proxy carries every app replica's NATS traffic as well as all tailnet HTTPS, SSE and websocket traffic, and it cannot scale out by design. Nothing measured says 100m is too little, and raising it would change the pod golden, so this change leaves it as it was; INFRA-63's apply is the first run that can measure it, and the number may need raising with the replica count.",
