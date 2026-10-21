@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-31",
+  "completed": "2026-10-21T06:05:00Z",
+  "ledger": "Retro removed `.legion/INFRA-31/` at fcdf00b5c9bb before READY, so the twenty-one rounds before this one are not in this file. The full ledger — 56 proof entries, two resolved failures and every round's verdict — is the version of this path at commit 127f15e892fbf297290f9c60f6349f55581b5782, which is where a later reader should go rather than treating this file as the record of the issue. This file is round twenty-two alone, and round twenty-two is a confirmation.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Its one claim this round is a negative one — that it ran no local build, because the merge resolution touches a single changelog and nothing a build reads — and that is the claim I checked rather than its passes. It holds, and the way to see it is the merge's own edits rather than its diff against either side: the files the merge changes against our pre-merge head and against main@origin intersect in exactly one path, `packages/claude-envoy/CHANGELOG.md`. Every other file in the diff is one side's own, carried through untouched. One nuance belongs with the verdict: paths a build reads did move onto this head through main's half of the union (`packages/pi-envoy/package.json`, `packages/pi-envoy/src/skills-guard.test.ts`, the rewritten `skills/`), so the honest form of the claim is that the resolution touched nothing a build reads, and the union of the two sides is what `Tests` at this head verifies — which it now has, green."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The forward merge leaves this branch's diff unchanged, so the round is a confirmation rather than a test round — and the equality is computed by me rather than inherited from the party that produced it.",
+      "surface": "the unchanged-diff fingerprint of `skill://legion-worker/references/conflicts-and-rewrites.md`, at the head my last E2E line named and at this one",
+      "command": "`jj diff --from \"fork_point(main@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum`, under `set -o pipefail`, at 127f15e892fb and at 7c2d7dedefec, after a fetch",
+      "observed": "8e8c72eded1a1125cedc8fd8906509ac433de0d98a52e78259cb9f56f114f835 at both heads — unchanged. So nothing of the product diff moved across the merge, and the real-surface verification recorded at 656ae060f0f3 stands: the shim making all seven told directories of the shared scratch, the child's `mktemp -d` landing in the shared TMPDIR, and both fences biting under their mutations.",
+      "headSha": "7c2d7dedefec",
+      "negativeControl": "the same command at the previous merge is the control on the method: at 0aa6f3bfa90d to 656ae060f0f3 it printed two different hashes and sent that round to a full test round. A check that returned `unchanged` for both merges would be measuring nothing."
+    },
+    {
+      "criterion": "The conflicted file is a clean union: both sides' entries present, neither side's text reworded.",
+      "surface": "`packages/claude-envoy/CHANGELOG.md` at the merge and at each of its two parents",
+      "command": "`jj file show` of the path at fcdf00b5c9bb (ours), 820d08d91cd7 (main) and 9094943b88c8 (the merge), then set differences of their lines in both directions, and a read of the `### Changed` section",
+      "observed": "A union, and the one line that is not is the right one. No line of our side is missing from the merge. Exactly one line of main's is: the Added-section sentence reading `contract 33, pinned in …`, which the merge carries as `contract 34` — this branch's own bump superseding main's number in a sentence both sides touched, not an edit to main's entry. No line in the merge comes from neither parent, so nothing was written by hand into the resolution. Both entries stand under `### Changed`: ours declaring daemon API contract 34 for the shared issue scratch, main's the rewritten dispatch skills, each verbatim.",
+      "headSha": "7c2d7dedefec",
+      "negativeControl": "the third comparison is the control that matters — lines in the merge from neither parent would be a hand-written resolution wearing the look of a union, and there are none."
+    },
+    {
+      "criterion": "Daemon API contract 34 still clears what is published and what main declares — the place the previous merge's surprise came from, so confirmed rather than inherited.",
+      "surface": "the npm registry and main@origin",
+      "command": "`npm view @sjawhar/pi-legion@latest version` and `… legion.daemonApiVersion`; `jj file show -r main@origin packages/daemon/internal/api/version.go | grep DaemonAPIVersion`",
+      "observed": "The registry's latest is 10.16.0 declaring contract 33, and main at 820d08d91cd7 declares `const DaemonAPIVersion = 33`. This branch's 34 is above both, so the collision that forced 33 to 34 has not repeated. Checked at this head rather than taken from the handoff, which is what the last merge taught: the number moved under this branch once already while nobody was looking at the registry.",
+      "headSha": "7c2d7dedefec",
+      "negativeControl": "main's own 33 is the control: had it been 34 or higher, this branch's number would be the one that must move, and the same two commands would have said so."
+    }
+  ],
+  "ci": "Read, not re-run, and the verdict of this round. The code head is the merge commit 9094943b88c8, not the branch head: 7c2d7dedefec is the implementer's handoff, `.legion/` only with `skip-checks: true`, and carries no check run at all — an empty set at the branch head is the shape the merger must not read as a missing verdict. At 9094943b88c8, with `per_page=100`: lint, typecheck, test, pr-title and build all `success`. I waited for `test` rather than passing the round around it, and ran nothing locally this round: the fingerprint is unchanged and the merge's only own edit is a changelog, so a local suite run would have been reassurance rather than evidence. Three traps for whoever reads CI here next: these commits carry 30 or more check runs, so a `gh api …/check-runs` without `per_page=100` silently drops some of the required set; a push carrying code and handoff together leaves the code commit with no run of its own; and a run can show `cancelled` lanes beside a `success` one in the same run id, which is GitHub's concurrency cancelling a superseded run rather than a failure (5c6d3ada654e is this branch's worked example).",
+  "notes": "**Two things on this head are expected and are not findings.** `.legion/INFRA-31/` is back, because the implementer's handoff re-created it after retro's removal at fcdf00b5c9bb; retro removes it again before READY. And main's paths now sit above the reviewer's approved head, which the unchanged fingerprint turns into a confirmation rather than new work to review. **What this round did not do, deliberately:** no suite run, no mutation, no real-surface drive. The fingerprint equality is the whole report, and re-running the proofs at an identical diff would have produced a green that says nothing about this merge. **For the reviewer and the merger:** the twenty-one rounds before this one are in `.legion/INFRA-31/test.json` as of commit 127f15e892fb, which retro removed from the head by design. The last real-surface verification is at 656ae060f0f3 and it stands at this head by the fingerprint above."
+}
