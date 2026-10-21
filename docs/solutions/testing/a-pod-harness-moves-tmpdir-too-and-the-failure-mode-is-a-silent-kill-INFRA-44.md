@@ -68,10 +68,13 @@ What this pod cannot show is whose budget that memory spends. The sandbox is cgr
 `cpuacct`, `cpuset`, `devices`, `job`, `memory` and `pids`, and the counter is
 `/sys/fs/cgroup/memory/memory.usage_in_bytes`. That counter is the sandbox's, not the container's:
 `memory.limit_in_bytes` reads 20,401,094,656 bytes, equal to `free -k`'s total of 19,922,944 KiB,
-and is neither the 6Gi the golden pod JSON gives the implementer and tester nor the 1Gi it gives
-the architect, planner and merger (`defaultResources`,
-`packages/daemon/internal/config/kubernetes.go`). The rule is Kubernetes' own, not verified from
-inside this sandbox, which can see no per-container counter: for a memory-backed `emptyDir`,
+and matches no role's own limit. Each role container has a memory limit of its own and they
+differ — request equal to limit, 1Gi for the architect, the planner and the merger, 4Gi for the
+reviewer, 6Gi for the implementer and the tester — which is the pod spec's, not something the
+container can read (`defaultResources`, `packages/daemon/internal/config/kubernetes.go`, and the
+recorded pod shape `packages/daemon/internal/runtime/sandbox/testdata/golden/root.json`).
+The rule is Kubernetes' own, not verified from inside this sandbox, which can see no
+per-container counter: for a memory-backed `emptyDir`,
 "files you write count against the memory limit of the container that wrote them"
 (https://kubernetes.io/docs/concepts/storage/volumes/#emptydir). So treat the write as spending
 the role's own memory budget; on a 1Gi role that is a smaller budget than the disk it was avoiding.
