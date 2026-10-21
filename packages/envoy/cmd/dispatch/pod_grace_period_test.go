@@ -42,8 +42,8 @@ type dispatchPod struct {
 
 // TestDispatchPodGracePeriodCoversStopGrace holds the Kubernetes side of stopGrace, which nothing
 // else does: the pod that gcp:Dispatch renders is one of the runtimes that grant these seconds,
-// its grace period is written out as a number in another Go module's component, and that module's
-// own test mirrors stopGrace by hand. So raising stopGrace here breaks nothing over there, and
+// its grace period is written out as a number in another Go module's component, and this test is
+// what holds that number to stopGrace. So raising stopGrace here breaks nothing over there, and
 // this test is what tells whoever raises it that the pod has to be raised with it.
 //
 // The kubelet runs the pre-stop hook and the server's shutdown inside the one
@@ -86,9 +86,8 @@ func TestDispatchPodGracePeriodCoversStopGrace(t *testing.T) {
 		t.Fatalf("the preStop sleep of %s in %s waits %q, which is no whole number of seconds: %v", dispatchPodContainer, dispatchPodGoldenPath, command[1], err)
 	}
 
-	needed := int(stopGrace / time.Second)
-	if grace-wait < needed {
-		t.Fatalf("%s asks for %d seconds of termination grace and spends %d of them on %s's pre-stop sleep, leaving its shutdown %d seconds where stopGrace in packages/envoy/cmd/dispatch/shutdown.go builds it for %d: the pod asks for less than the server's shutdown needs, so the kubelet kills %s mid-shutdown, past its document service's five-second reserve, with a write still waiting on a lock killed mid-commit. Whoever moves one of the two moves the other.",
-			dispatchPodGoldenPath, grace, wait, dispatchPodContainer, grace-wait, needed, dispatchPodContainer)
+	if time.Duration(grace-wait)*time.Second < stopGrace {
+		t.Fatalf("%s asks for %d seconds of termination grace and spends %d of them on %s's pre-stop sleep, leaving its shutdown %d seconds where stopGrace in packages/envoy/cmd/dispatch/shutdown.go builds it for %s: the pod asks for less than the server's shutdown needs, so the kubelet kills %s mid-shutdown, past its document service's five-second reserve, with a write still waiting on a lock killed mid-commit. Whoever moves one of the two moves the other.",
+			dispatchPodGoldenPath, grace, wait, dispatchPodContainer, grace-wait, stopGrace, dispatchPodContainer)
 	}
 }

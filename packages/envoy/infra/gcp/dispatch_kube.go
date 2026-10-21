@@ -287,15 +287,18 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 
-	// A pod leaves routing asynchronously: the EndpointSlice controller, and then every node's
-	// proxy and Tailscale Serve, learn of a terminating pod only after the kubelet has sent it
-	// SIGTERM, while envoy-dispatch closes its HTTP listener as that signal arrives
-	// (packages/envoy/cmd/dispatch/shutdown.go). The pre-stop wait holds the container open across
-	// that propagation window, so a pod still being sent requests still answers them, and the image
-	// (debian:bookworm-slim) carries /bin/sleep. The kubelet runs the hook first and signals the
-	// process only once it returns, both inside the one terminationGracePeriodSeconds, so a wait is
-	// taken out of the server's shutdown unless the pod's budget covers both: the 35 s below is
-	// these 5 s of routing window plus the 30 s cmd/dispatch/shutdown.go builds its shutdown for
+	// A pod leaves routing asynchronously, and it does so alongside its own shutdown rather than
+	// after it: the control plane takes the pod out of its EndpointSlice as soon as the deletion
+	// timestamp appears, concurrently with the kubelet beginning graceful termination - the
+	// pre-stop hook first, SIGTERM once the hook returns - and that removal then has to reach
+	// every node's proxy and Tailscale Serve. envoy-dispatch closes its HTTP listener as the
+	// signal arrives (packages/envoy/cmd/dispatch/shutdown.go), so the pre-stop wait runs
+	// alongside the propagation and is sized to outlast it, holding the container open across that
+	// window: a pod still being sent requests still answers them, and the image
+	// (debian:bookworm-slim) carries /bin/sleep. The kubelet spends the hook and the signalled
+	// shutdown inside the one terminationGracePeriodSeconds, so a wait is taken out of the
+	// server's shutdown unless the pod's budget covers both: the 35 s below is these 5 s of
+	// routing window plus the 30 s cmd/dispatch/shutdown.go builds its shutdown for
 	// (stopGrace = 30 * time.Second). The two values are coupled and neither may be raised alone; a
 	// wait the grace period does not cover spends the document service's five-second reserve and
 	// kills a write still waiting on a lock mid-commit.

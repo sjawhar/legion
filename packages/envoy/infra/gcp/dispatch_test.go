@@ -502,65 +502,35 @@ func TestDispatchListenerStaysSingleAndAuthenticated(t *testing.T) {
 	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
 }
 
-// A pod the apiserver has marked terminating stays in routing for a while yet: the EndpointSlice
-// controller, every node's proxy and the front door's Tailscale Serve learn of its removal only
-// after the kubelet has signalled it, while envoy-dispatch closes its HTTP listener as that signal
-// arrives (packages/envoy/cmd/dispatch/shutdown.go). The app's container therefore waits before it
-// is signalled, and since the kubelet runs that wait inside the pod's one grace period, the pod
-// asks for the wait on top of the server's own drain budget, so the wait costs the server nothing.
-// This pins the pair the deployment renders; the inequality they must satisfy is
-// TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown's.
+// A pod the apiserver has marked terminating leaves routing asynchronously, and it does so
+// alongside its own shutdown rather than after it: the control plane takes the pod out of its
+// EndpointSlice when the deletion timestamp appears, concurrently with the kubelet beginning
+// graceful termination - the pre-stop hook first, SIGTERM once the hook returns - so the hook's
+// sleep and the propagation of that removal to every node's proxy and to the front door's
+// Tailscale Serve run at the same time, and the sleep is sized to outlast the propagation.
+// envoy-dispatch closes its HTTP listener as the signal arrives
+// (packages/envoy/cmd/dispatch/shutdown.go), so without the wait a pod still being sent requests
+// would already have stopped answering them. The app's container therefore waits before it is
+// signalled, and since the kubelet runs that wait inside the pod's one grace period, the pod asks
+// for the wait on top of the server's own drain budget, so the wait costs the server nothing.
+// This pins the pair the deployment renders; the inequality between the pod's budget and the
+// server's shutdown is held in packages/envoy/cmd/dispatch/pod_grace_period_test.go, which reads
+// stopGrace itself.
 func TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
+	// The 35 s is this 5 s wait plus the 30 s cmd/dispatch/shutdown.go's stopGrace builds the
+	// server's shutdown for. Both numbers are spelled out here, since this test pins what the
+	// component renders; packages/envoy/cmd/dispatch/pod_grace_period_test.go is where the
+	// inequality between the pod's budget and that shutdown lives, held from the side that can
+	// read stopGrace.
 	const wait = 5
 	template := deploymentPodTemplate(t, m, "example-dispatch")
-	require.EqualValues(t, wait+dispatchServerStopGrace, template["spec"].(map[string]any)["terminationGracePeriodSeconds"])
+	require.EqualValues(t, 35, template["spec"].(map[string]any)["terminationGracePeriodSeconds"])
 	app := podContainer(t, template, "envoy-dispatch")
 	require.Equal(t, map[string]any{"preStop": map[string]any{"exec": map[string]any{"command": []any{"sleep", strconv.Itoa(wait)}}}},
 		app["lifecycle"])
-}
-
-// dispatchServerStopGrace is how long envoy-dispatch's own shutdown assumes its runtime lets it
-// run after SIGTERM: cmd/dispatch/shutdown.go's `stopGrace = 30 * time.Second`, which every later
-// budget there is derived from (httpDrainBeforeDocuments = stopGrace - 5s - documentShutdownTimeout,
-// documentShutdownTimeout = docs.ShutdownDrainBudget + 5s), so the whole sequence is planned to
-// end five seconds inside it. cmd/dispatch/shutdown_test.go holds a write behind a lock for 27 s
-// after SIGTERM and requires it to commit and answer before exit.
-const dispatchServerStopGrace = 30
-
-// The kubelet runs a preStop hook first and sends SIGTERM only after it returns, inside the one
-// terminationGracePeriodSeconds: "If the preStop hook needs longer to complete than the default
-// grace period allows, you must modify terminationGracePeriodSeconds to suit this"
-// (kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle, Pod termination). A pre-stop wait
-// therefore comes out of what the server has after the signal, so the pod's grace period must
-// cover the wait and the server's whole shutdown, not one of them.
-func TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown(t *testing.T) {
-	m, err := runDispatch(t, dispatchArgs(), true)
-	require.NoError(t, err)
-
-	template := deploymentPodTemplate(t, m, "example-dispatch")
-	grace, ok := template["spec"].(map[string]any)["terminationGracePeriodSeconds"]
-	require.True(t, ok, "the app pod sets no terminationGracePeriodSeconds")
-	command := podContainer(t, template, "envoy-dispatch")["lifecycle"].(map[string]any)["preStop"].(map[string]any)["exec"].(map[string]any)["command"].([]any)
-	require.Equal(t, "sleep", command[0], "the pre-stop wait is a sleep, whose seconds this test reads")
-	seconds, ok := command[1].(string)
-	require.True(t, ok, "the pre-stop wait's seconds are a string")
-	wait, err := strconv.Atoi(seconds)
-	require.NoError(t, err)
-
-	require.GreaterOrEqual(t, toInt(t, grace), wait+dispatchServerStopGrace,
-		"the kubelet kills the pod %d seconds after the pre-stop wait began, leaving envoy-dispatch %d seconds after SIGTERM where its shutdown is built for %d: its document service's five-second reserve is spent and a write still waiting on a lock is killed mid-commit",
-		toInt(t, grace), toInt(t, grace)-wait, dispatchServerStopGrace)
-}
-
-// toInt reads a rendered number, which a mock engine's property map carries as float64.
-func toInt(t *testing.T, value any) int {
-	t.Helper()
-	number, ok := value.(float64)
-	require.True(t, ok, "%v is not a rendered number", value)
-	return int(number)
 }
 
 func TestDispatchServiceExposesPort8766(t *testing.T) {
