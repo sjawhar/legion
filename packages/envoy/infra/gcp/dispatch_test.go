@@ -2,6 +2,7 @@ package gcp_test
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -516,6 +517,47 @@ func TestDispatchAppPodKeepsServingUntilItsRemovalFromRoutingPropagates(t *testi
 	app := podContainer(t, template, "envoy-dispatch")
 	require.Equal(t, map[string]any{"preStop": map[string]any{"exec": map[string]any{"command": []any{"sleep", "5"}}}},
 		app["lifecycle"])
+}
+
+// dispatchServerStopGrace is how long envoy-dispatch's own shutdown assumes its runtime lets it
+// run after SIGTERM: cmd/dispatch/shutdown.go's `stopGrace = 30 * time.Second`, which every later
+// budget there is derived from (httpDrainBeforeDocuments = stopGrace - 5s - documentShutdownTimeout,
+// documentShutdownTimeout = docs.ShutdownDrainBudget + 5s), so the whole sequence is planned to
+// end five seconds inside it. cmd/dispatch/shutdown_test.go holds a write behind a lock for 27 s
+// after SIGTERM and requires it to commit and answer before exit.
+const dispatchServerStopGrace = 30
+
+// The kubelet runs a preStop hook first and sends SIGTERM only after it returns, inside the one
+// terminationGracePeriodSeconds: "If the preStop hook needs longer to complete than the default
+// grace period allows, you must modify terminationGracePeriodSeconds to suit this"
+// (kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle, Pod termination). A pre-stop wait
+// therefore comes out of what the server has after the signal, so the pod's grace period must
+// cover the wait and the server's whole shutdown, not one of them.
+func TestDispatchAppPodGracePeriodCoversThePreStopWaitAndTheServersShutdown(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	template := deploymentPodTemplate(t, m, "example-dispatch")
+	grace, ok := template["spec"].(map[string]any)["terminationGracePeriodSeconds"]
+	require.True(t, ok, "the app pod sets no terminationGracePeriodSeconds")
+	command := podContainer(t, template, "envoy-dispatch")["lifecycle"].(map[string]any)["preStop"].(map[string]any)["exec"].(map[string]any)["command"].([]any)
+	require.Equal(t, "sleep", command[0], "the pre-stop wait is a sleep, whose seconds this test reads")
+	seconds, ok := command[1].(string)
+	require.True(t, ok, "the pre-stop wait's seconds are a string")
+	wait, err := strconv.Atoi(seconds)
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, toInt(t, grace), wait+dispatchServerStopGrace,
+		"the kubelet kills the pod %d seconds after the pre-stop wait began, leaving envoy-dispatch %d seconds after SIGTERM where its shutdown is built for %d: its document service's five-second reserve is spent and a write still waiting on a lock is killed mid-commit",
+		toInt(t, grace), toInt(t, grace)-wait, dispatchServerStopGrace)
+}
+
+// toInt reads a rendered number, which a mock engine's property map carries as float64.
+func toInt(t *testing.T, value any) int {
+	t.Helper()
+	number, ok := value.(float64)
+	require.True(t, ok, "%v is not a rendered number", value)
+	return int(number)
 }
 
 func TestDispatchServiceExposesPort8766(t *testing.T) {
