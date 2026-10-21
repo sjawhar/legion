@@ -22,6 +22,9 @@ let replyLength = 1;
 const LONG_THREAD = "11111111-1111-4111-8111-111111111111";
 const human = { kind: "human", id: "h" };
 
+/** The Envoy listener's answer for session ses-1's subscriptions. */
+let interests: () => Response = () => Response.json({ error: "unset" }, { status: 500 });
+
 const issue = {
   key: "DSP-1",
   title: "Native workspace",
@@ -289,6 +292,7 @@ const server = Bun.serve({
         ],
       });
     }
+    if (pathname === "/v1/interests/ses-1") return interests();
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -301,6 +305,7 @@ beforeEach(() => {
   triage = false;
   blocksServer = { tableRows: true, editedBetweenReads: false };
   textReads = 0;
+  interests = () => Response.json({ error: "unset" }, { status: 500 });
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
   resetAdviceMemory();
@@ -979,6 +984,104 @@ describe("the dispatch CLI's envoy.json", () => {
       expect(code).toBe(2);
     }
     expect(requests).toEqual([]);
+  });
+});
+
+describe("the dispatch CLI's subscription note", () => {
+  const note =
+    "(not subscribed to DSP-1; envoy_subscribe notifications.dispatch.issue.DSP-1.> for every event on it)";
+  const withListener = { ...omp, ENVOY_URL: `http://127.0.0.1:${server.port}` };
+  const post = () => run(["message", "--issue", "DSP-1", "--body", "hello"], withListener);
+  const listed = (topics: readonly string[]) => () =>
+    Response.json({ session_id: "ses-1", machine_id: "m", dir: "/", topics });
+
+  test("a write names its issue only when the listener says none of the session's topics covers it", async () => {
+    for (const [label, answer, noted] of [
+      ["its own topic alone", listed(["notifications.agent.ses-1"]), true],
+      [
+        "the issue",
+        listed(["notifications.agent.ses-1", "notifications.dispatch.issue.DSP-1.>"]),
+        false,
+      ],
+      ["every Dispatch event", listed(["notifications.dispatch.>"]), false],
+      // The listener holds no record of the session: it is subscribed to nothing.
+      ["no record", () => Response.json({ error: "not found" }, { status: 404 }), true],
+      // The listener cannot answer: the write says nothing about subscriptions.
+      ["a listener error", () => Response.json({ error: "down" }, { status: 500 }), false],
+    ] as const) {
+      interests = answer;
+      requests.length = 0;
+      const { code, stdout } = await post();
+      expect(code).toBe(0);
+      expect([label, stdout.includes(note), stdout.includes("not subscribed")]).toEqual([
+        label,
+        noted,
+        noted,
+      ]);
+      expect(requests.some((request) => request.path === "/v1/interests/ses-1")).toBe(true);
+    }
+  });
+
+  test("with Envoy off, a write says nothing about subscriptions and asks no listener", async () => {
+    const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "hello"], omp);
+    expect(code).toBe(0);
+    expect(stdout).not.toContain("not subscribed");
+    expect(requests.some((request) => request.path.startsWith("/v1/interests/"))).toBe(false);
+  });
+
+  test("an ask names the subscribe line, in its result and its follow notice, only when no subscription covers the issue, reading the listener once", async () => {
+    const ask = ["ask", "--issue", "DSP-1", "--question", "Which way?", "--option", "A"];
+    const line = "For every event on DSP-1: envoy_subscribe notifications.dispatch.issue.DSP-1.>";
+    for (const [label, answer, named] of [
+      ["its own topic alone", listed(["notifications.agent.ses-1"]), true],
+      ["the issue", listed(["notifications.dispatch.issue.DSP-1.>"]), false],
+      ["a listener error", () => Response.json({ error: "down" }, { status: 500 }), false],
+    ] as const) {
+      interests = answer;
+      requests.length = 0;
+      stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+      nextProcess("ses-1");
+      const { code, stdout } = await run(ask, withListener);
+      expect(code).toBe(0);
+      expect(stdout).toContain("Following ask ask-a");
+      // Both the result's line and the notice's, or neither.
+      expect([label, stdout.split(line).length - 1]).toEqual([label, named ? 2 : 0]);
+      // One read, shared by the result and the notice, and no retry after a 5xx.
+      expect(requests.filter((request) => request.path === "/v1/interests/ses-1")).toHaveLength(1);
+    }
+  });
+
+  test("a listener read that throws leaves the landed write reported as written", async () => {
+    // The listener's fetch throws a value no transport wraps: the read is the only thing it breaks.
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/v1/interests/")) throw "listener exploded";
+      return fetch(input, init);
+    }) as typeof fetch;
+    let stdout = "";
+    const code = await runDispatchCli(
+      ["message", "--issue", "DSP-1", "--body", "hello"],
+      environment(withListener),
+      {
+        stdout: (text) => {
+          stdout += text;
+        },
+        stderr: () => {},
+        readText: () => "",
+        cwd: stateDir,
+        fetchImpl,
+      }
+    );
+    expect(code).toBe(0);
+    expect(stdout).toStartWith("Posted message message-1");
+    expect(stdout).not.toContain("not subscribed");
+    expect(requests.some((request) => request.path === "/api/v1/issues/DSP-1/messages")).toBe(true);
+  });
+
+  test("a read asks no listener", async () => {
+    interests = listed([]);
+    const { code } = await run(["projects"], withListener);
+    expect(code).toBe(0);
+    expect(requests.some((request) => request.path.startsWith("/v1/interests/"))).toBe(false);
   });
 });
 

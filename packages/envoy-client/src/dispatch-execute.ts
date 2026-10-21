@@ -109,6 +109,7 @@ import {
   type ToolImage,
   toolImage,
 } from "./dispatch-pictures";
+import { ownerSubscribeLine } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
 import { pageSummaryText, searchAnswer } from "./search-answer";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
@@ -155,6 +156,10 @@ export interface ExecuteDispatchToolInput {
   readonly env?: ExecutorEnvironment;
   readonly fetchImpl?: typeof fetch;
   readonly exec?: ExecFn;
+  /** The topics the session's Envoy subscriptions hold, or null when they cannot be read (Envoy
+   *  off, or no answer from its listener); called only by a write that would name its owner as
+   *  unsubscribed. A write names the owner the session is not subscribed to only from this. */
+  readonly subscriptions?: () => Promise<readonly string[] | null>;
 }
 
 export interface DispatchToolResult {
@@ -183,12 +188,28 @@ function resolvedTopic(resolved: ResolvedArtifact): OwnerTopic {
   return issueTopic(resolved.issue.key);
 }
 
-function notSubscribed(owner: OwnerTopic): string {
-  return `(not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
+/**
+ * What a write says when the session follows none of `owner`'s events: ` (not subscribed to …)`,
+ * with the `envoy_subscribe` line that would. Empty when one of the session's subscriptions covers
+ * the owner, and when they could not be read (`subscriptions` unset or answering null), since
+ * nothing then says what the session receives.
+ */
+async function notSubscribed(
+  owner: OwnerTopic,
+  subscriptions: ExecuteDispatchToolInput["subscriptions"]
+): Promise<string> {
+  if (ownerSubscribeLine(owner, await subscriptions?.()) === null) return "";
+  return ` (not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
 }
 
-function followsAsk(owner: OwnerTopic): string {
-  return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+/** What an ask write says the session follows, with the line that subscribes it to every event on
+ *  `owner` when no subscription of its covers the owner (`ownerSubscribeLine`). */
+async function followsAsk(
+  owner: OwnerTopic,
+  subscriptions: ExecuteDispatchToolInput["subscriptions"]
+): Promise<string> {
+  const subscribe = ownerSubscribeLine(owner, await subscriptions?.());
+  return `You follow this ask: its answer and replies reach you directly.${subscribe === null ? "" : ` ${subscribe}`}`;
 }
 const triageAdviceShown = new Set<string>();
 
@@ -652,6 +673,53 @@ async function resolveIdPrefix(
 }
 
 const askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
+
+/**
+ * The ask `dispatch read` of `dispatch://…/ask/<id>` names, read. An ask in a document has two
+ * ids: its own uuid and the id of its `:::ask{#<id>}` block, which can look like a uuid too.
+ * Either names it, whole or as an 8+ hex prefix exactly one of `list()`, the owner's asks, carries.
+ * A full uuid is read as an ask id first; the list is read only when no ask has that id.
+ */
+async function readAskRef(
+  tool: string,
+  id: string,
+  ownerName: string,
+  client: DispatchClient,
+  list: () => Promise<readonly Pick<Ask, "id" | "block_id">[]>
+): Promise<AskRead> {
+  const fullID = normalizeUUID(id);
+  if (fullID !== undefined) {
+    try {
+      return await client.getAsk(fullID);
+    } catch (error) {
+      if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
+      const blocks = (await list()).filter((ask) => ask.block_id?.toLowerCase() === fullID);
+      if (blocks.length !== 1 || blocks[0] === undefined) throw error;
+      return client.getAsk(blocks[0].id);
+    }
+  }
+  const asks = await list();
+  let matches = asks.filter((ask) => ask.block_id === id);
+  if (matches.length === 0) {
+    if (!idPrefixPattern.test(id)) {
+      throw new ToolInputError(tool, [
+        `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`,
+      ]);
+    }
+    const prefix = id.toLowerCase();
+    matches = asks.filter(
+      (ask) =>
+        ask.id.toLowerCase().startsWith(prefix) ||
+        (ask.block_id?.toLowerCase().startsWith(prefix) ?? false)
+    );
+  }
+  if (matches.length === 1 && matches[0] !== undefined) return client.getAsk(matches[0].id);
+  throw new ToolInputError(tool, [
+    matches.length === 0
+      ? `ask id ${id} matches none of the asks on ${ownerName}; use the full id`
+      : `ask id ${id} matches ${matches.length} asks on ${ownerName}; use the full id`,
+  ]);
+}
 
 /** The open asks this session authored: the read `dispatch_open_asks` reports. */
 async function sessionOpenAsks(
@@ -1627,6 +1695,8 @@ function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]
           (option) => `- ${option.label}${option.description ? ` — ${option.description}` : ""}`
         )),
     `State: ${ask.state}`,
+    // A read can name the ask by its block's id; the writes to it take this one.
+    `Ask id: ${ask.id}`,
     "Answer:",
     ...(answer === null
       ? ["- none"]
@@ -2412,7 +2482,7 @@ export async function executeDispatchTool(
               : `; assigned to ${created.assignee}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} → ${href}${assigned} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} → ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -2580,7 +2650,7 @@ export async function executeDispatchTool(
       });
       return {
         text: [
-          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          `${after.key}: ${changes.join("; ")}${await notSubscribed(issueTopic(after.key), input.subscriptions)}`,
           ...adviceLines,
         ].join("\n"),
         details: {
@@ -2622,7 +2692,7 @@ export async function executeDispatchTool(
         text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
-        text: [text, notSubscribed(issueTopic(issueKey))].join("\n"),
+        text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
         details: { issue: issueKey, status: after.status, claim: held },
       };
     }
@@ -2856,7 +2926,7 @@ export async function executeDispatchTool(
       ];
       return {
         text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${await followsAsk(askOwner, input.subscriptions)}`,
           ...adviceLines,
         ].join("\n"),
         details: {
@@ -2944,7 +3014,7 @@ export async function executeDispatchTool(
             : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
-            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
+            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner, input.subscriptions)}`,
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -2959,9 +3029,10 @@ export async function executeDispatchTool(
         };
       }
       return {
-        text: [`Posted comment ${comment.id} ${notSubscribed(commentOwner)}`, ...adviceLines].join(
-          "\n"
-        ),
+        text: [
+          `Posted comment ${comment.id}${await notSubscribed(commentOwner, input.subscriptions)}`,
+          ...adviceLines,
+        ].join("\n"),
         details: {
           ...commentDetails,
           ...(comment.advice === undefined ? {} : { advice: comment.advice }),
@@ -2984,7 +3055,7 @@ export async function executeDispatchTool(
           ? await client.artifactSuggest(resolved.artifact.id, suggestionInput)
           : await client.suggest(issue(), suggestionInput);
       return {
-        text: `Posted suggestion ${comment.id} ${notSubscribed(resolvedTopic(resolved))}`,
+        text: `Posted suggestion ${comment.id}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
         details: writeResultDetails(resolved, { comment: comment.id }),
       };
     }
@@ -3082,7 +3153,7 @@ export async function executeDispatchTool(
       const adviceLines = renderAdvice(input.tool, issueKey, message.advice, {});
       return {
         text: [
-          `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
+          `Posted message ${message.id} (${messageRef})${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
           ...adviceLines,
         ].join("\n"),
         details: {
@@ -3147,7 +3218,7 @@ export async function executeDispatchTool(
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
-          `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
+          `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
           ...tokenTrailer,
           ...adviceLines,
         ].join("\n"),
@@ -3327,7 +3398,7 @@ export async function executeDispatchTool(
       });
       return {
         text: [
-          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
+          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})${await notSubscribed(uploadOwner, input.subscriptions)}`,
           ...adviceLines,
         ].join("\n"),
         details:
@@ -3399,7 +3470,7 @@ export async function executeDispatchTool(
       }
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () =>
+        const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () =>
           ref.owner.kind === "issue"
             ? client.listIssueAsks(ref.owner.issue)
             : client.getArtifactAsks(
@@ -3407,8 +3478,7 @@ export async function executeDispatchTool(
                 "all"
               )
         );
-        const askRead = await client.getAsk(id);
-        const askRef = refTarget(ref, "ask", id);
+        const askRef = refTarget(ref, "ask", askRead.ask.id);
         const [pictures, graph] = await Promise.all([
           picturesOf(askTexts(askRead)),
           graphSections(client, askRef),

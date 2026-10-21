@@ -3,7 +3,8 @@ import { dispatchDocumentSubject, dispatchIssueSubject } from "@legion/contracts
 /**
  * Where an owner's events go and how a session names it: the label agents read in tool
  * results and the wildcard `envoy_subscribe` takes. No write subscribes a session to it;
- * whole-owner subscription is the agent's explicit choice (D3), so every write says so.
+ * whole-owner subscription is the agent's explicit choice (D3), so a write says when none of the
+ * session's subscriptions covers its owner.
  */
 export interface OwnerTopic {
   readonly label: string;

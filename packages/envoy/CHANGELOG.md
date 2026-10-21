@@ -901,6 +901,13 @@
 
 ### Fixed
 
+- The listener's `GET /v1/interests/<session_id>` answers 404 only for a session the registry
+  holds no record of (`nats.ErrKeyNotFound`), and 503 for a read NATS did not serve (a dropped
+  connection, a timeout, a record that does not decode). It used to answer 404 for every failure,
+  so a caller took a NATS failure for a session subscribed to nothing: the `dispatch` command
+  printed "not subscribed", and Dispatch's subscriber removal could complete while the interest
+  was still stored.
+
 - A bare URL next to punctuation in a Dispatch document links as the browser editor links it, so
   reading a table row with `dispatch doc-read` and writing it back with `dispatch doc-edit` no
   longer grows the link. `"HTTP 401 (https://api.github.com/graphql)" while` links only

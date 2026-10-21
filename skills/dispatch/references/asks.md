@@ -20,9 +20,10 @@ dispatch ask --issue DSP-42 \
   --option 'Leave it expired: Changes nothing now but leaves the fix unable to run.'
 ```
 
-- Correct an open ask in place with `dispatch edit-ask`, not a second ask, while the same decision stays open. The human then reconfirms. You cannot edit an answered or resolved ask. If the decision changed, retract it and open a new one.
+- Correct an open ask in place with `dispatch edit-ask`, not a second ask, while the same decision stays open. The human then reconfirms. You cannot edit an answered or resolved ask. If the decision of an open ask changed, retract it and open a new one. If the decision of an answered ask changed, open a new one.
 - `edit-ask` on a block ask writes the block too, so it mints a version and closes a spec's design gate until approved. Change anything else about the block with `dispatch doc-edit`. A retry with unchanged fields is safe.
 - A human can change an answer. A new `ask.answered` carries `previous_answer`. Act on the newest.
+- When the selected option and the typed text disagree, the text is the answer. Act on it. To clarify, open a new ask.
 - Retract a moot or superseded ask, or resolve one whose answer you found:
 
 ```bash
