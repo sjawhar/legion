@@ -1458,7 +1458,12 @@ the agent from starting over an install it could have run without. It bounds its
 whole: `LEGION_SETUP_BUDGET` (270 s) is the run's wall clock, and every wait inside it — the
 `flock` on the cache, the install's own `timeout`, the retry — is what is left of that budget when
 that wait begins, so the wait for the lock can never expire before the install it is waiting for
-would have. The worst case is that budget plus the 5 s `timeout` leaves between its SIGTERM and
+would have. A second bound sits inside that one, on the only part of the run that makes another
+process wait: `LEGION_SETUP_LOCK_HOLD` (60 s) is the longest one attempt may hold the cache's
+lock, because the plugin install above waits on that same inode and fails the launch when its
+wait runs out. It is the first thing to lower in a deployment that lowers
+`worker_boot_timeout_seconds`, which lowers that wait with it.
+The worst case is that budget plus the 5 s `timeout` leaves between its SIGTERM and
 its SIGKILL, 275 s inside the 360 s registration deadline this run shares with the rest of the
 role's launch, against a measured 54 s for the first install of 1,986 packages and
 about 0.3 s when they are already there — and whatever went wrong (an unreachable registry, a lock
@@ -2059,7 +2064,15 @@ launch anyway. Above that floor the bound is also long enough for the last of si
 behind five serialised
 installs of the pair, 24 seconds each at the defaults — the half of the bound a smaller divisor
 would break, which `TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline` holds
-against the installs rather than against the derivation. A wait that
+against the installs rather than against the derivation. Those five installs are not the only
+holders of that lock: `scripts/legion-setup.sh` takes `/usr/bin/flock` on this same
+`BUN_INSTALL_CACHE_DIR` inode for the issue's own `bun install`, so the role waiting here can be
+behind a setup install of another role of the pod as well as behind the pair's. That hold is
+bounded by a number of its own rather than by this wait — `LEGION_SETUP_LOCK_HOLD`, 60 seconds by
+default, half this wait at its defaults, so a plugin install that began waiting the moment setup
+took the lock still has its whole second wait afterwards — and that number is set out in that
+script's header and in the comment where it is defined, which is also where a deployment that
+lowers `worker_boot_timeout_seconds`, and with it this wait, is told to lower it. A wait that
 times out exits 1, so it takes the retry and then the script's named failure — that one bump's
 launch fails the way it did before the lock existed, rather than hanging. `flock` is advisory
 and per-inode, which holds exactly where this needs it — the six containers of one pod share a

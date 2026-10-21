@@ -695,6 +695,89 @@ check "an info string carrying attributes is judged by its first word" "$(is "$s
 check "names the line inside the block" \
   "$(contains "$out" 'AGENTS.md:4: this fenced command runs `bunx`')"
 
+echo "case: a session block is judged at its prompts, where it writes like a session"
+# A command session is the one judged block whose convention interleaves commands with the
+# output they printed, and it is how this repository writes one: a `$ …dev-broker.sh` and then
+# thirty lines of what it printed (docs/site/src/content/docs/broker/guides/run-locally.md).
+# Reading every line of such a block reports a transcript as a command, which is a report that
+# is simply untrue — the very thing the narrowing to judged info strings exists to avoid. So a
+# session block that carries a prompt is judged at its prompted lines and nowhere else, while
+# one that carries none has no convention to read and is judged line by line, as a block with no
+# info string is. The labels stay judged rather than being dropped, because `$ bunx biome
+# check .` under one is a command a reader copies.
+root=$(fixture fence-session-prompted)
+cat > "$root/docs/solutions/session.md" <<'MD'
+# What it printed
+
+```console
+$ bun run typecheck
+error: Cannot find module 'tsc'
+tsc --noEmit
+```
+
+```sh
+bunx biome check .
+```
+MD
+run_check "$root"
+check "the shell block beside the session is judged" "$(is "$status" 1)"
+check "names the line inside it" \
+  "$(contains "$out" 'docs/solutions/session.md:10: this fenced command runs `bunx`')"
+check "what the session printed is not a command" \
+  "$(is "$(contains "$out" 'session.md:5')" false)"
+check "nor is the line of output that looks exactly like one" \
+  "$(is "$(contains "$out" 'session.md:6')" false)"
+check "so only the shell block is reported" "$(contains "$out" '1 place(s)')"
+
+root=$(fixture fence-session-transcript)
+cat > "$root/docs/solutions/transcript-session.md" <<'MD'
+# What it printed
+
+```console
+$ bun run typecheck
+error: Cannot find module 'tsc'
+bunx biome check .
+```
+MD
+run_check "$root"
+check "a session that only quotes what it printed is judged nowhere and passes" \
+  "$(is "$status" 0)"
+
+root=$(fixture fence-session-prompted-command)
+cat > "$root/AGENTS.md" <<'MD'
+# Commands
+
+```console
+$ bunx biome check .
+error: Cannot find module 'tsc'
+```
+MD
+run_check "$root"
+check "the command at a session's prompt is judged" "$(is "$status" 1)"
+check "names the prompt's own line" \
+  "$(contains "$out" 'AGENTS.md:4: this fenced command runs `bunx`')"
+check "and the output under it is reported as nothing" "$(contains "$out" '1 place(s)')"
+
+root=$(fixture fence-session-unprompted-next)
+cat > "$root/docs/solutions/two-sessions.md" <<'MD'
+# Two sessions
+
+```console
+$ bun run lint
+checked 1 file
+```
+
+```console
+bunx biome check .
+```
+MD
+run_check "$root"
+check "a second session block of its own, using no prompt, is judged line by line" \
+  "$(is "$status" 1)"
+check "names the line inside it" \
+  "$(contains "$out" 'docs/solutions/two-sessions.md:9: this fenced command runs `bunx`')"
+check "the prompt of the block above it does not reach this one" "$(contains "$out" '1 place(s)')"
+
 echo "case: the pinned binary is the other approved spelling"
 root=$(fixture pinned-path)
 cat >> "$root/scripts/release.sh" <<'SH'
@@ -838,6 +921,39 @@ check "a marker quoted after the command exempts nothing either" "$(is "$status"
 check "names the line and the runner" \
   "$(contains "$out" 'scripts/release.sh:5: this line runs `bunx`, a package runner')"
 
+echo "case: the comment is where the shell ends the command, backslashes and all"
+# Both of these are lines a shell reads one way and this gate used to read another. The first is
+# the fail-open, where everything else here fails closed: `split_comment` stepped over no escape,
+# so it closed the string at the `\"`, read the rest of the line as a comment, and handed `judge`
+# the command half alone — `sh -c 'echo "a \" # b" && echo RAN'` prints `a " # b` and then `RAN`,
+# while the gate saw a comment and exited 0. The second is the other direction: an apostrophe
+# inside an unquoted word opens a quote that never closes, which swallowed the line's whole tail
+# into a string, hiding the comment the reader plainly sees — and with it any marker it carries.
+root=$(fixture comment-escaped-quote)
+cat >> "$root/scripts/release.sh" <<'SH'
+echo "a \" # b" && bunx biome check .
+SH
+run_check "$root"
+check "a backslash-escaped quote does not end the string, so the \`&&\` after it is a command" \
+  "$(is "$status" 1)"
+check "names the line and the runner" \
+  "$(contains "$out" 'scripts/release.sh:5: this line runs `bunx`, a package runner')"
+
+root=$(fixture comment-unclosed-quote)
+cat >> "$root/scripts/release.sh" <<'SH'
+echo don't # bunx biome check .
+SH
+run_check "$root"
+check "an apostrophe opening a quote that never closes leaves the comment a comment" \
+  "$(is "$status" 0)"
+
+root=$(fixture comment-escaped-quote-exempt)
+cat >> "$root/scripts/release.sh" <<'SH'
+echo "a \" b" && bunx biome check . # check-check-commands: allow the string is the point here
+SH
+run_check "$root"
+check "and the marker is still read from the comment of such a line" "$(is "$status" 0)"
+
 echo "case: a file that is not text names itself"
 root=$(fixture undecodable)
 printf '# A note\n\xff\xfe binary\n' > "$root/docs/solutions/rogue.md"
@@ -857,6 +973,22 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the file it cannot read, without a traceback" \
   "$(contains "$out" 'scripts/dangling.sh cannot be read: \[Errno 2\] No such file or directory')"
+check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
+
+echo "case: a directory the walk cannot list names itself"
+# One level up from the dangling symlink above: `read_text` was guarded and `iterdir` was not, so
+# a directory no one may list ended the required lint job in a raw `PermissionError` traceback
+# naming no file at all — the crash this gate exists not to be.
+root=$(fixture unreadable-directory)
+mkdir -p "$root/docs/sealed"
+chmod 000 "$root/docs/sealed"
+run_check "$root"
+# Restored before the assertions, so the suite's own `rm -rf` of its temporary directory can
+# still take this tree away however the case goes.
+chmod 755 "$root/docs/sealed"
+check "fails" "$(is "$status" 1)"
+check "names the directory it cannot read, without a traceback" \
+  "$(contains "$out" 'docs/sealed cannot be read: \[Errno 13\] Permission denied')"
 check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
 
 echo "case: a file jj has never seen still counts"

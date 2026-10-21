@@ -131,17 +131,37 @@
 #      backticks, because only a line inside a fenced block is a command someone runs. Which
 #      fenced blocks those are is the first word of the info string: no info string at all, a
 #      shell (`sh`, `shell`, `bash`, `zsh`, `ksh`), a command session (`console`, `terminal`,
-#      `shell-session`) or `yaml`, because a workflow's `run:` step is a prescription wherever
-#      it is quoted. A block labelled as data is not judged — `text`, `json`, `diff`, `ts`,
-#      `go`, `md`, and a language this gate does not know with them — because a transcript
-#      quoting `error: Cannot find module 'tsc'` is output rather than an instruction; the
-#      first word, because an info string carries attributes here (```bash title="x"),
+#      `shell-session`, `shellsession`, `sh-session`) or `yaml`, because a workflow's `run:`
+#      step is a prescription wherever it is quoted. A block labelled as data is not judged —
+#      `text`, `json`, `diff`, `ts`, `go`, `md`, and a language this gate does not know with
+#      them — because a transcript quoting `error: Cannot find module 'tsc'` is output rather
+#      than an instruction; the first word, because an info string carries attributes here
+#      (```bash title="x"). A command session is the one judged block whose convention
+#      interleaves commands with their output, so where a session block uses that convention —
+#      where any line of it carries a prompt — the prompted lines are the commands and the rest
+#      is the output it printed, and only the prompted lines are judged. That is how this
+#      repository writes one (`docs/site/src/content/docs/broker/guides/run-locally.md`: a
+#      `$ …dev-broker.sh` and then thirty lines of what it printed), and judging all of those
+#      lines would report a transcript as a command. Where no line of a session block carries a
+#      prompt there is no convention to read, so every line is judged, as a block with no info
+#      string is. The labels stay on the judged side rather than being dropped: `$ bunx biome
+#      check .` under one is a command a reader copies, and a guide outlives the fashion in
+#      which it was written — the same reason `pnpm` and `yarn` are on the runner list though no
+#      image here installs them — while the set of files this gate reads has widened once
+#      already,
 #   4. an exemption that gives no reason. A fenced block whose immediately preceding non-blank
 #      line is `<!-- check-check-commands: allow <reason> -->` is not judged, and neither is a
 #      line whose comment ends `# check-check-commands: allow <reason>` — its comment as the
 #      shell reads it, so a line that quotes the marker inside a string exempts nothing it goes
 #      on to run; the reason is what makes the exemption reviewable, so an empty one is itself
-#      a problem.
+#      a problem. A fence's info string is the third thing that decides whether a block is
+#      judged, and the only one of the three that records no reason: a block relabelled
+#      ```text, or carrying a label this gate does not know, is not judged at all, and nothing
+#      is printed about it. That is written down here so a relabelled block reads as a decision
+#      rather than an accident — the label is itself the statement, that what the block holds
+#      is output rather than an instruction, and it is a statement a reviewer sees in the diff
+#      where an empty marker would hide one. The marker's reason is for the block that must
+#      keep a shell's label while holding the wrong form, which relabelling would misdescribe.
 #
 # Excluded, each for its own reason:
 #
@@ -282,6 +302,12 @@ FENCE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 JUDGED_FENCES = frozenset(
     "sh shell bash zsh ksh console terminal shell-session shellsession sh-session yaml yml".split()
 )
+# The judged labels that name a session rather than a script, which is the one convention that
+# interleaves commands with the output they printed. A session block that uses the convention —
+# that carries a prompt anywhere — is judged at its prompts and nowhere else, so the lines it
+# quotes back are read as the output they are; one that carries no prompt has no convention to
+# read and is judged line by line, as a block with no info string at all is.
+SESSION_FENCES = frozenset("console terminal shell-session shellsession sh-session".split())
 ALLOW_COMMENT = re.compile(rf"^<!--\s*{MARKER}(?P<reason>.*?)-->$")
 ALLOW_TRAILING = re.compile(rf"#\s*{MARKER}(?P<reason>[^#]*)$")
 
@@ -328,23 +354,53 @@ def runner_problem(spelling: str) -> str:
     )
 
 
+def scan_comment(line: str, openers: str) -> tuple[str, str, str]:
+    """One pass of `split_comment` — the command, the comment, and the quote left open at the end
+    of the line — reading only `openers` as quotes. A backslash is stepped over with the character
+    it escapes, except inside a single-quoted string, where the shell gives it no meaning. Without
+    that, `echo "a \\" # b" && bunx biome check .` closes its string at the escaped quote and reads
+    everything from the `#` as a comment, which is this gate's one fail-open: `judge` goes on to
+    offer the command half alone, so the `bunx` the shell would run is invisible to every rule
+    here. A `#` ends the command only where a word begins, which is where the shell ends it."""
+    quote = ""
+    index = 0
+    starts_word = True
+    while index < len(line):
+        character = line[index]
+        if character == "\\" and quote != "'":
+            index += 2
+            starts_word = False
+            continue
+        if quote:
+            if character == quote:
+                quote = ""
+        elif character in openers:
+            quote = character
+        elif character == "#" and starts_word:
+            return line[:index], line[index:], ""
+        starts_word = not quote and character in " \t"
+        index += 1
+    return line, "", quote
+
+
 def split_comment(line: str) -> tuple[str, str]:
     """A line as the shell reads it: the command it runs, and the comment it carries. A `#` that
     begins a word and stands outside quotes ends the command, so everything from there is the
     comment — the one place the exemption marker is honoured, since a marker quoted inside a
     string is part of the word it sits in and exempts nothing. The split happens before the
     segments are split, so a `;` or a `|` written inside a comment starts no segment of its
-    own."""
-    quote = ""
-    for index, character in enumerate(line):
-        if quote:
-            if character == quote:
-                quote = ""
-        elif character in "\"'":
-            quote = character
-        elif character == "#" and (index == 0 or line[index - 1] in " \t"):
-            return line[:index], line[index:]
-    return line, ""
+    own.
+
+    A quote that never closes was no quote: `echo don't # bunx biome check .` is an apostrophe
+    inside an unquoted word, a line the shell would refuse to run as written, and reading its
+    tail as one endless string would hide the comment the reader plainly sees — and with it the
+    marker, where the comment carries one. So a line left inside a quote is read again with that
+    character ordinary."""
+    command, comment, unclosed = scan_comment(line, "\"'")
+    if not unclosed:
+        return command, comment
+    command, comment, _ = scan_comment(line, "\"'".replace(unclosed, ""))
+    return command, comment
 
 
 def basename(word: str) -> str:
@@ -482,14 +538,33 @@ GUIDE_PATTERNS = [glob_to_regex(pattern) for pattern in GUIDES]
 
 def walk() -> list[Path]:
     """Every file in the tree, the directories that hold nothing prescriptive skipped. A symlinked
-    directory is not descended into: it would be walked twice or leave the tree entirely."""
+    directory is not descended into: it would be walked twice or leave the tree entirely. A
+    directory the walk cannot list, and an entry it cannot stat, are named problems rather than a
+    traceback, for the reason `read_text` is: a directory at mode 000 ends the required lint job
+    in a raw `PermissionError` whose line numbers are this heredoc's and which names no file at
+    all, where the gate's business is to name the place a person has to go and look."""
     found = []
     stack = [Path(".")]
     while stack:
-        for entry in sorted(stack.pop().iterdir()):
-            if entry.is_symlink() and entry.is_dir():
+        directory = stack.pop()
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError as error:
+            problems.append(
+                f"::error file={directory}::{directory} cannot be read: {one_line(error)}"
+            )
+            continue
+        for entry in entries:
+            try:
+                if entry.is_symlink() and entry.is_dir():
+                    continue
+                is_directory = entry.is_dir()
+            except OSError as error:
+                # `is_dir` answers False for what is not there — a dangling symlink, which
+                # `read_text` goes on to name — and raises for what it may not look at.
+                problems.append(f"::error file={entry}::{entry} cannot be read: {one_line(error)}")
                 continue
-            if entry.is_dir():
+            if is_directory:
                 if entry.name not in SKIP_DIRS:
                     stack.append(entry)
             else:
@@ -619,29 +694,69 @@ for script in shell_scripts:
         judge(script, number, stripped, "this line")
 
 
+def fence_label(info: str) -> str:
+    """The first word of a fence's info string, lowered: the word that decides whether the block
+    is judged, the first because an info string carries attributes in this repository's markdown
+    (```bash title="x")."""
+    words = info.strip().split()
+    return words[0].lower() if words else ""
+
+
 def judged_fence(info: str) -> bool:
-    """Whether a fenced block is read as commands, by the first word of its info string — the
-    first word, because an info string carries attributes in this repository's markdown. An
+    """Whether a fenced block is read as commands, by the first word of its info string. An
     empty info string, a shell, a command session and yaml are commands; every other language
     is data, and one this gate does not know is data too, since a block it cannot name is as
     likely a transcript as a recipe."""
-    words = info.strip().split()
-    return not words or words[0].lower() in JUDGED_FENCES
+    label = fence_label(info)
+    return not label or label in JUDGED_FENCES
+
+
+def closes_fence(match: re.Match[str] | None, fence: str) -> bool:
+    """Whether a fence line closes the block `fence` opened: the same character, at least as
+    long, and carrying no info string of its own."""
+    return bool(
+        match
+        and match.group("fence")[0] == fence[0]
+        and len(match.group("fence")) >= len(fence)
+        and not match.group("info").strip()
+    )
+
+
+def prompted(lines: list[str], start: int, fence: str) -> bool:
+    """Whether a session block uses the prompt convention: whether any line of it, from `start`
+    to the line that closes it, is a prompt. A `$ packages/envoy/scripts/dev-broker.sh` and then
+    thirty lines of what it printed is how this repository writes a session
+    (`docs/site/src/content/docs/broker/guides/run-locally.md`), and in such a block the
+    commands are the prompted lines: the rest is output, and reporting it would be a report that
+    is simply untrue. A session block that carries no prompt is a list of commands under a
+    session label, with no convention to read, so it is judged line by line like any other."""
+    for text in lines[start:]:
+        if closes_fence(FENCE.match(text), fence):
+            return False
+        if PROMPT.match(text.strip()):
+            return True
+    return False
 
 
 for guide in guides:
     content = read_text(guide)
     if content is None:
         continue
+    lines = content.splitlines()
     fence = ""
-    exempt = judged = False
+    exempt = judged = prompts_only = False
     previous, previous_number = "", 0
-    for number, text in enumerate(content.splitlines(), start=1):
+    for number, text in enumerate(lines, start=1):
         match = FENCE.match(text)
         if not fence:
             if match:
                 fence = match.group("fence")
-                judged = judged_fence(match.group("info"))
+                info = match.group("info")
+                judged = judged_fence(info)
+                # Only a block that says it is a session and writes like one: everywhere else an
+                # unprompted line is the command it looks like, which is nearly every block here.
+                session = fence_label(info) in SESSION_FENCES
+                prompts_only = session and prompted(lines, number, fence)
                 exemption = ALLOW_COMMENT.match(previous.strip())
                 exempt = bool(exemption and exemption.group("reason").strip())
                 if exemption and not exempt:
@@ -652,9 +767,7 @@ for guide in guides:
             elif text.strip():
                 previous, previous_number = text, number
             continue
-        # A fence closes on the same character, at least as long, and carrying no info string.
-        closing = match and match.group("fence")[0] == fence[0] and not match.group("info").strip()
-        if closing and len(match.group("fence")) >= len(fence):
+        if closes_fence(match, fence):
             fence = ""
             # The closing fence is the block's last non-blank line, so the marker above this
             # block cannot exempt the next one too.
@@ -662,6 +775,8 @@ for guide in guides:
             continue
         stripped = text.strip()
         if exempt or not judged or not stripped or stripped.startswith("#"):
+            continue
+        if prompts_only and not PROMPT.match(stripped):
             continue
         judge(guide, number, stripped, "this fenced command")
 
