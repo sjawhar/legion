@@ -1613,9 +1613,15 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	s.sweepUnrecordedMarks(room, versioned)
 }
 
-func currentUpdateCursor(ctx context.Context, tx pgx.Tx, artifactID string) (int64, error) {
+// currentUpdateCursor is the version q sees the document's stored history standing at: the read
+// the gate compares a room's cursor against (refuseRoomBehindHead). A settlement and a live write
+// read it inside their own transaction, under the document's advisory lock, so no append can land
+// between it and what they write; the stale-room evictor reads it through the shared pool,
+// holding nothing, because a room it finds behind a head that has moved on again is behind all
+// the same.
+func currentUpdateCursor(ctx context.Context, q Queryer, artifactID string) (int64, error) {
 	var cursor int64
-	if err := tx.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		select coalesce(max(version), 0) from doc_updates where artifact_id = $1
 	`, artifactID).Scan(&cursor); err != nil {
 		return 0, fmt.Errorf("read document update cursor: %w", err)
@@ -1914,8 +1920,9 @@ func (s *Service) lastActorPersisted(room string, creditSeq uint64) {
 }
 
 // Evict closes a live room and discards its resident state so the next access reloads the
-// durable document without treating the room as failed. No production code calls it: it exists
-// so tests, including those in package api, can force a room to reload.
+// durable document without treating the room as failed. The stale-room evictor calls it for a
+// room another envoy-dispatch process's write left behind the durable head (stale_room.go);
+// tests, including those in package api, call it to force a room to reload.
 func (s *Service) Evict(_ context.Context, artifactID string) error {
 	state := s.lockExistingState(artifactID)
 	if state != nil {

@@ -331,7 +331,9 @@ func main() {
 	//     the settlement resumption (it arms this process's rooms, and docs/resume.go says it
 	//     runs on an interval precisely because a rolling deploy overlaps two processes), the
 	//     delivery live hub and its listener (migration 0107_events_notify.up.sql states that
-	//     purpose), the event stream relay and the document rooms' timers.
+	//     purpose), the event stream relay, the document rooms' timers, and the stale-room
+	//     evictor (it closes the rooms resident in this process that the other process's writes
+	//     left behind the durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
 	leases, err := database.Pool.Leases()
@@ -368,6 +370,10 @@ func main() {
 	// A settlement a shutdown cut short, here or in the task this one replaces, runs without
 	// anyone opening its document.
 	go documentService.RunSettlementResumption(ctx)
+	// INFRA-66: a document written by the other envoy-dispatch process is announced over
+	// Postgres, and the room this process holds for it closes within that round trip, so its
+	// browsers reconnect and re-sync instead of reading text the store no longer holds.
+	go documentService.RunStaleRoomEviction(ctx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, on its own schedule.
 	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, api.SuggestionSweepInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that

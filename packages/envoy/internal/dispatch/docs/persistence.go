@@ -225,6 +225,9 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
+	if err := notifyDocumentChanged(ctx, tx, room); err != nil {
+		return 0, err
+	}
 	authors, lastActor, include := credit.take()
 	// An edit credited to authors names its latest edit source, none included when no one
 	// peer made it; an update no one is credited with keeps the row's. The row is taken here, with
@@ -599,6 +602,9 @@ func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, see
 		values ($1, $2, $3, true)
 	`, room, report.Head, seed); err != nil {
 		return RebuildReport{}, fmt.Errorf("seed rebuilt document: %w", err)
+	}
+	if err := notifyDocumentChanged(ctx, tx, room); err != nil {
+		return RebuildReport{}, err
 	}
 	return report, nil
 }

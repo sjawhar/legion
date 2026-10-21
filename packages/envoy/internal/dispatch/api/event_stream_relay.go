@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pglisten"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -52,7 +53,7 @@ type eventStreamRelay struct {
 	// stream is the reader's live feed; nothing but this relay publishes into it.
 	stream *events.Stream
 
-	// dial, listenIdle, pingTimeout and backoff are the listener's (deliveryListener). Nil dial
+	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener). Nil dial
 	// is the shared pool's Listener, taken when the relay starts rather than when it is built:
 	// Register mounts a relay on every server, a storeless one included (the route table's).
 	dial                    func(ctx context.Context) (*pgx.Conn, error)
@@ -114,13 +115,17 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 	if dial == nil {
 		dial = r.server.deps.Store.Pool.Listener
 	}
-	listener := &deliveryListener{
-		dial: dial, listenIdle: r.listenIdle, pingTimeout: r.pingTimeout, backoff: r.backoff,
-		onConnected: r.onConnected,
-		onNotify:    r.onNotify,
+	listener := &pglisten.Listener{
+		Dial:        dial,
+		Channels:    []string{dispatchEventsChannel},
+		ListenIdle:  r.listenIdle,
+		PingTimeout: r.pingTimeout,
+		Backoff:     r.backoff,
+		OnConnected: r.onConnected,
+		OnNotify:    r.onNotify,
 	}
 	r.running.Add(2)
-	go func() { defer r.running.Done(); listener.run(r.lifetime) }()
+	go func() { defer r.running.Done(); listener.Run(r.lifetime) }()
 	go func() { defer r.running.Done(); r.run(r.lifetime) }()
 	return nil
 }
@@ -129,13 +134,10 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 // subscription ever started has none to wait for.
 func (r *eventStreamRelay) wait() { r.running.Wait() }
 
-// onNotify wakes a read for one event commit, on the listener's goroutine. The listener holds the
-// delivery hub's three channels on one connection; the other two say nothing about the event log.
-func (r *eventStreamRelay) onNotify(channel, _ string) {
-	if channel == dispatchEventsChannel {
-		signal(r.wake)
-	}
-}
+// onNotify wakes a read for one event commit, on the listener's goroutine. The relay's connection
+// listens on dispatch_events alone: the delivery hub's other two channels say nothing about the
+// event log, and a relay that heard them would read the log for every settings write.
+func (r *eventStreamRelay) onNotify(_, _ string) { signal(r.wake) }
 
 // onConnected catches up from the cursor after each LISTEN succeeds, which is what covers the
 // notifications sent while the relay had no connection. It never moves the cursor: a redial reads

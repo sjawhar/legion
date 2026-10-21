@@ -260,6 +260,22 @@ func (s *Service) hasDurableAppend(room string) bool {
 	return state.durableAppends.Load() > 0
 }
 
+// hasWriteInFlight is whether this process has durable work of room's document under way that is
+// about to advance the room instance's cursor: an open live-write transaction (liveWrite, whose
+// publish takes its versions in), a browser append the room's persistence has not landed
+// (durableAppends), or a settlement running on the room (settleRoomWithin, which takes in the
+// version its repair is stored at). The stale-room evictor asks it before it closes a room
+// another process's write left behind: closing one of these rooms would take the room out from
+// under the writer that is mid-write on it.
+func (s *Service) hasWriteInFlight(room string) bool {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return false
+	}
+	defer s.unlockState(room, state)
+	return state.liveWriter != nil || state.durableAppends.Load() > 0 || state.settling > 0
+}
+
 func (s *Service) roomFailure(room string) error {
 	state := s.lockExistingState(room)
 	if state == nil {

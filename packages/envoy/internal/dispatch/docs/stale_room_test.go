@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -23,11 +24,13 @@ import (
 
 // processPair is one document served by two processes: taskA, whose rooms the tests leave behind
 // the head, and taskB, the other process, on a pool of its own (storetest.SecondProcess) as a
-// second envoy-dispatch task has.
+// second envoy-dispatch task has. serverA is task A's document websocket, which the eviction
+// tests connect a browser to (stale_room_eviction_test.go).
 type processPair struct {
 	database   *store.Store
 	artifactID string
 	taskA      *Service
+	serverA    *httptest.Server
 	taskB      *Service
 }
 
@@ -35,11 +38,11 @@ func newProcessPair(t *testing.T) processPair {
 	t.Helper()
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
-	taskA, _ := newTestServiceInstance(t, database)
+	taskA, serverA := newTestServiceInstance(t, database)
 	taskB, _ := newTestServiceInstance(t, storetest.SecondProcess(t, database))
 	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, taskA, artifactID)
-	return processPair{database: database, artifactID: artifactID, taskA: taskA, taskB: taskB}
+	return processPair{database: database, artifactID: artifactID, taskA: taskA, serverA: serverA, taskB: taskB}
 }
 
 // leaveTaskABehind loads task A's room, then has a browser on task B edit the document: task A's

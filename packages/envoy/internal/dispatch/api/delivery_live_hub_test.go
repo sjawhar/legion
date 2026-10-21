@@ -42,6 +42,15 @@ func newHubRig(t *testing.T, configure func(*deliveryHub)) *hubRig {
 	return hubOn(t, handler, database, deps, deliveryHubClock{}, configure)
 }
 
+// notifyChannel sends one notification on channel, as a trigger's commit does: the hub hears it
+// on the connection its listener holds (pglisten.Listener).
+func notifyChannel(t *testing.T, database *store.Store, channel, payload string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `select pg_notify($1, $2)`, channel, payload); err != nil {
+		t.Fatalf("pg_notify(%q, %q): %v", channel, payload, err)
+	}
+}
+
 // newClockedHubRig is newHubRig on a clock the test moves.
 func newClockedHubRig(t *testing.T, clock *fakeHubClock) *hubRig {
 	t.Helper()
