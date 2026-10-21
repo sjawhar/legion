@@ -167,21 +167,36 @@ func (l *Ledger) commit(ctx context.Context) error {
 	return nil
 }
 
-// takeRoomCursors records on each room instance a write was made on the versions this commit made
-// durable, before the publish that applies them to that room (publish). The room does not hold
-// them yet, and nothing in that window renders from it: the write holds its writer slot until the
-// publish has returned, which defers its room's settlement (settleRoomWithin's supersession
-// check) and holds off every other transaction's write and version (awaitLiveWriter). What does
-// run in that window is a browser's append queued on the document's advisory lock, which takes it
-// the instant this commit drops it: refused there, this process's own committed write would fail
-// its own room and drop the browser's edit (TestSettlementBetweenCommitAndPublishWaitsForTheWrite).
-// The publish records them again on the room it reaches, which is the same instance unless the
-// room was replaced meanwhile (publishLiveUpdate).
+// takeRoomCursors records on each room instance a write was made on, and on the room instance its
+// publish will reach, the versions this commit made durable, before that publish applies them
+// (publish). The room does not hold them yet, and nothing in that window renders from it: the
+// write holds its writer slot until the publish has returned, which defers its room's settlement
+// (settleRoomWithin's supersession check) and holds off every other transaction's write and
+// version (awaitLiveWriter). What does run in that window is a browser's append queued on the
+// document's advisory lock, which takes it the instant this commit drops it: refused there, this
+// process's own committed write would fail its own room and drop the browser's edit
+// (TestSettlementBetweenCommitAndPublishWaitsForTheWrite). The stale-room evictor reads the same
+// cursor, so a room left standing at the head here is also a room this process's own change does
+// not close (documentChanged, whose other guard is hasWriteInFlight).
+//
+// The two instances are one and the same for a warm write whose room is still resident. They are
+// not for a cold write, which has no cursor of its own at all (coldFork): the room it publishes
+// into is one that loaded while the write ran, and advancing that room here is the only thing
+// that keeps it at the head across this window. They are not for a write whose room was replaced
+// since its fork either, where the fork's cursor is the gone instance's. A room that loaded at or
+// past these versions takes nothing in - advanceRoomCursor only advances by the version that
+// follows the one it stands at - and the publish records them again on the room it reaches
+// (publishLiveUpdate).
 func (l *Ledger) takeRoomCursors() {
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
+		var publishing *roomCursor
+		if live := l.service.srv.GetDoc(artifactID); live != nil {
+			publishing = l.service.cursorOf(live)
+		}
 		for _, version := range write.versions {
 			advanceRoomCursor(write.forkCursor, version)
+			advanceRoomCursor(publishing, version)
 		}
 	}
 }

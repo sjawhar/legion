@@ -250,6 +250,79 @@ func TestARoomWithAWriteInFlightIsNotEvictedUnderIt(t *testing.T) {
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }
 
+// A cold write publishes into whatever room loaded while it ran, and holds no room cursor of its
+// own to advance (coldFork): its commit takes its versions into that room's cursor
+// (takeRoomCursors), so the room stands at the head for the whole commit-to-publish window. Left
+// behind there, it reads as a room another process wrote under - which is this process's own
+// write, about to publish into it - and its own browser's append, queued behind the write's
+// lock and taking it the instant the commit drops it, is refused and fails the room under the
+// browser that made the edit.
+func TestAColdWritesOwnRoomIsNotLeftBehindBetweenItsCommitAndPublish(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	closeDocumentRoom(t, service, artifactID)
+
+	// A browser opens the document behind the write's store read, as LEGION-504's window has it:
+	// the write stays cold, and the room it publishes into is this one.
+	opened := false
+	service.afterForkRead = func(room string) {
+		if room != artifactID || opened || service.srv.GetDoc(artifactID) != nil {
+			return
+		}
+		opened = true
+		if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+			t.Errorf("a browser opens the document while the cold write reads the store: %v", err)
+		}
+	}
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the write's transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, _, err := lockArtifactOwner(ctx, tx, artifactID); err != nil {
+		t.Fatalf("lock document owner: %v", err)
+	}
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "Agent's paragraph.", After: "Second."},
+	}, model.Actor{Kind: "session", ID: "agent-session"}, nil); err != nil {
+		t.Fatalf("apply the cold write: %v", err)
+	}
+	if write := joinedLiveWrite(joined, artifactID); write == nil || !write.cold {
+		t.Fatal("the write forked a room, so nothing here is tested")
+	}
+	if !opened || service.srv.GetDoc(artifactID) == nil {
+		t.Fatal("no room loaded while the cold write ran, so nothing here is tested")
+	}
+	if err := ledger.commit(ctx); err != nil {
+		t.Fatalf("commit the cold write: %v", err)
+	}
+
+	if roomBehind(t, service, artifactID) {
+		t.Fatal("the room the cold write is about to publish into stands behind the head between the write's commit and its publish")
+	}
+	if newStaleRoomEvictor(service).documentChanged(ctx, artifactID) {
+		t.Fatal("this process's own cold write evicted the room it was about to publish into")
+	}
+	if service.srv.GetDoc(artifactID) == nil {
+		t.Fatal("the room the cold write is about to publish into is gone")
+	}
+	// The browser's own append in that window, which is what the room was kept at the head for.
+	requireRoomStillWrites(t, service, artifactID, 1)
+
+	ledger.publish()
+	stored := storedMarkdown(t, service.store, artifactID)
+	for _, want := range []string{"Agent's paragraph.", "Writing again as peer 1."} {
+		if !strings.Contains(stored, want) {
+			t.Fatalf("the stored document after the cold write's publish = %q, want it to hold %q", stored, want)
+		}
+	}
+}
+
 // A notification for a document this process holds no room for does nothing: it loads no room,
 // and it is most of the traffic on the channel, since every append of both processes notifies.
 func TestANotificationForADocumentWithNoRoomHereDoesNothing(t *testing.T) {

@@ -138,10 +138,11 @@ func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactI
 // Every append notifies, this process's own included: the statement cannot tell who will hear it.
 // The room's cursor is what tells them apart - the durable version the resident instance holds
 // every update through (roomCursor). This process's own write advances it: a browser's append
-// inside the lock it committed under (appendUpdate), a live write's versions as its publish
-// lands in the room (publishLiveUpdate), a settlement's own repair where it is stored
-// (settleRoomWithin). So by the time the notification is heard, the room either stands at the
-// head, which is no eviction, or that write is still in flight, which is the guard below.
+// inside the lock it committed under (appendUpdate), a live write's versions at the commit that
+// made them durable, which is where its notification was sent from (Ledger.takeRoomCursors), and
+// again as its publish lands in the room (publishLiveUpdate), a settlement's own repair where it
+// is stored (settleRoomWithin). So by the time the notification is heard, the room either stands
+// at the head, which is no eviction, or that write is still in flight, which is the guard below.
 // Another process's write advances no cursor here, so its room stands behind the head and goes.
 //
 // Equality, not `cursor < head`, for refuseRoomBehindHead's reason: a prune or a deletion lowers

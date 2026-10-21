@@ -63,7 +63,8 @@ type liveWrite struct {
 	// which durable updates that room instance held (roomHold). An upload's version takes out both
 	// (uploadCapture). forkCursor is the durable version the fork's basis stands at: that room
 	// instance's live cursor, so an append of a peer of the same room that lands while this write
-	// runs counts, or, for a cold fork, one of its own at the head that read loaded (heldThrough).
+	// runs counts (heldThrough). It is nil for a cold fork, which has no room behind it and whose
+	// appends no cursor gates (coldFork, appendingCursor).
 	// cold says fork was built from the stored document while no room held it (coldFork), so it
 	// has no room to have been brought up to date from.
 	forkedFrom weak.Pointer[crdt.Doc]
@@ -358,9 +359,14 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	}
 	write.fork, write.cold, write.forkSeq = fork, true, 0
 	write.forkHold = &roomHold{loaded: int64(loaded.Version)}
-	// The cold fork's own cursor: this read holds every stored update through the head it read,
-	// and no room's advance applies to it (advanceRoomCursor names the room instances).
-	write.forkCursor = &roomCursor{through: int64(loaded.Version)}
+	// No cursor, so no gate: the gate is about a room (refuseRoomBehindHead), and this write
+	// holds none. Its update is a Yjs update, which commutes with whatever landed between this
+	// read and its append, and the room that loads after its publish reads the store, which by
+	// then holds both. A private cursor at the head this read loaded would refuse the write for
+	// an append that is no concern of its own - a browser opening the document behind this read
+	// and typing into it (TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits) - and the
+	// agent's edit would answer 503 for a conflict Yjs resolves.
+	write.forkCursor = nil
 	if s.afterForkRead != nil {
 		s.afterForkRead(write.artifactID)
 	}
@@ -420,7 +426,9 @@ func applyTransactionWrites(fork *crdt.Doc, updates [][]byte) error {
 // heldThrough is the durable version the document this write's operations run on holds every
 // update through, which gates each of its appends (refuseRoomBehindHead): its fork's basis, read
 // now so that a peer's append into the same room, which the fork takes in at its next read,
-// counts, with the versions this transaction has appended itself folded in (through).
+// counts, with the versions this transaction has appended itself folded in (through). It is the
+// cursor of a write whose fork came from a room, and only appendingCursor reads it, which hands
+// the gate no cursor at all for a cold write (coldFork).
 func (w *liveWrite) heldThrough() int64 {
 	return w.through(w.forkCursor.heldThrough())
 }

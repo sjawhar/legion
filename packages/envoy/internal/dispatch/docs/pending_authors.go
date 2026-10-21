@@ -330,8 +330,17 @@ func roomCursorFrom(ctx context.Context) *roomCursor {
 // appendingCursor is the cursor the gate reads for an append to room: the calling transaction's
 // own write to room when it has one, whose fork is what the write was made on, otherwise the room
 // cursor its caller marked the context with. Nil is an append no cursor gates.
+//
+// A transaction's write decides for itself: a cold write, whose fork came from the store because
+// no room of this process held the document (coldFork), carries no cursor and is not gated. The
+// gate refuses a write rendered from a room behind the head, and a cold write renders from the
+// store instead - it holds no room, its update commutes with whatever landed since its read, and
+// the room that loads after its publish reads the store, which holds both by then.
 func appendingCursor(ctx context.Context, room string) documentCursor {
-	if write := ledgerFrom(ctx).liveWriteFor(room); write != nil && write.forkCursor != nil {
+	if write := ledgerFrom(ctx).liveWriteFor(room); write != nil {
+		if write.forkCursor == nil {
+			return nil
+		}
 		return write
 	}
 	if cursor := roomCursorFrom(ctx); cursor != nil {
