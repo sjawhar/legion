@@ -1233,11 +1233,18 @@ written on reached **17 GiB of its 20, 3.0 GiB free** (01:32Z on 2026-10-21) wit
 in six per-role copies of the Go build and module caches — an intermediate layout no shipped image
 ever produced, since a role container at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
 no `BUN_INSTALL_CACHE_DIR`, and the Go pair is new on the volume here. The remedy for a volume
-near full is manual, because nothing prunes, and it names every directory this layout creates:
+near full is manual, because nothing prunes, and it accounts for every directory this layout
+creates, either on its delete list or in the two exemptions below it:
 `chmod -R u+w` and then delete `/legion/scratch/cache`, `/legion/scratch/tmp`,
 `/legion/scratch/bun/install/cache`, `/legion/go` and `/legion/uv`, which the issue's roles share.
-The per-role `/legion/scratch/state/<role>` is Oh My Pi's logs, Chromium's profiles and the
-installed plugin generation rather than a cache, and is small. Do not leave `/legion/scratch/tmp`
+Two paths this layout creates are deliberately not in that list. The per-role
+`/legion/scratch/state/<role>` is Oh My Pi's logs, Chromium's profiles and the installed plugin
+generation rather than a cache, and is small. `/legion/scratch/data` is the shared
+`XDG_DATA_HOME`, and it is the one path here that a rebuild cannot restore: Oh My Pi puts its
+whole profile root under `$XDG_DATA_HOME/omp` where that directory exists, so deleting it costs
+a role its stored state and frees whatever that state happened to weigh, where every other path
+on the list is re-derived by the next build or install. Measure it before you touch it, and
+delete it only when it is the reason the volume is full. Do not leave `/legion/scratch/tmp`
 out of that list because a temporary directory sounds transient: it is this layout's own new
 failure mode, since a role at the merge base is told no `TMPDIR` at all and its temporaries died
 with the container, where here a killed build's residue lives as long as the issue does — one
@@ -1247,6 +1254,11 @@ role mid-build rebuilds what it loses, but deleting `$BUN_INSTALL_CACHE_DIR` und
 installing its plugin pair takes the `flock` inode with it, so a second role enters the critical
 section while the first is inside it and both fill one cold cache entry (measured: with no delete
 the second waits the full bound; with the directory deleted and remade mid-install it does not).
+The install block cannot prevent that and does not claim to — a lock whose inode is unlinked
+protects nothing — what it does is keep the damage to that one install: each attempt remakes the
+cache directory before taking its lock and clears a non-directory left at that path, so the
+launch retries and succeeds instead of the issue being left with a regular file there that fails
+every later installing launch until a person removes it.
 (The 5.5 GiB a reclaim returned on this branch's own volume came out of six per-role copies under
 the intermediate layout above, not out of these paths.) The `chmod` is not caution — the go
 command writes every extracted
