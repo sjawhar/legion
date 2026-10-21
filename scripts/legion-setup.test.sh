@@ -57,13 +57,18 @@ fixture() {
   cat > "$case_root/bin/bun" <<'STUB'
 #!/usr/bin/env bash
 # The stub bun: no network, no install, no cache. It records the call the script made — the
-# arguments, the working directory it ran in, the cache directory it was given and its own pid —
-# and then behaves as STUB_MODE says.
+# arguments, the working directory it ran in, the cache directory it was given, the log file it
+# was handed as its output and its own pid — and then behaves as STUB_MODE says.
 set -u
+# The log by fd 2 rather than fd 1: inside a command substitution fd 1 is the substitution's own
+# pipe, while fd 2 is still the file the script redirected this install onto. /proc is Linux's,
+# as are the flock and the timeout the script under test is built on.
+log_path=$(readlink /proc/self/fd/2 || true)
 {
   echo "args: $*"
   echo "pwd: $PWD"
   echo "cache: ${BUN_INSTALL_CACHE_DIR-}"
+  echo "log: $log_path"
   echo "pid: $$"
 } >> "$STUB_RECORD"
 case "${STUB_MODE-ok}" in
@@ -84,11 +89,13 @@ fail)
 cold-race)
   # The cold-entry race Legion's own plugin install met (plugins.go): the first attempt dies
   # filling the cache, the second, against the cache the other install just filled, succeeds. The
-  # counter is a file, since each attempt is a new process.
+  # counter is a file, since each attempt is a new process. The message is the one plugins.go
+  # measured unless a case names another, so a case can hold the retry to the part of the
+  # sentence the script matches rather than to the whole of it.
   attempts="$STUB_RECORD.attempts"
   printf 'x' >> "$attempts"
   if [ "$(wc -c < "$attempts")" -eq 1 ]; then
-    echo 'error: ENOENT: failed copying files from cache to destination'
+    echo "${STUB_COLD_RACE_MESSAGE:-error: ENOENT: failed copying files from cache to destination}"
     exit 1
   fi
   mkdir -p node_modules/.bin
@@ -180,7 +187,11 @@ fixture fresh
 run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=ok
 check "exits 0" "$(is "$status" 0)"
 check "the stub ran exactly once" "$(is "$(calls)" 1)"
-check "with install --frozen-lockfile" "$(contains "$(cat "$record")" '^args: install --frozen-lockfile$')"
+# --backend=copyfile, because that cache and this node_modules are on one filesystem, where bun's
+# default backend hardlinks the installed files out of the cache every role of the issue shares
+# (plugins.go:155-163, and the install's own comment).
+check "with install --backend=copyfile --frozen-lockfile" \
+  "$(contains "$(cat "$record")" '^args: install --backend=copyfile --frozen-lockfile$')"
 check "with the cache under the derived root" "$(contains "$(cat "$record")" "^cache: $cache\$")"
 check "in the workspace" "$(contains "$(cat "$record")" "^pwd: $workspace\$")"
 check "the marker holds the lock file's cksum" "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
@@ -403,6 +414,108 @@ check "exits 0" "$(is "$status" 0)"
 check "the cache is under .legion-setup" "$(contains "$(cat "$record")" "^cache: $plain/\.legion-setup/bun/cache\$")"
 check "the marker too" "$(exists "$plain/.legion-setup/bun/state/installed")"
 check "and nothing is written beside the workspace" "$(is "$(exists "$install_root/bun")" false)"
+check_clean
+
+echo "case: the cold-entry race worded another way"
+fixture cold-race-reworded
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  STUB_COLD_RACE_MESSAGE='error: failed copying files from cache into node_modules (ENOENT)' \
+  STUB_MODE=cold-race
+check "exits 0" "$(is "$status" 0)"
+check "the install is retried on the part of the message both wordings share" "$(is "$(calls)" 2)"
+check "and the retry is announced" "$(contains "$out" 'retrying once')"
+check "the marker is written after the retry" "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
+check "no report is left" "$(is "$(exists "$report")" false)"
+check_clean
+
+echo "case: a waiter arrives behind an install that finished while it queued"
+fixture waiter-behind-install
+mkdir -p "$cache" "$state"
+ready="$case_root/holder-ready"
+# The handshake is the run's own log: the script makes it only after its outer check has found
+# nothing installed, so a holder that waits for that file and only then writes the tree is
+# writing behind that check — which is the race two roles of one issue starting together run.
+# Without the handshake this case would be a sleep against a check microseconds wide, and the
+# fast path would sometimes answer where the re-check under the lock is what is being tested.
+(
+  exec 9< "$cache"
+  flock 9
+  : > "$ready"
+  for _ in $(seq 400); do
+    if [ -n "$(find "$state" -name 'install.*' -print -quit 2> /dev/null)" ]; then
+      break
+    fi
+    sleep 0.05
+  done
+  mkdir -p "$workspace/node_modules/.bin"
+  printf '#!/bin/sh\necho 2.3.5\n' > "$workspace/node_modules/.bin/biome"
+  chmod 755 "$workspace/node_modules/.bin/biome"
+  cksum < "$workspace/bun.lock" > "$marker"
+) &
+holder=$!
+for _ in $(seq 200); do
+  if [ -e "$ready" ]; then
+    break
+  fi
+  sleep 0.05
+done
+check "the holder took the cache's lock" "$(exists "$ready")"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" \
+  LEGION_SETUP_BUDGET=60 STUB_MODE=ok
+wait "$holder" > /dev/null 2>&1 || true
+check "exits 0" "$(is "$status" 0)"
+check "it queued for the lock rather than taking the fast path" \
+  "$(contains "$out" 'installing this bun.lock')"
+check "and the re-check under the lock found the install finished" \
+  "$(contains "$out" 'another role installed this bun.lock')"
+check "so no second install ran over the tree the other role's agent is working in" \
+  "$(is "$(calls)" 0)"
+check "the marker that role wrote is left exactly as it was" \
+  "$(is "$(cat "$marker")" "$(cksum < "$workspace/bun.lock")")"
+check "and no report tells this agent the packages are missing" "$(is "$(exists "$report")" false)"
+check_clean
+
+echo "case: each run's log is its own, and goes when the run goes"
+fixture per-run-log
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=fail
+first_log=$(sed -n 's/^log: //p' "$record" | tail -n 1)
+check "the install's output went to a log of this run's own" \
+  "$(contains "$first_log" "^$state/install\.")"
+check "whose tail is what the report quotes" "$(contains "$(field detail)" 'he said "quoted"')"
+check "and which is removed when the run ends" "$(is "$(exists "$first_log")" false)"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=killed
+second_log=$(sed -n 's/^log: //p' "$record" | tail -n 1)
+check "the next run writes to a file of its own, never the one before it" \
+  "$(is "$(is "$second_log" "$first_log")" false)"
+check "its report is its own run's" "$(is "$(field reason)" 'install-killed')"
+check "so its detail cannot be the earlier run's" "$(is "$(contains "$(field detail)" 'quoted')" false)"
+check "and no log is left behind on the issue volume" \
+  "$(is "$(find "$state" -name 'install.*' | wc -l)" 0)"
+check_clean
+
+echo "case: no install root this role can write under"
+fixture no-install-root
+# The derived root is the workspace's `/workspaces/` parent and the fallback is a directory in
+# the workspace itself; a volume this role cannot write to makes both refuse, which is every
+# check unavailable for every role of the issue — the failure the report mechanism exists for.
+chmod 500 "$install_root" "$workspace"
+run_setup "$workspace" LEGION_WORKSPACE="$workspace" LEGION_STATE_DIR="$state_dir" STUB_MODE=ok
+if mkdir "$install_root/probe" 2> /dev/null; then
+  # uid 0 ignores a directory's mode bits. CI and a role container (uid 1000) both run as an
+  # ordinary user, where the branch below is the one that runs.
+  rmdir "$install_root/probe"
+  check "this user ($(id -u)) can write there regardless, so the install runs" "$(is "$(calls)" 1)"
+else
+  check "exits 0" "$(is "$status" 0)"
+  check "the role container's log says why" "$(contains "$out" 'no writable install root')"
+  check "the stub never ran" "$(is "$(calls)" 0)"
+  check "the report names the missing install root" "$(is "$(field reason)" 'no-install-root')"
+  check "and carries no process's status, because none ran" "$(is "$(field exitStatus)" 0)"
+  check "its detail names the roots it tried" "$(contains "$(field detail)" '\.legion-setup')"
+  echo "  the report this case wrote:"
+  cat "$report"
+fi
+chmod 700 "$install_root" "$workspace"
 check_clean
 
 summary "scripts/legion-setup.sh"

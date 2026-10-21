@@ -53,7 +53,8 @@
 # `cksum < bun.lock`, not by the issue, because a forward merge moves `bun.lock` mid-issue and a
 # `node_modules` from the lock before it fails the type check for the wrong reason. The install is
 # `--frozen-lockfile`, which is what keeps `bun.lock` unchanged under an implementer who commits
-# from this workspace.
+# from this workspace, and `--backend=copyfile`, which keeps the cache every role shares from
+# being hardlinked into that workspace's node_modules (the install below says why).
 #
 # Run by hand from a workspace: LEGION_WORKSPACE=<that workspace> sh scripts/legion-setup.sh
 # With LEGION_WORKSPACE unset it does nothing at all: a human's clone keeps bun's own cache and
@@ -97,47 +98,11 @@ remaining() {
   printf '%s\n' "$left"
 }
 
-# The issue volume's root, which every workspace on it shares, so one role's install serves the
-# next. When the workspace is not under a `/workspaces/` component the expansion returns it
-# unchanged — or empty, when the path is nothing but that component — and the fallback is a
-# directory inside the workspace itself, which .gitignore holds. The same fallback answers a
-# derived root this user cannot write under.
-#
-# usable_root <dir>: sets root and state from <dir>, true when it can be written under.
-usable_root() {
-  root=$1
-  state=$root/bun/state
-  mkdir -p "$state" 2> /dev/null && [ -w "$state" ]
-}
-derived=${workspace%/workspaces/*}
-if [ "$derived" = "$workspace" ] || [ -z "$derived" ]; then
-  derived=$workspace/.legion-setup
-fi
-if ! usable_root "$derived" && ! usable_root "$workspace/.legion-setup"; then
-  echo "legion setup: no writable install root under $root; leaving the install to the agent" >&2
-  exit 0
-fi
-
-# The download cache is the deployment's when it names one — every role container of an issue pod
-# is told the issue's own `BUN_INSTALL_CACHE_DIR` on its volume, and that one directory serving
-# every role is the point of it — and otherwise one of this script's own beside the state, so a
-# run anywhere else still keeps bun's cache off the container's own disk.
-cache=${BUN_INSTALL_CACHE_DIR:-}
-if [ -z "$cache" ]; then
-  cache=$root/bun/cache
-  mkdir -p "$cache" 2> /dev/null || true
-fi
-# The marker is the issue volume's, beside the cache every role of the issue shares, not the
-# workspace's: that is what makes one role's install serve the next five. It is also why a failed
-# run's `rm -f "$marker"` below reaches every workspace on the volume — a second workspace there
-# whose install failed would cost the first's roles a reinstall. Nothing reaches that: production
-# provisions exactly one clone and one jj workspace per issue volume (`workspace-init provision`,
-# `workspace.Location` in `packages/daemon/internal/workspace/provision.go`, which names the
-# repository and the issue and never a role), so one volume is one workspace. A tree that ever
-# puts two on one volume is where this would have to be keyed by workspace as well as by lock.
-marker=$state/installed
-log=$state/install.log
-
+# The report's path comes before the install root below, and not after it as everything else
+# about the report does, because the one failure this report mechanism exists for is a volume
+# this role cannot write under — every check unavailable, for every role of the issue. That
+# branch exits, so a report prepared after it would never be written at all. It depends on
+# nothing the install root sets.
 report=
 if [ -n "${LEGION_STATE_DIR-}" ] && [ -d "${LEGION_STATE_DIR}" ] && [ -w "${LEGION_STATE_DIR}" ]; then
   report=$LEGION_STATE_DIR/legion-setup-report.json
@@ -186,6 +151,51 @@ clear_report() {
   return 0
 }
 
+# The issue volume's root, which every workspace on it shares, so one role's install serves the
+# next. When the workspace is not under a `/workspaces/` component the expansion returns it
+# unchanged — or empty, when the path is nothing but that component — and the fallback is a
+# directory inside the workspace itself, which .gitignore holds. The same fallback answers a
+# derived root this user cannot write under.
+#
+# usable_root <dir>: sets root and state from <dir>, true when it can be written under.
+usable_root() {
+  root=$1
+  state=$root/bun/state
+  mkdir -p "$state" 2> /dev/null && [ -w "$state" ]
+}
+derived=${workspace%/workspaces/*}
+if [ "$derived" = "$workspace" ] || [ -z "$derived" ]; then
+  derived=$workspace/.legion-setup
+fi
+if ! usable_root "$derived" && ! usable_root "$workspace/.legion-setup"; then
+  echo "legion setup: no writable install root under $root; leaving the install to the agent" >&2
+  # Nothing can be installed for any role of this issue, so the agent is told rather than left to
+  # meet it as a check that will not run. It is the one failure that leaves no install log, so
+  # the detail is what this run knows; the status is 0 because no install ran to have one.
+  write_report no-install-root 0 \
+    "no writable install root: neither $derived nor $workspace/.legion-setup can be written under"
+  exit 0
+fi
+
+# The download cache is the deployment's when it names one — every role container of an issue pod
+# is told the issue's own `BUN_INSTALL_CACHE_DIR` on its volume, and that one directory serving
+# every role is the point of it — and otherwise one of this script's own beside the state, so a
+# run anywhere else still keeps bun's cache off the container's own disk.
+cache=${BUN_INSTALL_CACHE_DIR:-}
+if [ -z "$cache" ]; then
+  cache=$root/bun/cache
+  mkdir -p "$cache" 2> /dev/null || true
+fi
+# The marker is the issue volume's, beside the cache every role of the issue shares, not the
+# workspace's: that is what makes one role's install serve the next five. It is also why a failed
+# run's `rm -f "$marker"` below reaches every workspace on the volume — a second workspace there
+# whose install failed would cost the first's roles a reinstall. Nothing reaches that: production
+# provisions exactly one clone and one jj workspace per issue volume (`workspace-init provision`,
+# `workspace.Location` in `packages/daemon/internal/workspace/provision.go`, which names the
+# repository and the issue and never a role), so one volume is one workspace. A tree that ever
+# puts two on one volume is where this would have to be keyed by workspace as well as by lock.
+marker=$state/installed
+
 digest=$(cksum < bun.lock)
 
 # The packages this lock names are installed, and installed here: the marker alone would survive a
@@ -206,6 +216,15 @@ exit_if_installed() {
 
 exit_if_installed
 
+# This run's own log, made after the check above because a run that installs nothing needs none,
+# and removed when the run ends. Not one shared name: `$state` is on the issue volume, which
+# every role container of the pod shares, so a waiter would truncate the holder's log the moment
+# it began waiting, and the holder's own `tail` — and the report's `detail`, the only diagnostic
+# the agent ever sees — would then quote the other role's install. mktemp names it rather than
+# `$$`, because two role containers are two PID namespaces, where one pid is two runs.
+log=$(mktemp "$state/install.XXXXXX" 2> /dev/null) || log=$state/install.$$
+trap 'rm -f "$log" 2> /dev/null' EXIT
+
 # The install is serialised on the cache directory itself and retried once, following Legion's own
 # plugin install (packages/daemon/internal/runtime/sandbox/plugins.go), which runs in this same
 # container moments before this script and takes the same lock. Filling a cold entry of a bun
@@ -223,20 +242,53 @@ exit_if_installed
 # to that exact path.
 LOCK_BUSY=199
 
-# The install's own bound is computed inside the lock, by the shell flock runs, rather than before
-# it: `timeout`'s duration is fixed when its argument is expanded, so an install handed what was
-# left when the flock *started* would be given a budget the wait has since spent, and the two
-# would add up past the whole. $1 is the deadline, read after the lock is taken.
+# `--backend=copyfile`, for the reason plugins.go:155-163 states about this same cache in this
+# same container moments earlier: BUN_INSTALL_CACHE_DIR and the node_modules being written are
+# both on the issue volume, one filesystem, where bun's default backend hardlinks the installed
+# files out of the cache — an installed file and its cache entry become one inode, and a single
+# in-place write under node_modules corrupts the cache every role of the issue shares for the
+# life of the volume. The flag on the command is the only way to say it: bun ignores the setting
+# in a bunfig.toml and has no environment variable for it (oven-sh/bun#25391, #32158). Sami's
+# decision on dispatch://INFRA-31 to accept those links covers an install an agent types, which
+# bun gives no way to change; this one is Legion's own, run before the agent, which is exactly
+# the class the daemon's plugin install pays copyfile for.
+#
+# Everything else the install needs is done here too, by the shell flock runs under the lock, and
+# nothing of it by the shell that waits for the lock:
+#   * the install's own bound, because `timeout`'s duration is fixed when its argument is
+#     expanded: an install handed what was left when the flock *started* would be given a budget
+#     the wait has since spent, and the two would add up past the whole. $1 is the deadline, read
+#     after the lock is taken;
+#   * the same check the outer shell made before it queued, because two roles that start together
+#     both pass that one: the first installs for the ~50 s it takes, and the second would
+#     otherwise run a second `bun install` over the finished tree, in the workspace the first
+#     role's agent is already working in — and a failure of that redundant install would delete a
+#     marker that is true, cost every later role a full reinstall, and tell its agent the
+#     packages could not be installed in a container where they are, which is the untrue report
+#     this whole script exists to prevent. A waiter that arrives behind a finished install does
+#     no work at all;
+#   * the marker, so the run that wrote the tree is the run that vouches for it and no waiter
+#     rewrites it;
+#   * the log's truncation, because the log is this run's own file and this is the moment it
+#     starts being written.
 # shellcheck disable=SC2016 # the arithmetic belongs to the shell under the lock, not to this one
-locked_install='left=$(($1 - $(date +%s)))
+locked_install='deadline=$1 marker=$2 digest=$3 log=$4
+exec > "$log" 2>&1
+if [ -f "$marker" ] && [ -e node_modules/.bin/biome ] &&
+  [ "$(cat "$marker" 2> /dev/null)" = "$digest" ]; then
+  echo "another role installed this bun.lock while this run waited for the cache"
+  exit 0
+fi
+left=$((deadline - $(date +%s)))
 [ "$left" -ge 1 ] || left=1
-exec timeout -k 5 "$left" bun install --frozen-lockfile'
+timeout -k 5 "$left" bun install --backend=copyfile --frozen-lockfile || exit $?
+printf "%s\n" "$digest" > "$marker" 2> /dev/null || true'
 
 install_once() {
   [ -d "$cache" ] || rm -f -- "$cache"
   mkdir -p -- "$cache" 2> /dev/null
   BUN_INSTALL_CACHE_DIR="$cache" /usr/bin/flock -w "$(remaining)" -E "$LOCK_BUSY" -- "$cache" \
-    sh -c "$locked_install" sh "$deadline" > "$log" 2>&1
+    sh -c "$locked_install" sh "$deadline" "$marker" "$digest" "$log"
 }
 
 echo "legion setup: installing this bun.lock's packages into $workspace" >&2
@@ -246,9 +298,13 @@ status=$?
 # The retry is for the cold-entry race alone, and it waits on the same remaining budget as the
 # attempt before it, so a second attempt cannot push the script past the registration deadline it
 # shares with the role's launch. A budget with no more than a few seconds left buys nothing but
-# that deadline's risk, so the retry is skipped.
+# that deadline's risk, so the retry is skipped. The match is the part of bun's message that does
+# not depend on how it reached the file — plugins.go:169-171 measured
+# `ENOENT: failed copying files from cache to destination` under copyfile, this install carries a
+# backend flag of its own, and a wording pinned to one whole sentence would silently stop
+# retrying the moment either changed. What identifies the race is the copy out of the cache.
 if [ "$status" -ne 0 ] && [ "$status" -ne "$LOCK_BUSY" ] &&
-  grep -q 'ENOENT: failed copying files from cache to destination' "$log" 2> /dev/null; then
+  grep -q 'failed copying files from cache' "$log" 2> /dev/null; then
   if [ "$(remaining)" -gt 10 ]; then
     echo "legion setup: the cache was filled under this install; retrying once" >&2
     install_once
@@ -259,8 +315,9 @@ fi
 # first, or the 2> would be the fd it was pointed at.
 tail -n 20 "$log" >&2 2> /dev/null
 
+# The marker is the locked shell's, written where the tree was written and under the lock that
+# made it safe to write; this shell only reports what that one did.
 if [ "$status" -eq 0 ]; then
-  printf '%s\n' "$digest" > "$marker" 2> /dev/null
   clear_report
   echo "legion setup: installed this bun.lock's packages into $workspace" >&2
   exit 0
