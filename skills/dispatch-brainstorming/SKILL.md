@@ -42,8 +42,8 @@ Explain plainly what the code does now, naming each tool, event and route exactl
    1. Each decision the human must make: options, trade-offs and your recommendation, clear without the document. The human answers in the block.
    2. Each point the human has not yet settled, one line each, with a line reference.
    3. The link.
-2. Keep the reply, not the document, to what is new.
-3. If no decision is open and nothing is new, ask for no review in the reply. Say the document records what you agreed. Turn step 5 still applies.
+2. The reply carries only what is new. The document stays the full current design.
+3. If no decision is open and nothing is new, do not ask for review in the reply. Say the document records what you agreed. Turn step 5 still applies.
 4. When you ask for review, say "ready for review", never "complete". Put the uncertainty first and show your reasoning.
 
 ## The plan

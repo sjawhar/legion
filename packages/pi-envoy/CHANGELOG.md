@@ -20,7 +20,6 @@
   open decision, then each unsettled point with a line reference, then the link; it asks for no
   review when nothing is new; it says "ready for review", never "complete"; "plan only" stops after
   the plan; and the spec stays a record of the current design, not of how it was reached.
-
 - The model's `envoy_role_set` and `envoy_unsubscribe` no longer close a subscription another
   plugin opened for the role the session holds (`whileHolding`), which used to leave the session
   deaf to that role's notices without saying so. `envoy_role_set` refuses to move off such a role,

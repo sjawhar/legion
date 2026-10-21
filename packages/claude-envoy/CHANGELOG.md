@@ -69,7 +69,6 @@
   open decision, then each unsettled point with a line reference, then the link; it asks for no
   review when nothing is new; it says "ready for review", never "complete"; "plan only" stops after
   the plan; and the spec stays a record of the current design, not of how it was reached.
-
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
   an Oh My Pi session keeps; Claude Code holds none, so the tools behave as before.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
