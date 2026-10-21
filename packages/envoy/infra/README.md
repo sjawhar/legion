@@ -207,9 +207,10 @@ the in-cluster `allowedNamespaces` consumers lose the app for that window as wel
 since `internal/bus` reconnects without limit (`MaxReconnect = -1`) and no liveness probe restarts
 anything, and it is no regression, since the base ran one pod. Above one replica the app rolls
 instead: a new pod is ready before an old one stops, and a stopping pod keeps serving for five
-seconds after it is removed from routing, which is what the pre-stop wait is for. The kubelet runs
-that wait inside the pod's one `terminationGracePeriodSeconds` and signals the container only once
-it returns, so the pod asks for 35 seconds: the five of the wait added to the thirty
+seconds after it is told to stop, which is the window its removal from routing has to propagate,
+and is what the pre-stop wait is for. The kubelet runs that wait inside the pod's one
+`terminationGracePeriodSeconds` and signals the container only once it returns, so the pod asks
+for 35 seconds: the five of the wait added to the thirty
 `envoy-dispatch`'s own shutdown is built for (`stopGrace` in
 `packages/envoy/cmd/dispatch/shutdown.go`) rather than taken out of them. Whoever tunes either
 number moves both, since a wait the grace period does not cover is paid for out of the server's
