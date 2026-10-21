@@ -346,7 +346,10 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			wwwBare := !spelling.angleURLs
 			// A www link is written bare only where the character written before it is one a www
 			// URL may follow (wwwMayFollow); elsewhere its marks are written again with the link.
+			// The rollback restores everything closing and opening marks changes: the bytes, the
+			// open marks, the position, and the renderer's open code fence and link label verdict.
 			before, beforeActive, beforePosition, beforeFused := r.b.Len(), active, position, fused
+			beforeFence, beforePadded, beforeLabel := r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets
 			bareHere := wwwBare
 			var next, following []Mark
 			var common int
@@ -388,6 +391,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				}
 				r.b.Truncate(before)
 				active, position, fused, bareHere = beforeActive, beforePosition, beforeFused, false
+				r.inlineCodeFence, r.inlineCodePadded, r.labelBrackets = beforeFence, beforePadded, beforeLabel
 			}
 			hasLink := containsMark(visibleMarks(n.Marks), "link")
 			active = next

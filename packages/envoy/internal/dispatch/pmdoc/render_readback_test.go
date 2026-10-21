@@ -325,6 +325,21 @@ func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
 	}
 }
 
+// The first spelling of a run, the one inlineWithEscapes falls back to when no respelling reads
+// back, closes a code span before a www link it writes as an explicit link: rolling back the bare
+// writing of the link restores the open code fence its marks closed.
+func TestTheFirstSpellingClosesACodeSpanBeforeAWWWLinkAfterIt(t *testing.T) {
+	nodes := []*Node{
+		{Type: "text", Text: "c", Marks: []Mark{{Type: "inlineCode"}}},
+		{Type: "text", Text: "www.a.test", Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://www.a.test", "title": nil}}}},
+	}
+	r := &renderer{}
+	r.writeInlineRun(nodes, "", inlineContext{startsLine: true}, runSpelling{})
+	if got, want := r.b.String(), "`c`[www.a.test](http://www.a.test)"; got != want {
+		t.Fatalf("writeInlineRun = %q, want %q", got, want)
+	}
+}
+
 // The browser editor's parser links a URL in decoded text, after an escape or a character
 // reference, which Go's parser, reading markdown, does not. Each row is markdown and whether Go and
 // the engine read it alike, so a change to either reading shows here: the divergences that remain
