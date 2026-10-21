@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-71",
+  "completed": "2026-10-21T10:35:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 7,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-check-commands.sh:399-405",
+      "description": "The bare-tool message is untrue of the line it is printed for when the tool name stands in argument position. Reproduced at this head against a fixture tree with the real script symlinked in: `which biome`, `grep -rn biome package.json` and `rm -rf ~/.cache/biome` each get \"runs `biome`, which is whatever PATH answers with\" (the third names `~/.cache/biome` as the thing it runs), and a ```text block quoting `error: Cannot find module 'tsc'` gets the same sentence. The reporting behaviour is the architect's accepted decision; the sentence has to be true of the line and keep naming the exemption marker. No test asserts any clause after \"runs `biome`\" (every suite case stops at file:line plus the discriminating word), so the corrected sentence needs a fixture of its own."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-check-commands.sh:254,408-418",
+      "description": "The exemption marker is searched for in the raw line before tokenizing, so it is honoured anywhere on the line, quotes included, and a real vulnerable command on that same line passes. Reproduced: `echo \"see # check-check-commands: allow docs\" && bunx biome check .` and `bunx biome check . && echo \"# check-check-commands: allow z\"` are both unreported, while the header claims the exemption is \"a line ending `# check-check-commands: allow <reason>`\". The escape hatch can be obtained by text that is not a shell comment. strip_comment() already finds the `#` that begins a word outside quotes; the marker should be looked for there."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/legion-setup.sh:233",
+      "description": "`bun install --frozen-lockfile` runs with bun's default hardlink backend while BUN_INSTALL_CACHE_DIR (/legion/scratch/bun/install/cache, manifest.go:737) and the target node_modules are both on the issue volume — one filesystem. packages/daemon/internal/runtime/sandbox/plugins.go:155-163 states the invariant for this exact cache and pays `--backend=copyfile` (plugins.go:225) for it: on one filesystem bun hardlinks out of the cache, so an in-place write to an installed file rewrites the shared cache entry for the life of the volume. The retry predicate (line 251) also greps an ENOENT string plugins.go measured under copyfile."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/legion-setup.sh:207,231-239,281",
+      "description": "`exit_if_installed` runs once, before the lock, and nothing re-checks inside it. Two roles starting together both pass it; the waiter then runs a second `bun install --frozen-lockfile` over the finished tree, in the workspace the first role's agent is already working in, and any failure of that redundant install (`rm -f \"$marker\"`, line 281) deletes the valid marker — every later role of the issue reinstalls — and writes an install-failed report whose notice tells its agent the packages could not be installed when they are. That is the untrue report this issue exists to stop."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/legion-setup.sh:139,235-239",
+      "description": "`$state/install.log` is on the issue volume, shared by every role container, and `> \"$log\"` is applied by the shell that execs flock — so the file is truncated when an attempt begins waiting, not when it holds the lock. A waiter truncates the holder's log; the holder's own `tail -n 20` (line 260) and the report's `detail` (line 289) can then quote the other role's install. The detail is the only diagnostic the agent ever sees (setup-report.ts:78-85)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/local-instance.ts:176",
+      "description": "Three prescriptions of the vulnerable form survive the migration: local-instance.ts:176 prints `… bunx playwright test --config e2e/playwright.config.ts …` to the developer on every `bun run dispatch:local`, local-instance.ts:3 and failed-room.e2e.ts:10 prescribe it in comments. The identical failed-room command in packages/dispatch/AGENTS.md was migrated to the wrapper, and the guard never judges a *.ts file, so nothing keeps these out. The PR body carries no `## Contract change census`; re-running the search at this head produced exactly this hit list."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-check-commands.sh:462-469",
+      "description": "`read_text` catches only UnicodeDecodeError, and walk() keeps symlinked files. Reproduced: a dangling `scripts/dangling.sh -> missing-target.sh` makes the required lint job die with a raw FileNotFoundError traceback whose line numbers are the heredoc's, contradicting the header's claim (line 146) that an unreadable file is a named problem and the suite's two `no traceback` assertions."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/legion-setup.sh:116-119",
+      "description": "The \"no writable install root\" branch exits before `report=` is computed (lines 141-144), so the one case the report mechanism was built for — a volume the role cannot write to, every check unavailable — produces no first-turn notice, only a stderr line in the container log."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-legion/src/setup-report.ts:89-91",
+      "description": "The notice tells the agent \"Never a bare `bun install`: its download cache would land on the container's own disk\", while scripts/repo-tool.sh:49-50 — printed by the very failure the notice is about — says the remedy is `bun install` at the root. In a role container BUN_INSTALL_CACHE_DIR already names the issue volume's cache (manifest.go:737, podsafety.go:187), so the stated reason is false there. Two agent-facing instructions from one change contradicting each other."
+    }
+  ]
+}
