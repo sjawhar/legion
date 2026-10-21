@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-791",
-  "completed": "2026-10-21T16:53:16Z",
+  "completed": "2026-10-21T17:50:01Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2096",
-  "codeHeadSha": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
-  "handoffHeadSha": "003b994602824dbb0d0e359c9daeacd251d0fbb4",
+  "codeHeadSha": "6097442543c3d042ec55a5c4684d58cd83223215",
+  "handoffHeadSha": "2a16ebabc5a0485bb15769e8a313d3b3447b7604",
   "requiredSkillsFollowed": [
     "legion-worker (SKILL.md, references/pr-body.md)",
     "dispatch (doc-read of the spec and plan-md)"
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: the head's `legion` binary (go build ./cmd/legion; `legion version` -> `legion (devel)`) booted in the tester's pod over an embedded Postgres 16.4 of its own (zonky jar, port 15795), with tmux and omp stubs and a `secrets` stub, on ports 15796 and 15797. Re-ran the implementer's four predicates verbatim against my instance's body (the has/== predicate -> true; the PEM/DSN/password string sweep -> true; grep -c -> 0; the no-null predicate -> true), re-ran its `legion state --json --port` step and parsed the output through the strict LegionStateResponse with bun (strict parse OK: 5 / 90). Its negative control (a) re-read from this pod: `curl -s \"$LEGION_DAEMON_URL/legion/v1/state\" | jq 'has(\"settings\")'` -> false against the production LEGION daemon (boot 56). Its (b), the LEGION controller's read_state reply (Envoy id b74e5adff9a887cc0b345a694d7537d4 at 2026-10-21T15:30:46Z), is cited from its proof and not re-asked: one controller turn is enough for the pre-change record. Its (c) and (d) re-run: safeParse false with settings deleted and with max_fix_attempts as \"5\"; the loader refuses `projects.<KEY>.repo` on main and three more fixture shapes I tried."
+    "how": "Round 1: drove the same surface independently (own embedded Postgres, own ports; the implementer's four predicates re-run verbatim; its `legion state --json` + strict parse re-run; its negative control (a) re-read from this pod; its (b), the LEGION controller's reply b74e5adff9a887cc0b345a694d7537d4 at 2026-10-21T15:30:46Z, cited not re-asked). Round 2: reproduced its before/after on URL userinfo with the round-1 binary (9b1a38ef, still in /tmp from round 1) and the round-2 binary (6097442543c3) on the same file, widened to daemon_url, a user-only entry, an IPv6 host and a path-carrying entry; its four predicates, the Stage 1 sweep regex, the strict parse and the CLI equality re-run at the new head; its throwaway nested-type proof of the derived walk re-run by overlay (Config.Vault *VaultConfig{Token, URL}); the three threads it answered read as resolved on GitHub."
   },
   "failed": 0,
   "failures": [],
@@ -40,20 +40,55 @@
       "observed": "The first fails: `settings_test.go:173: Config.TesterPlantedUnclassified is in neither settingsEmitted nor settingsExcluded: decide whether every pod may read it, put it in one table, and have SettingsOf agree` (FAIL). The second passes: `reachable config structs: 18, classified: 18`. go.work.sum unchanged; the overlay files removed.",
       "headSha": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
       "negativeControl": "The same TestSettingsOfClassifiesEveryConfigField without the overlay is what CI's `Tests` run 39634012985 (job test, success at 9b1a38ef) ran green, so the failure is the planted field's alone."
+    },
+    {
+      "criterion": "Reviewer round-1 finding 1 (Security[secret]), the spec's 'non-secret settings': daemon_url, envoy_url, every nats_urls entry and dispatch_url reach the wire with their userinfo masked, where the loader tells operators to put NATS and Envoy credentials.",
+      "surface": "The `legion` binary built from 6097442543c3 (go build ./cmd/legion) booted in the tester's pod over its own embedded Postgres 16.4 (port 15795), tmux and omp stubs, under `env -i`, on port 15797, with a tmux file planting userinfo on every address key the loader admits under tmux: `daemon_url: http://legion:<pw>@127.0.0.1:15797/`, `envoy_url: http://legion:<pw>@127.0.0.1:9020`, `nats_urls: [nats://legion:<pw>@127.0.0.1:4222, nats://legion-user-only@127.0.0.1:4223, nats://legion:<pw>@[::1]:4224, nats://127.0.0.1:4225/path]` (dispatch_url cannot boot without a Dispatch; TestEndpointOfMasksUserinfoAndKeepsThePath covers its path-carrying shape), beside round 1's max_fix_attempts 5, worker_boot_timeout_seconds 90, DSN password and PEM fixtures.",
+      "command": "curl -s http://127.0.0.1:15797/legion/v1/state > e/state.json; jq -c '.settings | {daemon_url, envoy_url, nats_urls}' e/state.json; a Python sweep over the body and the daemon log for the three planted passwords, the user-only name, the regex ://[^/@\\s\"]+:[^/@\\s\"]+@, the DSN password, postgres://, BEGIN, PRIVATE KEY, the PEM body and the operator token; jq -e '([.. | strings | select(test(\"BEGIN|PRIVATE KEY|postgres://|://[^/@ ]+:[^/@ ]+@\"))] | length) == 0' e/state.json (Stage 1's own sweep); the forbidden/_file key sweep and the null check; legion state --json --port 15797 compared to the HTTP body; bun run parse.ts e/state.json, e/state-cli.json and packages/contracts/fixtures/daemon-api/state.json (LegionStateResponse.parse).",
+      "observed": "{\"daemon_url\":\"http://xxxxx@127.0.0.1:15797\",\"envoy_url\":\"http://xxxxx@127.0.0.1:9020\",\"nats_urls\":[\"nats://xxxxx@127.0.0.1:4222\",\"nats://xxxxx@127.0.0.1:4223\",\"nats://xxxxx@[::1]:4224\",\"nats://127.0.0.1:4225/path\"]}: user:password, user alone and an IPv6 host each masked as xxxxx@, the entry with no userinfo and its path as written, daemon_url's trailing slash gone (the loader's baseURL). Body hits: none; log hits: none (the log's two URL lines are the boot gate's and `legion daemon started` with address 127.0.0.1:15797); Stage 1's sweep \u2192 true; forbidden/_file keys: none; null: false; CLI settings == HTTP settings: true. Strict parse OK on the body (33 keys, 5 / 90), the CLI's, and the regenerated fixture (36 keys; envoy_url and nats_urls[0] masked, nats_urls[1] as written, dispatch_url and daemon_url without userinfo as the fixture sets them).",
+      "headSha": "6097442543c3d042ec55a5c4684d58cd83223215",
+      "negativeControl": "(a) The round-1 binary (9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7) booted with the identical file on port 15796 served every address verbatim \u2014 daemon_url http://legion:<pw>@127.0.0.1:15796, envoy_url http://legion:<pw>@127.0.0.1:9020, both password-carrying nats_urls entries and the user-only one \u2014 4 user:password@ matches in its body, the planted envoy password present, and Stage 1's sweep regex \u2192 false on it (the leak reproduced, then closed at the new head). (b) The served body with `settings` deleted \u2192 safeParse false (settings:invalid_type); max_fix_attempts as \"5\" \u2192 false; worker_boot_timeout_seconds 0 \u2192 false; an unknown key inside settings \u2192 true (loose by design); an unknown top-level key \u2192 false. (c) The production LEGION daemon before the merge, from this pod: jq 'has(\"settings\")' \u2192 false (boot 56)."
+    },
+    {
+      "criterion": "Reviewer round-1 finding 2 and the PR body's Contract change census: the classification guard reaches every config struct type by walking config.Config (not a hand list), and a plugin built before contract 35 is refused at the boot gate (the census's rollout row), never a silent mismatch.",
+      "surface": "The daemon's Go test suite in the pod with a scratch `go test -overlay` (the workspace untouched; go.work.sum compared byte for byte), and the round-2 `legion` binary booted against a `@sjawhar/pi-legion` manifest declaring `daemonApiVersion: 34` under a HOME of its own (the plugin gate's load probe reads that manifest), port 15798.",
+      "command": "go test ./internal/api/ -run TestSettingsOfClassifiesEveryConfigField -overlay overlay.json -count=1 (config.go replaced by a copy adding `Vault *VaultConfig` as Config's first field and `type VaultConfig struct { Token string; URL string }`); env -i PATH=\u2026 HOME=/tmp/legion791/home34 LEGION_OMP_PATH=\u2026 legion-r2 start --config f/legion.yaml.",
+      "observed": "FAIL naming all three: `Config.Vault is in neither settingsEmitted nor settingsExcluded \u2026`, `VaultConfig.Token is in neither \u2026`, `VaultConfig.URL is in neither \u2026` (round 1's hand list would have named Config.Vault alone). The daemon exits 1 before serving anything: `legion start: pi-legion at /tmp/legion791/home34/.omp/plugins/node_modules/@sjawhar/pi-legion/package.json (package 10.17.0) speaks daemon API contract 34; this daemon requires 35. Install the @sjawhar/pi-legion release built from this daemon's commit into the default OMP profile.`; no planted password in that log. go.work.sum unchanged; the overlay removed.",
+      "headSha": "6097442543c3d042ec55a5c4684d58cd83223215",
+      "negativeControl": "The same binary with the manifest at 35 (home) booted and served the state on port 15797 (proof above); the same TestSettingsOfClassifiesEveryConfigField without the overlay is green in CI's Tests run 39644068365 at 6097442543c3, so the failure is the planted type's alone."
     }
   ],
   "ci": {
-    "head": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
-    "tests": "run 39634012985: lint, typecheck, test success; the test job's `Stage 1 live proof` step success (the real binary on a real Postgres asserting the served settings)",
-    "prTitle": "runs 39634012975 and 39634724197 success",
-    "docs": "run 39634012933 success",
-    "workerImage": "run 39634012963 success",
-    "legionEnvoyAndContracts": "run 39634013138: changes, pi-legion, claude-envoy (check-dist), envoy-client, envoy-plugin, contracts, envoy-e2e-local, pi-envoy, envoy-smoke, envoy-go, envoy-infra-go, pi-shared, envoy-go-race and dispatch-memory success; the `dispatch` job still in progress at 16:52Z (the Dispatch UI, which this change does not touch)",
-    "handoffHead": "003b994602824dbb0d0e359c9daeacd251d0fbb4 carries `skip-checks: true` and started no run; the tester's push below is handoff-only too"
+    "head": "6097442543c3d042ec55a5c4684d58cd83223215",
+    "tests": "run 39644068365: lint, typecheck, test success; the test job's `Stage 1 live proof` step success (the real binary on a real Postgres asserting the masked envoy_url and the user:password@ sweep)",
+    "prTitle": "runs 39644068444, 39644097263, 39644097358, 39644100659, 39644102220, 39644105091, 39644106685, 39644328515 success (one per body edit)",
+    "docs": "run 39644068234 success",
+    "workerImage": "run 39644068250 success",
+    "legionEnvoyAndContracts": "run 39644068302: every job success but `dispatch` and `dispatch-memory` still in progress at 17:47Z (the Dispatch UI, which this change does not touch); the round-1 run 39634013138's same jobs finished green",
+    "handoffHead": "2a16ebabc5a0485bb15769e8a313d3b3447b7604 carries `skip-checks: true` and started no run; this handoff push is handoff-only too"
   },
   "notesForTheReviewer": [
-    "settingsClassifiedTypes is a hand-maintained list that claims to be every type reachable from config.Config; today it is (18 of 18, checked by a scratch reflect walk), but nothing in the suite enforces the reachability claim, so a new nested struct type whose parent field is classified `emitted` would have its own fields unclassified until someone adds the type to the list. Not a defect in the served behaviour; a one-loop hardening of TestSettingsOfClassifiesEveryConfigField if the reviewer wants it.",
-    "The settingsEmitted/settingsExcluded tables are documentary: the leak guard is the fixture's planted-marker sweep, the forbidden-key-name and `_file`-suffix sweep, and the exact key-set assertions at the top level, runtime.kubernetes and github_apps.implement. A credential field added later must also be planted in settingsFixtureFile for the sweep to see it.",
-    "The production check's lockstep: a daemon at contract 35 refuses a worker image at 34 at its boot gate, so the legion-deploy holder's release moves the binary and runtime.kubernetes.image together (the plan's Integration note); this round could not exercise it."
+    "Round 1's two notes on the hand-maintained reachability list and the documentary tables are answered: settingsConfigTypes() derives the set (verified by the nested-type overlay), and the planted-marker sweep now holds userinfo too; the `settingsEmitted` prose values remain the Fast-follow.",
+    "endpointOf keeps a path and drops nothing else because the loader refuses a query and a fragment on all four keys (config.go endpointURL/noQueryOrFragment/trimmedBase); runtime.kubernetes.agent_secrets.url is not passed through it but the loader refuses userinfo there (kubernetes.go:275), so no fifth address key carries one.",
+    "Operator argv stays in as the plan decided (omp_launch_prefix, which may not run `secrets`; runtime.kubernetes.setup, which every pod runs): an operator who writes a literal KEY=value secret into either would see it served; provider_keys is the sanctioned route and the loader points there.",
+    "The production check's lockstep: a daemon at 35 refuses a plugin at 34 (driven live here) and the image probe refuses the mixed pair; the legion-deploy holder's release moves the binary and runtime.kubernetes.image together."
+  ],
+  "round": 2,
+  "rounds": [
+    {
+      "round": 1,
+      "codeHeadSha": "9b1a38ef9c76f3c9011917f15c2f3a7f34f898d7",
+      "handoffHeadSha": "003b994602824dbb0d0e359c9daeacd251d0fbb4",
+      "verdict": "pass",
+      "proof": "proof[0..2] below; the reviewer's round-1 finding (URL userinfo emitted verbatim) was a leak this round's fixtures missed: every URL planted in round 1 carried no userinfo"
+    },
+    {
+      "round": 2,
+      "codeHeadSha": "6097442543c3d042ec55a5c4684d58cd83223215",
+      "handoffHeadSha": "2a16ebabc5a0485bb15769e8a313d3b3447b7604",
+      "verdict": "pass",
+      "answers": "review handoff 0f0659209aeb: threads PRRT_kwDORFy7ds6u305o, \u2026305q, \u2026305t, each resolved on GitHub; the Contract change census added to the PR body",
+      "proof": "proof[3..4] below"
+    }
   ]
 }
