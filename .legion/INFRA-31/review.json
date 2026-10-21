@@ -2,46 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T02:05:00Z",
+  "completed": "2026-10-21T02:25:00Z",
   "decision": "changes_requested",
-  "round": 10,
-  "note": "My task named 9b8c6ccc50bd; the head moved to d52ae9dc58b4 while the round was open (78e350969a26 rewrote the paragraph this round is about). I re-read the head immediately before writing rather than after being handed the task — the rule I wrote after the last time this happened — and reviewed d52ae9dc58b4.",
+  "round": 11,
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:1233",
-      "description": "The clause written to answer my previous finding introduced a new false one, in the same operator-facing paragraph and in the direction that costs the operator the action. It reads 'which fits once the duplication is gone, and does not before it' and concludes 'So what was filling the disk is the duplication, and the already-running volumes fit because it is being removed.' Two things make that false, and I derived both from the files rather than carrying them. First, nothing removes it: fourteen lines above, the same paragraph says 'Nothing prunes /legion/scratch: it grows for the life of the issue, across every pod of it', and that is what the code does — EnsureScratch only makes directories, and the one rm in the rendered wrapper is `rm -rf -- <root>/g*` for plugin generations. The 5.5 GiB the paragraph cites as returned came back because a person deleted a role's copy by hand. Second, and worse for the general case: a production volume never held the duplication being described. At the merge base 2127101bddff the runtime sets a role container no GOCACHE, no GOMODCACHE and no BUN_INSTALL_CACHE_DIR at all — the only TMPDIR it sets is fetchEnvironment's, the fetch container's own — and xdgCacheHome is podHome + '/.cache', the container's filesystem. So the 17 GiB with 14 GiB of per-role Go caches is this branch's own issue volume under an intermediate per-role layout that no shipped image ever produced. After the apply an already-running volume does not lose duplication; it gains the shared scratch. The operational consequence is the one the paragraph then disarms: an operator reading 'the already-running volumes fit because it is being removed' takes no step on an issue already near its 20 GiB, and the next sentence tells them the failure mode is silent. The fix is to drop the causal clause and keep the arithmetic, which is a complete argument on its own — 2.1 to 2.7 GiB measured on live volumes plus the shared layout's 8.5 GiB worst case stays inside 20 — and to mark the 17 GiB as this branch's own workspace under a layout no release shipped. If an operator does have an issue near full, the true remedy is deleting its stale /legion/scratch/<role> directories by hand, which is worth the sentence the false one occupies."
-    },
-    {
-      "severity": "minor",
-      "file": "pull request #2085 body",
-      "description": "Two entries of the body's Not proven / risk list are mine, are marked 'Open as the round's finding', and are both answered at this head — and one of them carries the sentence I already conceded was wrong. Entry 24 still says the shipped example and docs:1135 write 20Gi; both read 50Gi at this head, which is the error I owned to the architect and which has now survived into the artifact a merger and an operator read before pinning a digest. Entry 25 still says flock is declared on PATH and nothing refuses an image that moved it; worker.Dockerfile's final step now refuses exactly that. Every other closed finding in that list carries a strikethrough and 'Fixed and resolved'; these two do not. I am fixing them in this round rather than reporting them, since they are my lines, and recording them here because the record should show that the false sentence outlived its own correction by a round."
+      "file": "docs/kubernetes.md:1235",
+      "description": "The remedy written in place of the false cause cannot be executed as written. The paragraph tells an operator to delete the stale /legion/scratch/<role> directories of roles that are not running, and a plain rm -rf cannot: the go command writes the module cache read-only, mode 555 on every extracted module directory, so rm exits 1 and leaves bytes behind. I reproduced it myself rather than taking the tester's number — one 391 KB module downloaded into a scratch GOMODCACHE, then the delete the sentence names: 31 Permission denied lines, exit 1, 83 KB of the 391 KB surviving, and chmod -R u+w first makes it exit 0 and remove cleanly. One detail my run adds that the scale measurement does not show: what survives is the extracted module source, while the re-downloadable cache/download goes, so the partial delete removes the cheap half and keeps the expensive one. The tester measured the same failure on the real volume at scale: 11,393 denied lines, exit 1, 147 MB left. Every per-role directory of the intermediate layout holds such a cache — that is what the 14 GiB was — so an operator who follows the sentence gets a partial reclaim and an error to diagnose, in the one paragraph of this change that has now been corrected twice. One clause closes it, and half a sentence is worth adding beside it: rm exits 1, so a scripted remedy fails loudly rather than silently, which is the one mercy in the current shape."
     }
   ],
   "fixedThisRound": {
-    "flockPath": "Answered, and better than either option I offered. Rather than loosening the script or threading a field, the image's final build step now resolves `flock` and refuses anything but /usr/bin/flock — `flock=\"$(command -v flock)\"; test \"$flock\" = /usr/bin/flock` — beside the existing git, legion and gh pins, so the declaration and the use are held to one path at build time. I confirmed the step is in the final stage and the last RUN in the file, that `set -eu` makes a mismatch abort the build rather than warn, and that the only looseness runs the safe way: an image keeping /usr/bin/flock but shadowing it earlier on PATH fails the build though the absolute call would have worked.",
-    "volumeReach": "The first half of my finding is answered: the paragraph now says the new size reaches volumes created after the apply and no others, that it rides in the Sandbox's volumeClaimTemplates evaluated at claim creation, and that an issue's Sandbox outlives its pods. That part is accurate and is what I asked for. The clause added around it is the finding above."
+    "theInventedCause": "Answered in 0085e4b45a48, and answered fully. Both the causal clause and :1227's conditional are gone; the arithmetic carries the argument on its own (2.1 to 2.7 GiB live plus 8.5 GiB worst case inside 20); the 17 GiB keeps its 01:32Z stamp and is marked as this workspace's under an intermediate layout no shipped image produced, with the merge-base reason named in the document itself — a role container there is told no GOCACHE, no GOMODCACHE and no BUN_INSTALL_CACHE_DIR; and the paragraph now says a running volume gains the shared scratch rather than losing anything it holds. I checked the document rather than the diff summary, and the sentence pair that contradicted each other at :1220 and :1233 no longer does."
   },
   "ci": {
-    "verdict": "two of four required checks green at the code head; lint and test still running, which a request for changes does not wait on",
+    "verdict": "all four required checks green at the code head",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "78e350969a2620f8507d1ff801f6e94bc76a484d",
-    "read": "Read with per_page=100 and --paginate: typecheck and pr-title completed and success; lint and test in_progress at the time of writing. At the previous code head 86baa18af5f7 all four were green. gh api compare 78e350969a26...d52ae9dc58b4 prints true for all paths under .legion/. An approval would have had to wait for all four; a request for changes stands whatever CI says, and I am saying which it was rather than letting a summary imply four."
+    "ciHead": "0085e4b45a48161bad81287d86ad5c52120056e4",
+    "read": "Read with per_page=100 and --paginate: lint, typecheck, test and pr-title all completed and success. gh api compare 0085e4b45a48...6cc2f5a5abb3 prints true for all paths under .legion/. This is the first round where all four were green at the code head at the time I read them; it does not change the verdict, since a finding stands, but it means CI is not what the next round waits on."
   },
-  "verifiedByReading": [
-    "The merge base's manifest.go: no GOCACHE, GOMODCACHE or BUN_INSTALL_CACHE_DIR for a role container, the only TMPDIR being fetchEnvironment's, and xdgCacheHome at podHome + '/.cache' — which is what makes the duplication claim false for a production volume.",
-    "docs/kubernetes.md:1220 against :1233, fourteen lines apart in one paragraph.",
-    "The Dockerfile's flock pin, its stage, its position as the last RUN, and its failure mode.",
-    "The two body lines of my own, read at this head rather than remembered."
-  ],
-  "methodNote": "Both of this round's facts I derived from the files at the head before asserting them, after conceding last round that I had carried a subagent's sentence into a review without checking output I already had. The rule I am applying: the value in my sentence must appear verbatim in output I can point at in this session. The thermonuclear pair found both of this round's items first; what is mine is that I re-derived each before filing it.",
   "threads": {
-    "roundNine": 2,
-    "note": "Both answered and resolved by the implementer; replies posted at this head."
+    "openedByMe": 1,
+    "answered": "PRRT_kwDORFy7ds6umAjh — my round-ten inline comment on the invented cause. Answered at this head naming 0085e4b45a48 as the fix, with what it fixed, and recording that the remedy sentence written in its place is a new sentence rather than a survival of that one. Accepted; the implementer may resolve it.",
+    "botThreads": 0
   },
+  "bodyCorrection": "My round-ten entry in the body's Not proven / risk list still ended 'Open as this round's finding' for a sentence that no longer exists at this head. The tester recorded it rather than failing on it. I struck it and filed this round's in its place. That is the third stale line of mine in that artifact, and one of them crossed a round boundary with nobody acting; the merger quotes Outcome and Not proven / risk into READY, so none may survive into the approval. I now re-read the body at the head as part of the round rather than trusting what I remember writing.",
+  "methodNote": "The tester found this finding and measured it at scale. I reproduced it myself before filing rather than carrying the figure, which is the rule I adopted two rounds ago after importing a subagent's sentence into a review: the lead is worth acting on, the value is mine to derive. The reproduction also produced a fact the scale run did not — which half of the cache survives — which is the argument for re-deriving rather than quoting.",
   "fastFollow": [
     "The scratch.go extraction from manifest.go, which should collapse the rationale now restated across about fifteen sites rather than relocate it, and fold the state home's regained mount assertions into one helper with the sibling test's copy; bunInstallArgs and runStart's shared stubbing belongs in the same pass.",
     "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
