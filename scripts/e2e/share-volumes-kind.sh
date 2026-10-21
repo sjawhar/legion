@@ -3,8 +3,9 @@
 # `runtime.kubernetes.pod.volumes` as a PersistentVolumeClaim and as an NFS export, reaches an issue
 # pod the daemon's own code launches under gVisor, which reads a file from the claim's share, is
 # refused a write there (its mount is read-only by default), and writes a file to the export it
-# mounts with `read_only: false` that the NFS server then holds. `legion probe-boot` refuses a claim
-# that does not exist and an export the server does not have, each naming the volume and its share.
+# mounts with `read_only: false` that the NFS server then holds. `legion probe-boot` mounts both
+# shares, and refuses a claim that does not exist and an export the server does not have, each
+# naming the volume and its share.
 # The pod is built by Legion's own code: the daemon's loader reads the legion.yaml, its
 # sandboxOptions builds the Agent Sandbox runtime, which launches the issue's root through Agent
 # Sandbox v1.0.3's controller (internal/daemon/share_volumes_live_test.go). The share is an
@@ -266,27 +267,39 @@ want="legion start: runtime.kubernetes.pod.volumes[0] must set exactly one of se
 note "a volume naming a claim and an export: refused, exit 1: $refused"
 pass
 
-# probe NAME WANT… runs `legion probe-boot` on the case NAME's legion.yaml and holds it to a
-# refusal, exit 1, carrying every WANT.
+# probe NAME WANT… runs `legion probe-boot` on the case NAME's legion.yaml, keeps its output as
+# evidence in $probed, and holds it to exit 1 carrying every WANT.
 probe() {
-  local name=$1 out status=0
+  local name=$1 status=0
   shift
-  out=$(on_kind probe mirror.gcr.io/library/busybox:1.37 timeout 900 "$work/legion" probe-boot --config "$(awk -v n="$name" '$1 == n {print $3}' "$result")" 2>&1) || status=$?
-  printf '%s\n' "$out" >"$evidence/$name-probe-boot.txt"
-  [ "$status" -eq 1 ] || fail "probe-boot on the $name file exited $status, want the refusal's 1: $(tail -5 <<<"$out")"
+  probed=$(on_kind probe mirror.gcr.io/library/busybox:1.37 timeout 900 "$work/legion" probe-boot --config "$(awk -v n="$name" '$1 == n {print $3}' "$result")" 2>&1) || status=$?
+  printf '%s\n' "$probed" >"$evidence/$name-probe-boot.txt"
+  [ "$status" -eq 1 ] || fail "probe-boot on the $name file exited $status, want 1: $(tail -5 <<<"$probed")"
   local want
   for want in "$@"; do
-    [[ $out == *"$want"* ]] || fail "probe-boot's refusal of the $name file does not say $want: $(tail -5 <<<"$out")"
+    [[ $probed == *"$want"* ]] || fail "probe-boot on the $name file does not say $want: $(tail -5 <<<"$probed")"
   done
-  note "$name: probe-boot exit 1: $(grep -m1 'cannot mount' <<<"$out")"
 }
+
+begin probe-mounts-shares
+# The shares file's probe pod mounts both shares and runs the image's probe container, whose own
+# verdict is the image's: the run's agents have no model route, so the image refuses on its
+# agents' models, and that refusal, never a `cannot mount`, is the evidence that the probe
+# passed every share.
+probe shares 'worker image ' 'failed its probe: pod '
+[[ $probed != *"cannot mount"* && $probed != *"over its mounts"* ]] || fail "probe-boot refused the mountable shares: $(tail -3 <<<"$probed")"
+note "shares: probe-boot exit 1 on the image's own verdict, no share refused: $(grep -m1 -o 'failed its probe: pod [^ ]* [A-Za-z]*' <<<"$probed")"
+pass
+
 
 begin probe-missing-claim
 probe missing-claim 'cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "absent-share"' \
   'persistentvolumeclaim "absent-share" not found'
+note "missing-claim: probe-boot exit 1: $(grep -m1 'cannot mount' <<<"$probed")"
 pass
 
 begin probe-missing-export
 probe missing-export 'cannot mount volume "scratch", which runtime.kubernetes.pod.volumes gives it from NFS export '"$server"':/absent' \
   'mount failed: '
+note "missing-export: probe-boot exit 1: $(grep -m1 'cannot mount' <<<"$probed")"
 pass
