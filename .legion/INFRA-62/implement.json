@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-62",
-  "completed": "2026-10-21T08:05:00Z",
-  "round": "review round 3 — the architect's settled decision to delete the mirrored stopGrace landed whole (it was lost in transit, not declined: the process died around 04:22Z, the workspace was recreated and the re-sent task carried round 1's text, so the only durable copy readable was the round-2 handoff, where the item stood as the reviewer's batched minor), both comments that stated the Kubernetes ordering backwards are corrected, the two clauses that over-promised the guard now say what it asserts, and the guard's own truncation is gone. No rendering moved: the three pod goldens and the Serve golden are byte-identical, so the proofs that read the rendering stand at the heads they name.",
+  "completed": "2026-10-21T09:10:00Z",
+  "round": "review round 4 — one line of documentation and no code: packages/envoy/infra/README.md's resource table still gave the app pod a 30-second termination grace period, the value the base's pod had and this change's does not. The table now reads 35 and carries the same arithmetic the paragraph seventy lines below it states.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2089",
-  "head": "123048deebc052cdb878399af3b81fd61ae1dcec",
+  "head": "b889f4f818b3ebeca3fbd6899008b2a6363353f8",
   "base": "envoy-infra-integration at ba3f6b7e2bbf0a8119bd8b597980904f3b4ab6e2",
   "proof": [
     {
@@ -103,6 +103,14 @@
       "observed": "The comparison is now time.Duration(grace-wait)*time.Second < stopGrace and the message formats stopGrace itself; both clauses read 'pod_grace_period_test.go fails when the pod's budget stops covering it', which is what the assertion does — it fires when stopGrace rises, the grace period falls or the sleep grows, and is deliberately silent when the pod's grace alone is raised. Green at this head.",
       "headSha": "123048deebc052cdb878399af3b81fd61ae1dcec",
       "negativeControl": "The edit that used to slip through now fails: with stopGrace at 30*time.Second + 500*time.Millisecond the guard reports `… leaving its shutdown 30 seconds where stopGrace in packages/envoy/cmd/dispatch/shutdown.go builds it for 30.5s …`, where the truncating comparison passed. 30 s was restored byte-identically and the guard re-run green before the push."
+    },
+    {
+      "criterion": "Review round 4: the operator documentation must not contradict the pod it documents. The resource table said 30 seconds of termination grace where the rendered pod asks for 35, and nothing guards README prose — the guard reads the golden, not the documentation.",
+      "surface": "packages/envoy/infra/README.md, the table an operator skims before the paragraphs, and the rendered pod it describes (gcp/testdata/dispatch-pod.golden).",
+      "command": "sed -n '143p' packages/envoy/infra/README.md ; grep -n terminationGracePeriodSeconds packages/envoy/infra/gcp/testdata/dispatch-pod.golden ; bash .github/scripts/check-private-names.sh",
+      "observed": "The row reads a 35-second termination grace period and names where it comes from — a five-second pre-stop wait and the thirty seconds envoy-dispatch's shutdown is built for — so the table and the paragraph at :213 state one relation rather than two numbers a reader must reconcile by opening the golden, which records 35. check-private-names passes over the tree (4365 files).",
+      "headSha": "b889f4f818b3ebeca3fbd6899008b2a6363353f8",
+      "negativeControl": "The diff of this round is that single line: no golden, no test and no Go file is in it, so nothing of the rendering or of the guard moved with the wording, and the proofs above stand at the heads they name."
     }
   ],
   "objectInventory": [
