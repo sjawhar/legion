@@ -7,7 +7,7 @@
   "requiredSkills": {
     "implement": [
       "legion-worker: the phase contract — workspace binding, the PR body template and the proof definition (references/pr-body.md), the handoff and push procedure, and the production check (references/merge-gate.md#after-the-merge).",
-      "envoy: the controller reads before and after are envoy_publish calls to notifications.role.legion-legion-controller and notifications.role.legion-agentc-controller with expects_reply required, and both deploy routes are publishes to legion-deploy and dispatch-deploy.",
+      "envoy: the controller reads before and after are envoy_publish calls to notifications.role.legion-legion-controller and the other deployment's controller role topic (the second project's, named in the plan document) with expects_reply required, and both deploy routes are publishes to legion-deploy and dispatch-deploy.",
       "dispatch: the production read is recorded as a dispatch comment on LEGION-791 (the spec's Done when names a comment on this issue); read the plan document with dispatch doc-read.",
       "ce-simplify-code: pr-body.md requires one simplify pass in the first implementing round since the diff touches runtime code."
     ],
@@ -48,11 +48,11 @@
       },
       {
         "finding": "'Proven from the controller pod by a negative control' cannot be a curl: the controller runs no bash (SKILL.md:26-31) and nobody may exec into its pod; its only read is op read_state.",
-        "answer": "T6/T7: envoy_publish to notifications.role.legion-legion-controller asking for a read_state before merge (no settings key) and after deploy (the values); plus the implementer's own curl of $LEGION_DAEMON_URL as a second negative control. Recorded in the PR body's E2E negative control and the handoff proof; the AGENTC read as a comment on LEGION-791, as the spec says."
+        "answer": "T6/T7: envoy_publish to notifications.role.legion-legion-controller asking for a read_state before merge (no settings key) and after deploy (the values); plus the implementer's own curl of $LEGION_DAEMON_URL as a second negative control. Recorded in the PR body's E2E negative control and the handoff proof; the second project's controller read as a comment on LEGION-791, as the spec says."
       },
       {
-        "finding": "'Both daemons run it' and the AGENTC controller's read depend on a deployment-repository roll these workers never make, on a daemon↔image lockstep, and the dispatch-deploy route fires because packages/contracts/ is in release-envoy-listener.yaml's paths (:17).",
-        "answer": "T7: both routes per the deployment instructions; the legion-deploy holder pins both daemons; the lockstep named; the dispatch deploy is a no-op rebuild by path rule. No answer from the AGENTC controller → reported to the architect and republished next wake; the issue waits by default, the architect may accept the LEGION read plus the AGENTC body."
+        "finding": "'Both daemons run it' and the second project's controller's read depend on a deployment-repository roll these workers never make, on a daemon↔image lockstep, and the dispatch-deploy route fires because packages/contracts/ is in release-envoy-listener.yaml's paths (:17).",
+        "answer": "T7: both routes per the deployment instructions; the legion-deploy holder pins both daemons; the lockstep named; the dispatch deploy is a no-op rebuild by path rule. No answer from the second project's controller → reported to the architect and republished next wake; the issue waits by default, the architect may accept the LEGION read plus the second project's body."
       },
       {
         "finding": "The controller skill's read_state field list (SKILL.md:26-28) names no settings, and the skill ships inside the plugin.",
@@ -67,8 +67,8 @@
         "answer": "T2 completes state.Settings there with api.SettingsOf(config.Config{…}); both -update commands named; one shared fixture config for the api tests and the api golden."
       },
       {
-        "finding": "Acceptance lines 2 and 3 had no commands; the AGENTC daemon is reachable to no LEGION pod.",
-        "answer": "The acceptance table gives each line a command and expected output; the AGENTC half is the controller's read_state comment (T7 step 2)."
+        "finding": "Acceptance lines 2 and 3 had no commands; the second project's daemon is reachable to no LEGION pod.",
+        "answer": "The acceptance table gives each line a command and expected output; the second project's half is the controller's read_state comment (T7 step 2)."
       },
       {
         "finding": "Unverified claims: the controller reads read_state on every wake; the cluster NetworkPolicy's ingress; whether LEGION-781 is live at this merge.",
