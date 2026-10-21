@@ -1,9 +1,7 @@
 import {
-  branchHoldsNotice,
   type FirstTurnNotice,
   type FirstTurnNoticeMessage,
   firstTurnNoticeMessage,
-  withoutRepeatedNotice,
 } from "./first-turn-notice";
 
 /**
@@ -48,30 +46,4 @@ export function workspaceRecreatedMessage(
   notice: WorkspaceRecreatedNotice
 ): FirstTurnNoticeMessage {
   return firstTurnNoticeMessage(notice, WORKSPACE_RECREATED_MESSAGE);
-}
-
-/**
- * Whether `branch`, a session's active branch, holds a copy of the notice `id` names. A recovery of
- * a failed last turn that moves the branch back past it (Oh My Pi drops an empty `length` stop that
- * way) leaves it on no branch the session reads; a notice an earlier recreation saved is not it.
- */
-export function branchHoldsWorkspaceRecreatedNotice(
-  branch: readonly unknown[],
-  id: string
-): boolean {
-  return branchHoldsNotice(branch, WORKSPACE_RECREATED_MESSAGE, id);
-}
-
-/**
- * `messages`, one provider request's, with every copy of the notice `id` names but the first left
- * out, or undefined when it holds at most one. A recovery that took the saved copy off the branch
- * leaves it in the process's live context, so the copy sent again for the stored branch would
- * otherwise reach the model twice in every later request of that process. A notice an earlier
- * recreation left in the history is history, and stays.
- */
-export function withoutRepeatedWorkspaceRecreatedNotice(
-  messages: readonly unknown[],
-  id: string
-): unknown[] | undefined {
-  return withoutRepeatedNotice(messages, WORKSPACE_RECREATED_MESSAGE, id);
 }

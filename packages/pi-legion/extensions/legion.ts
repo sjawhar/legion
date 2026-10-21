@@ -267,6 +267,8 @@ export default function legionExtension(pi: PiApi): void {
   // before_agent_start, so its branch keeps the saved copies.
   const resentNotices: FirstTurnNoticeMessage[] = [];
   pi.on("before_agent_start", async (_event, context) => {
+    // Owed nothing is every turn after the first, so the branch is not read for them.
+    if (owedNotices.length === 0) return undefined;
     const branch = context.sessionManager.getBranch?.() ?? [];
     const missing = owedNotices.filter(
       (notice) => !branchHoldsNotice(branch, notice.customType, notice.details.id)

@@ -72,21 +72,23 @@ detail_bytes=1000
 # The issue volume's root, which every workspace on it shares, so one role's install serves the
 # next. When the workspace is not under a `/workspaces/` component the expansion returns it
 # unchanged — or empty, when the path is nothing but that component — and the fallback is a
-# directory inside the workspace itself, which .gitignore holds.
-root=${workspace%/workspaces/*}
-if [ "$root" = "$workspace" ] || [ -z "$root" ]; then
-  root=$workspace/.legion-setup
-fi
-cache=$root/bun/cache
-state=$root/bun/state
-if ! mkdir -p "$cache" "$state" 2> /dev/null || [ ! -w "$state" ]; then
-  root=$workspace/.legion-setup
+# directory inside the workspace itself, which .gitignore holds. The same fallback answers a
+# derived root this user cannot write under.
+#
+# usable_root <dir>: sets root, cache and state from <dir>, true when it can be written under.
+usable_root() {
+  root=$1
   cache=$root/bun/cache
   state=$root/bun/state
-  if ! mkdir -p "$cache" "$state" 2> /dev/null || [ ! -w "$state" ]; then
-    echo "legion setup: no writable install root under $root; leaving the install to the agent" >&2
-    exit 0
-  fi
+  mkdir -p "$cache" "$state" 2> /dev/null && [ -w "$state" ]
+}
+derived=${workspace%/workspaces/*}
+if [ "$derived" = "$workspace" ] || [ -z "$derived" ]; then
+  derived=$workspace/.legion-setup
+fi
+if ! usable_root "$derived" && ! usable_root "$workspace/.legion-setup"; then
+  echo "legion setup: no writable install root under $root; leaving the install to the agent" >&2
+  exit 0
 fi
 marker=$state/installed
 log=$state/install.log
@@ -149,11 +151,15 @@ installed() {
   [ "$(cat "$marker" 2> /dev/null)" = "$digest" ]
 }
 
-if installed; then
+# `exit` in a POSIX shell function ends the shell, so both call sites end the run the same way.
+exit_if_installed() {
+  installed || return 0
   clear_report
   echo "legion setup: this bun.lock's packages are already installed; nothing to do" >&2
   exit 0
-fi
+}
+
+exit_if_installed
 
 # One install per workspace at a time: an issue pod runs a container per role, each with this
 # workspace as its working directory, and two bun installs writing one node_modules leave neither.
@@ -174,11 +180,7 @@ if [ "$status" -ne 0 ]; then
 fi
 
 # The holder may have been installing exactly this lock's packages and just finished.
-if installed; then
-  clear_report
-  echo "legion setup: this bun.lock's packages are already installed; nothing to do" >&2
-  exit 0
-fi
+exit_if_installed
 
 echo "legion setup: installing this bun.lock's packages into $workspace" >&2
 BUN_INSTALL_CACHE_DIR="$cache" timeout -k 5 "$install_timeout" bun install --frozen-lockfile \

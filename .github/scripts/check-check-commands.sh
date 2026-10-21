@@ -163,8 +163,9 @@ def first_word(segment: str) -> str:
 
 def offenders(command: str):
     """Every segment of a command string that reaches a pinned check tool outside the wrapper,
-    as (first word, what is wrong with it). One reading of what the shell would run serves a
-    recipe, a workflow `run:` line, a shell line and a fenced command line alike."""
+    as the sentence naming what is wrong with it (the segment's first word is quoted inside it).
+    One reading of what the shell would run serves a recipe, a workflow `run:` line, a shell line
+    and a fenced command line alike."""
     for segment in SEGMENT.split(command):
         word = first_word(segment)
         if not word or word.endswith(WRAPPER):
