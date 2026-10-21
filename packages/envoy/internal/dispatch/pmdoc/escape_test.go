@@ -630,13 +630,16 @@ func TestRenderLeavesPairedBracketsInLinkTextAlone(t *testing.T) {
 }
 
 // A bare URL is written as itself so the parser linkifies it again, and its brackets are part of
-// the address: escaping them stops linkify at the backslash and truncates the href.
+// the address: escaping them would put the backslash in the href. A URL ending in `]`, which GFM
+// leaves out of a bare URL, is written as a link instead, which reads back whole.
 func TestRenderKeepsBracketsInABareURL(t *testing.T) {
-	for _, url := range []string{
-		"https://x.test/p?q=[1]",
-		"https://x.test/[a]",
-		"https://x.test/a]b",
+	for _, test := range []struct{ url, want string }{
+		{"https://x.test/p?q=[1]&r", "https://x.test/p?q=[1]&r\n"},
+		{"https://x.test/[a]/b", "https://x.test/[a]/b\n"},
+		{"https://x.test/a]b", "https://x.test/a]b\n"},
+		{"https://x.test/p?q=[1]", "[https://x.test/p?q=[1]](https://x.test/p?q=[1])\n"},
 	} {
+		url := test.url
 		t.Run(url, func(t *testing.T) {
 			doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
 				{Type: "text", Text: url, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": url}}}},
@@ -645,8 +648,8 @@ func TestRenderKeepsBracketsInABareURL(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if markdown != url+"\n" {
-				t.Fatalf("Render() = %q, want the bare URL %q", markdown, url)
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
 			}
 			back, err := Parse(markdown)
 			if err != nil {

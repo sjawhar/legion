@@ -219,3 +219,55 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 		})
 	}
 }
+
+// An agent edits a table row by reading its markdown and writing it back, so the markdown a write
+// takes must come back from the next read as it went in. Each cell here holds a bare URL next to
+// punctuation, the first from a production row, read in a table cell and in a paragraph: Go must
+// read it as the browser editor's engine does - GFM leaves trailing punctuation before an end out
+// of a URL, so only the URL is linked, and a URL after a quote is linked as one after a space - and
+// every write must render it as written.
+func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
+	type form struct{ name, before, after string }
+	forms := []form{{"paragraph", "", "\n"}, {"table cell", "| a | b |\n| --- | --- |\n| x | ", " |\n"}}
+	tests := []struct{ name, cell string }{
+		{"bare URL before a parenthesis and a quote", `"HTTP 401: Bad credentials (https://api.github.com/graphql)" while`},
+		{"bare URLs in quotes and before a bracket", `see "https://x.test/a"; and 'https://x.test/b'! or https://x.test/c]`},
+	}
+	var markdowns []string
+	for _, test := range tests {
+		for _, f := range forms {
+			markdowns = append(markdowns, f.before+test.cell+f.after)
+		}
+	}
+	readings := engineReadings(t, markdowns)
+	index := 0
+	for _, test := range tests {
+		for _, f := range forms {
+			markdown, engine := markdowns[index], readings[index]
+			index++
+			t.Run(test.name+" in a "+f.name, func(t *testing.T) {
+				doc, err := Parse(markdown)
+				if err != nil {
+					t.Fatalf("Parse(%q) = %v", markdown, err)
+				}
+				if engine == nil || !doc.Equal(engine) {
+					got, _ := doc.JSON()
+					reading, _ := engine.JSON()
+					t.Errorf("Go reads %q as %s, the engine as %s", markdown, got, reading)
+				}
+				for write := 1; write <= 3; write++ {
+					rendered, err := Render(doc)
+					if err != nil {
+						t.Fatalf("Render, write %d: %v", write, err)
+					}
+					if rendered != markdown {
+						t.Fatalf("write %d renders %q, want %q", write, rendered, markdown)
+					}
+					if doc, err = Parse(rendered); err != nil {
+						t.Fatalf("Parse(%q) = %v", rendered, err)
+					}
+				}
+			})
+		}
+	}
+}

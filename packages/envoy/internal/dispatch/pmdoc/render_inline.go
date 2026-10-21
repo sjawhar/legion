@@ -79,8 +79,9 @@ type lineCandidate struct {
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
 // alone can still pair into a mark the text never had, or break one it has: GFM reads a single
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
-// across a hard break, around a reference or inside a link label. Linkify continues a bare URL
-// into the text written right after it, which a backslash escape had stopped as written. A mark's
+// across a hard break, around a reference or inside a link label. A bare URL's text, escapes
+// included, can read back as another URL, and linkify continues one into the text written right
+// after it unless that text opens with trailing punctuation and then an end. A mark's
 // delimiter run beside punctuation inside it and a letter outside it opens or closes nothing
 // (`**Which here?**Careful.`). A run whose text holds any of these is read back after it is
 // written, and when it does not come back as written it is written again in each spelling
@@ -107,7 +108,7 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
-	bareURL := textAfterBareURL(nodes, context.tableCell)
+	bareURL := writesBareURL(nodes, context.tableCell)
 	flanking := delimiterBesidePunctuation(nodes, context.tableCell)
 	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused && !flanking {
 		return
@@ -147,20 +148,20 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 }
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
-// text it escapes, whether it escapes the character after each bare URL (endsBareURL), whether
-// a mark the next text still carries stays open around that text's other marks (keepingOpen), and
-// whether a letter beside a delimiter run that punctuation stands inside is a character reference
-// (flanking).
+// text it escapes, whether it writes each bare URL as an autolink (`<href>`, whose text both parsers
+// read as written and whose `>` ends it), whether a mark the next text still carries stays open
+// around that text's other marks (keepingOpen), and whether a letter beside a delimiter run that
+// punctuation stands inside is a character reference (flanking).
 type runSpelling struct {
-	escapes      delimiterEscapes
-	afterBareURL bool
-	keepOpen     bool
-	flanking     bool
+	escapes   delimiterEscapes
+	angleURLs bool
+	keepOpen  bool
+	flanking  bool
 }
 
 // respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
 // in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
-// then each again with the character after a bare URL escaped.
+// then each again with every bare URL written as an autolink.
 func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 	escapes := []delimiterEscapes{delimitersAsRuled}
 	if held != delimitersAsRuled {
@@ -169,12 +170,12 @@ func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 		}
 	}
 	var spellings []runSpelling
-	for _, afterBareURL := range []bool{false, true} {
-		if afterBareURL && !bareURL {
+	for _, angleURLs := range []bool{false, true} {
+		if angleURLs && !bareURL {
 			continue
 		}
 		for _, delimiters := range escapes {
-			spelling := runSpelling{escapes: delimiters, afterBareURL: afterBareURL, keepOpen: keepOpen}
+			spelling := runSpelling{escapes: delimiters, angleURLs: angleURLs, keepOpen: keepOpen}
 			if spelling != (runSpelling{}) {
 				spellings = append(spellings, spelling)
 			}
@@ -204,25 +205,15 @@ func keepingOpen(active, marks, following []Mark) []Mark {
 	return ordered
 }
 
-// textAfterBareURL reports whether nodes write text right after a bare URL, which linkify can
-// continue into that text's first character.
-func textAfterBareURL(nodes []*Node, escapePipes bool) bool {
-	for index := 1; index < len(nodes); index++ {
-		if followsBareURL(nodes, index, escapePipes) {
+// writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink), which linkify
+// reads again from the text alone.
+func writesBareURL(nodes []*Node, escapePipes bool) bool {
+	for _, node := range nodes {
+		if node.Type == "text" && isBareURLLink(node, visibleMarks(node.Marks), escapePipes) {
 			return true
 		}
 	}
 	return false
-}
-
-// followsBareURL reports whether nodes[index] is text outside any link written right after a bare
-// URL (isBareURLLink), whose link linkify reads again from the text alone.
-func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
-	if index == 0 || nodes[index].Type != "text" || nodeHasMark(nodes[index], "link") {
-		return false
-	}
-	previous := nodes[index-1]
-	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes)
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes by
@@ -356,16 +347,23 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				position.afterMarker = true
 			}
 			active = next
-			if isAngleURLLink(n, visibleMarks(n.Marks), escapePipes) {
+			marks := visibleMarks(n.Marks)
+			if isAngleURLLink(n, marks, escapePipes) || spelling.angleURLs && isBareURLLink(n, marks, escapePipes) {
 				// An autolink's text is literal to both parsers, so it takes no escape.
 				r.writeSyntax("<" + n.Text + ">")
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
 			}
+			if isBareURLLink(n, marks, escapePipes) {
+				// Linkify reads a bare URL's bytes as they are written, a backslash among them, so
+				// its text takes no escape either.
+				r.writeSyntax(n.Text)
+				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
+				continue
+			}
 			flankLast := spelling.flanking && opensBeforePunctuation(nodes, index, next, following) && !flankingNeutral(lastRune(n.Text))
-			// The brackets rule follows the marks actually written, not hasLink: a bare URL's
-			// link mark is stripped above, and its text must keep its own brackets so linkify
-			// reads the whole href. The verdict itself was taken when the link opened.
+			// The brackets rule follows the marks actually written, not hasLink: an autolink's
+			// link mark is stripped above. The verdict itself was taken when the link opened.
 			label := labelBracketsNone
 			if containsMark(next, "link") {
 				label = r.labelBrackets
@@ -377,7 +375,6 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label:          label,
 				followed:       index+1 < len(nodes) || len(next) > 0,
 				delimiters:     spelling.escapes,
-				afterBareURL:   spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
 				heading:        context.heading,
 				marked:         len(next) > 0,
 				opener:         adjacentDelimiter(next[common:]),
@@ -645,7 +642,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			segmentStart = byteOffset + width
 		} else if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context)))
+			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
 		}
 		lineEnd := char == '\n'

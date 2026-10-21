@@ -694,8 +694,9 @@ func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 }
 
 // isBareAutolink reports whether a link whose text is its href can be written as that bare text for
-// linkify to link again. A backtick in it would be written escaped, which linkify stops at, so such
-// a link is written as an autolink (isAngleURLLink).
+// linkify to link again. A backtick in it would be written escaped, and linkify reads the escape's
+// backslash into the URL, so such a link is written as an autolink (isAngleURLLink). One ending in
+// punctuation linkify leaves out of a URL before an end (literalTrail) is never read back whole.
 func isBareAutolink(value string) bool {
 	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
@@ -703,14 +704,15 @@ func isBareAutolink(value string) bool {
 	if strings.ContainsAny(value, " \t\n()<>`") {
 		return false
 	}
-	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
+	last := rune(value[len(value)-1])
+	return !literalTrailPunctuation(last) && last != ']'
 }
 
 // isAngleURLLink reports whether node is a link whose text is its href, holding a backtick, which
 // is written `<href>`, as the browser editor writes it: both parsers read an autolink's text as
-// written, escapes and references included, where bare text would be escaped and linkify would stop
-// at the escape. One an autolink cannot hold (whitespace, `<`, `>`, a pipe in a table cell) is
-// written as an explicit link.
+// written, escapes and references included, where bare text would be escaped and linkify would read
+// the escape's backslash into the URL. One an autolink cannot hold (whitespace, `<`, `>`, a pipe in a
+// table cell) is written as an explicit link.
 func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	for _, mark := range marks {
 		if mark.Type != "link" {

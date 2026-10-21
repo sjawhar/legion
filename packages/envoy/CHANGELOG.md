@@ -901,6 +901,18 @@
 
 ### Fixed
 
+- A bare URL next to punctuation in a Dispatch document links as the browser editor links it, so
+  reading a table row with `dispatch doc-read` and writing it back with `dispatch doc-edit` no
+  longer grows the link. `"HTTP 401 (https://api.github.com/graphql)" while` links only
+  `https://api.github.com/graphql`, where the server linked `https://api.github.com/graphql)"` and
+  stored it as `[https://api.github.com/graphql)"](<https://api.github.com/graphql)">)`. The server
+  now reads a www or http(s) URL as GFM's extended autolink does, as the editor's parser reads one:
+  trailing punctuation before whitespace, `<` or the line's end (`"`, `'`, `;`, `]`, `_`, and a `)`
+  that closes no `(` in the URL among it) is left out, a backslash, an asterisk or a letter outside
+  ASCII is part of the URL, a URL after a quote or another punctuation character links, the scheme
+  reads in any case, and `ftp://` is text. A bare URL is written as its own bytes, or as `<url>`
+  where the text after it would continue it.
+
 - A write that rewrites a block's text no longer stores two U+FFFD in place of an emoji: an edit
   (`dispatch doc-edit`, `POST /api/v1/artifacts/{id}/edits`), an uploaded new version of a live
   document, an accepted or rejected suggestion and an ask edit. The new text is written as one span
