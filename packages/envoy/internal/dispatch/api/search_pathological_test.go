@@ -37,12 +37,12 @@ import (
 // tell the code before the fix from the code after it, whose removed timings measured a
 // 2,000-character `a_` comment at 51 ms before the fix and 56 ms after. The raised cap is
 // laddered here ("comment a_"), a full-cap `a_` comment being the longest pathological text a
-// caller can write outside a document; its times are TODO(INFRA-45): fill the three rungs' logged
-// times in from a CI run of this test, which no pod without Postgres can measure. An ask question
-// is still capped at 800 and an issue title at 1,000 (contracts.IssueTitleMax), both too short to
-// ladder; the title's ladders, and the duplicate check's against a stored title, went with the
-// title cap (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts is indexed
-// through the search_text the document ladders time.
+// caller can write outside a document; growsLinearly is what holds it, so a write that stops
+// being bounded at the cap fails this test rather than waiting for a reader to notice. An ask
+// question is still capped at 800 and an issue title at 1,000 (contracts.IssueTitleMax), both
+// too short to ladder; the title's ladders, and the duplicate check's against a stored title,
+// went with the title cap (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
+// is indexed through the search_text the document ladders time.
 //
 // Settlement is held off. A document's settlement holds its issue's row while it renders, so a
 // save timed while one ran would count the wait for it; and the test server's shutdown, which
