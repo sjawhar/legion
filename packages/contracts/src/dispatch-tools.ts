@@ -201,8 +201,13 @@ export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 /** Longest ask question the Dispatch server accepts, in characters. */
 export const ASK_QUESTION_MAX = 800;
 
-/** Longest message or comment body the Dispatch tools send, in characters. */
-export const DISPATCH_BODY_MAX = 2000;
+/**
+ * Longest comment, comment edit, message and broadcast body the Dispatch server accepts, in
+ * UTF-16 code units. Generated into Go as `contracts.DispatchBodyMax`, which the server enforces,
+ * and as `dispatch.MessageBodyLimit` for the Legion daemon, whose `record.MessagePostLimit`
+ * subtracts its outbox marker from it.
+ */
+export const DISPATCH_BODY_MAX = 32000;
 
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The

@@ -162,6 +162,8 @@ jobs:
               # scripts/gen-go.test.ts checks the generated Go file is current.
               - 'packages/envoy/internal/dispatch/text/testdata/**'
               - 'packages/envoy/internal/contracts/generated.go'
+              # The second file scripts/gen-go.ts writes, checked by the same gen-go.test.ts.
+              - 'packages/daemon/internal/dispatch/generated.go'
               # A lockfile or root manifest change moves what the package resolves (#1519 nested
               # a second zod under contracts through the lock alone).
               - 'package.json'
@@ -184,6 +186,9 @@ jobs:
               # the versions envoy compiles with.
               - 'packages/daemon/go.mod'
               - 'packages/daemon/go.sum'
+              # The daemon's generated body cap: the envoy job runs bun run check:go, the only
+              # check that catches a hand-edit of it.
+              - 'packages/daemon/internal/dispatch/generated.go'
               # Its bun run gen:go step imports contracts' zod schemas.
               - 'package.json'
               - 'bun.lock'
