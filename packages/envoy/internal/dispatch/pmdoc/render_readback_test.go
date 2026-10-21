@@ -224,14 +224,15 @@ func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 // takes must come back from the next read as it went in. Each cell here holds a bare URL next to
 // punctuation, the first from a production row, read in a table cell and in a paragraph: Go must
 // read it as the browser editor's engine does - GFM leaves trailing punctuation before an end out
-// of a URL, so only the URL is linked, and a URL after a quote is linked as one after a space - and
-// every write must render it as written.
+// of a URL, so only the URL is linked, a URL after a quote is linked as one after a space, and a
+// scheme or `www` reads in any case - and every write must render it as written.
 func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 	type form struct{ name, before, after string }
 	forms := []form{{"paragraph", "", "\n"}, {"table cell", "| a | b |\n| --- | --- |\n| x | ", " |\n"}}
 	tests := []struct{ name, cell string }{
 		{"bare URL before a parenthesis and a quote", `"HTTP 401: Bad credentials (https://api.github.com/graphql)" while`},
 		{"bare URLs in quotes and before a bracket", `see "https://x.test/a"; and 'https://x.test/b'! or https://x.test/c]`},
+		{"bare URLs with an uppercase scheme and www", `see HTTPS://X.TEST/Y and Www.x.test/z; or (www.a.test) and *www.b.test*`},
 	}
 	var markdowns []string
 	for _, test := range tests {
@@ -269,6 +270,33 @@ func TestBareURLMarkdownComesBackFromAWriteAsWritten(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A www link is written as its bare text only where its run reads it back so: a www URL begins only
+// after whitespace, `(`, `*`, `_`, `[`, `]`, `~` or a head, so one right after a quote, as the
+// browser editor can hold it, is written as an explicit link, which both parsers read back, and so
+// is every other www link of its run (runSpelling.angleURLs).
+func TestAWWWLinkTheBareTextWouldLoseIsWrittenAsALink(t *testing.T) {
+	link := func(text string) *Node {
+		return &Node{Type: "text", Text: text, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": "http://" + text, "title": nil}}}}
+	}
+	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: `see "`}, link("www.a.test"), {Type: "text", Text: `" and `}, link("Www.b.test"), {Type: "text", Text: "."},
+	}}}}
+	const want = "see \"[www.a.test](http://www.a.test)\" and [Www.b.test](http://Www.b.test).\n"
+	rendered, err := Render(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rendered != want {
+		t.Fatalf("Render = %q, want %q", rendered, want)
+	}
+	reading := engineReadings(t, []string{rendered})[0]
+	if back, err := Parse(rendered); err != nil || !back.Equal(StripAnchorMarks(doc)) || reading == nil || !reading.Equal(back) {
+		got, _ := back.JSON()
+		engine, _ := reading.JSON()
+		t.Fatalf("%q reads back in Go as %s (%v), in the engine as %s", rendered, got, err, engine)
 	}
 }
 

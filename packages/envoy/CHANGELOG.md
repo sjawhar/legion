@@ -914,8 +914,9 @@
   any case, a domain with an underscore in either of its last two parts is text, and `ftp://` is
   text. A URL the editor links after a letter and punctuation (`x;https://…`), after an escape or a
   character reference, or at a line or cell opening with punctuation is still text on the server.
-  A bare URL the editor's rules read is written as its own bytes, or as `<url>` where the text after
-  it would continue it.
+  A bare URL the editor's rules read whole, its scheme in any case and a `www.` one included, is
+  written as its own bytes, or, where the text around it would change what is linked, as `<url>`
+  (a www link as `[www…](http://www…)`).
 
 - A write that rewrites a block's text no longer stores two U+FFFD in place of an emoji: an edit
   (`dispatch doc-edit`, `POST /api/v1/artifacts/{id}/edits`), an uploaded new version of a live

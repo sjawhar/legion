@@ -695,22 +695,40 @@ func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 
 // isBareAutolink reports whether a link whose text is its href can be written as that bare text for
 // linkify to link again. A backtick in it would be written escaped, and linkify reads the escape's
-// backslash into the URL, so such a link is written as an autolink (isAngleURLLink). The tokenizer
-// must read it whole (literalLength): one ending in punctuation the tokenizer leaves out of a URL
-// before an end (literalTrail) is never read back whole. One the tokenizer refuses outright, such as
-// a host opening with `-`, goldmark's parser reads (linkifyGuard), and it is held to goldmark's
-// rule.
+// backslash into the URL, so such a link is written as an autolink (isAngleURLLink). A URL the
+// tokenizer reads at all (literalLength), its scheme in any case, must be read whole: one ending in
+// punctuation the tokenizer leaves out of a URL before an end (literalTrail) is never read back
+// whole. One the tokenizer refuses outright, such as a host opening with `-`, goldmark's parser
+// reads (linkifyGuard), and it is held to goldmark's rule, which reads a lowercase scheme alone.
 func isBareAutolink(value string) bool {
-	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
-		return false
-	}
-	if strings.ContainsAny(value, " \t\n()<>`") {
+	if value == "" || strings.ContainsAny(value, " \t\n<>`") {
 		return false
 	}
 	if length := literalLength(value); length != 0 {
-		return length == len(value)
+		return length == len(value) && !strings.HasPrefix(strings.ToLower(value), "www.")
+	}
+	if strings.ContainsAny(value, "()") || !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
+		return false
 	}
 	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
+}
+
+// isBareWWWLink reports whether node is a www link, its href `http://` and its text, that the
+// tokenizer reads whole from that text (literalLength), which is written as the bare text where its
+// run reads back so (inlineWithEscapes) and as an explicit link otherwise (runSpelling.angleURLs):
+// a www literal begins only after whitespace, `(`, `*`, `_`, `[`, `]`, `~` or a head.
+func isBareWWWLink(node *Node, marks []Mark, escapePipes bool) bool {
+	for _, mark := range marks {
+		if mark.Type != "link" {
+			continue
+		}
+		href, _ := mark.Attrs["href"].(string)
+		title, _ := mark.Attrs["title"].(string)
+		value := node.Text
+		return title == "" && href == "http://"+value && len(value) > len("www.") && strings.EqualFold(value[:len("www.")], "www.") &&
+			!strings.ContainsAny(value, " \t\n<>`") && !(escapePipes && strings.Contains(value, "|")) && literalLength(value) == len(value)
+	}
+	return false
 }
 
 // literalLength is the length of the URL the browser editor's tokenizer reads from value, or 0. A
@@ -737,7 +755,7 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 		title, _ := mark.Attrs["title"].(string)
 		value := node.Text
 		return href == value && title == "" && strings.Contains(value, "`") &&
-			(strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")) &&
+			len(value) > len("https://") && (strings.EqualFold(value[:len("http://")], "http://") || strings.EqualFold(value[:len("https://")], "https://")) &&
 			!strings.ContainsAny(value, " \t\n\r<>") && !(escapePipes && strings.Contains(value, "|"))
 	}
 	return false

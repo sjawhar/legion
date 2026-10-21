@@ -210,11 +210,14 @@ func keepingOpen(active, marks, following []Mark) []Mark {
 	return ordered
 }
 
-// writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink), which linkify
-// reads again from the text alone.
+// writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink, isBareWWWLink),
+// which linkify reads again from the text alone.
 func writesBareURL(nodes []*Node, escapePipes bool) bool {
 	for _, node := range nodes {
-		if node.Type == "text" && isBareURLLink(node, visibleMarks(node.Marks), escapePipes) {
+		if node.Type != "text" {
+			continue
+		}
+		if marks := visibleMarks(node.Marks); isBareURLLink(node, marks, escapePipes) || isBareWWWLink(node, marks, escapePipes) {
 			return true
 		}
 	}
@@ -251,7 +254,7 @@ func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node, reader i
 // where the flanking rules can keep the run from opening or closing.
 func delimiterBesidePunctuation(nodes []*Node, escapePipes bool) bool {
 	for index, node := range nodes {
-		if node.Type != "text" || !hasDelimiterMark(writtenMarks(node, escapePipes)) {
+		if node.Type != "text" || !hasDelimiterMark(writtenMarks(node, escapePipes, true)) {
 			continue
 		}
 		if index > 0 && nodes[index-1].Type == "text" && flankingNeutral(firstRune(node.Text)) ||
@@ -331,18 +334,19 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		}
 		switch n.Type {
 		case "text":
-			next := writtenMarks(n, escapePipes)
+			wwwBare := !spelling.angleURLs
+			next := writtenMarks(n, escapePipes, wwwBare)
 			hasLink := containsMark(visibleMarks(n.Marks), "link")
 			var following []Mark
 			if index+1 < len(nodes) {
-				following = writtenMarks(nodes[index+1], escapePipes)
+				following = writtenMarks(nodes[index+1], escapePipes, wwwBare)
 			}
 			if spelling.keepOpen {
 				next = keepingOpen(active, next, following)
 				if index+1 < len(nodes) {
 					var after []Mark
 					if index+2 < len(nodes) {
-						after = writtenMarks(nodes[index+2], escapePipes)
+						after = writtenMarks(nodes[index+2], escapePipes, wwwBare)
 					}
 					following = keepingOpen(next, following, after)
 				}
@@ -371,9 +375,11 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
 			}
-			if isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 {
+			if isBareURLLink(n, marks, escapePipes) && literalLength(n.Text) != 0 || wwwBare && isBareWWWLink(n, marks, escapePipes) {
 				// The tokenizer reads a bare URL's bytes as they are written, a backslash among
-				// them, so its text takes no escape either.
+				// them, so its text takes no escape either. A www URL begins only after some
+				// characters; where its run does not read back, the angleURLs spelling writes it as
+				// an explicit link.
 				r.writeSyntax(n.Text)
 				position.atLineStart, position.atTextStart, position.afterMarker = false, false, false
 				continue
