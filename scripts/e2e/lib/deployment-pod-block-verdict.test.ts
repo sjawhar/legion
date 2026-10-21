@@ -32,6 +32,8 @@ interface BlockVolume {
   projected?: { sources: (TokenSource | ObjectSource)[] };
   config_map?: { name: string; items?: { key: string; path: string }[] };
   secret?: { name: string };
+  persistent_volume_claim?: { name: string };
+  nfs?: { server: string; path: string };
 }
 interface Block {
   service_account?: string;
@@ -52,6 +54,7 @@ interface PodVolume {
   configMap?: { name: string; items?: { key: string; path: string }[] };
   secret?: { secretName: string };
   persistentVolumeClaim?: { claimName: string };
+  nfs?: { server: string; path: string };
 }
 interface PodMount {
   name: string;
@@ -201,6 +204,44 @@ describe("deployment-pod-block verdict", () => {
     const p = pod();
     p.spec.serviceAccountName = "default";
     expect(verdict(p).wrong).toEqual(["the pod runs as ServiceAccount default, not legion-worker"]);
+  });
+
+  test("a share the block names is read by its claim or export", () => {
+    const b = block();
+    b.volumes.push(
+      { name: "team-share", persistent_volume_claim: { name: "team-share" } },
+      { name: "nas", nfs: { server: "nas.internal.example", path: "/exports/builds" } }
+    );
+    b.volume_mounts.push(
+      { volume: "team-share", mount_path: "/mnt/team" },
+      { volume: "nas", mount_path: "/mnt/nas", read_only: false }
+    );
+    const p = pod();
+    p.spec.volumes.push(
+      { name: "team-share", persistentVolumeClaim: { claimName: "team-share" } },
+      { name: "nas", nfs: { server: "nas.internal.example", path: "/exports/builds" } }
+    );
+    for (const c of p.spec.containers) {
+      c.volumeMounts.push(
+        { name: "team-share", mountPath: "/mnt/team", readOnly: true },
+        { name: "nas", mountPath: "/mnt/nas" }
+      );
+    }
+    expect(verdict(p, b)).toEqual({ process: { pid: 10, comm: "legion" }, missing: [], wrong: [] });
+
+    const other = structuredClone(p);
+    other.spec.volumes[other.spec.volumes.length - 2] = {
+      name: "team-share",
+      persistentVolumeClaim: { claimName: "someone-else" },
+    };
+    other.spec.volumes[other.spec.volumes.length - 1] = {
+      name: "nas",
+      nfs: { server: "nas.internal.example", path: "/exports/other" },
+    };
+    expect(verdict(other, b).wrong).toEqual([
+      "volume team-share is PersistentVolumeClaim someone-else, not team-share",
+      "volume nas is NFS export nas.internal.example:/exports/other, not nas.internal.example:/exports/builds",
+    ]);
   });
 
   test("a volume the pod lacks is missing", () => {
