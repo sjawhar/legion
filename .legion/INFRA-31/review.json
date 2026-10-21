@@ -2,54 +2,45 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T02:50:00Z",
-  "decision": "approved",
-  "round": 12,
+  "completed": "2026-10-21T04:05:00Z",
+  "decision": "changes_requested",
+  "round": 13,
+  "note": "My approval of 46e10cf52e41 was voided by the architect's backward move. This is a new round reviewing f8038a501ba9 in full from that approval, not a fingerprint confirmation.",
   "critical": 0,
-  "important": 0,
+  "important": 3,
   "minor": 0,
-  "keyFindings": [],
-  "approvedHead": "the commit this handoff push makes, named by SHA in the submitted review",
-  "whatTheLastFindingNeededAndGot": "docs/kubernetes.md:1236 now reads 'chmod -R u+w the stale /legion/scratch/<role> directories of roles that are not running and then delete them', with the reason stated rather than asserted: the go command writes every extracted module directory read-only at mode 555, so a plain rm -rf exits 1 with a Permission denied line per file and leaves bytes, and what it leaves is the extracted source while what it removes is the re-downloadable cache/download — the reclaim frees the cheap half and keeps the expensive one. The non-zero exit is named as the one mercy, since a scripted remedy fails loudly rather than silently. Both halves I asked for are there, and the consequence I derived myself in round 11 is in the document rather than only in the review.",
-  "whatIDerivedForThisApproval": [
-    "The clause's scope, which is what makes it true: in my own round-11 run the extracted module directories were mode 555 and mod/cache/download was 755, so 'every extracted module directory' is the right scope and a fixture with no extracted module would see the naive delete succeed. The architect reports exactly that from a small fixture of his own, which is an argument for leaving the wording as it is rather than narrowing it.",
-    "The reclaim's direction, from my own run: 83 KB of 391 KB surviving, the survivors being the extracted source and the removed part the download cache.",
-    "CI at the code head 7da7a8133267, read with per_page=100 and --paginate: lint, typecheck, test and pr-title all completed and success.",
-    "compare 7da7a8133267...<this head> all under .legion/.",
-    "The pull request's threads read on GitHub rather than from the body: 32 total, 0 unresolved.",
-    "The body read at this head, which is now part of the round: no stale 'Open as this round's finding' marker survives, every resolved entry is struck and attributed to its fixing commit, and the one stale line left was my own 'Look at first', which I rewrote in this round rather than leaving for the merger to quote."
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/runtime/sandbox/plugins_test.go:69",
+      "description": "The guard this round adds is pinned by nothing, and I proved it by reinstating the exact regression rather than by reading the assertions: I reverted plugins.go to the pre-guard shape — mkdir -p back outside legion_install, no [ -d ] || rm -f — and ran go test ./internal/runtime/sandbox/. It passed, ok 149.960s. Every wanted substring in TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript was already true at 46e10cf52e41: 'mkdir -p -- \"$cache\"' matches wherever the line sits, and nothing asserts it is inside legion_install or that the rm guard exists at all; a grep for '[ -d' or 'rm -f --' across the package's tests returns no hit. This is the third time in this review that a fix has shipped with nothing that can fail if it is reverted, and it is the one with the worst consequence: by the change's own comment, the state it prevents kills every later installing launch of that issue at 'mkdir: File exists' under set -eu, before Oh My Pi starts, until a person clears the file by hand — on a volume, invisible to CI. The nine lines of comment now explaining why the code must not be reverted are the argument for the test, not a substitute for it. The package already owns the harness: runStart (plugins_test.go:510) and installLockProbe (:241) run the rendered wrapper under /bin/sh with a stand-in bun and a BUN_INSTALL_CACHE_DIR under t.TempDir(). Write a regular file at that path, run the wrapper, assert exit 0 and a directory afterwards. The test record says this was proved on a throwaway rig; the rig is what should have been committed."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:1254",
+      "description": "The remedy says 'Delete them between turns, not under a running role', and the exemption above it says 'a cache, a temporary directory and an install cache are rebuilt by the next build or install'. For /legion/scratch/tmp both are false, and this pull request says so in its own words. podsafety.go:200-203: 'TMPDIR has no creator at all — mktemp and every library equivalent fail where the directory the variable names does not exist, and the pod's role containers are told no other temporary directory.' I checked the callers rather than the comment: EnsureScratch has exactly one non-test caller, worker_shim.go:98, which runs once when the shim starts Oh My Pi, and nothing else in the daemon creates that path. So 'between turns' is the wrong window — a role's shim lives across turns, and the directory stays gone until the role is relaunched. What that costs, run here rather than reasoned: with the told TMPDIR missing, mktemp -d fails outright, exit 1. And the worse half, which is why this is more than an error message: Python's tempfile does not fail, it silently falls back to /tmp — I ran it and it placed the directory at /tmp/tmp3ggdephm with TMPDIR set to a path that did not exist. In a role container /tmp is the container's own filesystem, so a tool that falls back resumes charging the kubelet's ephemeral-storage limit. An operator following this sentence to reclaim space can silently re-arm the eviction this entire issue exists to prevent. The fix is to name /legion/scratch/tmp as the one path on the list whose only creator is the role's next shim start, so it is deleted with the role stopped rather than merely between turns, and to drop 'a temporary directory' from the rebuilt-by-the-next-build clause, which is true only of the caches."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:1238",
+      "description": "The delete list says to delete /legion/uv, and the same repository documents that path as the thing a surviving environment links into. manifest.go:763-767: 'A project's .venv, in an issue's workspace on that volume, links to an interpreter in that issue's directory, so every later pod of the issue finds the interpreter and the environment works there as it is.' docs/kubernetes.md:2023-2026 says it again in prose. The remedy deletes neither the workspace nor the clone, so after following it the .venv survives with its interpreter gone — the designed property, that the environment works as it is in every later pod, is exactly what the reclaim falsifies. This is not the cache half: /legion/uv/cache is a cache and deleting it costs a download, where /legion/uv/python/<issue> holds installed interpreters that nothing on the list re-derives, which is the same distinction the paragraph already draws for the data home one sentence later. Either split the two paths on the list, naming the cache as reclaimable and the interpreter directory as costing a .venv rebuild, or keep /legion/uv whole and say what it breaks."
+    }
+  ],
+  "verifiedHereNotCarried": [
+    "The premise the change rests on: /usr/bin/flock -w 5 -- <missing path> /bin/true exits 0 and leaves a 0-byte regular file. I ran it. The old shape then exits 1 at 'mkdir: Already exists' on that state; the new guard exits 0 and leaves a directory. The fix is correct and the comment states its reason accurately.",
+    "The mutation above: the whole sandbox package green with the pre-guard shape restored.",
+    "EnsureScratch's single non-test caller, and that nothing else in the daemon creates /legion/scratch/tmp.",
+    "mktemp -d failing against a missing told TMPDIR, and Python's tempfile silently falling back to /tmp instead."
   ],
   "ci": {
-    "verdict": "green",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
-    "nonRequired": "dispatch and dispatch-memory were in_progress at the read, not red. A red `dispatch` on this branch belongs to dispatch://INFRA-76, an Inbox test failing across the project; this change touches 0 files under packages/dispatch or packages/proof-editor against the merge base, which I derived rather than cited."
+    "note": "Read at the code head before the review was submitted; recorded in the submitted review."
   },
-  "thermonuclear": "Run at every round's head where the diff touched runtime code, last at 9b8c6ccc: code-quality found the invented cause, deep-review returned approve on the code and the Dockerfile. Every push since has been documentation only — rounds 11 and 12 changed one paragraph of docs/kubernetes.md and nothing else — so no runtime code has entered the change since the pair last cleared it.",
   "fastFollow": [
-    "Extract the scratch layout out of manifest.go into scratch.go, collapsing the rationale now restated across about fifteen sites rather than relocating it, and fold the state home's regained mount assertions into one helper with the sibling test's copy; bunInstallArgs and runStart's shared stubbing belongs in the same pass.",
-    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23, whose 103-byte path sits under a 107-byte sun_path with no margin named.",
-    "Give the drift fence a reverse walk over every role rather than one rendered spec: there are exactly ten /legion variables and none is kind-specific, so the fence can assert the set rather than a sample.",
-    "A test for configure's refusal of a non-positive RegistrationIntervals, which is safe only while the loader's positive-count key and installLockWait's one-second floor both stand."
-  ],
-  "forTheMerger": {
-    "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the approval body.",
-    "rule": "Read the run, not the lane. Every shape below is a way a lane's name misleads, and the run id settles all of them.",
-    "ciShapes": [
-      "The default check-runs page is 30 and these commits carry 25 to 39 runs; read with per_page=100 and --paginate or required names fall off the page and a green head reads as missing.",
-      "A superseded run shows completed/cancelled while a later run of the same workflow succeeded: dispatch at 0085e4b45a48 is the worked example.",
-      "A push carrying code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
-      "pr-title fires on every pull-request edit, so one head carries many runs of it; the newest decides.",
-      "While a pull request is CONFLICTING, GitHub runs no on: pull_request workflow for any of its activity.",
-      "A genuinely failing non-required lane may belong to another issue: dispatch://INFRA-76 is the Inbox test failing across this project, and this change touches 0 files under packages/dispatch or packages/proof-editor."
-    ]
-  },
-  "forTheRetro": {
-    "theParentLesson": "A derived pin is worth more than a correct constant, and it holds one level up as well: the value you assert in a review must be re-derived from the file at the head, because a citation inside a subagent's finding is a claim rather than a reading. Both of this issue's documentation failures were a single asserted value inside an argument that was otherwise sound, and in both the contradicting evidence was already in the session that asserted it.",
-    "theSharperForm": "The architect's generalisation, which I would put above mine: writing to strengthen an argument rather than to describe a system. Neither failure was careless in the ordinary sense; both made the case better, which is why neither was checked. The sentence that makes the argument stronger is the one to re-derive first.",
-    "theSystemProperty": "Both failures were claims about a production system neither role can read. A claim about production in operator-facing documentation, written by roles with no production read, should name what it rests on.",
-    "theNarrowingThatMatters": "The rule is about the value, not the source. The thermonuclear pair found this issue's two most useful items and an agent found my own stale body line; an entry that said 'do not trust agent findings' would have cost more than both errors. Carry the lead, re-derive the clause.",
-    "theGraceZeroFlinch": "When the measured grace was zero I wanted to call it a margin and did not, and the round that followed found the race. A number that makes a design look safe is the one to measure twice.",
-    "myOwnPattern": "Three stale lines of mine reached the PR body, one crossing a round boundary with nobody acting, because I wrote each entry when I filed the finding and never read it again — it aged exactly one round behind the document every time. Reading the body at the head is now part of the round, beside reading CI."
-  }
+    "The scratch.go extraction from manifest.go, collapsing the rationale now restated across about fifteen sites rather than relocating it.",
+    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
+    "The drift fence's reverse walk over every role rather than one rendered spec.",
+    "A test for configure's refusal of a non-positive RegistrationIntervals.",
+    "docs/kubernetes.md:1965 — the canonical 'Sharing BUN_INSTALL_CACHE_DIR' section still describes the install as taking flock after a mkdir -p of it, with no mention of the per-attempt remake or the non-directory clearing. Not false, but the authoritative account of the new shape now lives 700 lines earlier in a reclaim paragraph."
+  ]
 }
