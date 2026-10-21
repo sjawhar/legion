@@ -10,7 +10,8 @@ the Dispatch specs behind the `dispatch` command:
 - envelope schema/type and subject helpers
 - `dispatchToolSpecs`, built over an injected Zod surface and `zodSchemaApi`, from which
   `@legion/envoy-client` derives the `dispatch` command's flags, help and validation
-- Go output in `packages/envoy/internal/contracts/generated.go`
+- Go output in `packages/envoy/internal/contracts/generated.go` and
+  `packages/daemon/internal/dispatch/generated.go`
 - Dispatch `Actor` session values may include an `owner` (a person's lowercase email) when a personal agent token authenticated the request; consumers render it as `(for <owner>)` and persist it wherever they preserve actor JSON.
 
 ## Where to look
@@ -19,8 +20,9 @@ the Dispatch specs behind the `dispatch` command:
 | --- | --- | --- |
 | Envelope and subject contracts | `src/envelope.ts`, `src/subject.ts` | canonical TypeScript surface |
 | Dispatch tool specifications | `src/dispatch-tools.ts`, `src/tool-schema.ts` | builders over `zodSchemaApi(hostZod)` |
-| Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract and the shared constants (`bun run gen:go`); `bun run check:go` (`--check`) compares a fresh render with the committed `generated.go` without writing it, and CI runs it in place of regenerating |
+| Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract and the shared constants into two files, one per Go module (`bun run gen:go`); `bun run check:go` (`--check`) compares a fresh render of each with its committed file without writing either, naming the one it finds stale, and CI runs it in place of regenerating |
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |
+| Generated Go body cap for the daemon | `packages/daemon/internal/dispatch/generated.go` | generated; do not hand-edit. The daemon is a Go module of its own and its production build imports nothing from `github.com/sjawhar/envoy`, so `DISPATCH_BODY_MAX` reaches it as `dispatch.MessageBodyLimit` in this second output rather than through `contracts` |
 | Daemon API schema | `src/legion-api.ts`, `fixtures/daemon-api/` | Hand-written mirror of the Legion daemon's wire shapes — `packages/daemon/internal/api` (`state.go`, `operator.go`) and the claim wire in `internal/claim/wire.go` — which are the source of truth: no generator runs either way. `go test ./internal/api/ -update` writes the golden fixtures, and `go test ./internal/projection/ -update` writes `state-controller-claim.json` (the state with the controller's claim beside a tree's); `src/legion-api.test.ts` parses each one through the strict schema, so a Go field without its zod line fails there. `version.json` is no response: it is the daemon's `DaemonAPIVersion` (`internal/api/version.go`), which the Legion plugin's `src/daemon-api-version.test.ts` (`packages/pi-legion`) and claude-envoy's `tests/daemon-api-version.test.ts` each pin their manifest's `legion.daemonApiVersion` to. Reached as `@legion/contracts/legion-api`, never from the barrel. Its readers are the code that speaks to the daemon — the daemon client (`packages/pi-shared/src/daemon-client.ts`) and each host's `legion` tool — in two bundles: pi-legion's `dist/legion.js` and claude-envoy's MCP server, `dist/envoy-channel.js`. The barrel is bundled into each of claude-envoy's committed bundles, so through it the session hook and the `dispatch` command would carry the schema for nothing. |
 | Contract tests | `src/*.test.ts` | validation and schema drift coverage |
 | Document block offsets and anchors | `src/dispatch-api.ts` | `ArtifactBlock` maps stable block IDs, canonical markdown offsets, and SHA-256 full-Proof-state tokens (including inline marks), plus per-block comment/ask reference counts; `Anchor.block_id` is nullable for legacy rows. |
@@ -109,7 +111,8 @@ the Dispatch specs behind the `dispatch` command:
   new quotes use their lowest complete containing block, while quotes across top-level siblings
   remain unpinned. Clients must preserve the field.
 - A session `Actor` carries `service?: string` — the subject of the verified service token that authenticated the write (`system:serviceaccount:<namespace>:<name>`), which the server sets and a request body can never supply — and `WhoamiResponse` reports it as `service: string | null` beside the personal token's `owner`. Every renderer appends `(as <label>)` through `serviceSubjectLabel`, the one place that rule lives: a Kubernetes subject reads `<namespace>/<name>`, because every namespace has a `default` service account and the name alone names no one; any other subject reads whole rather than truncated. The persisted value is always the full subject — the label is presentation.
-- Do not hand-edit `packages/envoy/internal/contracts/generated.go`.
+- Do not hand-edit `packages/envoy/internal/contracts/generated.go` or
+  `packages/daemon/internal/dispatch/generated.go`.
 - If the envelope or subject shape changes, update its schema and regenerate the
   applicable Go output.
 - Prefer backward-compatible additions when extending the envelope.
