@@ -2,43 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T02:30:00Z",
+  "completed": "2026-10-21T03:05:00Z",
   "proof": [
     {
-      "criterion": "The volume remedy the documentation gives can be executed as written, and says what the naive form costs.",
-      "surface": "The command the sentence names, run against a real Go module cache in this pod: one module downloaded into a scratch GOMODCACHE, then the delete, then the delete the corrected sentence gives.",
-      "command": "GOMODCACHE=<scratch> go mod download golang.org/x/sync; rm -rf <scratch>/mod; then chmod -R u+w <scratch>/mod && rm -rf <scratch>/mod",
-      "observed": "Plain delete: exit 1, 19 `Permission denied` lines, 96 KB of 2.3 MB surviving — and what survives is the extracted module source while the re-downloadable cache/download is what goes, so the naive remedy frees the cheap half and keeps the expensive one. With `chmod -R u+w` first: exit 0, nothing left. The same shape at two other scales: the reviewer's 31 lines and 83 KB of 391 KB, the tester's 11,393 lines and 147 MB on the real volume.",
-      "headSha": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
-      "negativeControl": "The chmod run is the control for the plain one: same directory, same command, one step apart, exit 0 against exit 1 — so the failure is the read-only mode the go command writes and not the rig."
+      "criterion": "The reclaim remedy names directories this layout actually creates, so an operator following it frees the space that fills.",
+      "surface": "docs/kubernetes.md's issue_volume paragraph, read against the renderer it describes.",
+      "command": "grep -n 'scratchRoot + \"' packages/daemon/internal/runtime/sandbox/manifest.go; read docs/kubernetes.md's remedy sentence at the head",
+      "observed": "The renderer gives `/legion/scratch/cache`, `/legion/scratch/data`, `/legion/scratch/tmp` and `/legion/scratch/bun/install/cache` shared (manifest.go:731-737) plus the Go pair, and exactly one per-role path, `roleStateHome` = `/legion/scratch/state/<role>` (manifest.go:758). The remedy now names `/legion/scratch/cache`, `/legion/scratch/bun/install/cache` and `/legion/go` as what to delete, says the per-role state home is logs, Chromium profiles and the plugin generation rather than a cache and is small, and says to delete between turns since a role mid-install of its plugin pair does not survive losing it. The superseded sentence named `/legion/scratch/<role>`, which no shipped layout creates.",
+      "headSha": "cad5d51bfcb207e3319ea74ac115eb4a38934659",
+      "negativeControl": "The directory listing of this issue's own volume is the control for the failure mode: under the shipped names there is no `/legion/scratch/<role>` to delete, so the old sentence freed nothing — while `/legion/scratch/cache` and the Go pair are where a build's bytes land."
     },
     {
-      "criterion": "The sentence in the document carries both halves the reproduction establishes, not only the fix.",
-      "surface": "docs/kubernetes.md's issue_volume paragraph.",
-      "command": "read at the head",
-      "observed": "It now reads: `chmod -R u+w` the stale /legion/scratch/<role> directories of roles that are not running and then delete them … the chmod is not caution — the go command writes every extracted module directory read-only (mode 555), so a plain rm -rf exits 1 with a Permission denied line per file and leaves bytes behind, and what it leaves is the extracted source while what it removes is the re-downloadable cache/download: run without the chmod the reclaim frees the cheap half and keeps the expensive one. The non-zero exit is named as the one mercy in that shape, since a scripted remedy fails loudly rather than silently.",
-      "headSha": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
-      "negativeControl": "The superseded sentence is the control: it was true about what to delete and impossible to carry out, which is the documentation form of a check that cannot fail."
-    },
-    {
-      "criterion": "The round changed nothing executable and nothing else in the document.",
-      "surface": "The working copy's diff and the private-names check.",
-      "command": "jj diff --stat; bash .github/scripts/check-private-names.sh",
-      "observed": "One file, docs/kubernetes.md, +8/-2. check-private-names clean over 4693 files. No Go code, no test, no Dockerfile, so every proof of the earlier rounds stands at this head unre-run and the four required checks' verdicts at 0085e4b45a48 carry.",
-      "headSha": "7da7a8133267f8e830653dcb524c72e13e6e2b79",
-      "negativeControl": "The diff stat is the control for that claim."
+      "criterion": "Everything else in the paragraph that was proved stays proved: the chmod reasoning and what a plain delete leaves behind are unchanged.",
+      "surface": "The same paragraph, and the reproduction already recorded at three scales.",
+      "command": "read at the head; the earlier reproduction: GOMODCACHE=<scratch> go mod download …; rm -rf; chmod -R u+w && rm -rf",
+      "observed": "The `chmod -R u+w` clause, the mode-555 explanation, the fact that a plain `rm -rf` exits 1 and keeps the extracted source while removing the re-downloadable `cache/download`, and the note that the non-zero exit makes a scripted remedy fail loudly are all unchanged. The 5.5 GiB figure is now marked as the intermediate per-role layout's rather than these paths', which is the confusion that produced the defect.",
+      "headSha": "cad5d51bfcb207e3319ea74ac115eb4a38934659",
+      "negativeControl": "The round's diff is one file, docs/kubernetes.md, +12/-3: no Go code, no test and no Dockerfile moved, so every proof of the earlier rounds stands at this head unre-run."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md — the volume remedy gains `chmod -R u+w`, the reason it is not caution, which half of a module cache a plain delete leaves behind, and the note that the non-zero exit makes a scripted remedy fail loudly."
+    "docs/kubernetes.md — the reclaim remedy names the shared directories the layout creates, distinguishes the one small per-role path, says when it is safe to delete them, and scopes the 5.5 GiB reclaim to the intermediate layout."
   ],
   "trickyParts": [
-    "I had already met this failure two rounds earlier — the reclaim's `rm -rf /legion/scratch/thermo7` left thermo7/mod behind and needed a second pass — and recorded it in that round's handoff as a tricky part instead of carrying it into the sentence I then wrote. The knowledge was in the record and not in the instruction."
+    "The defect was found by retro's fresh-eyes subagent at an approved head, verified against manifest.go by me and by the architect, and fixed by a requested backward move to implementing rather than in retro, since only docs/solutions/ and the handoff removal may sit above the approved head without voiding the approval."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "An instruction is a claim too, and the way to check one is to run it. Both documentation corrections this issue produced were text nobody had executed until someone ran it; this one was wrong in the direction that matters, since an operator who runs the naive delete, sees the error and moves on has reclaimed the re-downloadable half and kept the expensive half.",
-    "The body entry describing this finding was itself a round stale when the reviewer read it — the third such line in that artifact — because an entry is written when a finding is filed and never re-read at the next head. Reading the body at the head is now part of the round rather than trusting what I remember writing."
+    "A sentence true of the text above it can become false when what it points at changes, without the sentence being edited. Nothing in this paragraph was wrong when written: the remedy described the intermediate per-role layout the paragraph had just measured, and kept pointing at it after the subject became the shipped shared layout. No amount of checking the sentence finds that — only reading the instruction against the system it now describes does, which is what a fresh reader did four corrections in."
   ]
 }
