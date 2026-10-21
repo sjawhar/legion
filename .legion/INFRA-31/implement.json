@@ -2,48 +2,44 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-21T00:30:00Z",
+  "completed": "2026-10-21T01:10:00Z",
   "proof": [
     {
-      "criterion": "The pull request merges again, by a forward merge of the base rather than a rebase, with nothing of this branch dropped in the resolution.",
-      "surface": "GitHub's own mergeability for PR #2085, and the seven files the merge conflicted in: plugins.go, plugins_test.go, launcher.go, live_test.go, controller_test.go, docs/kubernetes.md, scripts/e2e/README.md.",
-      "command": "jj new legion/INFRA-31 main@origin -m 'merge: resolve conflict against main@origin'; resolve; jj git push --bookmark legion/INFRA-31; gh api repos/sjawhar/legion/pulls/2085 --jq '{mergeable, mergeable_state, head: .head.sha}'",
-      "observed": "Before: `mergeable: false`, `mergeable_state: dirty`. After: `{\"head\":\"f714cec148b6b8175f6b1e128a705e54bd00487e\",\"mergeable\":true,\"mergeable_state\":\"blocked\"}` — blocked being the review gate, not a conflict. The merge is a genuine fast-forward from both parents, so nothing existing was rewritten.",
-      "headSha": "f714cec148b6b8175f6b1e128a705e54bd00487e",
-      "negativeControl": "The pre-merge read is the control, taken twice ten seconds apart by the reviewer and once by me: dirty both times, so the conflict was a settled computation rather than one in flight."
+      "criterion": "A failed install ends the start wrapper where it stands: the deployment's setup command never runs and Oh My Pi never starts on a plugin pair that was not installed.",
+      "surface": "TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent in packages/daemon/internal/runtime/sandbox, running the rendered wrapper through the package's own runStart harness with a stand-in bun that exits non-zero, a stand-in node, and recorder stand-ins for the setup command and the agent.",
+      "command": "go test -count=1 -run TestAFailingInstallNeverRuns -v ./internal/runtime/sandbox/",
+      "observed": "Both subtests pass: the failing case exits 1, writes the install's own `legion plugins: installing @sjawhar/pi-legion@9.7.0 and @sjawhar/pi-envoy@9.6.1 failed` to stderr, leaves stdout — the shim's frame stream — empty, and neither the setup log nor the agent log exists; the succeeding case exits 0 with both logs present.",
+      "headSha": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
+      "negativeControl": "The succeeding case is the control and runs in the same test: without it the failing case's absent markers would prove only that the harness ran nothing at all."
     },
     {
-      "criterion": "The lock's two kinds of assertion still pair as they did before the merge, so the base's restructure did not quietly weaken them.",
-      "surface": "TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline and TestTwoRenderedInstallsSerialiseOnTheSharedBunCache, at the merged head, under the same two mutations the reviewer ran before it.",
-      "command": "installLockWait's body replaced by `return 1`, then the divisor moved to 4, each `go test -count=1 -run 'TestTheInstallLockWaitIsABound|TestTwoRenderedInstallsSerialise' ./internal/runtime/sandbox/`, restored between",
-      "observed": "`return 1`: three cases red twice each — `the wait at boot 2m0s x 3 intervals is 1s, want 120s: the 6m0s deadline's third, floored at a second` and `less than the 5s the queue this lock creates needs: the last of a pod's six roles waits for the 5 installs before it`. Divisor 4: the same three cases red once each, on the hand arithmetic alone (`90s, want 120s`; `45s, want 60s`; `60s, want 80s`), the queue clause silent in every one. Restored: `ok … 1.223s`.",
-      "headSha": "f714cec148b6b8175f6b1e128a705e54bd00487e",
-      "negativeControl": "The divisor-4 run is the control for the queue clause: silent there and firing under `return 1` is what shows that clause reads the feature rather than the derivation, and it behaves identically either side of the merge."
+      "criterion": "The new test fails when the behaviour it pins is removed — checked in that order, before the test was trusted.",
+      "surface": "installBlock's rendered failure branch in plugins.go.",
+      "command": "the rendered `|| { echo %s; exit 1; }` changed to `|| { echo %s; }`, then `go test -count=1 -run TestAFailingInstallNeverRuns ./internal/runtime/sandbox/`, then restored",
+      "observed": "FAIL, three lines: `the wrapper exited 0, want 1`, `the setup command ran after a failed install (<nil>): the install's subshell exit did not end the wrapper`, and the same for the agent. Restored: `ok … 0.076s`, plugins.go back to checksum 741d9ee605423d52.",
+      "headSha": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
+      "negativeControl": "The restore is the control for the mutation: the same command on the unmutated render passes, so the failure is the deleted branch's and not the harness's."
     },
     {
-      "criterion": "The resolution is the union of both sides, not either side wholesale.",
-      "surface": "The merged plugins.go, plugins_test.go and docs/kubernetes.md read against both parents.",
-      "command": "go build ./... && go vet -tags e2e ./... && go test -count=1 ./internal/runtime/sandbox/ ./internal/capabilities/... ./internal/config/ ./cmd/legion/ ; bunx biome check . ; bash .github/scripts/check-private-names.sh",
-      "observed": "All green: sandbox 134.241s, capabilities 25.865s, config 0.733s, cmd/legion 68.166s, gofmt clean, vet ok, biome exit 0, private-names clean. The base's startScript/startArgv/setupBlock and its four setup-command tests are present; so are this branch's --backend=copyfile, the cache read with no default, the flock function with its bounded wait and retry, installLockWait with its whole rationale, requireFlock, the pinned BUN_INSTALL_CACHE_DIR, the serialisation test with its lockless control and the wait's property with its four hand-computed cases. In the documentation both sides' sentences stand, including this branch's floor exception and its five-installs claim scoped above the floor.",
-      "headSha": "f714cec148b6b8175f6b1e128a705e54bd00487e",
-      "negativeControl": "The fingerprint is the control and it reports changed, which is the honest answer: the base restructured the code this branch changed, so the branch's diff against its new fork point is a different diff. A resolution that had dropped a correction would have produced the same verdict, so the verdict is not the evidence — the mutations and the suite above are."
+      "criterion": "The merged tree is otherwise unchanged by this round.",
+      "surface": "The whole sandbox package at the new head.",
+      "command": "gofmt -l ./internal; go vet ./internal/runtime/sandbox/; go test -count=1 ./internal/runtime/sandbox/; jj diff --stat",
+      "observed": "gofmt clean, vet ok, `ok … 140.663s`, and the round's diff is one file, `plugins_test.go`, +56/−0 — no production code and no prose, so the branch's diff against its base is where the merge left it.",
+      "headSha": "0e21bab7d9883638b81f6881db5d2c742172cdbd",
+      "negativeControl": "The diff stat is the control for that claim: a round that had touched the render or the documentation would show it there."
     }
   ],
   "filesChanged": [
-    "Merge commit f714cec148b6 resolves seven conflicted files against main@origin (#2070, the deployment setup command).",
-    "packages/daemon/internal/runtime/sandbox/plugins.go — this branch's lock, copyfile flag, cache read and installLockWait re-expressed inside the base's installBlock/startScript/startArgv, with the wait threaded as a parameter; both doc comments merged rather than one chosen.",
-    "packages/daemon/internal/runtime/sandbox/plugins_test.go — both sides' tests, the base's setup-command four and this branch's five, with every assertion of this branch's kept.",
-    "packages/daemon/internal/runtime/sandbox/launcher.go — the base's startArgv call with this branch's installLockWait argument.",
-    "live_test.go, controller_test.go — both sides' option fields.",
-    "docs/kubernetes.md, scripts/e2e/README.md — both sides' sentences."
+    "packages/daemon/internal/runtime/sandbox/plugins_test.go — TestAFailingInstallNeverRunsTheSetupCommandOrTheAgent, the install-side mirror of main's TestAFailingSetupCommandNeverStartsTheAgent, with the succeeding case as its control in the same test."
   ],
   "trickyParts": [
-    "The base's commit restructured exactly this branch's code, so the merge was structural rather than textual: installScript ceased to exist and its body became installBlock inside a subshell. The lock had to be re-expressed in that shape rather than re-applied as a patch.",
-    "A changed fingerprint was unavoidable here and is reported as changed. The rule that a changed fingerprint means a new round rather than a continuation is the reviewer's to apply; smoothing the resolution to make the number match would have been the defect this branch has spent eight rounds removing."
+    "The install's failure is the one in this wrapper that crosses a subshell boundary: installBlock renders `( … ) 1>&2`, so a failed `bun add` exits the subshell and only `set -e` in the wrapper makes it the wrapper's own exit. That is why the mutation deletes the `exit 1` rather than the message, and why the test asserts the wrapper's exit and the two absent logs rather than the stderr line alone."
   ],
-  "deviations": [],
+  "deviations": [
+    "The commit carrying this test, 0e21bab7d988, is authored by the reviewer's App rather than mine: the working-copy commit this turn started on was the reviewer's, in the workspace all roles share, and I split it before reading its author. The handoff commit above it is mine. I did not rewrite the pushed commit to correct the attribution — rewriting a pushed commit for authorship alone is not one of the sanctioned rewrites, and a code commit's author reaches no gate — so it is recorded here instead."
+  ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "A mergeable read is perishable: the reviewer's and my own reads were MERGEABLE at 23:24 and dirty by 23:58, because the base moved between them. The behind-count's trend, not the status alone, is what says how long the read stays true."
+    "Absent evidence again, in its narrowest form: the tester's live run showed the failure propagating, and nothing in the suite would have noticed if it stopped. A behaviour proven once by hand on freshly restructured code is not a behaviour that is held."
   ]
 }
