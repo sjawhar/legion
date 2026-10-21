@@ -4,6 +4,13 @@
 
 ### Added
 
+- The secrets broker serves a minted secret: a GCP secret with no version tagged
+  `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
+  its name with that account and its owner and the secret is human-tier. Each release mints a
+  Google access token for the account, lasting the shorter of an hour and the grant's remaining
+  life, after rereading the secret (at most once per name per 30 seconds); a request for one must
+  ask for at most an hour (`400 MINT_REQUIRES_LIFETIME`).
+
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the
   Settings page's Default radio; an issue carries its own `repo`, which must be a mapping of its
@@ -893,6 +900,30 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- The listener's `GET /v1/interests/<session_id>` answers 404 only for a session the registry
+  holds no record of (`nats.ErrKeyNotFound`), and 503 for a read NATS did not serve (a dropped
+  connection, a timeout, a record that does not decode). It used to answer 404 for every failure,
+  so a caller took a NATS failure for a session subscribed to nothing: the `dispatch` command
+  printed "not subscribed", and Dispatch's subscriber removal could complete while the interest
+  was still stored.
+
+- A bare URL next to punctuation in a Dispatch document links as the browser editor links it, so
+  reading a table row with `dispatch doc-read` and writing it back with `dispatch doc-edit` no
+  longer grows the link. `"HTTP 401 (https://api.github.com/graphql)" while` links only
+  `https://api.github.com/graphql`, where the server linked `https://api.github.com/graphql)"` and
+  stored it as `[https://api.github.com/graphql)"](<https://api.github.com/graphql)">)`. Where the
+  server reads a URL - after whitespace, `*`, `_`, `~`, `(` or a line's start, and after quotes and
+  other punctuation that follow one of those - it reads a www or http(s) URL as GFM's extended
+  autolink does, as the editor's parser reads one: trailing punctuation before whitespace, `<` or
+  the line's end (`"`, `'`, `;`, `]`, `_`, and a `)` that closes no `(` in the URL among it) is left
+  out, a backslash, an asterisk or a letter outside ASCII is part of the URL, the scheme reads in
+  any case, a domain with an underscore in either of its last two parts is text, and `ftp://` is
+  text. A URL the editor links after a letter and punctuation (`x;https://…`), after an escape or a
+  character reference, or at a line or cell opening with punctuation is still text on the server.
+  A bare URL the editor's rules read whole, its scheme in any case and a `www.` one included, is
+  written as its own bytes, or, where the text around it would change what is linked, as `<url>`
+  (a www link as `[www…](http://www…)`).
 
 - A write that rewrites a block's text no longer stores two U+FFFD in place of an emoji: an edit
   (`dispatch doc-edit`, `POST /api/v1/artifacts/{id}/edits`), an uploaded new version of a live

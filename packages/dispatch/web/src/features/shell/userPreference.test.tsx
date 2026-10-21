@@ -8,12 +8,12 @@ import { userPreferenceStorageKey, useUserPreference } from "./userPreference";
 
 function PreferenceProbe() {
   const [view, setView] = useUserPreference(
-    "inbox.view",
-    (stored) => (stored === "everyone" ? "everyone" : "mine"),
+    "project.issue-view",
+    (stored) => (stored === "board" ? "board" : "list"),
     (next) => next
   );
   return (
-    <button onClick={() => setView(view === "mine" ? "everyone" : "mine")} type="button">
+    <button onClick={() => setView(view === "list" ? "board" : "list")} type="button">
       {view}
     </button>
   );
@@ -23,11 +23,11 @@ test("a user preference stays at its caller default until login, then follows th
   const whoAmIResult = Promise.withResolvers<AuthenticatedUser>();
   const whoAmI = spyOn(api, "whoAmI").mockReturnValue(whoAmIResult.promise);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const aliceKey = userPreferenceStorageKey("alice", "inbox.view");
-  const bobKey = userPreferenceStorageKey("bob", "inbox.view");
-  const undefinedKey = userPreferenceStorageKey("undefined", "inbox.view");
-  window.localStorage.setItem(aliceKey, "everyone");
-  window.localStorage.setItem(bobKey, "mine");
+  const aliceKey = userPreferenceStorageKey("alice", "project.issue-view");
+  const bobKey = userPreferenceStorageKey("bob", "project.issue-view");
+  const undefinedKey = userPreferenceStorageKey("undefined", "project.issue-view");
+  window.localStorage.setItem(aliceKey, "board");
+  window.localStorage.setItem(bobKey, "list");
   window.localStorage.removeItem(undefinedKey);
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -36,19 +36,19 @@ test("a user preference stays at its caller default until login, then follows th
   );
 
   try {
-    expect(screen.getByRole("button").textContent).toBe("mine");
+    expect(screen.getByRole("button").textContent).toBe("list");
     fireEvent.click(screen.getByRole("button"));
-    expect(window.localStorage.getItem(aliceKey)).toBe("everyone");
+    expect(window.localStorage.getItem(aliceKey)).toBe("board");
     expect(window.localStorage.getItem(undefinedKey)).toBeNull();
 
     await act(async () => whoAmIResult.resolve({ kind: "user", login: "alice" }));
-    await waitFor(() => expect(screen.getByRole("button").textContent).toBe("everyone"));
+    await waitFor(() => expect(screen.getByRole("button").textContent).toBe("board"));
 
     fireEvent.click(screen.getByRole("button"));
-    expect(window.localStorage.getItem(aliceKey)).toBe("mine");
+    expect(window.localStorage.getItem(aliceKey)).toBe("list");
 
     act(() => queryClient.setQueryData(["whoami"], { kind: "user", login: "bob" }));
-    await waitFor(() => expect(screen.getByRole("button").textContent).toBe("mine"));
+    await waitFor(() => expect(screen.getByRole("button").textContent).toBe("list"));
   } finally {
     view.unmount();
     whoAmI.mockRestore();

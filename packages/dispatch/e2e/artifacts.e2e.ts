@@ -217,7 +217,7 @@ test("the artifacts tab filter narrows rows by name and kind", async ({ page }, 
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
 });
 
-test("an uploaded document is linked from the Conversation and counted on its tab", async ({
+test("an uploaded document is linked from the Activity tab and counted on its own tab", async ({
   page,
 }, testInfo) => {
   await createProject({ key: "OPS", name: "Ops" });
@@ -232,13 +232,11 @@ test("an uploaded document is linked from the Conversation and counted on its ta
     name,
   });
 
-  // The live event stream refreshes the issue and its Conversation: no reload.
+  // The live event stream refreshes the issue and its tabs: no reload.
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
-  // The counted label stays on one line, and all four tabs fit the tablist without scrolling at
-  // the iPhone width (the tablist clips what it scrolls, so its own edge is the bound).
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");
-  await expect(tabs).toHaveCount(4);
+  await expect(tabs).toHaveCount(5);
   const insideTablist = async (tab: Locator) => {
     const [listBox, box] = await Promise.all([tablist.boundingBox(), tab.boundingBox()]);
     expect(listBox).not.toBeNull();
@@ -249,36 +247,51 @@ test("an uploaded document is linked from the Conversation and counted on its ta
       (listBox?.x ?? 0) + (listBox?.width ?? 0) + 0.5
     );
   };
-  for (const tab of await tabs.all()) {
-    await insideTablist(tab);
-  }
-  // At 360 px (a default Android width) the tablist overflows; the keyboard still reaches every
-  // tab and the focused one is scrolled fully into view rather than left clipped.
+  // Five tabs, one of them counted, no longer fit a 390 px viewport: the tablist scrolls
+  // sideways there (as it already did at 360 px). No label is shortened to buy the room, every
+  // tab is reachable from the keyboard, each is scrolled fully into view as it takes focus, and
+  // each keeps its 44 px touch target.
   const viewport = page.viewportSize();
-  await page.setViewportSize({ height: viewport?.height ?? 800, width: 360 });
-  await page.getByRole("tab", { name: "Conversation" }).focus();
-  await page.keyboard.press("End");
-  const artifactsTab = page.getByRole("tab", { exact: true, name: "Artifacts (2)" });
-  await expect(artifactsTab).toBeFocused();
-  await insideTablist(artifactsTab);
+  await page.setViewportSize({ height: viewport?.height ?? 800, width: 390 });
+  await expect(tabs).toHaveText(["Spec", "Conversation", "Children", "Artifacts2", "Activity"]);
+  expect(await tablist.evaluate((node) => node.scrollWidth > node.clientWidth + 0.5)).toBe(true);
+  await page.getByRole("tab", { name: "Spec" }).focus();
+  for (const label of ["Conversation", "Children", "Artifacts (2)", "Activity"] as const) {
+    await page.keyboard.press("ArrowRight");
+    const tab = page.getByRole("tab", { exact: true, name: label });
+    await expect(tab).toBeFocused();
+    await insideTablist(tab);
+    expect((await tab.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+  }
   await page.keyboard.press("Home");
-  await expect(page.getByRole("tab", { name: "Spec" })).toBeFocused();
-  await insideTablist(page.getByRole("tab", { name: "Spec" }));
+  const specTab = page.getByRole("tab", { name: "Spec" });
+  await expect(specTab).toBeFocused();
+  await insideTablist(specTab);
+  expect((await specTab.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
   await page.setViewportSize({ height: viewport?.height ?? 800, width: viewport?.width ?? 1280 });
-  await page.getByRole("tab", { name: "Conversation" }).click();
-  const added = page.locator('[data-kind="activity"]', { hasText: `added ${name}` });
-  await expect(added).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath("conversation-added-artifact.png") });
+
+  await page.getByRole("tab", { name: "Activity" }).click();
+  const rows = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
+  const added = rows.filter({ hasText: `added ${name}` });
+  await expect(added).toHaveCount(1);
+  await page.screenshot({ path: testInfo.outputPath("activity-added-artifact.png") });
 
   // A second upload under the same name is a new version; its line links that version.
   await createIssueArtifact(issue.key, { content: "# Draft\n\nRevised.\n", name });
-  const saved = page.locator('[data-kind="activity"]', { hasText: `saved ${name} v2` });
-  await expect(saved).toBeVisible();
+  const saved = rows.filter({ hasText: `saved ${name} v2` });
+  await expect(saved).toHaveCount(1);
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   await expect(saved.getByRole("link", { name })).toHaveAttribute(
     "href",
     `/issues/${issue.key}/artifacts/${upload.artifact.slug}?v=2`
   );
+
+  // The upload is an Activity line and nothing else: the Conversation draws no row for it.
+  await page.getByRole("tab", { name: "Conversation" }).click();
+  await expect(
+    page.getByRole("list", { name: "Conversation turns" }).getByText(`added ${name}`)
+  ).toHaveCount(0);
+  await page.getByRole("tab", { name: "Activity" }).click();
 
   await added.getByRole("link", { name }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
@@ -341,29 +354,44 @@ test("an out-of-schema document names its repair and uploads replacement markdow
   expect((await getArtifactText(upload.artifact.id)).markdown).toBe("repaired\n");
 });
 
-test("an out-of-schema document does not reconnect from cached text", async ({ page }) => {
-  const sockets = countDocumentSockets(page);
+// The reader leaves the document and opens it again without a page load, so the page still holds
+// the text it read on the first visit. The second admission reads the text afresh and shows the
+// repair; connecting on the cached text would open a socket into a tree outside the schema. The
+// count is this document's sockets alone: the issue's own spec holds a socket of its own.
+test("an out-of-schema document does not reconnect from cached text", async ({
+  page,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Do not reconnect from stale text" });
   const upload = await createIssueArtifact(issue.key, {
     content: "before\n",
     name: "cached-repair.md",
   });
+  const sockets = countDocumentSockets(page, upload.artifact.id);
+  const row = page.getByTestId(`artifact-${upload.artifact.slug}`);
+  const openDocument = () => row.getByRole("link", { name: "cached-repair.md" }).click();
 
-  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await page.goto(`/issues/${issue.key}`);
+  await openArtifacts(page, testInfo.project.name === "iphone");
+  // A page load would drop this marker, and the page's cached reads with it.
+  await page.evaluate(() => Object.assign(window, { __e2eNavMarker: true }));
+  await openDocument();
   await expect(documentEditor(page)).toContainText("before");
   await expect.poll(sockets).toBe(1);
 
-  await page.goto(`/issues/${issue.key}`);
+  await page.goBack();
+  await expect(row).toBeVisible();
   const corrupted = await postAsPage(
     page,
     `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
   );
   expect(corrupted.status()).toBe(204);
-  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await openDocument();
 
   await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
-  await expect.poll(sockets).toBe(1);
+  await expect(documentEditor(page)).toBeHidden();
+  expect(await page.evaluate(() => "__e2eNavMarker" in window)).toBe(true);
+  expect(sockets()).toBe(1);
 });
 
 // A mounted editor's provider reconnects on its own after a dropped socket. Another client makes

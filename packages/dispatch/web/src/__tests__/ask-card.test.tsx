@@ -1808,6 +1808,50 @@ test("a reply arriving while the older replies are shown lands first and keeps t
   }
 });
 
+test("a link to a folded reply opens the fold and still lets the reader collapse it", async () => {
+  const input = answered(ask(), ["Ship"]);
+  const replies = [
+    reply({ body: "Oldest reply", created_at: "2026-09-09T00:01:00Z", id: "comment-1" }),
+    reply({ body: "Middle reply", created_at: "2026-09-09T00:02:00Z", id: "comment-2" }),
+    reply({ body: "Newest reply", created_at: "2026-09-09T00:03:00Z", id: "comment-3" }),
+  ];
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      currentReplyId="comment-1"
+      getAskThread={async () => ({ ask: input, answers: [], edits: [], followers: [], replies })}
+      thread="collapsed"
+    />
+  );
+
+  try {
+    const threadElement = await view.findByTestId("thread-ask-1");
+    // The link names a reply behind the fold, so the card lands with the fold open.
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual([
+        "Newest reply",
+        "Middle reply",
+        "Oldest reply",
+      ])
+    );
+
+    // The reader stays on that URL, so the link must not pin the fold open.
+    fireEvent.click(view.getByRole("button", { name: "Show fewer replies" }));
+    await waitFor(() =>
+      expect(shownReplyBodies(threadElement)).toEqual(["Newest reply", "Middle reply"])
+    );
+    const showMore = view.getByRole("button", { name: "Show 1 more reply" });
+    expect(showMore.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(showMore);
+    await waitFor(() =>
+      expect(view.getByRole("button", { name: "Show fewer replies" })).toBeTruthy()
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard with no replies offers Write a reply only after an answer, and retries a failed thread fetch", async () => {
   const openInput = ask();
   const { view: open } = renderCard(
@@ -1996,8 +2040,10 @@ test("a document ask links its project and document page", async () => {
   ]);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // A document has no assignee, so the Inbox lists its question under the Unassigned filter
+  // rather than in the reader's own default list.
   const view = render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={["/?assignee=unassigned"]}>
       <QueryClientProvider client={queryClient}>
         <Inbox />
       </QueryClientProvider>

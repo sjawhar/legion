@@ -33,9 +33,13 @@ func TestManagedServer_StartAndStop(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
-	var notifiedURI string
+	// The server calls onNotify on a goroutine of its own, so the URI comes back over a channel.
+	notified := make(chan string, 1)
 	s := NewManagedServer(cfg.Servers[0], func(uri string) {
-		notifiedURI = uri
+		select {
+		case notified <- uri:
+		default:
+		}
 	})
 
 	if err := s.Start(); err != nil {
@@ -48,14 +52,13 @@ func TestManagedServer_StartAndStop(t *testing.T) {
 	}
 
 	// The mock server sends a notification after subscribe.
-	// Give it a moment to arrive.
-	time.Sleep(500 * time.Millisecond)
-
-	if notifiedURI == "" {
-		t.Fatal("expected notification URI to be set")
-	}
-	if notifiedURI != "whatsapp://messages/15551234567/5551234567@s.whatsapp.net" {
-		t.Fatalf("unexpected notified URI: %s", notifiedURI)
+	select {
+	case uri := <-notified:
+		if uri != "whatsapp://messages/15551234567/5551234567@s.whatsapp.net" {
+			t.Fatalf("unexpected notified URI: %s", uri)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected a notification within 5s")
 	}
 }
 

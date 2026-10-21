@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- A `dispatch` write ends with `(not subscribed to KEY; …)` only when none of the session's Envoy
+  subscriptions, as the listener records them, receives every event on the issue or document; it
+  used to end every write that way. With Envoy off or the listener not answering, the write says
+  nothing about subscriptions. An ask or an ask reply names its `envoy_subscribe` line under the
+  same rule.
+- `dispatch read --ref dispatch://KEY/ask/<id>` finds an ask in a spec by its `:::ask{#<id>}`
+  block id too, whole or as a unique 8+ hex prefix, where it answered `matches none of the asks`
+  or `not found`, and prints the ask's own id (`Ask id:`).
+- The `dispatch` skill: a typed answer that disagrees with the selected option is the answer; a
+  changed decision on an answered ask is a new ask, since an answered ask cannot be retracted;
+  repeated measurements go in one artifact edited in place; and `dispatch read` takes an ask
+  block's id, while the writes to an ask take the ask's own.
 - The `dispatch` command waits for its stdout and stderr writes before it exits. Bun's
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
@@ -11,6 +23,15 @@
 
 ### Changed
 
+- The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
+  (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
+  references and `dispatch <command> --help`; a blind comparison of old and new text on each
+  skill's main situations found the same decisions. Two kinds of rule are new: `dispatch` says to
+  ask once (an open ask is the request; do not raise it again in each message), and
+  `dispatch-brainstorming` says how to hand a spec or plan to the human: the reply leads with each
+  open decision, then each unsettled point with a line reference, then the link; it asks for no
+  review when nothing is new; it says "ready for review", never "complete"; "plan only" stops after
+  the plan; and the spec stays a record of the current design, not of how it was reached.
 - The model's `envoy_role_set` and `envoy_unsubscribe` no longer close a subscription another
   plugin opened for the role the session holds (`whileHolding`), which used to leave the session
   deaf to that role's notices without saying so. `envoy_role_set` refuses to move off such a role,

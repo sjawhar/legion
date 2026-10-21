@@ -186,7 +186,7 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	implementing, reviewing, tested, lingering, lingeringChild, planning := key("1"), key("2"), key("3"), key("4"), key("5"), key("6")
 	until := time.Now().Add(time.Hour)
 	parked := record.Issue{Key: lingering, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: lingering, Project: cfg.Project, Title: lingering, Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "n", HandedOver: true, LingerUntil: &until}
-	child := runningRoot(lingeringChild, phase.ProductionCheck)
+	child := runningRoot(lingeringChild, phase.Retro)
 	child.Tree, child.Parent = lingering, &parked.Key
 	// The tester's start for its phase is due in an hour: the outbox holds it, but the operator
 	// suspended the tester, so the start waits for the operator's resume and wakes nothing.
@@ -335,7 +335,7 @@ func TestABootServesHealthzWhileTheStrandedReportStoreReadWaits(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(runCtx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
+	go func() { done <- run(runCtx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
 	t.Cleanup(func() {
 		if locked {
 			_ = lock.Rollback(context.Background())

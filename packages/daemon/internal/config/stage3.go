@@ -566,6 +566,9 @@ func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.Linger != nil {
 		cfg.Linger = *file.Linger
 	}
+	if file.ProductionCheckBound != nil {
+		cfg.ProductionCheckBound = *file.ProductionCheckBound
+	}
 	if file.ReviewRoundCap != nil {
 		cfg.ReviewRoundCap = *file.ReviewRoundCap
 	}

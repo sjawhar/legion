@@ -3,7 +3,8 @@ import { dispatchDocumentSubject, dispatchIssueSubject } from "@legion/contracts
 /**
  * Where an owner's events go and how a session names it: the label agents read in tool
  * results and the wildcard `envoy_subscribe` takes. No write subscribes a session to it;
- * whole-owner subscription is the agent's explicit choice (D3), so every write says so.
+ * whole-owner subscription is the agent's explicit choice (D3), so a write says when none of the
+ * session's subscriptions covers its owner.
  */
 export interface OwnerTopic {
   readonly label: string;
@@ -95,8 +96,10 @@ export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
     };
   }
 
+  // `activity` is the Activity tab's spelling of the same event list `log` has always named, so
+  // both read the issue's events; it is no kind of its own.
   const issueReference = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
+    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
   );
   if (!issueReference) return null;
   const [, issue, spec, log, children, artifact, version, ask, comment, message] = issueReference;

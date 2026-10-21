@@ -802,6 +802,715 @@
     "rendered_by_milkdown": ":::ask{#ask-1 urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose?\n\n* REST: Matches the existing platform\n* gRPC: Adds streaming\n:::\n"
   },
   {
+    "name": "bare-url-trailing-punctuation",
+    "markdown": "\"HTTP 401: Bad credentials (https://api.github.com/graphql)\" while CI ran\n\nSee https://x.test/a, https://x.test/b. and https://x.test/c; then https://x.test/d: or https://x.test/e!\n\nQuoted \"https://x.test/f\" and 'https://x.test/g' and (https://x.test/h(i)) and https://x.test/j_ and https://x.test/k*.\n\nA trail before more text continues the URL: https://x.test/l.m and https://x.test/n;o and https://x.test/p\"q.\n\nReferences and brackets: https://x.test/r&amp; and https://x.test/s] and https://x.test/t](u) and https://x.test/v]w.\n\nBackslashes, asterisks and letters outside ASCII are the URL's: https://x.test/a\\b https://x.test/a*b https://x.test/café\n\nAny case: HTTPS://X.TEST/Y and Www.x.test/z; no ftp://x.test/w\n\n| cell | text |\n| --- | --- |\n| x | \"HTTP 401: Bad credentials (https://api.github.com/graphql)\" while |\n| y | see \"https://x.test/a\"; and 'https://x.test/b'! |\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "\"HTTP 401: Bad credentials ("
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://api.github.com/graphql",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://api.github.com/graphql"
+            },
+            {
+              "type": "text",
+              "text": ")\" while CI ran"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "See "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/a",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/a"
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/b"
+            },
+            {
+              "type": "text",
+              "text": ". and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/c",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/c"
+            },
+            {
+              "type": "text",
+              "text": "; then "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/d",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/d"
+            },
+            {
+              "type": "text",
+              "text": ": or "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/e",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/e"
+            },
+            {
+              "type": "text",
+              "text": "!"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Quoted \""
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/f",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/f"
+            },
+            {
+              "type": "text",
+              "text": "\" and '"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/g",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/g"
+            },
+            {
+              "type": "text",
+              "text": "' and ("
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/h(i)",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/h(i)"
+            },
+            {
+              "type": "text",
+              "text": ") and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/j",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/j"
+            },
+            {
+              "type": "text",
+              "text": "_ and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/k",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/k"
+            },
+            {
+              "type": "text",
+              "text": "*."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A trail before more text continues the URL: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/l.m",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/l.m"
+            },
+            {
+              "type": "text",
+              "text": " and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/n;o",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/n;o"
+            },
+            {
+              "type": "text",
+              "text": " and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/p\"q",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/p\"q"
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "References and brackets: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/r",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/r"
+            },
+            {
+              "type": "text",
+              "text": "& and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/s",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/s"
+            },
+            {
+              "type": "text",
+              "text": "] and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/t",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/t"
+            },
+            {
+              "type": "text",
+              "text": "](u) and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/v]w",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/v]w"
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Backslashes, asterisks and letters outside ASCII are the URL's: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/a\\b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/a\\b"
+            },
+            {
+              "type": "text",
+              "text": " "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/a*b",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/a*b"
+            },
+            {
+              "type": "text",
+              "text": " "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://x.test/café",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "https://x.test/café"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Any case: "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "HTTPS://X.TEST/Y",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "HTTPS://X.TEST/Y"
+            },
+            {
+              "type": "text",
+              "text": " and "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://Www.x.test/z",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "Www.x.test/z"
+            },
+            {
+              "type": "text",
+              "text": "; no ftp://x.test/w"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000009"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000011"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "cell"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000012"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000013"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "text"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000016"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000017"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000018"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "\"HTTP 401: Bad credentials ("
+                        },
+                        {
+                          "type": "text",
+                          "marks": [
+                            {
+                              "type": "link",
+                              "attrs": {
+                                "href": "https://api.github.com/graphql",
+                                "title": null
+                              }
+                            }
+                          ],
+                          "text": "https://api.github.com/graphql"
+                        },
+                        {
+                          "type": "text",
+                          "text": ")\" while"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000019"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000021"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "y"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000022"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000023"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "see \""
+                        },
+                        {
+                          "type": "text",
+                          "marks": [
+                            {
+                              "type": "link",
+                              "attrs": {
+                                "href": "https://x.test/a",
+                                "title": null
+                              }
+                            }
+                          ],
+                          "text": "https://x.test/a"
+                        },
+                        {
+                          "type": "text",
+                          "text": "\"; and '"
+                        },
+                        {
+                          "type": "text",
+                          "marks": [
+                            {
+                              "type": "link",
+                              "attrs": {
+                                "href": "https://x.test/b",
+                                "title": null
+                              }
+                            }
+                          ],
+                          "text": "https://x.test/b"
+                        },
+                        {
+                          "type": "text",
+                          "text": "'!"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AbsBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBHCJIVFRQIDQwMTogQmFkIGNyZWRlbnRpYWxzICiGAR0EbGluazZ7ImhyZWYiOiJodHRwczovL2FwaS5naXRodWIuY29tL2dyYXBocWwiLCJ0aXRsZSI6bnVsbH2EAR4eaHR0cHM6Ly9hcGkuZ2l0aHViLmNvbS9ncmFwaHFshgE8BGxpbmsEbnVsbIQBPQ8pIiB3aGlsZSBDSSByYW4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABTgYEAAFPBFNlZSCGAVMEbGluayh7ImhyZWYiOiJodHRwczovL3gudGVzdC9hIiwidGl0bGUiOm51bGx9hAFUEGh0dHBzOi8veC50ZXN0L2GGAWQEbGluawRudWxshAFlAiwghgFnBGxpbmsoeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvYiIsInRpdGxlIjpudWxsfYQBaBBodHRwczovL3gudGVzdC9ihgF4BGxpbmsEbnVsbIQBeQYuIGFuZCCGAX8EbGluayh7ImhyZWYiOiJodHRwczovL3gudGVzdC9jIiwidGl0bGUiOm51bGx9hAGAARBodHRwczovL3gudGVzdC9jhgGQAQRsaW5rBG51bGyEAZEBBzsgdGhlbiCGAZgBBGxpbmsoeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvZCIsInRpdGxlIjpudWxsfYQBmQEQaHR0cHM6Ly94LnRlc3QvZIYBqQEEbGluawRudWxshAGqAQU6IG9yIIYBrwEEbGluayh7ImhyZWYiOiJodHRwczovL3gudGVzdC9lIiwidGl0bGUiOm51bGx9hAGwARBodHRwczovL3gudGVzdC9lhgHAAQRsaW5rBG51bGyEAcEBASEoAAFOB2Jsb2NrSWQBdwhiLTAwMDAwMocBTgMJcGFyYWdyYXBoBwABxAEGBAABxQEIUXVvdGVkICKGAc0BBGxpbmsoeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvZiIsInRpdGxlIjpudWxsfYQBzgEQaHR0cHM6Ly94LnRlc3QvZoYB3gEEbGluawRudWxshAHfAQciIGFuZCAnhgHmAQRsaW5rKHsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L2ciLCJ0aXRsZSI6bnVsbH2EAecBEGh0dHBzOi8veC50ZXN0L2eGAfcBBGxpbmsEbnVsbIQB+AEHJyBhbmQgKIYB/wEEbGluayt7ImhyZWYiOiJodHRwczovL3gudGVzdC9oKGkpIiwidGl0bGUiOm51bGx9hAGAAhNodHRwczovL3gudGVzdC9oKGkphgGTAgRsaW5rBG51bGyEAZQCBikgYW5kIIYBmgIEbGluayh7ImhyZWYiOiJodHRwczovL3gudGVzdC9qIiwidGl0bGUiOm51bGx9hAGbAhBodHRwczovL3gudGVzdC9qhgGrAgRsaW5rBG51bGyEAawCBl8gYW5kIIYBsgIEbGluayh7ImhyZWYiOiJodHRwczovL3gudGVzdC9rIiwidGl0bGUiOm51bGx9hAGzAhBodHRwczovL3gudGVzdC9rhgHDAgRsaW5rBG51bGyEAcQCAiouKAABxAEHYmxvY2tJZAF3CGItMDAwMDAzhwHEAQMJcGFyYWdyYXBoBwAByAIGBAAByQIsQSB0cmFpbCBiZWZvcmUgbW9yZSB0ZXh0IGNvbnRpbnVlcyB0aGUgVVJMOiCGAfUCBGxpbmsqeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvbC5tIiwidGl0bGUiOm51bGx9hAH2AhJodHRwczovL3gudGVzdC9sLm2GAYgDBGxpbmsEbnVsbIQBiQMFIGFuZCCGAY4DBGxpbmsqeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvbjtvIiwidGl0bGUiOm51bGx9hAGPAxJodHRwczovL3gudGVzdC9uO2+GAaEDBGxpbmsEbnVsbIQBogMFIGFuZCCGAacDBGxpbmsreyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvcFwicSIsInRpdGxlIjpudWxsfYQBqAMSaHR0cHM6Ly94LnRlc3QvcCJxhgG6AwRsaW5rBG51bGyEAbsDAS4oAAHIAgdibG9ja0lkAXcIYi0wMDAwMDSHAcgCAwlwYXJhZ3JhcGgHAAG+AwYEAAG/AxlSZWZlcmVuY2VzIGFuZCBicmFja2V0czoghgHYAwRsaW5rKHsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L3IiLCJ0aXRsZSI6bnVsbH2EAdkDEGh0dHBzOi8veC50ZXN0L3KGAekDBGxpbmsEbnVsbIQB6gMGJiBhbmQghgHwAwRsaW5rKHsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L3MiLCJ0aXRsZSI6bnVsbH2EAfEDEGh0dHBzOi8veC50ZXN0L3OGAYEEBGxpbmsEbnVsbIQBggQGXSBhbmQghgGIBARsaW5rKHsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L3QiLCJ0aXRsZSI6bnVsbH2EAYkEEGh0dHBzOi8veC50ZXN0L3SGAZkEBGxpbmsEbnVsbIQBmgQJXSh1KSBhbmQghgGjBARsaW5rKnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L3ZddyIsInRpdGxlIjpudWxsfYQBpAQSaHR0cHM6Ly94LnRlc3Qvdl13hgG2BARsaW5rBG51bGyEAbcEAS4oAAG+AwdibG9ja0lkAXcIYi0wMDAwMDWHAb4DAwlwYXJhZ3JhcGgHAAG6BAYEAAG7BEBCYWNrc2xhc2hlcywgYXN0ZXJpc2tzIGFuZCBsZXR0ZXJzIG91dHNpZGUgQVNDSUkgYXJlIHRoZSBVUkwnczoghgH7BARsaW5rK3siaHJlZiI6Imh0dHBzOi8veC50ZXN0L2FcXGIiLCJ0aXRsZSI6bnVsbH2EAfwEEmh0dHBzOi8veC50ZXN0L2FcYoYBjgUEbGluawRudWxshAGPBQEghgGQBQRsaW5rKnsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L2EqYiIsInRpdGxlIjpudWxsfYQBkQUSaHR0cHM6Ly94LnRlc3QvYSpihgGjBQRsaW5rBG51bGyEAaQFASCGAaUFBGxpbmsseyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvY2Fmw6kiLCJ0aXRsZSI6bnVsbH2EAaYFFGh0dHBzOi8veC50ZXN0L2NhZsOphgG5BQRsaW5rBG51bGwoAAG6BAdibG9ja0lkAXcIYi0wMDAwMDaHAboEAwlwYXJhZ3JhcGgHAAG8BQYEAAG9BQpBbnkgY2FzZToghgHHBQRsaW5rKHsiaHJlZiI6IkhUVFBTOi8vWC5URVNUL1kiLCJ0aXRsZSI6bnVsbH2EAcgFEEhUVFBTOi8vWC5URVNUL1mGAdgFBGxpbmsEbnVsbIQB2QUFIGFuZCCGAd4FBGxpbmsreyJocmVmIjoiaHR0cDovL1d3dy54LnRlc3QveiIsInRpdGxlIjpudWxsfYQB3wUMV3d3LngudGVzdC96hgHrBQRsaW5rBG51bGyEAewFEzsgbm8gZnRwOi8veC50ZXN0L3coAAG8BQdibG9ja0lkAXcIYi0wMDAwMDeHAbwFAwV0YWJsZQcAAYEGAxB0YWJsZV9oZWFkZXJfcm93BwABggYDDHRhYmxlX2hlYWRlcgcAAYMGAwlwYXJhZ3JhcGgHAAGEBgYEAAGFBgRjZWxsKAABhAYHYmxvY2tJZAF3CGItMDAwMDExKAABgwYHY29sc3BhbgF9ASgAAYMGB3Jvd3NwYW4BfQEoAAGDBgdibG9ja0lkAXcIYi0wMDAwMTCHAYMGAwx0YWJsZV9oZWFkZXIHAAGOBgMJcGFyYWdyYXBoBwABjwYGBAABkAYEdGV4dCgAAY8GB2Jsb2NrSWQBdwhiLTAwMDAxMygAAY4GB2NvbHNwYW4BfQEoAAGOBgdyb3dzcGFuAX0BKAABjgYHYmxvY2tJZAF3CGItMDAwMDEyKAABggYHYmxvY2tJZAF3CGItMDAwMDA5hwGCBgMJdGFibGVfcm93BwABmgYDCnRhYmxlX2NlbGwHAAGbBgMJcGFyYWdyYXBoBwABnAYGBAABnQYBeCgAAZwGB2Jsb2NrSWQBdwhiLTAwMDAxNigAAZsGB2NvbHNwYW4BfQEoAAGbBgdyb3dzcGFuAX0BKAABmwYHYmxvY2tJZAF3CGItMDAwMDE1hwGbBgMKdGFibGVfY2VsbAcAAaMGAwlwYXJhZ3JhcGgHAAGkBgYEAAGlBhwiSFRUUCA0MDE6IEJhZCBjcmVkZW50aWFscyAohgHBBgRsaW5rNnsiaHJlZiI6Imh0dHBzOi8vYXBpLmdpdGh1Yi5jb20vZ3JhcGhxbCIsInRpdGxlIjpudWxsfYQBwgYeaHR0cHM6Ly9hcGkuZ2l0aHViLmNvbS9ncmFwaHFshgHgBgRsaW5rBG51bGyEAeEGCCkiIHdoaWxlKAABpAYHYmxvY2tJZAF3CGItMDAwMDE4KAABowYHY29sc3BhbgF9ASgAAaMGB3Jvd3NwYW4BfQEoAAGjBgdibG9ja0lkAXcIYi0wMDAwMTcoAAGaBgdibG9ja0lkAXcIYi0wMDAwMTSHAZoGAwl0YWJsZV9yb3cHAAHvBgMKdGFibGVfY2VsbAcAAfAGAwlwYXJhZ3JhcGgHAAHxBgYEAAHyBgF5KAAB8QYHYmxvY2tJZAF3CGItMDAwMDIxKAAB8AYHY29sc3BhbgF9ASgAAfAGB3Jvd3NwYW4BfQEoAAHwBgdibG9ja0lkAXcIYi0wMDAwMjCHAfAGAwp0YWJsZV9jZWxsBwAB+AYDCXBhcmFncmFwaAcAAfkGBgQAAfoGBXNlZSAihgH/BgRsaW5rKHsiaHJlZiI6Imh0dHBzOi8veC50ZXN0L2EiLCJ0aXRsZSI6bnVsbH2EAYAHEGh0dHBzOi8veC50ZXN0L2GGAZAHBGxpbmsEbnVsbIQBkQcIIjsgYW5kICeGAZkHBGxpbmsoeyJocmVmIjoiaHR0cHM6Ly94LnRlc3QvYiIsInRpdGxlIjpudWxsfYQBmgcQaHR0cHM6Ly94LnRlc3QvYoYBqgcEbGluawRudWxshAGrBwInISgAAfkGB2Jsb2NrSWQBdwhiLTAwMDAyMygAAfgGB2NvbHNwYW4BfQEoAAH4Bgdyb3dzcGFuAX0BKAAB+AYHYmxvY2tJZAF3CGItMDAwMDIyKAAB7wYHYmxvY2tJZAF3CGItMDAwMDE5KAABgQYHYmxvY2tJZAF3CGItMDAwMDA4AA==",
+    "rendered_by_milkdown": "\"HTTP 401: Bad credentials (<https://api.github.com/graphql>)\" while CI ran\n\nSee <https://x.test/a>, <https://x.test/b>. and <https://x.test/c>; then <https://x.test/d>: or <https://x.test/e>!\n\nQuoted \"<https://x.test/f>\" and '<https://x.test/g>' and (<https://x.test/h(i)>) and <https://x.test/j>\\_ and <https://x.test/k>\\*.\n\nA trail before more text continues the URL: <https://x.test/l.m> and <https://x.test/n;o> and <https://x.test/p\"q>.\n\nReferences and brackets: <https://x.test/r>& and <https://x.test/s>] and <https://x.test/t>]\\(u) and <https://x.test/v]w>.\n\nBackslashes, asterisks and letters outside ASCII are the URL's: <https://x.test/a\\b> <https://x.test/a*b> <https://x.test/café>\n\nAny case: <HTTPS://X.TEST/Y> and [Www.x.test/z](http://Www.x.test/z); no ftp\\://x.test/w\n\n| cell | text                                                                 |\n| ---- | -------------------------------------------------------------------- |\n| x    | \"HTTP 401: Bad credentials (<https://api.github.com/graphql>)\" while |\n| y    | see \"<https://x.test/a>\"; and '<https://x.test/b>'!                  |\n"
+  },
+  {
     "name": "bare-url",
     "markdown": "see https://example.com/x now\n",
     "pm_json": {

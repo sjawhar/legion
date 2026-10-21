@@ -14,8 +14,10 @@ questions, approve the spec, and review the pull request. Everything happens in
 - **The issue must be in a Dispatch project a Legion daemon runs.** Each daemon runs the projects its
   operator configured; ask your operator which ones.
 - **Assign the issue to the person who will answer for it.** The assignee's Inbox gets the
-  architect's questions and the spec approval for the whole tree. An unassigned issue still runs, but
-  its questions wait in every Inbox's Unassigned band until someone picks the issue up.
+  architect's questions and the spec approval for the whole tree. An unassigned issue still runs,
+  but its questions reach nobody's Inbox list and nobody's **Needs you** count until someone takes
+  it: they are found through the Inbox's **Assignee** filter, under **Unassigned**, or on the
+  issue's own page.
 - **Write the outcome, not the steps.** A title that says what someone can do afterwards, and a spec
   with the problem, the acceptance criteria and how you would check them, give the architect what it
   needs. It extends your spec rather than replacing it, and it asks about anything it cannot decide.
@@ -97,7 +99,7 @@ template, and the later phases fill in their own lines:
   control.
 - **Look at first** and **Not proven / risk**: written by Legion's reviewer, naming where a wrong
   decision would hurt and every claim left unproven.
-- **Production**: written by the implementer after the merge.
+- **Production**: written by the implementer after the merge closes the issue, once your deploy carries the change; `pending deploy of <sha>` until then.
 - Any line your repository's own instructions derive from the paths the change touches, such as a
   checklist named for each kind of path: after the approval, the retro recomputes it for the whole
   change, its notes included, the way those instructions say, before it pushes the notes.
@@ -127,10 +129,12 @@ only you can give is waited for. A pull request the project's `merge.by_hand` pa
 merged by a person instead, and its READY says so. Nothing in Legion approves a pull request on
 your behalf or changes who may merge.
 
-After the merge, the implementer checks the change in production and records what it saw on the
-pull request and the issue. The architect then signs off with a comment summarizing the evidence,
-and the issue moves to `done`. The tree's workspace is kept for three days (`linger_hours`, 72 by
-default) in case the work resumes.
+The merge closes the issue: it moves to `done` the moment GitHub reports the pull request merged.
+The architect accepted the change before that, when the reviewer approved it, with a comment on
+the issue summarizing the evidence. After the close the implementer checks the change in
+production, once your deploy carries it, and records what it saw on the pull request's
+`Production:` line; a closed issue takes no further write, so look there. The tree's workspace is
+kept for three days (`linger_hours`, 72 by default) in case the work resumes.
 
 ## Stop, park or rerun
 
@@ -158,6 +162,6 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `todo` | a person or the controller | Ready. A labelled root is admitted when a slot is free and waits in line until then. A child in `todo` runs under its tree. |
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
-| `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing. Your GitHub review counts now. |
-| `retro` | the daemon | The reviewer approved. The issue stays here through retro, `READY`, the merge, and the production check. |
-| `done` | the daemon at sign-off, or a person | Finished. The tree lingers, then closes. |
+| `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |
+| `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge. |
+| `done` | the daemon at the merge, or a person | Finished: the pull request merged. The implementer's production check follows on the pull request; the tree lingers, then closes. |

@@ -13,7 +13,8 @@ import type {
   InboxRow,
 } from "./types";
 
-/** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it. */
+/** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
+ *  names the person by lowercase email, the form issue assignees carry. */
 export const whoAmIQuery = () =>
   queryOptions({
     queryKey: ["whoami"],
@@ -87,6 +88,17 @@ export const projectsQuery = () =>
   queryOptions({
     queryKey: ["projects"],
     queryFn: () => api.listProjects(),
+  });
+
+/** Everyone who has signed in (`GET /api/v1/users`), sorted by email and kept for the session:
+ *  the issue header's assignee picker and the Inbox's assignee filter choose from this one list.
+ *  Each call site keeps its own `enabled` - the list is read only once a reader reaches for a
+ *  control that needs it - so no page fetches `/api/v1/users` just by rendering. */
+export const usersQuery = () =>
+  queryOptions({
+    queryKey: ["users"],
+    queryFn: () => api.listUsers(),
+    staleTime: Number.POSITIVE_INFINITY,
   });
 
 /** Every configured architecture source, shared by its settings table and invalidations. */

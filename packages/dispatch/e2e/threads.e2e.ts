@@ -10,7 +10,7 @@ import {
   listComments,
   resolveAsk,
 } from "./api";
-import { threadCard } from "./editor";
+import { conversationFilter, threadCard } from "./editor";
 import { resetDatabase } from "./seed";
 import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -24,7 +24,8 @@ const bobSession = {
   as: "agent" as const,
 };
 
-// Asks and comment threads both render in the margin; Conversation keeps the chronological record.
+// Asks and comment threads both render in the margin; Conversation lists one card per thread.
+
 async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
   if (project !== "iphone") {
     return;
@@ -284,17 +285,19 @@ test("resolve, reopen, then edit leaves one comment turn in its final state", as
     const aliceThread = await expandedThread(alicePage, root.id);
     await aliceThread.getByRole("button", { name: "Resolve" }).click();
     await expect(alicePage.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
-    await expect(threadCard(alicePage, root.id)).toHaveCount(0);
+    // A resolved thread is not hidden from the Conversation: it moves to the Closed bucket and
+    // is still listed under All, which every visit opens on.
+    await expect(threadCard(alicePage, root.id)).toBeVisible();
+    await expect(threadCard(bobPage, root.id)).toBeVisible();
+    await conversationFilter(bobPage, "Open").click();
     await expect(threadCard(bobPage, root.id)).toHaveCount(0);
+    await conversationFilter(bobPage, "Closed").click();
 
-    await bobPage
-      .getByRole("tabpanel", { name: "Conversation" })
-      .getByRole("button", { name: "Resolved (1)" })
-      .click();
     const resolvedThread = await expandedThread(bobPage, root.id);
     await expect(resolvedThread).toContainText(/Resolved by alice/);
     await resolvedThread.getByRole("button", { name: "Reopen" }).click();
     await closeThreadView(bobPage, testInfo.project.name);
+    await conversationFilter(bobPage, "All").click();
     await expect(alicePage.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(threadCard(alicePage, root.id)).toBeVisible();
 
@@ -518,11 +521,15 @@ test("a session retraction leaves its reason on the card and removes the human's
     await issuePage.getByRole("button", { name: "Close navigation" }).click();
   }
 
+  // The margin folds a retracted ask away; the Conversation lists it like every other
+  // conversation, under All and under Closed, with no control of its own to reveal it.
   await issuePage.getByRole("tab", { name: "Conversation" }).click();
   const conversation = issuePage.getByRole("region", { name: "Conversation" });
-  await expect(conversation.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
-  await issuePage.getByRole("checkbox", { name: /^Show retracted \(\d+\)$/ }).check();
   const resolvedCard = conversation.getByTestId(`ask-${ask.id}`);
+  await expect(resolvedCard).toHaveCount(1);
+  await conversationFilter(issuePage, "Open").click();
+  await expect(conversation.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  await conversationFilter(issuePage, "Closed").click();
   await expect(resolvedCard.getByTestId("ask-resolution-badge")).toHaveText("Retracted");
   await expect(resolvedCard).toContainText(
     "Retracted by session:e2e-sess… - A newer question supersedes this one."
@@ -585,12 +592,23 @@ test("two suggestions on one block are each accepted from their collapsed card",
     expect(ins.y).toBeGreaterThanOrEqual(del.y + del.height);
     expect(note.y).toBeGreaterThanOrEqual(ins.y + ins.height);
 
+    // An accept decides the thread; it does not take the card off the Conversation. The card
+    // stays listed under All - the filter every visit opens on - with its Accept and Reject
+    // gone, and it is the Open bucket it leaves and the Closed one it joins.
     await firstCard.getByRole("button", { name: "Accept suggestion" }).click();
-    await expect(firstCard).toHaveCount(0);
+    await expect(firstCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(firstCard).toHaveCount(1);
     await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(secondCard).toHaveAttribute("aria-expanded", "false");
     await secondCard.getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(secondCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(secondCard).toHaveCount(1);
+    await conversationFilter(page, "Open").click();
+    await expect(firstCard).toHaveCount(0);
     await expect(secondCard).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    await expect(firstCard).toHaveCount(1);
+    await expect(secondCard).toHaveCount(1);
     await expect
       .poll(() =>
         listComments(issue.key, issue.primary_artifact_id).then((items) =>
@@ -631,14 +649,19 @@ test("accepting a later suggestion over an earlier one's text leaves the earlier
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    await page
+    const laterCard = page
       .locator(`[data-turn="comment:${later.id}"]`)
-      .getByTestId(`margin-comment-${later.id}`)
-      .getByRole("button", { name: "Accept suggestion" })
-      .click();
-    await expect(
-      page.locator(`[data-turn="comment:${later.id}"]`).getByTestId(`margin-comment-${later.id}`)
-    ).toHaveCount(0);
+      .getByTestId(`margin-comment-${later.id}`);
+    await laterCard.getByRole("button", { name: "Accept suggestion" }).click();
+    // The accept decides the later thread without taking its card off the Conversation: it
+    // stays listed under All with its Accept and Reject gone, leaves Open and joins Closed.
+    await expect(laterCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(laterCard).toHaveCount(1);
+    await conversationFilter(page, "Open").click();
+    await expect(laterCard).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    await expect(laterCard).toHaveCount(1);
+    await conversationFilter(page, "All").click();
     await expect
       .poll(() =>
         listComments(issue.key, issue.primary_artifact_id).then(
@@ -696,16 +719,17 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen", a
     await expect(expanded.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await expanded.getByRole("button", { name: "Resolve" }).click();
     await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
+    // Resolved, the thread moves to the Closed bucket; it is still listed under All.
+    await expect(threadCard(page, earlier.id)).toBeVisible();
+    await conversationFilter(page, "Open").click();
     await expect(threadCard(page, earlier.id)).toHaveCount(0);
-    await page
-      .getByRole("tabpanel", { name: "Conversation" })
-      .getByRole("button", { name: "Resolved (2)" })
-      .click();
+    await conversationFilter(page, "Closed").click();
     const resolved = await expandedThread(page, earlier.id);
     await expect(resolved).toContainText(/Resolved by alice/);
     await expect(resolved.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await resolved.getByRole("button", { name: "Reopen" }).click();
     await closeThreadView(page, testInfo.project.name);
+    await conversationFilter(page, "All").click();
     await expect(
       page
         .locator(`[data-turn="comment:${earlier.id}"]`)
@@ -772,8 +796,17 @@ test("a failed queued Conversation comment action keeps its thread and reply, cl
     await expect(firstReply).toHaveValue("Half a reply");
     await firstThread.getByRole("button", { name: "Retry" }).click();
     await expect.poll(() => requests).toBe(2);
+    // The retried Resolve is taken, so the first thread closes: its card collapses and leaves
+    // the Open bucket for Closed. It is still listed under All - a decided thread stays on the
+    // Conversation - and the second, whose queued click was cleared, is still open.
+    await expect(threadCard(page, first.id)).toHaveAttribute("aria-expanded", "false");
+    await expect(threadCard(page, first.id)).toHaveCount(1);
+    await expect(threadCard(page, second.id)).toBeVisible();
+    await conversationFilter(page, "Open").click();
     await expect(threadCard(page, first.id)).toHaveCount(0);
     await expect(threadCard(page, second.id)).toBeVisible();
+    await conversationFilter(page, "Closed").click();
+    await expect(threadCard(page, first.id)).toBeVisible();
   } finally {
     await alice.close();
   }

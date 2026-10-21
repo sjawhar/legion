@@ -57,6 +57,7 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
     session_store: pvc
+    setup: [/bin/sh, -c, 'omp plugin marketplace add acme/agent-skills']
     repository_cache:
       volume: 50Gi
       refresh_minutes: 5
@@ -109,6 +110,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		IssueVolume:  "30Gi",
 		Kubeconfig:   filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
 		Context:      "legion-daemon@example",
+		Setup:        []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
 		Scheduling: Scheduling{
 			NodeSelector: map[string]string{"karpenter.k8s.aws/instance-family": "m7i", "zone": "4"},
 			Tolerations: []Toleration{
@@ -165,7 +167,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 }
 
-// What a block that sets only its required members settles to: the issue volume at 20Gi, every
+// What a block that sets only its required members settles to: the issue volume at 50Gi, every
 // role's reservation at the daemon's default (the six workflow roles and the controller, each with
 // a cpu and a memory, summing to 3 CPU and 19 GiB over an issue pod's six, and each with its
 // ephemeral-storage limit, 20Gi for the implementer and tester and 10Gi for the rest, over a 1Gi
@@ -184,7 +186,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		name      string
 		got, want any
 	}{
-		{"issue_volume", block.IssueVolume, "20Gi"},
+		{"issue_volume", block.IssueVolume, "50Gi"},
 		{"resources", block.Resources, map[claim.Role]RoleResources{
 			claim.RoleArchitect:   {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 			claim.RolePlanner:     {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
@@ -199,6 +201,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"context", block.Context, ""},
 		{"pod", block.Pod, PodConfig{}},
 		{"session_dsn_secret", block.SessionDSNSecret, ""},
+		{"setup", block.Setup, []string(nil)},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
 			Resources: RoleResources{CPU: "1", CPURequest: "1", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
@@ -456,10 +459,35 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
-			// The runtime reads a zero volume as "use the default", so zero would be a silent 20Gi.
+			// The runtime reads a zero volume as "use the default", so zero would be a silent 50Gi.
 			name: "issue_volume zero",
 			body: kubernetesFile + "    issue_volume: 0\n",
 			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			name: "setup a string",
+			body: kubernetesFile + "    setup: omp plugin install agent-skills\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup a mapping",
+			body: kubernetesFile + "    setup: {command: omp}\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup a word that is no string",
+			body: kubernetesFile + "    setup: [omp, 3]\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup an empty word",
+			body: kubernetesFile + "    setup: [omp, \"\"]\n",
+			want: "runtime.kubernetes.setup must be an array of non-empty strings",
+		},
+		{
+			name: "setup naming no command",
+			body: kubernetesFile + "    setup: []\n",
+			want: "runtime.kubernetes.setup must name a command: leave it out to run none",
 		},
 		{
 			name: "repository_cache volume zero",

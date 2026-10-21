@@ -258,13 +258,14 @@ tokens, then supplies it through `dispatch.token` or `DISPATCH_TOKEN`; the serve
 attributes that session's writes to the minting human. `DISPATCH_AGENT_TOKEN` is
 the shared devbox fallback, not a token to configure for an individual agent. No
 Dispatch write subscribes the session to anything: whole-issue or whole-document
-subscription is the model's explicit `envoy_subscribe`, and every write result names
-the topic to pass it. What a write does give the session is a *follow* on the ask it
+subscription is the model's explicit `envoy_subscribe`, and a write result names the topic to
+pass it only when none of the session's subscriptions, as the Envoy listener records them, covers
+the owner. What a write does give the session is a *follow* on the ask it
 opened or replied to (`details.follows.ask`): the ask's answer and replies then reach
 the session's own agent topic directly, server-side, with no NATS subscription to
 manage. The `dispatch` command prints the first `details.follows` for each ask id as one
 notice after the call's result (the session's `state.json` remembers which asks it already
-announced, the once-per-ask policy over `dispatchFollowNotice` every host shares); a later
+announced, the once-per-ask policy over `followedAsk` and `followNoticeText` every host shares); a later
 write on the same ask stays quiet, and reads (`dispatch read`, `dispatch doc-read`) return only
 owner details. `dispatch follow` leaves or rejoins an ask. A `subscription.removed`
 notice (a human unsubscribed a session from the dashboard) reaches both the issue's

@@ -71,6 +71,11 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
+	case errors.Is(err, requests.ErrMintRequiresLifetime):
+		// A minted secret's grant must sign lifetime_seconds of at most an hour, the life of the
+		// token it releases.
+		writeError(w, http.StatusBadRequest, "MINT_REQUIRES_LIFETIME", err.Error())
+		return
 	case errors.Is(err, requests.ErrRequestPending):
 		writeError(w, http.StatusConflict, "REQUEST_PENDING", err.Error())
 		return

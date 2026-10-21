@@ -38,6 +38,7 @@ const knownEventTypes: Record<EventType, true> = {
   "issue.closed": true,
   "issue.claimed": true,
   "issue.released": true,
+  "issue.deployed": true,
   "artifact.created": true,
   "artifact.version": true,
   "artifact.approved": true,
@@ -536,10 +537,15 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     keys.push(["issue"], projectsQuery().queryKey);
     return keys;
   }
-  if (event.type === "issue.claimed" || event.type === "issue.released") {
+  if (
+    event.type === "issue.claimed" ||
+    event.type === "issue.released" ||
+    event.type === "issue.deployed"
+  ) {
     // A claim changes only who holds the issue: its detail, its log, and the lists that render
     // the claim — `["issues"]` above covers every project list by prefix. No rollup, ask count
-    // or component attachment moves with it.
+    // or component attachment moves with it. A deploy is a line in the issue's log and nothing
+    // the lists or rollups read.
     return keys;
   }
   // The branches above name every `issue.*` type there is, so a type added later falls to the
@@ -602,7 +608,8 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     const askID = payloadString(event, "ask_id");
     keys.push(["comments", event.issue_key]);
     // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
-    // block reads its turn from that list rather than from the Inbox.
+    // block reads its turn from that list rather than from the Inbox. The Conversation's card
+    // for that ask carries the reply itself.
     if (askID !== undefined) {
       keys.push(["asks", event.issue_key]);
     }
@@ -625,7 +632,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   if (isMessageEvent(event)) {
     const target = payloadString(event, "target");
     appendAgentConversationKey(keys, target);
-    keys.push(["messages", event.issue_key]);
+    keys.push(["messages", event.issue_key], ["issue-messages", event.issue_key]);
     // The Agents page groups a conversation under its thread root, so a reply belongs to that
     // root's conversation and not to a target of its own: a session answering a message aimed
     // at itself names no target at all, and the event carries the root's as `thread_target`.

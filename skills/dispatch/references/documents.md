@@ -1,45 +1,14 @@
 # Documents: typed blocks, comments, suggestions, and artifacts
 
-`skill://dispatch` sends you here when you write a typed block (an `:::ask` or a callout), comment on
-or suggest a change to a document, upload an artifact, request a document's approval, or get
-`DOC_SCHEMA`, `INVALID_ASK_BLOCK` or `DOC_SERVICE_UNAVAILABLE` back. Changing a document's text,
-tables included, is [Editing a document](skill://dispatch/references/document-edits.md).
+Read this to write a typed block, comment, suggest, upload an artifact, request approval, or handle `DOC_SCHEMA`, `INVALID_ASK_BLOCK` or `DOC_SERVICE_UNAVAILABLE`. Text and table edits are [Editing a document](skill://dispatch/references/document-edits.md).
 
 ## Typed blocks
 
-The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write one only with the
-container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
-and a closing line of as many colons at the same nesting. A typed block directly inside another needs the outer
-one's fence a colon longer (`::::callout{…}` around a `:::callout{…}`), and so does one whose code holds a `:::` line;
-Dispatch writes its fences that way. An unclosed typed block at document level is rejected. An
-opening line that continues a paragraph instead of standing on its own (indented four or more
-columns under the paragraph's text) is refused, naming the line's number and text - `INVALID_OP` on an edit's `markdown` or `with`, `INVALID_MARKDOWN` on any other write - since it
-would be stored as the paragraph's text; start the block on its own line. An opening written inside
-a line is stored as text, and `dispatch issue` and `dispatch artifact` quote it back as a
-typed-block opening that is text, not a block. For
-a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
-its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
-names one block, so an insert, upload or suggestion whose markdown names an id the document holds
-outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
-`INVALID_MARKDOWN` for any other write. To rewrite such a block whole, `delete` it and then
-`insert` the new one carrying its id, anchored on the block before or after it, in that order and
-in one batch: an insert carrying an id the document still holds is refused. An `ask` block whose ask
-is still open cannot be rewritten that way: `dispatch doc-edit` refuses the `delete`, so reword it with
-`replace`, relocate it with `move`, or change its question, options, urgency or `multiple` with
-`dispatch edit-ask` if you asked it ([Editing a document](skill://dispatch/references/document-edits.md)).
-
-Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
-quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf
-`::name` directives, or text `:name` directives; those strings are literal when quoted inside a code
-block. Do not set attributes the schema marks `server: true`; the server ignores them and reasserts
-its authoritative value at settlement.
-
-Questions about a document must be `ask` blocks, never an `Open questions` prose section. An ask
-body is one or more question paragraphs followed by an optional bullet list of options, where each
-item is `Label: description`. A spec, an uploaded document or an uploaded version holding an ask that
-breaks that shape - a code block, heading or quote in it, a paragraph after its options, a second
-list - is refused with `INVALID_ASK_BLOCK`; so is an edit that writes one. An ask someone left
-unreadable in the browser refuses nothing it is carried through unchanged by. For example:
+- Use only the types, content rules, attributes and enum values from `GET /api/v1/schema/blocks`. Quote values: `:::callout{kind="warning" title="Risk"}`. Never set an attribute marked `server: true`.
+- Write the container form only: `:::name{#block-id key="value"}` on its own line, block children, and a closing line with the same number of colons. A block inside another, or one whose code holds a `:::` line, needs the outer fence one colon longer. Never write Pandoc `::: {.callout}`, leaf `::name` or text `:name`.
+- Dispatch refuses an unclosed block, and an opening indented four or more columns under a paragraph. An opening inside a line is stored as text.
+- For a new block, omit `#block-id`: Dispatch mints it. When you edit one, keep its id and every attribute. Never copy an id into new markdown. To rewrite a block whole, `delete` it, then `insert` it with its id, in one batch. You cannot do this to an open ask's block: use `replace`, `move` or `dispatch edit-ask`.
+- Questions about a document are `ask` blocks, never an "Open questions" section. The body is question paragraphs, then an optional bullet list of `Label: description` options. A code block, heading or quote, a paragraph after the options, or a second list is `INVALID_ASK_BLOCK`.
 
 ```md
 :::ask{urgency="high" multiple="false"}
@@ -54,153 +23,42 @@ unknown cost before production while keeping today's release possible.
 :::
 ```
 
-When a human answers a decision written as an ask block, the answer lives on that ask. Use
-`dispatch resolve-ask` when the decision is resolved without a human response, or preserve the
-human's answer; never rewrite the question into its answer or blank its options. An edit that leaves
-an ask block without a question or with a blank option is rejected with `INVALID_ASK_BLOCK`.
-
-When `dispatch issue` or `dispatch artifact` answers `This spec holds no ask blocks …`, read it as a
-question: either no decision is needed and you say nothing, or you forgot to make it a block. When
-it answers `… typed-block openings in this document are text, not blocks`, the quoted openings are
-blocks stored as prose (inside a line, or a paste with something before every line): fix the markdown
-and upload again; a mention on purpose belongs in code. Neither answer sees a spec wrapped whole in a
-code fence (take the fence off), a malformed opening inside a line (`::ask{`, `:::ask {`: an ask opens
-only as `:::ask{…}` on a line of its own), or any `dispatch doc-edit`: after an edit that writes an
-ask, `dispatch doc-read` the section and check it renders as `:::ask{#<id> …}` on its own line.
+- A human's answer lives on the ask. Never rewrite the question into its answer or blank its options. Resolve without a human with `dispatch resolve-ask`.
+- An answered or resolved ask's question is fixed. Dispatch writes its block back. To ask something new, write a new block. An open ask's block is its text.
+- `This spec holds no ask blocks …`: either no decision is needed, or you forgot the block. `… typed-block openings in this document are text, not blocks`: fix the markdown and upload again. Put an intended mention in code.
+- Neither check sees a spec wrapped in a code fence, an opening like `::ask{` or `:::ask {`, or any `doc-edit`. After an edit that writes an ask, `dispatch doc-read` the section and check that it renders `:::ask{#<id> …}` on its own line.
 
 ## Comments and suggestions
 
-Add feedback with `dispatch comment` (`dispatch comment --help` lists its flags):
-
 ```bash
 dispatch comment --issue <KEY> --artifact spec --quote '<the passage>' --body '<the question or note>'
-```
-
-It prints the comment's id; a `--reply-to-ask` reply also makes you one of the ask's followers
-(see [Following](skill://dispatch/references/asks.md)).
-`--ref` names the owner (an issue or project-document reference) in place of `--issue`/`--project`.
-An ask, comment or message link there is refused, since the comment would land outside it: reply
-under an ask with `--reply-to-ask`, in a comment's thread with `--reply-to`, and read a message
-with `dispatch read`.
-`--quote` requires `--artifact`; its anchor is pinned to the containing block while retaining the quote
-for display. Omit both for a floating issue comment. A reply (`--reply-to`/`--reply-to-ask`) takes no
-`--quote`; it belongs to its parent's anchor. Reply to any comment in a thread; the server keeps
-threads flat. A reply to a resolved thread reopens it, except a decided suggestion's: a reply joins
-that thread and the suggestion stays accepted or rejected. Use `--reply-to-ask` to reply directly under a
-question asked with `dispatch ask`; `--turn` (only with `--reply-to-ask`) says who holds the turn after
-the reply — `agent` for a progress note that keeps the ask waiting on you, `human` (the default) when
-the human needs to act; see "Asking" in `skill://dispatch`. Comments are edited only by their author from the
-dashboard. A delivered `comment.created` event carries the comment `id`; reply to it with
-`dispatch comment --reply-to <id>`.
-
-Resolve your own review comment once you have addressed it:
-
-```bash
-dispatch resolve-comment --comment <id>
-```
-
-`--comment` is the comment id, or a `dispatch://KEY/comment/<id>` or `dispatch://PROJECT/artifact/<slug>/comment/<id>` reference (an
-8+ character id prefix is resolved against the owner's comments). It takes no reason —
-say what you did in a `--reply-to` first if the thread needs it. The server lets any session or human resolve any open comment, so
-resolve only threads you opened or were asked to close; reopening a resolved thread is human-only (from the dashboard), though your
-reply to it reopens it - except a decided suggestion's, which your reply joins and leaves accepted or rejected. A reply to a pending
-suggestion whose text an edit removed lands as well. Asks are closed with `dispatch resolve-ask` instead.
-
-An exact replacement for document text is a suggestion (`dispatch suggest`), never a comment; a
-comment is for a question or a note the human answers in words. A human accepts a suggestion with
-one click and cannot accept a comment, so propose the replacement instead of describing it:
-
-```bash
 dispatch suggest --issue <KEY> --artifact spec --quote '<exact text>' --replace-with '<replacement>'
 ```
 
-It prints the suggestion's id; `--body` adds a note and `--occurrence` picks a repeated quote. A human accepts or rejects a suggestion.
-Errors: `TARGET_AMBIGUOUS` (add `--occurrence`), `TARGET_NOT_FOUND` (re-read first), `INVALID_ANCHOR`/`ANCHOR_MISSING`/`ANCHOR_ORPHANED`
-(bad, unwritten, or stale quote), `INVALID_MARKDOWN`/`DOC_SCHEMA` (malformed content), `CAP_EXCEEDED`, `ISSUE_CLOSED`.
-Suggest only what the quoted block can hold. The accept, not the suggestion, checks that: an
-accept whose replacement would break an ask block that was readable before it is refused with
-`INVALID_ASK_BLOCK` - a question given a code block, text after an ask's options, a second option
-list, or an emptied question; one that names an id the document holds outside the text it
-replaces, an ask under a held id included, with `INVALID_MARKDOWN`; and one no part of the
-document can hold where it sits (a code block over a table cell's whole text), or whose quote runs
-into an ask or callout from the text before it, with `INVALID_OP`. Either changes nothing: the human sees the reason with no Retry, and the suggestion
-stays open until someone rejects or replaces it.
+- An exact replacement is a suggestion, never a comment: a human accepts it with one click. A comment is for a question or note answered in words.
+- Omit `--quote` and `--artifact` for a floating comment. A reply (`--reply-to`, `--reply-to-ask`) takes no quote. Threads are flat. A reply reopens a resolved thread, except a decided suggestion's. `--turn` works only with `--reply-to-ask`.
+- `--ref` names the owner only. Dispatch refuses an ask, comment or message link there.
+- Resolve your own comment once addressed: `dispatch resolve-comment --comment <id>`. It takes no reason, so reply first if needed. Resolve only threads you opened or were asked to close. Reopening a resolved thread from the dashboard is human-only, but your reply to it reopens it, except a decided suggestion's.
+- Suggest only what the quoted block can hold. The accept checks it, and a refused accept stays open.
+- Error codes: `TARGET_AMBIGUOUS` (add `--occurrence`), `TARGET_NOT_FOUND` (re-read), `INVALID_ANCHOR` / `ANCHOR_MISSING` / `ANCHOR_ORPHANED` (bad or stale quote), `INVALID_MARKDOWN` / `DOC_SCHEMA`, `CAP_EXCEEDED`, `ISSUE_CLOSED`.
 
 ## Artifacts
 
-Attach an image, diagram, or local file with:
-
 ```bash
 dispatch artifact --issue <KEY> --name diagram.png --path ./diagram.png
-```
-
-Or, when the text is already at hand, post a Markdown document directly:
-
-```bash
 dispatch artifact --issue <KEY> --name load-test-results.md --content-file - <<'EOF'
 # Load test
-...
 EOF
 ```
 
-Exactly one of `--issue` and `--project` is required. A project upload creates an unlinked project document; it takes no `--artifact`.
-Exactly one of `--path` and `--content` is required. It prints the document's slug and version.
-Uploading the same `--name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
-with your text. Never do that: the spec is edited in place with `dispatch doc-edit` (see [Editing a document](skill://dispatch/references/document-edits.md)). Address an existing
-artifact by the slug the upload printed or by its filename, and a project document by its artifact id, slug, or filename; the
-slug also arrives on `artifact.created` events. Dispatch suffixes a slug two documents would share, so one document's
-filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
-`--artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
-A document you upload holding a copy of another document's `:::ask` block, under the same `#id` and with the same
-question, options, `multiple` and urgency, on the same issue (or the same project for a project document), opens no
-ask: the copy shows the state and answer of the ask it was copied from, names it and its document in `copied_from` and
-`copied_from_document`, and cannot be answered there. Answer the original: its answer or resolution shows on the copy a
-few seconds later. A copy may hold the original's earlier wording, from before someone reworded it. It stays a copy
-while the original is open, and shows an answer or resolution given while the original still asked that wording; an
-answer or resolution given after the rewording decides a question the copy does not ask, so the copy opens its own ask
-instead. A copy whose text you change opens a new ask. Once the original's block leaves its document, its copies share
-one new ask: the first copy to settle opens it and the others name it.
-
-An answered or resolved ask's question is fixed. Editing its block's question, options, `multiple` or urgency in the
-document, or uploading a version that changes them, does not change the ask: a few seconds later the block is written
-back to the question the answer was given on, beside its answer. To ask something new, write a new ask block with its
-own `#id`. An open ask's block is its text: edit it and the ask changes with it.
-
-A picture meant to be seen inline in a message, comment or ask is not uploaded with `dispatch artifact`: pass its local
-path with that command's `--image`, once per picture (PNG, JPEG, GIF or WebP by its bytes, at most 25 MiB each). Each is uploaded to the issue (a
-project document's project; for a reply to a direct message, your own conversation) and appended after a blank line as
-one `![<file name>](dispatch://<owner>/artifact/<slug>@vN)` line, about 60 characters that count toward the body or
-question cap; a command the lines would carry over the cap is refused with the count before anything uploads, and again,
-with nothing posted, in the rare case where Dispatch gives an upload a longer address than that (a later version of a
-name the owner already holds, or a slug another file took first). The `@vN` pins the version the upload made (the same
-file name again makes the next version). A plain `dispatch://KEY/artifact/<slug>` reference to an image stays a link
-with a thumbnail.
-
-`dispatch read` writes the pictures the messages, asks and comments it shows embed to files, newest first, at most 8 and
-10 MiB per read, prints a `- picture: <path>` line for each, and its `Pictures:` section names each one shown, in order, and the rest by reference for
-`dispatch doc-read`, which shows one picture (at most 3,750,000 bytes, the 5 MB of base64 a model provider takes; a
-larger one or an SVG is described). Open each written file with your file-read tool. A picture in a
-conversation on the Agents page belongs to that conversation, `dispatch://agent/<session id>/artifact/<slug>@vN`, and
-`dispatch doc-read` reads it by that reference alone. On Oh My Pi an Inbox delivery carries its pictures as images; in
-Claude Code it stays text with the reference.
-
-A session is shown each picture once. A later read or delivery that embeds a picture you were already shown names it in
-`Pictures:` as `shown earlier this session` and sends no bytes, since every request carries the session's whole history
-and a model provider refuses one over 32 MB; `dispatch doc-read` always shows the picture, so ask it for one you need
-again, after compaction too.
-
-Documents are CommonMark. A bare `<https://example.com|text>` is a CommonMark autolink and is normalised: the angle brackets are
-dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|text>` displays as `<https://example.com|text>` in the
-document but comes back re-escaped (`\<`) from `dispatch doc-read`. A Slack mrkdwn draft, or any other payload that is not Markdown,
-still belongs inside a fenced code block, where it survives verbatim both ways.
-
-A table cell ends at every `|` not written `\|`, inside inline code and links too, so write
-`` `x: Promise<void> \| undefined` ``, never `` `x: Promise<void> | undefined` ``, in a cell. A row
-holding text in a cell past its table's width is refused rather than stored without it, naming the
-row: write a `|` inside a cell as `\|`, or, where the row really has more cells, give the header and
-delimiter rows as many. Blank cells past the width are dropped, on every path. A spec, an upload or
-a version answers `INVALID_MARKDOWN`, an insert of blocks `INVALID_OP` on `markdown`, and an insert
-of bare table rows `TABLE_WIDTH`, which names the cell counts only.
+- Uploading the same `--name` makes its next version. Never upload `spec.md`: it replaces the human's spec. Edit with `dispatch doc-edit`.
+- Address an artifact by the slug the upload printed. A bare `--artifact` that names two documents (a slug and a filename) is refused with both ids. A `dispatch://` reference always uses the slug.
+- A copy of another document's `:::ask` block (same `#id` and text, same owner) opens no ask. It mirrors the original. Answer the original. Change the copy's text and it opens its own ask.
+- A picture from an Agents-page conversation is `dispatch://agent/<session id>/artifact/<slug>@vN`. `dispatch doc-read` reads it by that reference alone.
+- Show a picture inline with `--image` on `message`, `comment` or `ask`, not `dispatch artifact`. Each adds about 60 characters that count toward the cap. A plain `dispatch://KEY/artifact/<slug>` link to an image shows a thumbnail.
+- `dispatch read` and `dispatch doc-read` write pictures to files and print `- picture: <path>`. Open each with your file-read tool. A session sees each picture once. `dispatch doc-read` shows it again, after compaction too.
+- Documents are CommonMark. Put Slack mrkdwn or other non-Markdown in a fenced code block.
+- In a table cell, write every `|` as `\|`, inside code and links too. A row wider than its table is refused.
 
 ## Approval requests
 
@@ -208,64 +66,14 @@ of bare table rows `TABLE_WIDTH`, which names the cell counts only.
 dispatch request-approval --issue <KEY> --summary '<what the human is approving>'
 ```
 
-The command opens an approval ask with the options `Approve` and `Request changes`, its question
-"Approve spec.md (version N)?" followed by the summary, where N is the document's latest version. It
-is refused, with nothing sent, while that version holds a decision block open, and the refusal
-names each block and its ask. An answer or a `dispatch resolve-ask` closes the ask at once but
-reaches a version only when the document settles, about two seconds later. An answered block
-already carries its own record, so wait for that version rather than editing just to force one; a
-waiver carries none, so write the human's decision into the text with your next `dispatch doc-edit`
-before you request. A block written in the last few seconds counts as open before Dispatch has
-opened its ask. A document holds one open request. A new version moves it to that version, keeping
-its thread and summary, and leaves it waiting on you, as a human's reply in its thread does; a move
-your own edit made sends you no event, and `dispatch read` and `dispatch doc-read` show it as
-`Approval: awaiting, waiting on agent`. Run it again when "Approval of a spec" in `skill://dispatch`
-allows: that hands the same request back to the human, reworded first when `--summary` is new. Your
-own reply in its thread hands it back too, with no command and the summary it already holds, unless
-you post it with `--reply-to-ask` and `--turn agent` (`--reply-to` carries no turn, so its reply takes
-the default, `human`) or a new version has moved the request since your last
-`dispatch request-approval`. While it waits on the human, the same `--summary` changes
-nothing, and a different `--summary` is refused, since it would rewrite the card they are
-reading. The answer reaches you as `artifact.approved` or `artifact.changes_requested` with the
-pinned `version` and closes the request, so the next call opens a new one; `changes_requested`
-carries the reason, which is your next piece of work. Those reads show the document's approval
-state; `stale` means it was approved and changed since, other than as the next paragraph says.
-
-A human's own answer to a decision block in a document they approved can carry the approval to
-the version it writes. Dispatch compares that version with the version they approved, every
-decision block cut out of both; when the text outside the blocks is the same and every block added or
-answered since has their answer, it records an `approved` review in their name pinned to the new version and
-emits `artifact.approved`, in the transaction that writes the version, and answers an approval
-request open on the document `Approve` in their name. The answer was the whole change since the
-version they approved, so request nothing: `dispatch doc-read` shows `Approval: approved vN` at
-the new version. An edit inside the block before the answer does not stop this. A change
-outside the blocks, whoever wrote it (an upload or a typed edit included), a block added since the
-approval that the human has not answered (open or waived), a block the approved version held that
-someone else answered or that was waived since, a decided block whose question or options were
-changed (its answer decided the question it was given on), a removed block, a request for changes
-newer than the approval, or a document they never approved leaves the approval stale, and the next
-request shows them the diff: a request on a document a human approved earlier carries
-`approved` (`{version, at, by}`) in `ask.approval`, and its Inbox card puts
-`Approved at version N on <date> by <who>.` and a `Show diff` control under the question, which
-shows what changed between the two versions with every decision block cut out. So that request's
-`--summary` is one sentence naming what changed since that approval, and repeats nothing the diff
-shows.
+- It opens an `Approve` / `Request changes` ask on the latest version. It is refused while a decision block is open. A block written in the last few seconds counts as open.
+- An answer or resolve reaches a version about two seconds later. Wait for that version, do not edit to force one. A waiver carries no record: write the decision into the text before you request.
+- A document holds one open request. A new version moves it and leaves it `waiting on agent`. Run the command again when "Approval of a spec" allows, to hand it back. Your own thread reply hands it back too, unless you reply with `--reply-to-ask` and `--turn agent`. A `--reply-to` reply takes no turn flag, so it takes the default, `human`. Exception: a new version moved the request since your last `dispatch request-approval`. Then no reply hands it back: run `dispatch request-approval` again. While it waits on the human, a different `--summary` is refused.
+- The answer arrives as `artifact.approved` or `artifact.changes_requested` with its version. `changes_requested` carries the reason: that is your next work. `stale` means approved, then changed.
+- A human's own answer to a block can carry their approval forward. That needs no change outside the blocks, and their answer on every new or answered block. Then `dispatch doc-read` shows `Approval: approved vN`. Anything else leaves it stale, and the card shows a diff: make the next `--summary` one sentence on what changed.
 
 ## A document that is reloading
 
-These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its
-transaction: `dispatch doc-edit`; `dispatch ask` and `dispatch comment` on a quote; a `dispatch comment` reply
-in a thread whose first comment is anchored; `dispatch suggest`; `dispatch resolve-comment` on an anchored
-comment; `dispatch artifact` replacing a document that already exists; and, on an ask that lives in a `:::ask`
-block, `dispatch edit-ask` and `dispatch resolve-ask`, which write that block. Creating an issue with a spec,
-uploading a new document, `dispatch request-approval` and `dispatch message` never answer it, and neither do
-`dispatch edit-ask` and `dispatch resolve-ask` on an ask that has no block. It means that document's live room
-failed and is reloading from its durable copy, so the server refused rather than wait for it; your call wrote
-nothing and the document is intact. Nothing retries it for you: the Dispatch client hands a 503 straight back.
-Wait a few seconds and make the same call again. A second refusal in a row is worth telling your human about,
-with the document's reference.
-
-`dispatch doc-read` can answer it too, though it writes nothing: a read never opens a live room, and waits out
-a room that is reloading, so it is refused only when the document's durable copy cannot be read or decoded.
-Retry it the same way.
-
+- `DOC_SERVICE_UNAVAILABLE` (503) means the document's live room is reloading. Your call wrote nothing. Nothing retries for you. Wait a few seconds and repeat the same call.
+- A second refusal in a row: tell the human, with the document's reference.
+- It comes from calls that write a document. Those are `doc-edit`, a quoted `ask` or `comment`, a reply in an anchored thread, and `suggest`. Also `resolve-comment` on an anchored comment, an `artifact` that replaces a document, and `edit-ask` / `resolve-ask` on a block ask. `doc-read` returns it only when the durable copy is unreadable.

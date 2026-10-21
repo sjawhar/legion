@@ -79,7 +79,7 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 // is said to be carried as well when its old root's gate came with it, so the architect registers
 // no spec. The same root at a later generation (closed and reopened) is a root like any other.
 func TestACatchUpMarksAHandedOverRootInEveryPhase(t *testing.T) {
-	for _, at := range []phase.Phase{phase.Planning, phase.Reviewing, phase.ProductionCheck} {
+	for _, at := range []phase.Phase{phase.Planning, phase.Reviewing, phase.Accepting} {
 		for _, gateCarried := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s, gate carried %t", at, gateCarried), func(t *testing.T) {
 				pool := migratedPool(t)

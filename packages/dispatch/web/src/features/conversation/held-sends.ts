@@ -78,6 +78,9 @@ function refreshAfter(client: QueryClient, { anchor, owner }: SentRequest): void
   if (owner.kind === "issue") {
     void client.invalidateQueries({ queryKey: ["events", owner.issueKey] });
     void client.invalidateQueries({ queryKey: ["issue", owner.issueKey] });
+    // The Conversation lists the issue's messages itself, so a message the reader just wrote is
+    // a new card in that list; a comment is one already, through the issue's comments above.
+    void client.invalidateQueries({ queryKey: ["issue-messages", owner.issueKey] });
   } else {
     void client.invalidateQueries({ queryKey: ["artifact", owner.artifactId] });
     void client.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });

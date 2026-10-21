@@ -13597,6 +13597,16 @@ var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
+var IssueDeployedEventPayloadSchema = exports_external.strictObject({
+  repo: exports_external.string(),
+  number: exports_external.number().int().positive(),
+  run_id: exports_external.number().int().positive(),
+  completed_at: exports_external.iso.datetime()
+});
+var DispatchServerStartedPayloadSchema = exports_external.strictObject({
+  commit: exports_external.string().min(1),
+  started_at: exports_external.iso.datetime()
+});
 var DispatchEventSchema = exports_external.object({
   issue_key: exports_external.string().nullable(),
   artifact_id: exports_external.string().nullish(),
@@ -15648,7 +15658,7 @@ function parseDispatchRef(ref) {
       artifact: artifact2
     };
   }
-  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
+  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
   if (!issueReference)
     return null;
   const [, issue2, spec, log, children, artifact, version2, ask, comment, message] = issueReference;
@@ -16120,6 +16130,71 @@ async function readPictures(client, addresses, shown) {
   return { lines, images, shown: showing };
 }
 
+// ../envoy-client/src/dispatch-subscribe.ts
+function followedAsk(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue: issue2, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  if (typeof issue2 === "string" && issue2 !== "")
+    return { ask, owner: issueTopic(issue2) };
+  if (typeof document !== "string")
+    return null;
+  const [project, slug] = document.split("/", 2);
+  if (!project || !slug)
+    return null;
+  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
+}
+function followNoticeText({ ask, owner }, topics) {
+  const subscribe = ownerSubscribeLine(owner, topics);
+  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
+}
+function ownerSubscribeLine(owner, topics) {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+    return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+function subscriptionCovers(topic, owner) {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">")
+      return true;
+    if (index >= base.length || part !== "*" && part !== base[index])
+      return false;
+  }
+  return false;
+}
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope2;
+  try {
+    envelope2 = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope2 !== "object" || envelope2 === null)
+    return;
+  const { source, payload } = envelope2;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
+
 // ../envoy-client/src/search-answer.ts
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
@@ -16206,11 +16281,14 @@ function resolvedTopic(resolved) {
     throw new Error("issue document is missing its issue");
   return issueTopic(resolved.issue.key);
 }
-function notSubscribed(owner) {
-  return `(not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
+async function notSubscribed(owner, subscriptions) {
+  if (ownerSubscribeLine(owner, await subscriptions?.()) === null)
+    return "";
+  return ` (not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
 }
-function followsAsk(owner) {
-  return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+async function followsAsk(owner, subscriptions) {
+  const subscribe = ownerSubscribeLine(owner, await subscriptions?.());
+  return `You follow this ask: its answer and replies reach you directly.${subscribe === null ? "" : ` ${subscribe}`}`;
 }
 var triageAdviceShown = new Set;
 function adviceMemory() {
@@ -16487,6 +16565,37 @@ async function resolveIdPrefix(tool, kind, id, ownerName, list) {
   ]);
 }
 var askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
+async function readAskRef(tool, id, ownerName, client, list) {
+  const fullID = normalizeUUID(id);
+  if (fullID !== undefined) {
+    try {
+      return await client.getAsk(fullID);
+    } catch (error48) {
+      if (!(error48 instanceof DispatchServiceError) || error48.status !== 404)
+        throw error48;
+      const blocks = (await list()).filter((ask) => ask.block_id?.toLowerCase() === fullID);
+      if (blocks.length !== 1 || blocks[0] === undefined)
+        throw error48;
+      return client.getAsk(blocks[0].id);
+    }
+  }
+  const asks = await list();
+  let matches = asks.filter((ask) => ask.block_id === id);
+  if (matches.length === 0) {
+    if (!idPrefixPattern.test(id)) {
+      throw new ToolInputError(tool, [
+        `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`
+      ]);
+    }
+    const prefix = id.toLowerCase();
+    matches = asks.filter((ask) => ask.id.toLowerCase().startsWith(prefix) || (ask.block_id?.toLowerCase().startsWith(prefix) ?? false));
+  }
+  if (matches.length === 1 && matches[0] !== undefined)
+    return client.getAsk(matches[0].id);
+  throw new ToolInputError(tool, [
+    matches.length === 0 ? `ask id ${id} matches none of the asks on ${ownerName}; use the full id` : `ask id ${id} matches ${matches.length} asks on ${ownerName}; use the full id`
+  ]);
+}
 async function sessionOpenAsks(client, sessionId) {
   const session = sessionId?.trim();
   if (!session)
@@ -16591,7 +16700,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     const value2 = url2.searchParams.get(name);
     return value2 !== null && /^[1-9][0-9]*$/.test(value2) ? `@v${value2}` : "";
   };
-  const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
+  const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
     const [, key, page, artifact, ask, comment, message] = issuePage;
     const version2 = versionOf("v");
@@ -17109,6 +17218,7 @@ function askSummary({ ask, replies, answers }, graph) {
     "Options:",
     ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
     `State: ${ask.state}`,
+    `Ask id: ${ask.id}`,
     "Answer:",
     ...answer === null ? ["- none"] : [
       `- By: ${answer.user}`,
@@ -17574,7 +17684,7 @@ async function executeDispatchTool(input) {
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
             ...adviceLines
           ].join(`
 `),
@@ -17691,7 +17801,7 @@ async function executeDispatchTool(input) {
       });
       return {
         text: [
-          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          `${after.key}: ${changes.join("; ")}${await notSubscribed(issueTopic(after.key), input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -17724,8 +17834,7 @@ async function executeDispatchTool(input) {
         text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
-        text: [text, notSubscribed(issueTopic(issueKey))].join(`
-`),
+        text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
         details: { issue: issueKey, status: after.status, claim: held }
       };
     }
@@ -17901,7 +18010,7 @@ async function executeDispatchTool(input) {
       return {
         text: [
           `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${followsAsk(askOwner)}`,
+${await followsAsk(askOwner, input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -17967,7 +18076,7 @@ ${followsAsk(askOwner)}`,
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
-            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
+            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner2, input.subscriptions)}`,
             ...adviceLines
           ].join(`
 `),
@@ -17981,7 +18090,10 @@ ${followsAsk(askOwner)}`,
         };
       }
       return {
-        text: [`Posted comment ${comment.id} ${notSubscribed(commentOwner2)}`, ...adviceLines].join(`
+        text: [
+          `Posted comment ${comment.id}${await notSubscribed(commentOwner2, input.subscriptions)}`,
+          ...adviceLines
+        ].join(`
 `),
         details: {
           ...commentDetails,
@@ -18003,7 +18115,7 @@ ${followsAsk(askOwner)}`,
       };
       const comment = resolved.owner.kind === "project" ? await client.artifactSuggest(resolved.artifact.id, suggestionInput) : await client.suggest(issue2(), suggestionInput);
       return {
-        text: `Posted suggestion ${comment.id} ${notSubscribed(resolvedTopic(resolved))}`,
+        text: `Posted suggestion ${comment.id}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
         details: writeResultDetails(resolved, { comment: comment.id })
       };
     }
@@ -18061,7 +18173,7 @@ ${followsAsk(askOwner)}`,
       const adviceLines = renderAdvice(input.tool, issueKey, message.advice, {});
       return {
         text: [
-          `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
+          `Posted message ${message.id} (${messageRef})${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -18099,7 +18211,7 @@ ${followsAsk(askOwner)}`,
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
-          `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
+          `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
           ...tokenTrailer,
           ...adviceLines
         ].join(`
@@ -18222,7 +18334,7 @@ ${trailer.join(`
       });
       return {
         text: [
-          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
+          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})${await notSubscribed(uploadOwner, input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -18284,9 +18396,8 @@ ${trailer.join(`
       }
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
-        const askRead = await client.getAsk(id);
-        const askRef = refTarget(ref, "ask", id);
+        const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
+        const askRef = refTarget(ref, "ask", askRead.ask.id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(askTexts(askRead)),
           graphSections(client, askRef)
@@ -18432,9 +18543,10 @@ var PICTURE_EXTENSIONS = {
   "image/webp": "webp"
 };
 function sessionStateRoot(env) {
-  if (env.DISPATCH_STATE_DIR)
-    return env.DISPATCH_STATE_DIR;
-  return join(env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "dispatch");
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
@@ -18521,6 +18633,10 @@ function writeLongOutput(dir, text) {
   writeFileSync(path, text, { mode: PRIVATE_FILE });
   return path;
 }
+function writeSessionTitle(dir, title) {
+  ensureDirectory(dir);
+  writeAtomically(join(dir, "title"), title);
+}
 function readSessionTitle(dir) {
   return readIfPresent(join(dir, "title")) || undefined;
 }
@@ -18556,59 +18672,6 @@ function pruneSessions(root, now) {
   }
   ensureDirectory(root);
   writeFileSync(stamp, "", { mode: PRIVATE_FILE });
-}
-
-// ../envoy-client/src/dispatch-subscribe.ts
-function dispatchFollowNotice(details) {
-  if (typeof details !== "object" || details === null)
-    return null;
-  const { follows, issue: issue2, document } = details;
-  if (typeof follows !== "object" || follows === null)
-    return null;
-  const { ask } = follows;
-  if (typeof ask !== "string" || ask === "")
-    return null;
-  let owner;
-  if (typeof issue2 === "string" && issue2 !== "") {
-    owner = issueTopic(issue2);
-  } else if (typeof document === "string") {
-    const [project, slug] = document.split("/", 2);
-    if (!project || !slug)
-      return null;
-    owner = { label: document, topic: documentTopicOf(project, slug).topic };
-  } else {
-    return null;
-  }
-  return {
-    ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
-  };
-}
-function subscriptionRemovedTopics(raw, sessionID) {
-  let envelope2;
-  try {
-    envelope2 = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof envelope2 !== "object" || envelope2 === null)
-    return;
-  const { source, payload } = envelope2;
-  if (source !== "dispatch" || typeof payload !== "string")
-    return;
-  let event;
-  try {
-    event = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const parsedEvent = DispatchEventSchema.safeParse(event);
-  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
-    return;
-  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
-  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
-    return;
-  return parsedPayload.data.topics ?? [];
 }
 
 // ../envoy-client/src/envoy-config.ts
@@ -19329,6 +19392,252 @@ function sessionDispatchSettings(file2, env, options) {
     missing: config2.kind === "read" ? config2.missing : null
   };
 }
+function sessionEnvoySettings(file2, env, options) {
+  if (file2.path === null)
+    return offWithError(file2.error);
+  return envoySettings(env, readEnvoyConfig(file2.path, env, options), { nats: options.nats });
+}
+
+// ../envoy-client/src/transport.ts
+var DEFAULT_TIMEOUT_MS = 5000;
+var RETRY_DELAY_MS = 250;
+var InterestWireSchema = exports_external.object({
+  session_id: exports_external.string(),
+  machine_id: exports_external.string(),
+  dir: exports_external.string(),
+  topics: exports_external.array(exports_external.string()),
+  updated_at: exports_external.number().int().optional(),
+  warnings: exports_external.array(exports_external.string()).optional()
+});
+var SessionWireSchema = exports_external.object({
+  session_id: exports_external.string(),
+  machine_id: exports_external.string(),
+  host: exports_external.string().optional(),
+  dir: exports_external.string(),
+  port: exports_external.number().int(),
+  title: exports_external.string(),
+  topics: exports_external.array(exports_external.string()),
+  roles: exports_external.array(exports_external.string()).optional(),
+  capabilities: exports_external.array(exports_external.string()).optional(),
+  self_subscribed: exports_external.boolean(),
+  last_seen: exports_external.number().int().optional()
+});
+var RoleWireSchema = exports_external.object({
+  role: exports_external.string(),
+  holder: exports_external.string(),
+  host: exports_external.string().optional(),
+  last_seen: exports_external.number().int()
+});
+var RoleHeldWireSchema = exports_external.object({
+  error: exports_external.string(),
+  role: exports_external.string(),
+  holder: exports_external.string()
+});
+var ErrorWireSchema = exports_external.object({
+  error: exports_external.string(),
+  expected: exports_external.array(exports_external.string()).optional()
+});
+var EnvelopeResponseSchema = EnvelopeSchema.extend({
+  recipient: exports_external.string().optional(),
+  holder: exports_external.string().optional()
+});
+function mergeInterestSources(registryTopics, liveTopics) {
+  const interests = new Map;
+  for (const topic of registryTopics) {
+    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
+  }
+  for (const topic of liveTopics) {
+    if (!interests.has(topic))
+      interests.set(topic, "live");
+  }
+  return interests;
+}
+function expandSubscriptionTopics(topics) {
+  const expanded = new Set;
+  for (const topic of topics) {
+    const base = topic.endsWith(".>") ? topic.slice(0, -2) : undefined;
+    if (base === undefined || base.includes("*") || base.includes(">")) {
+      expanded.add(topic);
+      continue;
+    }
+    const segments = base.split(".");
+    if (segments.length < 2 || segments.some((segment) => segment.length === 0)) {
+      throw new TypeError(`cannot expand Envoy wildcard topic "${topic}": its concrete base must have at least two non-empty segments`);
+    }
+    expanded.add(base);
+    expanded.add(topic);
+  }
+  return [...expanded];
+}
+
+class EnvoyApiError extends Error {
+  details;
+  name = "EnvoyApiError";
+  expected;
+  constructor(details) {
+    let parsed;
+    try {
+      const result = ErrorWireSchema.safeParse(JSON.parse(details.responseBody));
+      if (result.success)
+        parsed = result.data;
+    } catch {}
+    super(parsed === undefined ? `${details.method} ${details.url} failed with ${details.status}: ${details.responseBody}` : `${parsed.error}${parsed.expected === undefined ? "" : ` (expected: ${parsed.expected.join(", ")})`}`);
+    this.details = details;
+    this.expected = parsed?.expected;
+  }
+}
+function createEnvoyClient(config2) {
+  const baseUrl = normalizeEnvoyUrl(config2.baseUrl);
+  const timeoutMs = config2.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const apiToken = config2.token;
+  const request = async (path2, init) => {
+    const url2 = `${baseUrl}${path2}`;
+    const attempts = config2.retry === false ? 1 : 2;
+    for (let attempt = 0;attempt < attempts; attempt += 1) {
+      let response;
+      try {
+        const headers = new Headers(init.headers);
+        if (apiToken)
+          headers.set("Authorization", `Bearer ${apiToken}`);
+        response = await config2.fetch(url2, {
+          ...init,
+          headers,
+          signal: AbortSignal.timeout(timeoutMs)
+        });
+      } catch (error49) {
+        if (attempt + 1 < attempts) {
+          await waitForRetry();
+          continue;
+        }
+        throw error49;
+      }
+      const responseBody = await response.text();
+      if (response.ok)
+        return responseBody;
+      const error48 = new EnvoyApiError({
+        method: init.method ?? "GET",
+        url: url2,
+        status: response.status,
+        responseBody
+      });
+      if (response.status >= 500 && attempt + 1 < attempts) {
+        await waitForRetry();
+        continue;
+      }
+      throw error48;
+    }
+    throw new Error("Envoy request exhausted retries");
+  };
+  const post = (path2, body) => request(path2, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return {
+    subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
+      session_id: input.sessionID,
+      dir: input.directory,
+      topics: expandSubscriptionTopics(input.topics),
+      port: input.port,
+      title: input.title,
+      ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
+      driving: input.driving,
+      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      host: machineID()
+    }))),
+    unsubscribe: async (input) => {
+      await post("/v1/interests/unsubscribe", {
+        session_id: input.sessionID,
+        topics: expandSubscriptionTopics(input.topics)
+      });
+    },
+    getInterest: async (sessionID) => InterestWireSchema.parse(JSON.parse(await request(`/v1/interests/${sessionID}`, {}))),
+    send: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/send", {
+        source: input.source ?? "agent",
+        ...sourceSession(input.sourceSessionID),
+        target_session: input.targetSessionID,
+        message: input.message,
+        idempotency_key: idempotencyKey,
+        ...messageMetadata(input)
+      })));
+      return {
+        envelope: response,
+        recipient: response.recipient ?? input.targetSessionID,
+        confirmed: response.recipient !== undefined
+      };
+    },
+    publish: async (input) => {
+      const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+      const response = EnvelopeResponseSchema.parse(JSON.parse(await post("/v1/messages/publish", {
+        source: input.source ?? "agent",
+        ...sourceSession(input.sourceSessionID),
+        topic: input.topic,
+        message: input.message,
+        ...input.payload === undefined ? {} : { payload: input.payload },
+        idempotency_key: idempotencyKey,
+        ...messageMetadata(input)
+      })));
+      return {
+        envelope: response,
+        ...response.holder === undefined ? {} : { holder: response.holder }
+      };
+    },
+    unregisterSession: async (sessionID) => {
+      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
+    },
+    setRole: async (input) => {
+      const soft = input.soft === true;
+      const previous = soft ? input.previousSessionID ?? "" : "";
+      const body = {
+        session_id: input.sessionID,
+        role: input.role,
+        ...soft ? { soft: true } : {},
+        ...previous === "" ? {} : { previous_session_id: previous }
+      };
+      let raw;
+      try {
+        raw = await post("/v1/roles/set", body);
+      } catch (error48) {
+        if (error48 instanceof EnvoyApiError && error48.details.status === 409) {
+          const held = RoleHeldWireSchema.safeParse(JSON.parse(error48.details.responseBody));
+          if (held.success)
+            return { claimed: false, holder: held.data.holder };
+        }
+        throw error48;
+      }
+      return { claimed: true, interest: InterestWireSchema.parse(JSON.parse(raw)) };
+    },
+    getRole: async (role) => RoleWireSchema.parse(JSON.parse(await request(`/v1/roles/${encodeURIComponent(role)}`, { method: "GET" }))),
+    listSessions: async (input = {}) => {
+      const search = new URLSearchParams;
+      if (input.directory !== undefined)
+        search.set("dir", input.directory);
+      if (input.title !== undefined)
+        search.set("title", input.title);
+      const query = search.size === 0 ? "" : `?${search.toString()}`;
+      return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
+    }
+  };
+}
+function waitForRetry() {
+  const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
+  setTimeout(resolve2, RETRY_DELAY_MS);
+  return promise2;
+}
+function messageMetadata(input) {
+  return {
+    ...input.inReplyTo === undefined ? {} : { in_reply_to: input.inReplyTo },
+    ...input.supersedes === undefined ? {} : { supersedes: input.supersedes },
+    ...input.urgency === undefined ? {} : { urgency: input.urgency },
+    ...input.expectsReply === undefined ? {} : { expects_reply: input.expectsReply },
+    ...input.expiresAt === undefined ? {} : { expires_at: input.expiresAt }
+  };
+}
+function sourceSession(sessionID) {
+  return sessionID === undefined || sessionID === "" ? {} : { source_session: sessionID };
+}
 
 // ../envoy-client/src/dispatch-cli.ts
 var OK = 0;
@@ -19340,6 +19649,7 @@ var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's s
 function stateWriteFailed(problem) {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
+var SUBSCRIPTIONS_TIMEOUT_MS = 1500;
 function fitOutput(text, pictures, kept, limit, writeFull) {
   const whole = [text, ...pictures, ...kept].join(`
 `);
@@ -19438,6 +19748,28 @@ async function runDispatchCli(argv, rawEnv, io) {
     return USAGE;
   }
   const config2 = resolution;
+  let topics;
+  const readTopics = async () => {
+    try {
+      const envoy = sessionEnvoySettings(file2, env, { cwd: io.cwd, nats: false });
+      if (!envoy.enabled)
+        return null;
+      const listener = createEnvoyClient({
+        baseUrl: envoy.url,
+        fetch: io.fetchImpl ?? fetch,
+        token: envoy.token,
+        timeoutMs: SUBSCRIPTIONS_TIMEOUT_MS,
+        retry: false
+      });
+      return (await listener.getInterest(sessionId)).topics;
+    } catch (error48) {
+      return error48 instanceof EnvoyApiError && error48.details.status === 404 ? [] : null;
+    }
+  };
+  const subscriptions = () => {
+    topics ??= readTopics();
+    return topics;
+  };
   let follows;
   try {
     pruneSessions(sessionStateRoot(env), Date.now());
@@ -19463,7 +19795,8 @@ async function runDispatchCli(argv, rawEnv, io) {
       sessionTitle: env.DISPATCH_SESSION_TITLE ?? readSessionTitle(dir),
       config: config2,
       env,
-      ...io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl }
+      ...io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl },
+      subscriptions
     });
     text = result.text;
     for (const warning of result.warnings ?? []) {
@@ -19478,10 +19811,10 @@ async function runDispatchCli(argv, rawEnv, io) {
     } catch (error48) {
       problems.push(messageFor(error48));
     }
-    const notice = dispatchFollowNotice(result.details);
-    if (notice !== null && !follows.has(notice.ask)) {
-      follows.add(notice.ask);
-      notes.push(notice.text);
+    const followed = followedAsk(result.details);
+    if (followed !== null && !follows.has(followed.ask)) {
+      follows.add(followed.ask);
+      notes.push(followNoticeText(followed, await subscriptions()));
     }
     entry = { tool, details: result.details };
     code = OK;

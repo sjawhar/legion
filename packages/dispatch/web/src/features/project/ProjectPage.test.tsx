@@ -33,7 +33,8 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
     created_at: "2026-09-11T00:00:00Z",
     edited_at: null,
     id: "ask-1",
-    issue: { assignee: null, key: "CORE-1", title: "Fix the thing" },
+    // The pill counts the reader's own: `renderPage` signs in as `alice`.
+    issue: { assignee: "alice", key: "CORE-1", title: "Fix the thing" },
     issue_key: "CORE-1",
     kind: "question",
     multiple: false,

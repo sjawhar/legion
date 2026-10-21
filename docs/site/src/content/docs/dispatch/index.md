@@ -30,7 +30,7 @@ Dispatch sits beside Legion and the Secrets Broker.
 
 | Surface | What it is for |
 | --- | --- |
-| **Inbox** | Every open question (an *ask*), split by whose turn it is. Start here. |
+| **Inbox** | The open questions (an *ask* each) on your issues, split by whose turn it is; a filter widens it to anyone's. Start here. |
 | **Projects** | A project's issues as a List or a Board, its documents, and, when the project has one, its architecture. |
 | **Issue page** | One issue: its header, the Spec, the Conversation, its child issues, and its files. |
 | **Agents** | The agents connected right now. You can message one, or broadcast to many. |
@@ -39,8 +39,10 @@ Dispatch sits beside Legion and the Secrets Broker.
 | **Settings** | Projects, repository mappings, architecture sources, and the tokens your agents use. |
 
 The sidebar links the Inbox, Agents, your pinned issues, every project, and Settings. The Inbox
-entry shows **Needs you** with a count when asks or credential requests are waiting on you. The
-Agents entry shows a count when an agent has replied to you and you have not read it.
+entry shows **Needs you** with a count of the asks waiting on you — those on issues assigned to
+you — and the credential requests waiting on you; widening the Inbox's filter lists more asks
+without changing that count. The Agents entry shows a count when an agent has replied to you and
+you have not read it.
 
 ## Your first ten minutes
 

@@ -9,7 +9,7 @@ import {
 import { z } from "zod";
 import { renderInbound } from "../delivery";
 import { executeDispatchTool } from "../dispatch-execute";
-import { dispatchFollowNotice } from "../dispatch-subscribe";
+import { followedAsk, followNoticeText } from "../dispatch-subscribe";
 
 // Agents reach Dispatch through the `dispatch` command, so no text an agent reads may name one of
 // the native tools it replaced.
@@ -105,9 +105,11 @@ describe("no text an agent reads names a native Dispatch tool", () => {
       { issue: "DSP-1", follows: { ask: "ask-1" } },
       { document: "CORE/design-notes", follows: { ask: "ask-1" } },
     ]) {
-      const notice = dispatchFollowNotice(details);
-      expect(notice).not.toBeNull();
-      expect(notice?.text).not.toMatch(toolNames);
+      const followed = followedAsk(details);
+      expect(followed).not.toBeNull();
+      if (followed === null) continue;
+      // With no subscription the notice names its envoy_subscribe line too.
+      expect(followNoticeText(followed, [])).not.toMatch(toolNames);
     }
   });
 

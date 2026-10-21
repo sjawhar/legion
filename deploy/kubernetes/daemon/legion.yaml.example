@@ -66,14 +66,15 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
     storage_class: standard            # the issue volumes' class; required, the cluster has no default
-    issue_volume: 20Gi                 # each issue pod's own volume (and the daemon-launched controller's); 20Gi is the default
+    issue_volume: 50Gi                 # each issue pod's own volume (and the daemon-launched controller's); 50Gi is the default
     # resources:                       # each role's reservation: cpu and memory, the container's limits, each
     #   tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # requested in full unless cpu_request or
     #   reviewer: { memory: 6Gi }      # memory_request sets less (at most the limit): with none set every Legion
     #   implementer: { memory: 32Gi, memory_request: 8Gi }   # pod is Guaranteed, and a lower request makes every
     #   controller: { cpu: 2, memory: 8Gi }  # pod holding that role Burstable (docs/kubernetes.md, Issue sizing);
     #                                  # and ephemeral_storage, the container's limit on the node's disk (its root
-    #                                  # filesystem: $HOME, the state home, build caches) over ephemeral_storage_request,
+    #                                  # filesystem: $HOME, with the image's own content under it; the scratch and
+    #                                  # the caches are on issue_volume) over ephemeral_storage_request,
     #                                  # what the scheduler reserves of it (at most the limit). A field or role left
     #                                  # out takes the daemon's default: implementer, tester 750m and 6Gi; reviewer
     #                                  # 750m and 4Gi; architect, planner, merger 250m and 1Gi; controller 1 and 4Gi
@@ -99,6 +100,12 @@ runtime:
     #                                  # second line). Set it for a daemon built from an unreleased commit
     #                                  # (every Stage 4a/4b run), or to pin a different published pair than
     #                                  # this binary links.
+    # setup: [/bin/sh, -c, '{ omp plugin marketplace update acme-skills || omp plugin marketplace add acme/agent-skills; } && omp plugin install agent-skills@acme-skills --force']
+    #                                  # a command every role's container runs before each start of its
+    #                                  # Oh My Pi, in its working directory with the role's environment
+    #                                  # (its git answers github.com with the role's App token); Oh My Pi
+    #                                  # starts only once it exits 0, and a failure counts as a failed
+    #                                  # launch (docs/kubernetes.md, Configuration)
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml
       env:
         PI_CONFIG_FILES: /etc/legion-operator/overlay.yml

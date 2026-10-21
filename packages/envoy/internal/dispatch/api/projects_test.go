@@ -212,8 +212,8 @@ func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testi
 		"नमस्ते",
 		"น้ำ",
 		"\u1112\u1161\u11ab",
-		// A character newer than the Unicode tables Go ships (U+1FAE9, Unicode 16, sent by phones
-		// now): a reader's device draws it, so it is not "no visible character".
+		// A character from a recent Unicode release (U+1FAE9, Unicode 16, sent by phones now): a
+		// reader's device draws it, so it is not "no visible character".
 		"🫩",
 		"Team 🫩",
 	} {

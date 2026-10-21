@@ -146,12 +146,12 @@ var blankGlyphs = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0
 
 // visibleCharacter reports whether the character is one a reader sees: a letter, number,
 // punctuation or symbol (Unicode L, N, P, S) other than the blank fillers, or a code point Go's
-// Unicode tables leave unassigned (Cn), since a newer Unicode may have made it a character the
-// reader's device draws (U+1FAE9 is Unicode 16; Go 1.26's tables are Unicode 15.0). Two kinds of
-// unassigned code point are not visible: a noncharacter (U+FDD0-U+FDEF and each code point ending
-// in FFFE or FFFF), which Unicode's stability policy guarantees is never assigned, and a reserved
-// default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF), the ranges Unicode sets aside for
-// characters that render as nothing; that reservation is Unicode's allocation practice, not a
+// Unicode tables leave unassigned (Cn), since a Unicode release newer than those tables may have
+// made it a character the reader's device draws. Two kinds of unassigned code point are not
+// visible: a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF), which
+// Unicode's stability policy guarantees is never assigned, and a reserved default-ignorable
+// (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF), the ranges Unicode sets aside for characters that
+// render as nothing; that reservation is Unicode's allocation practice, not a
 // stability guarantee. The two property tables hold exactly those unassigned code points. A code
 // point a future Unicode assigns outside them as whitespace or a format character counts as visible
 // here until Go's tables learn it. Combining marks, format characters, private-use characters (Co)

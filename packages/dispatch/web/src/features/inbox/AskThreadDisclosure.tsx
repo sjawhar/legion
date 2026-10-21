@@ -15,6 +15,8 @@ interface AskThreadDisclosureProps {
   uploadOwner?: ArtifactOwner;
   /** The Replies page's mark for the ask, placed on its newest reply (`AskThread`). */
   markNewest?: DwellRef;
+  /** The reply a deep link named (`AskThread`); only the Conversation passes one. */
+  currentReplyId?: string;
 }
 
 export function AskThreadDisclosure({
@@ -24,6 +26,7 @@ export function AskThreadDisclosure({
   embedded = false,
   uploadOwner,
   markNewest,
+  currentReplyId,
 }: AskThreadDisclosureProps): ReactNode {
   const [composerOpen, setComposerOpen] = useState(false);
   const composerId = useId();
@@ -57,6 +60,7 @@ export function AskThreadDisclosure({
       {replyCount === 0 ? null : (
         <AskThread
           ask={ask}
+          currentReplyId={currentReplyId}
           embedded={embedded}
           markNewest={markNewest}
           showComposer={false}
