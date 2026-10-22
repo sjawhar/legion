@@ -232,7 +232,7 @@ func dashboardDNSName(host string) bool {
 		return false
 	}
 	// Lower-case only an ASCII host: strings.ToLower folds `İ` (U+0130) to `i` and the Kelvin sign
-	// (U+212A) to `k`, which would let a name through that the agents read as another host.
+	// (U+212A) to `k`, which would pass a non-ASCII name the agents may read as another host.
 	for _, r := range host {
 		if r > unicode.MaxASCII {
 			return false
