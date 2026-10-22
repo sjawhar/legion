@@ -230,9 +230,11 @@ const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go) holds one for as long as it waits for notifications,
-// which is the life of the process: a connection of the shared pool held that long would be one
-// fewer for every request, and a LISTEN on a pooled connection would end when the pool recycled it.
+// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
+// and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
+// they wait for notifications, which is the life of the process: a connection of the shared pool
+// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
+// end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -256,8 +258,8 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // delivery-events and delivery-jobs) - taken by eight callers, since each delivery intake takes
 // its own durable's name from a bind poll of its own, so eight callers can be inside Exclusive at
 // once. Eight connections are exactly those eight: the headroom is zero, not one, and the next
-// leased loop added here makes a ninth caller that waits for a connection rather than failing -
-// the wait a standby's two-second bind poll takes anyway. They cannot come from the shared pool:
+// leased loop added here makes a ninth caller that waits for a connection rather than failing,
+// for as long as the longest pass then holding one. They cannot come from the shared pool:
 // a lease is held for the whole pass, which is minutes for the compaction, and sharedPoolSize's
 // sixteen are what every request reads through.
 const leasePoolSize = 8

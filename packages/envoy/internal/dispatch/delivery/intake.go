@@ -553,6 +553,16 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 //
 // Its caller runs it under that durable's consumer lease (consumerLease), so one process at a
 // time is in here for one durable.
+//
+// PushBound is read twice, here and again immediately before the delete, and two reads still
+// leave a window of one round trip: a process whose own reconciliation was skipped -- the lease
+// was held, or its throttle refused the pass -- goes straight to the subscribe in
+// bindDurableConsumer without passing through here, so one that binds between the second read
+// and the delete has its durable deleted under it. No message is lost, since this pass creates
+// the replacement and binds it; what the loser loses is its standby, silently. Intake.Run stops
+// its bind poll as soon as it is bound ("Nothing rebinds a bound intake"), so that process
+// delivers nothing for the life of the process with "dispatch delivery: NATS consumer bound" as
+// its last word, and only its next restart clears it.
 func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.ConsumerConfig) bool {
 	name, subject := wanted.Durable, wanted.FilterSubject
 	info, err := js.ConsumerInfo(bus.Stream, name)
@@ -578,9 +588,23 @@ func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.Consumer
 		// than updated in place, and replaced at its own ack floor, so the replacement neither
 		// replays what the old durable acknowledged nor skips what it had not
 		// (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
+		//
+		// Re-read the durable immediately before the delete: the read above is two round trips
+		// back, and a process that skipped this reconciliation binds without taking the lease,
+		// so the durable can have been bound since. The ack floor comes from this read for the
+		// same reason -- it is the last thing the durable acknowledged before the delete.
+		bound, err := js.ConsumerInfo(bus.Stream, name)
+		switch {
+		case err != nil:
+			slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
+			return false
+		case bound.PushBound:
+			slog.Info("dispatch delivery: another process is bound to the NATS consumer; leaving its configuration alone", "name", name)
+			return true
+		}
 		recreate := wanted
 		recreate.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
-		recreate.OptStartSeq = info.AckFloor.Stream + 1
+		recreate.OptStartSeq = bound.AckFloor.Stream + 1
 		if err := js.DeleteConsumer(bus.Stream, name); err != nil {
 			slog.Error("dispatch delivery: replace multi-subject NATS consumer", "name", name, "error", err)
 			return false

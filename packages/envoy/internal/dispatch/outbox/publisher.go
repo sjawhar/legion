@@ -299,10 +299,9 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 			// row on as a failure backs it off like any other unpublishable event, which is
 			// what lets the events queued behind it be read at all; e.id is the first
 			// destination, so the row scanned that far before it failed. The rest of the
-			// batch is claimed (claimPendingEvents) and is never read here, so those
-			// events wait out claimWindow before any process reads them again - the same
-			// delay a process crashing mid-batch costs them, and the reason this row is
-			// backed off rather than left to poison every batch after it too.
+			// batch is claimed (claimPendingEvents) and is never read here, so its claim
+			// is cleared below instead of left to lapse, and this row is backed off
+			// rather than left to poison every batch after it too.
 			item.failure = fmt.Errorf("read event: %w", err)
 			item.failureLog = "dispatch outbox: read event"
 			unreadable = true
@@ -318,10 +317,53 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 		}
 		pending = append(pending, item)
 	}
+	// Closed before the statement below rather than at the return: a cursor still open holds
+	// one of the pool's connections, and a caller asking for a second is refused
+	// (store.ErrNestedAcquire). Close is idempotent, so the deferred one above still stands.
+	rows.Close()
 	if err := rows.Err(); err != nil && !unreadable {
 		return nil, false, fmt.Errorf("iterate unpublished events: %w", err)
 	}
+	// A row that fails to scan kills the cursor, so the claimed ids behind it are never read,
+	// never published and never backed off: without this they would sit out the whole
+	// claimWindow, a minute argued from how long a healthy batch of 100 takes (claimWindow),
+	// where before the claim existed the next scan tick re-selected them retryInterval later.
+	// Driven by the ids actually read, because scanBatch's loop reaches every item returned
+	// here: a row the batch reached and backed off keeps the backoff retryEvent wrote for it,
+	// and a row it published keeps its published_at. The paths above that return an error
+	// release nothing and leave the claim standing, as claimPendingEvents describes.
+	if len(pending) < len(claimed) {
+		releaseClaim(ctx, deps, unreachedIDs(claimed, pending))
+	}
 	return pending, unreadable, nil
+}
+
+// unreachedIDs returns the claimed ids missing from pending: those a cursor that died mid-scan
+// never produced, and so the ones no part of the batch touched.
+func unreachedIDs(claimed []int64, pending []pendingEvent) []int64 {
+	read := make(map[int64]struct{}, len(pending))
+	for _, item := range pending {
+		read[item.event.ID] = struct{}{}
+	}
+	unreached := make([]int64, 0, len(claimed)-len(pending))
+	for _, id := range claimed {
+		if _, ok := read[id]; !ok {
+			unreached = append(unreached, id)
+		}
+	}
+	return unreached
+}
+
+// releaseClaim clears the claim claimPendingEvents wrote on ids, so the next scan tick selects
+// them again. Guarded on published_at is null like every other terminal write here, so a row
+// another process published once the window lapsed keeps its mark. A failure is logged and
+// nothing more: those rows then wait the claim out, which is what they did before this existed.
+func releaseClaim(ctx context.Context, deps Deps, ids []int64) {
+	if _, err := deps.Store.Pool.Exec(ctx, `
+		update events set next_attempt_at = null where id = any($1) and published_at is null
+	`, ids); err != nil {
+		slog.Error("dispatch outbox: release unread claim", "event_ids", ids, "error", err)
+	}
 }
 
 func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {

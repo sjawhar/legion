@@ -65,7 +65,7 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 }
 
 // deliveryTestLeases is the lease pool an intake reconciles its durable under (duty.Exclusive on
-// deliveryConsumerLease), taken from the test's own pool. Each lease is held on a connection of
+// consumerLease(durable)), taken from the test's own pool. Each lease is held on a connection of
 // its own, so a test can hold the lease from one caller while an intake tries for it from
 // another.
 func deliveryTestLeases(t *testing.T, pool *store.Pool) duty.Leases {
