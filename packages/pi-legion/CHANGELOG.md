@@ -66,14 +66,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- **Breaking configuration change:** the daemon refuses, at load and under `--check-config`, a
-  host with any character outside ASCII in `advertise_host`, `bind`, an NFS volume's `server`,
-  the host of `daemon_url`, `envoy_url`, `dispatch_url`, each `nats_urls` entry and
-  `agent_secrets.url`, and a `runtime.kubernetes.pod.env` `DISPATCH_PUBLIC_URL`
-  (`<key> must be an IP address or an ASCII DNS name; got "…"`, the character printed as its `\u`
-  escape). Go's lower-casing turned `İ` (U+0130) into `i` and the Kelvin sign (U+212A) into `k`,
-  so such a host passed the check and then failed to resolve, or a full-width `ｌｏｃａｌｈｏｓｔ`
-  URL reached the pod itself. Write an internationalized name in its `xn--` form.
+- **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
+  under `--check-config`, a host with any character outside ASCII in `advertise_host`, `bind`, an
+  NFS volume's `server`, and the host of `daemon_url`, `envoy_url`, `dispatch_url`, each
+  `nats_urls` entry and `agent_secrets.url` (`<key> must be an IP address or an ASCII DNS name;
+  got "…"`, the character printed as a `\u` or `\U` escape). Go's lower-casing turned `İ` (U+0130)
+  into `i` and the Kelvin sign (U+212A) into `k`, so such a host passed the check and then failed
+  to resolve, and a full-width `ｌｏｃａｌｈｏｓｔ` URL reached the pod itself. Write an
+  internationalized name there in its `xn--` form. A `runtime.kubernetes.pod.env`
+  `DISPATCH_PUBLIC_URL` with such a host is refused by its existing rule, whose message now prints
+  the value with escapes; that rule refuses an `xn--` label too, so its host must be plain ASCII.
 
 - The reviewer's pair rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) are the
   one copy of these skills: the operator's dotfiles copies are gone. Each is shorter, and each

@@ -198,10 +198,10 @@ func legionClaim(claim string) bool {
 // the URL standard's parser the agents' dispatch command reads the value with (envoy-client's
 // dispatchSettings), so boot accepts only values the agents accept, and refuses some they would
 // take (userinfo, a trailing dot, IPv4 shorthand, an internationalized name). It is http or https
-// with no userinfo; a plain host, which is a DNS name of ASCII letters, digits and hyphens (no label
-// empty, longer than 63 or starting `xn--`, and a last label neither all digits nor `0x`, which
-// the agents read as an IPv4 address), a four-octet dotted IPv4 address, or a bracketed IPv6
-// address with no zone; and, when it names one, a port from 1 to 65535.
+// with no userinfo; a plain host, which is a DNS name of ASCII letters, digits and hyphens (no
+// label empty, longer than 63 or starting `xn--`, and a last label neither all digits nor `0x`,
+// which the agents read as an IPv4 address), a four-octet dotted IPv4 address, or a bracketed
+// IPv6 address with no zone; and, when it names one, a port from 1 to 65535.
 func dashboardURL(value string) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Opaque != "" || parsed.User != nil {

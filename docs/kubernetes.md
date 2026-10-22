@@ -3297,11 +3297,11 @@ issue's pod (every role container of it alike) and the image probe's.
   `https://dispatch.example.org`: every link an agent's `dispatch` command prints, which agents
   repeat in Slack replies, pull requests and comments, then points there, and a pasted dashboard
   link on either address resolves. Load refuses, naming it, a value that is not an http or https
-  URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens (no `xn--` label,
-  no trailing dot, a last label that is not a number), a dotted-quad IPv4 address or a bracketed
-  IPv6 address, and any port from 1 to 65535: a rule narrower than the agents' URL parser, so a
-  value load accepts never turns Dispatch off in an agent. The controller's `slack_post` refuses a
-  reply linking an address inside the cluster.
+  URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens (no `xn--`
+  label, no trailing dot, a last label that is not a number), a dotted-quad IPv4 address or a
+  bracketed IPv6 address, and any port from 1 to 65535: a rule narrower than the agents' URL
+  parser, so a value load accepts never turns Dispatch off in an agent. The controller's
+  `slack_post` refuses a reply linking an address inside the cluster.
   Like every `pod.env` variable, it reaches an agent with the start command of its next generation,
   so set it in the same restart that installs this release, which relaunches the controller once.
   To hand a later change to a running agent, start its next generation with `legion claims suspend`
