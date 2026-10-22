@@ -111,3 +111,41 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 		t.Fatalf("neither runner skipped:\n%s", logs.Lines("lease="))
 	}
 }
+
+// One runner, nothing else on the database: every tick must make a pass. The lease is free at
+// each of them and no other process has served the period, so a skip here is an interval of this
+// loop's work that no pass of any process did - the loop running slower than it is configured to,
+// with one process, which is what this deployment runs today.
+//
+// It is the loop's own shape that is at stake. Every leased loop ticks on the interval it passes
+// as its period (RunSuggestionOutcomeSweep, redeliver.Sweeper.Run, duty.RunJittered's callers),
+// so the period and the gap between two ticks are the same span, and the record of a pass is
+// stamped a moment after the tick that made it - the time it takes to take the lease. A tick
+// whose own moment is shorter than the previous one's then falls inside the period that pass
+// recorded and is dropped. Ten ticks are driven because one skip is what this is about and a
+// shorter window could miss it.
+func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	database := storetest.Open(t)
+	leases := sweepLeases(t, database)
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	const tick = time.Second
+	const ticks = 10
+	done := make(chan struct{})
+	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, database.Pool, tick, leases) }()
+	time.Sleep(tick*ticks + tick/2)
+	stop()
+	<-done
+
+	ran := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease)
+	skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease)
+	t.Logf("one runner, %d ticks of %v: ran %d, skipped %d", ticks, tick, ran, skipped)
+	if skipped != 0 {
+		t.Errorf("a lone runner skipped %d of its %d ticks; no other process swept, so each of those intervals went unswept:\n%s",
+			skipped, ran+skipped, logs.Lines("lease="))
+	}
+}
