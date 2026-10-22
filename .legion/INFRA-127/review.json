@@ -2,46 +2,78 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-127",
-  "completed": "2026-10-22T20:28:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-22T21:50:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
-  "keyFindings": [
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "round": 2,
+  "approvedHead": "pushed with this handoff; the review names it by SHA",
+  "roundOneFindingsClosed": [
     {
-      "severity": "important",
-      "file": "packages/envoy/infra/core/allowed_hosts_agreement_test.go",
-      "description": "The mirror's guard asserts a property the code does not have. core.CheckAllowedHosts applies the shape rule to the entry as written (core/listener_env.go:87-99); the listener's parseAllowedHosts trims the entry and skips an empty one first (packages/envoy/internal/config/config.go:86-101), so core refuses a padded or empty entry the listener accepts. The test's doc comment (':30-33', \"every entry either side refuses, the other refuses\") and its assertion (require.Equal(t, loadErr != nil, checkErr != nil), ':60-61') state the two-way property, and the table was curated past the one row of the listener's own accept case that would fail it (internal/config/config_test.go:12, \" Hub.Internal.Example. , ,192.0.2.7,[2001:db8::1]\"). docs/nats-hub.md's refusal bullet (\"The listener refuses the same entry in its own ENVOY_ALLOWED_HOSTS when it boots\") and the PR body's Change bullet (\"refused in exactly the cases the listener refuses one at boot\") carry the same false claim to the operator. The direction is fail-safe (0 entries core accepts and the listener refuses, measured by the tester over 23,630 entries and by the deep-review pair over 400,000), so no behaviour changes: what must change is the assertion, which becomes one-way (the listener refuses => core refuses) with explicit padded and empty rows pinning the extra strictness, and the two sentences. Requested by the architect for this round."
+      "finding": "The agreement test asserted a two-way rule the code does not have, and its table was curated past the listener's own padded-and-empty accept case.",
+      "closedBy": "f255cf2006f0a40dc9ec3b1da4b2da99b7e36c1b",
+      "howVerified": "Read the test at 07950b09: coreOnlyRefusedAllowedHosts holds \" hub.internal.example \" and \"\", each row names which side refuses it, and the doc comment states the one-way rule with its reason. Re-derived the direction independently: the two rule bodies are identical but for the listener's TrimSpace/skip-empty step (internal/config/config.go:97-100), and hostEntry matches no string holding a space and no empty string, so core's accept set is a strict subset of the listener's by construction. The tester's mutation run fails exactly those two rows when CheckAllowedHosts is made to trim and skip."
     },
     {
-      "severity": "important",
-      "file": "pull request #2108 body",
-      "description": "No '## Contract change census'. The pull request adds a refusal at the plugin's input boundary — a hub with a listener and no tailnetDnsName is refused while Pulumi previews it (gcp/natshub.go:335-338) — and a new per-entry refusal on listener.allowedHosts (gcp/natshub.go:339), so every existing stack that builds a gcp:NatsHub with a listener fails preview until it is edited. The census's searches at the head: `grep -rn 'NatsHub' --include=*.go --include=*.ts --include=*.yaml --include=*.md .` and `grep -rn 'gcp:NatsHub' --include=*.md --include=*.yaml .` find no in-tree instantiation beyond the docs example (docs/nats-hub.md:642, updated in this diff), the schema test (provider/provider_test.go:95-115, updated) and prose; the one real consumer is out of tree (theorem-labs/agent-infra, which already holds the tailnet name and is tracked by dispatch://INFRA-120). The rollout is an immediate refusal, not warn-first, and it closes a configuration that silently takes every tailnet session off messaging. All of that is true and already scattered through the body and the spec; it must be stated as the census section, each hit with its disposition and the rollout line."
+      "finding": "docs/nats-hub.md's refusal bullet and the PR body's Change bullet carried the same two-way claim.",
+      "closedBy": "f255cf2006f0a40dc9ec3b1da4b2da99b7e36c1b",
+      "howVerified": "Both now state the one-way rule and name the comma-joined docker run argument as the reason for the extra strictness; the listener's own parseAllowedHosts comment (internal/config/config.go:86-93) now names the plugin's copy and the agreement test, so a reader meeting either rule finds the other."
     },
     {
-      "severity": "minor",
-      "file": "packages/envoy/infra/docs/nats-hub.md",
-      "description": "The whole served set now derives from one unverified operator string: core.TailnetHostName(args.Hostname, args.TailnetDnsName) (gcp/natshub.go:346), checked only for shape (gcp/natshub.go:226, tailnetDNSNameRule). A value that matches the rule but is not this tailnet's name, or a MagicDNS collision that hands the node <h>-1, renders a hub that previews, applies and stays healthy — the MIG's autohealing check is NATS 8222 (gcp/natshub.go:651-657) and nothing in this repository dials 9020 on the hub — while answering 421 to every client. 'Updating a hub' should name the post-replacement check (read the listener's `listener API hosts:` boot line, or dial <h>.<tailnetDnsName>:9020 on a /v1 route and require 200). Not a gate."
+      "finding": "No '## Contract change census' although the change adds a refusal at the plugin's published input boundary.",
+      "closedBy": "the pull request body at 07950b09",
+      "howVerified": "Re-ran both search commands at the head and compared: every hit falls in a class the census lists with a disposition (the gcp tests including export_test.go and dispatch_test.go, provider/provider_test.go and the registration at provider/provider.go:31, core/hub_host_live_test.go's comment, the README/AGENTS/docs-site prose, the docs/plans records, and the one YAML instantiation at docs/nats-hub.md:651, which gained tailnetDnsName in this diff). No in-tree program constructs a hub outside tests. The rollout line is an immediate refusal naming what it closes — 421 to every tailnet session once the image moves — as the rule requires. The tester drove both refusals through Construct and read the served schema, which is the boundary the census is about."
     },
     {
-      "severity": "minor",
-      "file": "pull request #2108 body",
-      "description": "The E2E (implementer) line's closing clause, 'No Legion worker machine has a container runtime, so this proof runs in CI and nowhere else', is no longer true: the tester ran the same listener against a real nats-server v2.15.1 installed from the Go proxy in its pod (test.json, observationsForTheReviewer[0]). The run itself and its negative control stand; only the clause needs narrowing to 'testcontainers needs a container runtime no worker machine has, so this run is CI's'. No in-tree text makes the claim (`grep -rn 'container runtime' packages/envoy/infra .github` finds none)."
+      "finding": "The 'Updating a hub' section named no post-replacement check, so a shaped-but-wrong tailnetDnsName left a healthy group whose listener answers 421 to everyone (raised to blocking by the architect).",
+      "closedBy": "07950b0953d96235620c25c70d5e3cae76588776",
+      "howVerified": "docs/nats-hub.md:510-520 names the listener's `listener API hosts:` boot line and a /v1 200 from a tailnet device as alternatives, and says why the replacement proves neither (the autohealing check reads NATS on 8222, gcp/natshub.go:34,653; the only 9020 exposure is Serve's raw TCPForward). The tester's rendered-hub run logs exactly that prefix (packages/envoy/cmd/listener/main.go:509)."
     },
     {
-      "severity": "minor",
-      "file": "packages/envoy/infra/core/listener_env.go",
-      "description": "Fast-follow, not a gate: the allowed-host rule in core (:49-77,:87-99) is a verbatim copy of the listener's (internal/config/config.go:74-80,86-101,103-121), kept out of an import because the plugin's release is cut from `go list -deps ./cmd/...`. internal/bus is already in that dependency set and already imported here for bus.HoldsSeed, and internal/bus/socks5.go:22-30 is the precedent for a rule both the listener and the plugin's resolver read, so one home would delete the copy and both guard tests. That is a cross-package move of released listener code, too wide for this P1 change; it belongs in the next envoy-infra change beside the gcp/dispatch.go TailnetHostName joins the body already names."
+      "finding": "The E2E (implementer) clause 'this proof runs in CI and nowhere else' was false after the tester ran the same listener in a pod.",
+      "closedBy": "the pull request body at 07950b09",
+      "howVerified": "The clause now attributes the CI-only constraint to testcontainers and records that a NATS-backed proof itself needs no container runtime."
+    },
+    {
+      "finding": "The Fast-follow line deferred two cleanup items into a merged body, where nobody reads them (the architect's ruling).",
+      "closedBy": "07950b0953d96235620c25c70d5e3cae76588776 and the body's '## Decisions recorded in the diff'",
+      "howVerified": "Fast-follow now reads 'none'. The three hand-written MagicDNS joins are migrated (gcp/dispatch.go:372,431, gcp/dispatch_kube.go:420 call core.TailnetHostName; the function is pure concatenation, so every substitution is byte-identical, and the Dispatch goldens are unchanged while the tester drove three hostname/tailnet pairs, two held by no golden). The mirror's deferral is recorded with its reason in the body and as a comment on each side of the copy."
+    }
+  ],
+  "adjudicated": [
+    {
+      "raisedBy": "thermonuclear-code-quality at 5faaaf2a",
+      "claim": "Move the allowed-host rule to one home in internal/bus; the release-cut cost applies only to internal/config.",
+      "disposition": "Not a finding in this pull request. The architect ruled the move deferred, and the body records it with a scope-and-timing reason that does not rest on the release-cut argument — it already states that both the listener and the plugin depend on internal/bus. The copy is held by the agreement test and by a comment on each side."
+    },
+    {
+      "raisedBy": "thermonuclear-code-quality at 5faaaf2a",
+      "claim": "The tailnetDnsName refusal is duplicated between gcp/natshub.go:226-227 and gcp/dispatch.go:224-225.",
+      "disposition": "Not a finding. Both callers are in package gcp and share the one rule variable, so the only duplication is a two-line refusal whose identical wording is a feature; no drift the copy could hide exists."
+    },
+    {
+      "raisedBy": "thermonuclear-code-quality at 5faaaf2a",
+      "claim": "tailnetDnsName is optional in the schema but required in practice; move it to HubListenerArgs.",
+      "disposition": "Not a finding. The approved spec's own decision block settled the refusal's shape, and the tester read the served schema at the boundary: tailnetDnsName a plain string outside gcp:NatsHub's required set, allowedHosts an array outside gcp:HubListener's."
+    },
+    {
+      "raisedBy": "thermonuclear-deep-review at 5faaaf2a",
+      "claim": "Two hardening items: the hub's listener still takes no bearer, and listener.allowedHosts entries are shape-checked but never scoped to names the operator controls.",
+      "disposition": "Hardening, Minor, neither a regression of this change. Both recorded in the pull request body's 'Not proven / risk' so they travel with the change rather than with the review."
     }
   ],
   "ciRead": {
-    "codeHead": "8293cec5eb577e1658afcd16e7a9dcdc5bfc0938",
+    "codeHead": "07950b0953d96235620c25c70d5e3cae76588776",
     "requiredOnMain": ["lint", "typecheck", "test", "pr-title"],
-    "observed": "Every required check present, completed and success at 8293cec5 (22 check-runs: 13 success, 9 skipped, 0 failed; envoy-infra-go success and read by name, since main's ruleset does not require it). gh api compare 8293cec5...b6d3aa6c is 'ahead' and every file under .legion/, so these are the checks that stand for the code reviewed. Branch protection on main carries no required_status_checks of its own."
+    "observed": "All four required checks completed and success at 07950b09 (31 check-runs, 0 failed; envoy-infra-go, envoy-go, envoy-go-race, envoy-smoke, envoy-e2e-local, dispatch-memory, build, changes also success, the rest skipped). gh api compare 07950b09...5faaaf2a is 'ahead' with only .legion/INFRA-127/implement.json and test.json changed, so these are the checks that stand for the code reviewed. Branch protection on main declares no required_status_checks of its own."
   },
   "threads": {
-    "openedByReviewer": 3,
-    "botThreads": 0,
-    "note": "No review thread existed on #2108 before this round (gh api graphql reviewThreads: 0 nodes, reviews: none). The three inline comments of this round are the first."
+    "opened": 3,
+    "answeredByImplementer": 3,
+    "resolved": 3,
+    "reviewerReplies": [4353776468, 4353776702, 4353776943],
+    "botThreads": 0
   }
 }
