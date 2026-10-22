@@ -3515,12 +3515,16 @@ Kubernetes-runtime source alone; under tmux the panes read whatever the host has
 
 Every issue pod mounts the share at once, and Legion pins no pod to a node, so the claim must be
 `ReadWriteMany`: a `ReadWriteOnce` disk attaches to one node, and pods on any other fail to attach
-it (`Multi-Attach error`), and a `ReadWriteOncePod` claim holds every pod after the first
-Unschedulable. A `ReadOnlyMany` persistent disk is not supported either: GKE requires `readOnly` on
-the claim's volume source too, which the loader does not set.
+it (`Multi-Attach error`), and a `ReadWriteOncePod` claim another pod holds refuses the boot in the
+image probe. A `ReadOnlyMany` claim attaches when every mount of it is read-only, since the loader
+then sets `readOnly` on the claim's volume source too.
 
 The mount is read-only unless its `volume_mounts` entry says `read_only: false`; the source itself
-takes no `read_only`. On GKE Autopilot both sources are among the volume types it admits
+takes no `read_only`. A share no mount writes is read-only at its source as well: the loader sets
+`readOnly` on the claim's or the NFS volume's source, so the node mounts the export `-o ro` and the
+kubelet changes no ownership on it. A writable claim whose CSI driver's `fsGroupPolicy` is `File`
+has the group of every file on it set to the pods' `fsGroup` (1000) at each mount, as the kubelet
+does for any such volume; the built-in `nfs` source and a PersistentVolume of it never do. On GKE Autopilot both sources are among the volume types it admits
 (`persistentVolumeClaim` and `nfs`, [Autopilot security](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-security)),
 and a gVisor pod mounts both: the node mounts the share and gVisor's gofer serves it to the sandbox.
 An inline `csi` volume is not offered because a CSI driver runs outside gVisor's isolation with
@@ -3535,15 +3539,19 @@ scheme, port or path, and the export a clean absolute path; the claim a Kubernet
 the pods cannot mount refuses the boot in the image probe, naming the volume and the share: a claim
 the scheduler cannot find, is deleting or has lost its volume (`persistentvolumeclaim "<name>" not
 found`, `… is being deleted`, `… bound to non-existent persistentvolume …`, at once, never counted as
-a capacity wait), a mount the node ran and that failed and is still failing (`… : mount failed: …`,
-a server that never answers or has no such export, or a CSI driver's final `… : rpc error: code = …`;
-the codes the kubelet's CSI client retries itself, `Aborted`, `DeadlineExceeded`, `Unavailable`,
-`ResourceExhausted` and `Canceled`, are left to the attempt's budget, as is a failure the kubelet's
-next try cleared, which the pod's image pull after it shows), and a share mounted but unreadable,
+a capacity wait), a mount the node ran and that failed (`… : mount failed: …`, a server that never
+answers or has no such export, or a CSI driver's `… : rpc error: code = …`), refused at the first
+read of the pod's events after it, and a share mounted but unreadable,
 which gVisor reports as the container's failed start (`reading mounts file: …`). With two or more
 claims in the block, a claim's failure names its PersistentVolume and every claim it may be bound
-to, since the daemon reads no claim to tell which. A claim
-that exists but is not bound yet is waited on within the attempt. The daemon needs no right on
+to, since the daemon reads no claim to tell which. A CSI failure whose gRPC code says the operation
+may still be under way (`Aborted`, `DeadlineExceeded`, `Unavailable`, `ResourceExhausted`,
+`Canceled`, the codes the kubelet's CSI client does not treat as final) is left to the attempt's
+budget while the kubelet retries it, as is a failure the image pull after it shows a later try
+cleared; the kubelet retries every failed mount with backoff, so a refused NFS mount the network
+would have answered a minute later restarts the daemon, whose Deployment boots it again. A claim
+that exists but is not bound yet is waited on within the attempt, and a `ReadWriteOncePod` claim
+another pod holds is refused at once. The daemon needs no right on
 PersistentVolumeClaims for any of this: the pod names the claim and the kubelet mounts it. An `nfs`
 volume is not among the Pod Security "restricted" profile's volume types, which GKE Autopilot's
 own policy extends with it: a namespace that enforces `restricted` (`pod-security.kubernetes.io/enforce`)

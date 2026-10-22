@@ -97,8 +97,8 @@ cluster and the image:
     and its NFS version. With two or more claims the refusal reads `… cannot mount PersistentVolume
     "<pv>", bound to one of the claims runtime.kubernetes.pod.volumes gives volumes <a>, <b> from …`:
     `kubectl get pv <pv> -o jsonpath='{.spec.claimRef.name}'` names the claim. A CSI driver's
-    `Aborted`, `DeadlineExceeded`, `Unavailable`, `ResourceExhausted` or `Canceled` is retried, never
-    refused; a claim must be `ReadWriteMany`, since every issue pod mounts it from its own node;
+    `Aborted`, `DeadlineExceeded`, `Unavailable`, `ResourceExhausted` or `Canceled` is left to the probe's
+    budget while the kubelet retries it; a claim must be `ReadWriteMany`, since every issue pod mounts it from its own node;
   - the image names another NATS user than the daemon's seed: put the agents' seed in the providers
     Secret's `NATS_NKEY_SEED` key;
   - `capability <name> is missing: <detail>` in the quoted log: the image lacks a tool the capability

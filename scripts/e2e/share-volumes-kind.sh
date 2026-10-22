@@ -286,7 +286,7 @@ begin probe-mounts-shares
 # verdict is the image's: the run's agents have no model route, so the image refuses on its
 # agents' models, and that refusal, never a `cannot mount`, is the evidence that the probe
 # passed every share.
-probe shares 'worker image ' 'failed its probe: pod '
+probe shares 'worker image ' 'failed its probe: pod ' ' Failed (container probe terminated'
 [[ $probed != *"cannot mount"* && $probed != *"over its mounts"* ]] || fail "probe-boot refused the mountable shares: $(tail -3 <<<"$probed")"
 note "shares: probe-boot exit 1 on the image's own verdict, no share refused: $(grep -m1 -o 'failed its probe: pod [^ ]* [A-Za-z]*' <<<"$probed")"
 pass
