@@ -62,7 +62,7 @@ requires a bearer checks no `Host`.
 | `/v1/roles/set` | POST | Claim a role for a live session and register its role topic |
 | `/v1/registry/{session_id}` | GET | Get a session's registry entry (port, machine) |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message |
-| `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics use core NATS, while JetStream acknowledgement for every other topic is bounded to five seconds. |
+| `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics and ad-hoc topics (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) use core NATS and reach the sessions subscribed at that moment; JetStream acknowledgement for every topic the stream captures is bounded to five seconds. |
 | `/healthz` | GET | Health check (always available, even during startup) |
 
 ## Subscription visibility

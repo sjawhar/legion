@@ -660,9 +660,21 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	}
 }
 
+// usesCoreTransport reports whether topic travels over core NATS rather than JetStream: a role lane
+// or its exception lane, which the stream must never retain, and any other notification topic none
+// of the stream's subjects captures (an ad-hoc topic such as notifications.team.deploy-squad, or the
+// exception lane of one). JetStream answers a publish to a subject no stream captures only with "no
+// responders", and not at all while a core subscriber holds the subject, since that subscriber is
+// handed the acknowledgement request: the publish would wait out its whole deadline for an
+// acknowledgement that never comes, after the subscribers had already received the message. A
+// subject outside NotificationTopicPrefix keeps JetStream, as before. The capture is judged on the
+// subjects this binary compiles in, not the deployed stream's: a topic under a subject only a newer
+// build adds (which reconciliation keeps) goes over core NATS from an older one, so the stream
+// still stores it but without a MsgId, and the older listener's durable never fans it out.
 func usesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, contracts.RoleTopicPrefix) ||
-		strings.HasPrefix(topic, ExceptionTopicPrefix+contracts.RoleTopicPrefix)
+		strings.HasPrefix(topic, ExceptionTopicPrefix+contracts.RoleTopicPrefix) ||
+		(strings.HasPrefix(topic, NotificationTopicPrefix) && !streamCaptures(topic))
 }
 
 // ErrRefused is returned for an envelope that is refused the same way however often it is
@@ -739,10 +751,10 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
-// Publish routes role lanes and their delivery-exception lanes through core
-// NATS; every other notification retains JetStream durability. Its signature is
-// an interface method in cistore, outbox and webhook, so a caller that wants
-// JetStream's duplicate verdict calls PublishReportingDuplicate instead.
+// Publish routes role lanes, their delivery-exception lanes and every topic the stream does not
+// capture through core NATS (usesCoreTransport); every notification the stream captures retains
+// JetStream durability. Its signature is an interface method in cistore, outbox and webhook, so a
+// caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead.
 func (c *Client) Publish(item contracts.Envelope) error {
 	_, err := c.PublishReportingDuplicate(item)
 	return err

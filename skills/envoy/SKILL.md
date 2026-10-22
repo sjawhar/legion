@@ -133,10 +133,23 @@ top-level sessions are running). Then your messages carry no sender either, so s
 in the message body. An empty address is deliberate — being handed an unrelated live session
 would send your peers to an agent that never spawned you.
 
-Your own `envoy_publish` never reaches the agent that spawned you. The listener delivers nothing
-to the session a message names as its source, and inside a subagent that source is your parent,
-so a publish to a role it holds — or to any topic it subscribes to — is accepted and delivered to
-nobody. Use a `write` to its `agent://` address for that one hop. `envoy_send` to any other
+Whether a publish reaches a session turns on where that session takes its deliveries, not on
+whether the topic is a built-in one or your own. A session that holds its own NATS connection —
+every Oh My Pi session, and a Claude Code one — receives every message published on a subject it
+subscribes to, whoever the source: its own publish, and a subagent's publish to a topic the
+session that spawned you subscribes to, included. The listener skips its push to such a session
+entirely, so the push path's skip of the source session never decides anything for it, and a
+topic the stream retains and a team topic that travels live (below) behave alike here. The
+session whose own publish does not come back is one the listener delivers to by push, one
+registered with a serve port such as the OpenCode plugin; such a session receives no team topic
+at all, since it holds no NATS subscription of its own.
+
+A role lane is the case that needs the `agent://` hop, because a role is not a subject its holder
+subscribes to: the listener resolves the live holder and forwards the message to it, and drops
+the message when that holder is the session the message names as its source. Inside a `task`
+subagent that source is the session that spawned you, so a publish to a role your parent holds is
+accepted, answers with that holder, and reaches nobody — `envoy_publish` says so in its answer.
+Use a `write` to the parent's `agent://` address for that one hop. `envoy_send` to any other
 session, including a reply, is unaffected.
 
 ### Delivery capabilities
@@ -179,6 +192,16 @@ relying on a wakeup. A topic that spells a repository name with its dot, followe
 a warning naming the spelling Envoy publishes (`acme.site_io` for `acme/site.io`); subscribe to
 that one instead. A token after the repository that is not a GitHub topic kind (`checks` in
 `acme.widgets.checks.>`) draws a warning naming the kinds.
+
+## Team topics
+
+Any `notifications.` topic that no built-in source owns is yours to name: a group of sessions
+subscribes to `notifications.team.deploy-squad.>`, and any of them publishes there with
+`envoy_publish(topic="notifications.team.deploy-squad.all", message=...)`. Such a topic travels
+live, as a role does: it reaches the sessions subscribed when it is published, the publisher
+itself included when it subscribes, it is not retained, and a session that subscribes later does
+not receive earlier messages. A topic outside `notifications.` is refused. Use a role for one
+owner, and `envoy_send` for one session.
 
 ## Roles
 
