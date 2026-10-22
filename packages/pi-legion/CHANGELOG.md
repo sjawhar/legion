@@ -66,6 +66,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
+  under `--check-config`, a host with any character outside ASCII in `advertise_host`, `bind`, an
+  NFS volume's `server`, and the host of `daemon_url`, `envoy_url`, `dispatch_url`, each
+  `nats_urls` entry and `agent_secrets.url` (`<key> must be an IP address or an ASCII DNS name;
+  got "…"`, the character printed as a `\u` or `\U` escape). Go's lower-casing turned `İ` (U+0130)
+  into `i` and the Kelvin sign (U+212A) into `k`, so such a host passed the check and then failed
+  to resolve. Nothing checked for ASCII either, and a pod's HTTP client maps a full-width
+  `ｌｏｃａｌｈｏｓｔ` to localhost, so such a URL reached the pod itself. Write an
+  internationalized name there in its `xn--` form. A `runtime.kubernetes.pod.env`
+  `DISPATCH_PUBLIC_URL` host must be plain ASCII as well: its rule lower-cased `İ` and the Kelvin
+  sign into ASCII and let them through, and now refuses them, as it already refused every other
+  non-ASCII name and an `xn--` label; its message prints the value with escapes.
+
 - The reviewer's pair rubrics (`thermonuclear-deep-review`, `thermonuclear-code-quality`) are the
   one copy of these skills: the operator's dotfiles copies are gone. Each is shorter, and each
   report now starts with `Verdict: APPROVE at <sha>` or `Verdict: CHANGES at <sha>`, which a PR

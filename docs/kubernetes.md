@@ -1436,13 +1436,16 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 Code (`worker_backends.<role> is claude, which runs only under runtime: tmux`). Every
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
-worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
+worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise. `bind`
+and the host of each of those URLs and of `agent_secrets.url` must be ASCII. This is a breaking
+configuration change for a file that names a host in Unicode; write it in its `xn--` form.
 `envoy_url` and each `nats_urls` entry are endpoints, not request URLs: they refuse a query string
 or fragment. This is a breaking configuration change for a file that has either; put credentials in
 URL userinfo or in a Secret, never in a query.
-`advertise_host` is an IP address or a DNS name, the host alone, and only `runtime: kubernetes`
-accepts it. A pod's own IP changes on every restart, so a daemon running inside the cluster binds
-`0.0.0.0` and lets `advertise_host` name the Service DNS name that reaches whichever pod is live.
+`advertise_host` is an IP address or an ASCII DNS name, the host alone, and only
+`runtime: kubernetes` accepts it. A pod's own IP changes on every restart, so a daemon running
+inside the cluster binds `0.0.0.0` and lets `advertise_host` name the Service DNS name that
+reaches whichever pod is live.
 Pods dial it at the port the worker stream listens on, so the Service exposes `worker_stream_port`
 as that same port number. A daemon on a fixed host (a devbox or a VM) leaves `advertise_host` unset
 and binds that host's own address, which pods then dial. A loopback `bind` is refused either way: a
@@ -3295,11 +3298,11 @@ issue's pod (every role container of it alike) and the image probe's.
   `https://dispatch.example.org`: every link an agent's `dispatch` command prints, which agents
   repeat in Slack replies, pull requests and comments, then points there, and a pasted dashboard
   link on either address resolves. Load refuses, naming it, a value that is not an http or https
-  URL with no userinfo, a host that is a DNS name of letters, digits and hyphens (no `xn--` label,
-  no trailing dot, a last label that is not a number), a dotted-quad IPv4 address or a bracketed
-  IPv6 address, and any port from 1 to 65535: a rule narrower than the agents' URL parser, so a
-  value load accepts never turns Dispatch off in an agent. The controller's `slack_post` refuses a
-  reply linking an address inside the cluster.
+  URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens (no `xn--`
+  label, no trailing dot, a last label that is not a number), a dotted-quad IPv4 address or a
+  bracketed IPv6 address, and any port from 1 to 65535: a rule narrower than the agents' URL
+  parser, so a value load accepts never turns Dispatch off in an agent. The controller's
+  `slack_post` refuses a reply linking an address inside the cluster.
   Like every `pod.env` variable, it reaches an agent with the start command of its next generation,
   so set it in the same restart that installs this release, which relaunches the controller once.
   To hand a later change to a running agent, start its next generation with `legion claims suspend`
@@ -3333,9 +3336,10 @@ issue's pod (every role container of it alike) and the image probe's.
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address), and `token_file` (required, absolute) is where the daemon's own pod mounts its projected
-  ServiceAccount token for the broker's audience, `agent-secrets`, with an `expirationSeconds` of
-  at most 3600: the broker refuses a token that lives longer than an hour from its issue
+  address; an ASCII host), and `token_file` (required, absolute) is where the daemon's own pod
+  mounts its projected ServiceAccount token for the broker's audience, `agent-secrets`, with an
+  `expirationSeconds` of at most 3600: the broker refuses a token that lives longer than an hour
+  from its issue
   (`TOKEN_TOO_LONG_LIVED`). The daemon logs in with that token at boot, on a background context,
   and again halfway through each credential's life and whenever the broker refuses it, reading the
   file each time so it presents the kubelet's current token; no person approves any of it, a
@@ -3534,7 +3538,7 @@ mounted through a claim the operator made, whose driver the cluster's administra
 `host_path` is refused too: Autopilot refuses a host path, and one would hand the agent the node's
 files. A claim named as Legion's own
 claims are (`issue-legion-…`, `cache-legion-…`, and `tree-legion-…` of the earlier layout) is refused at load, since every pod would then mount
-an issue's workspace or a repository cache. The server must be an IP address or a DNS name with no
+an issue's workspace or a repository cache. The server must be an IP address or an ASCII DNS name with no
 scheme, port or path, and neither the node's loopback nor an unspecified address, and the export a clean absolute path; the claim a Kubernetes name, named by
 one volume only (the kubelet mounts a claim's volume once per pod, so two volumes of one claim
 would let one's `read_only` decide the other's; mount the one volume at each path instead). A share

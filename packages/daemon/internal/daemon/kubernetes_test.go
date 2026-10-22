@@ -700,7 +700,7 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			change: func(cfg *config.Config) {
 				cfg.Runtime.Kubernetes.Pod = config.PodConfig{Env: map[string]string{"DISPATCH_PUBLIC_URL": "dispatch.example.org"}}
 			},
-			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`,
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
