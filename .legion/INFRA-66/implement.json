@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-66",
-  "completed": "2026-10-21T22:20:00Z",
+  "completed": "2026-10-22T02:30:00Z",
   "proof": [
+    {
+      "criterion": "Acceptance 1, the clause the tester failed: a leased background loop runs once overall - once per period across the processes, not once per process - including when the second process's ticker is out of phase with the first's, which is what a rolling update makes.",
+      "surface": "Two real envoy-dispatch binaries on one Postgres 17 and one nats-server 2.10 in this issue's pod, the second started only after the first had finished a webhook-redelivery pass and given the lease back, with the loopback GitHub counting the App webhook's delivery listings.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 30m -run 'TestALeasedLoopRunsOnceAcrossAStaggeredStart|TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses' ./cmd/dispatch",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 81.312s. The tester's red row passes unmodified: the webhook-redelivery pass ran once across the two processes, the second reported the skip, and the two processes listed the webhook's deliveries exactly as many times as the first alone had - the double listing the tester measured is gone. The forced-overlap row beside it still passes, so mutual exclusion and once-per-period are each pinned by their own test.",
+      "headSha": "fe0c2f1c2a6317e1e6e4b0dbc7e0c3f0eca61b0e",
+      "negativeControl": "The GitHub listing count is the control, measured from outside the server: a second pass that ran would list the deliveries again, which is the N-times-for-one-result cost the lease exists to avoid, and that is exactly what the same row observed before this change. In the duty package, TestExclusiveWithoutAPeriodRunsWheneverTheLeaseIsFree is the control in the other direction - a period of zero still runs every time the lease is free, which is what the delivery consumers' reconciliation needs."
+    },
     {
       "criterion": "Two envoy-dispatch processes against one database and one message bus: no durable bind error, and the standby takes the durable over when its holder dies.",
       "surface": "Two real envoy-dispatch binaries on one Postgres 17 (pgvector, UTF8/ICU) and one nats-server 2.10 with JetStream, in this issue's pod; driven over HTTP, the processes' own logs and NATS's own ConsumerInfo.",
@@ -89,6 +97,7 @@
     "A cold write (one whose fork came from the store, with no room) is deliberately outside the gate: its update commutes with whatever landed since its read, and gating it broke TestABrowserOpeningADocumentMidColdWriteKeepsBothEdits, a case the code already handled."
   ],
   "deviations": [
+    "Round 2, after the tester's failure: the plan's section 1 said the design would add no new table. It now adds one, duty_passes (migration 0115), because the architect decided the property stays once per period and the mechanism changes: a lease that is taken and given back excludes concurrent passes alone, and two processes' tickers are out of phase, so each ran the whole pass. The record is what makes a pass another process already made count, and the elapsed-time comparison is made in the database because two processes' wall clocks differ. Leadership was the alternative and was not taken: it brings a hand-over to design and drive, where this costs one period when a holder dies.",
     "The plan's section 9.1 allowed the proof to be a CI run id, since no Docker and no Postgres existed in this pod. That fallback was not needed: the harness above was built instead, so every row of the proof is a local run of two real processes, and the reader-facing half is a real browser.",
     "The plan put the migrations README inside internal/dispatch/store/migrations/. It is at internal/dispatch/store/README.md instead, because pgmigrate.Load refuses a migration set holding a file that is not <version>_<name>.{up,down,census}.sql, so a README there would refuse every boot. The file says so in its first paragraph.",
     "The multiprocess test takes its NATS from DISPATCH_TEST_NATS_URL when that is set and from testnats.Start (a container) otherwise, so it runs both in this pod and in CI. storetest's own DISPATCH_TEST_DATABASE_URL is the precedent.",
