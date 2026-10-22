@@ -71,8 +71,8 @@ architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 
 For a Google Cloud deployment, use `envoy-infra:gcp:Dispatch` from
 `packages/envoy/infra`. It supplies the private Cloud SQL connection, the tailnet entry point,
-and the pod environment this binary needs; see that component's README for its inputs and required
-Workload Identity grant.
+and the pod environment this binary needs; see that component's README for its inputs, the IAM
+grant it writes and the one the consumer writes.
 
 ## Webhook redelivery
 

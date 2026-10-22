@@ -139,7 +139,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount. |
-| Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone. |
+| Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
 | Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. |
 
 ### Inputs
@@ -180,12 +180,18 @@ creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig
 running Pulumi needs `gke-gcloud-auth-plugin`.
 
 The generated `principal` output is the Kubernetes service account's Workload Identity principal,
+`principal://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/<project id>.svc.id.goog/subject/ns/<namespace>/sa/<hostname>`,
 built from the cluster's own Workload Identity pool, so it resolves only once the cluster that
-creates the pool exists. Before the first apply, the consumer grants that principal
-`roles/cloudsql.client` at project scope; a grant built from the `principal` output waits for the
-cluster, so it never names a pool that does not exist yet. The component itself grants that
-principal `roles/secretmanager.secretAccessor` only on the NATS seed secret. The three Deployments
-share that one Kubernetes service account, whose Role is limited to the Tailscale state Secret.
+creates the pool exists. The app's Cloud SQL Auth Proxy needs `roles/cloudsql.client` on the
+project for that principal, which the component does not write, since writing a project IAM
+member needs `resourcemanager.projects.setIamPolicy`: the consumer grants it before the first
+apply, from a program whose identity holds that permission. The component itself grants that
+principal `roles/secretmanager.secretAccessor` only on the NATS seed secret, and the app and the
+listener, which mount the seed, wait for that grant to be written. IAM can take minutes to apply
+a new binding (Google cites typically two, sometimes seven or more), and a pod restarts until it
+can mount. The three Deployments share that one Kubernetes service account, whose Role lets it
+read and update the Tailscale state Secret and create Secrets in its namespace, since Tailscale
+creates its state Secret on first start.
 
 ### The pods
 
