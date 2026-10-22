@@ -2,12 +2,15 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -34,7 +37,28 @@ type staleRoomNote struct {
 // decided rather than guessing how long that takes. It stops with the test.
 func runStaleRoomEvictor(t *testing.T, service *Service) <-chan staleRoomNote {
 	t.Helper()
-	evictor := newStaleRoomEvictor(service)
+	return runStaleRoomEvictorListening(t, newStaleRoomEvictor(service))
+}
+
+// runStaleRoomEvictorListening is runStaleRoomEvictor for a test that builds the evictor itself,
+// to set the clock its interval is measured on or its listener's waits.
+func runStaleRoomEvictorListening(t *testing.T, evictor *staleRoomEvictor) <-chan staleRoomNote {
+	t.Helper()
+	notes, connected := startStaleRoomEvictor(t, evictor)
+	select {
+	case <-connected:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the stale-room evictor never listened")
+	}
+	return notes
+}
+
+// startStaleRoomEvictor runs evictor until the test ends and reports what it does: notes, one per
+// notification it decided, and connected, one per LISTEN that stood and the sweep that follows it
+// (staleRoomEvictor.connected). It waits for neither, because a test whose dial is down at the
+// start has to write before any LISTEN stands.
+func startStaleRoomEvictor(t *testing.T, evictor *staleRoomEvictor) (<-chan staleRoomNote, <-chan struct{}) {
+	t.Helper()
 	listening := make(chan struct{}, 4)
 	notes := make(chan staleRoomNote, 64)
 	evictor.listening = func() {
@@ -64,12 +88,7 @@ func runStaleRoomEvictor(t *testing.T, service *Service) <-chan staleRoomNote {
 			t.Error("the stale-room evictor did not return within 10s of its context ending")
 		}
 	})
-	select {
-	case <-listening:
-	case <-time.After(roomWait(t)):
-		t.Fatal("the stale-room evictor never listened")
-	}
-	return notes
+	return notes, listening
 }
 
 // waitStaleRoomNote is the evictor's decision on the next notification for artifactID, ignoring
@@ -85,6 +104,27 @@ func waitStaleRoomNote(t *testing.T, notes <-chan staleRoomNote, artifactID, whe
 			}
 		case <-deadline:
 			t.Fatalf("%s: the evictor heard nothing for %s", when, artifactID)
+		}
+	}
+}
+
+// requireNoStaleRoomNote fails unless the evictor decides no notification for artifactID. The two
+// rows that use it are about a room nothing notifies for again, and a notification decided for it
+// would be a second explanation for the eviction each of them waits on. A notification already on
+// its way is milliseconds behind the write that sent it - that round trip is what
+// TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip measures - so a tenth of a
+// second is past it.
+func requireNoStaleRoomNote(t *testing.T, notes <-chan staleRoomNote, artifactID, when string) {
+	t.Helper()
+	deadline := time.After(100 * time.Millisecond)
+	for {
+		select {
+		case note := <-notes:
+			if note.room == artifactID {
+				t.Fatalf("%s: the evictor decided a notification for %s (evicted=%t)", when, artifactID, note.evicted)
+			}
+		case <-deadline:
+			return
 		}
 	}
 }
@@ -261,6 +301,107 @@ func TestANotificationRefusedByTheIntervalTakesNoDocumentLock(t *testing.T) {
 	now = now.Add(staleRoomEvictInterval)
 	if !evictor.documentChanged(ctx, pair.artifactID) {
 		t.Fatalf("the room was not evicted %s after its eviction, so what refused the notification above was not the interval", staleRoomEvictInterval)
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// The last write of a burst converges with no further notification. Every notification inside the
+// interval's window is refused, the burst's last one among them, and a document nobody writes
+// again notifies nobody again: what closes the room is the refusal itself, re-examined on the
+// listener's own goroutine once the window ends (wakeIn, woke). Left there, that room holds text
+// the store replaced for as long as it stays resident, which for a room with a tab in it is for
+// as long as the tab is open - roomIdleTimeout is time since the last peer left. The evictor runs
+// through its real run loop here, so the wake path is what drives this and not a call of the
+// test's own, and the interval is measured on the evictor's clock, which this test holds still
+// over the burst and then moves past the window.
+func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	clock := &atomic.Int64{}
+	clock.Store(time.Now().UnixNano())
+	evictor.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	// Past every wait this test makes, so the wake and never the idle ping is what ends the
+	// listener's wait here.
+	evictor.listenIdle = time.Minute
+	notes := runStaleRoomEvictorListening(t, evictor)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+
+	// The burst's first write, which evicts: it is the eviction the interval refuses the write
+	// below by.
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 2, bob, appendBlocks(t, "Bob types once.\n"))
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the burst's first write"); !note.evicted {
+		t.Fatal("the first write on the other process evicted nothing, so the interval holds no eviction to refuse the burst's last write by")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+
+	// Task A's room again, held resident by the load: no peer of its own is in it, and nothing on
+	// this process writes it, so for roomIdleTimeout the only thing that can close it is the
+	// evictor.
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room again: %v", err)
+	}
+
+	// The burst's last write: inside the window, so the interval refuses it, and nothing writes
+	// this document again.
+	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 3, bob, appendBlocks(t, "Bob types again.\n"))
+	waitForLandedAppends(t, pair.taskB, pair.artifactID)
+	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the burst's last write"); note.evicted {
+		t.Fatalf("the write inside the %s window evicted the room again, under readers the eviction before it had not finished re-syncing", staleRoomEvictInterval)
+	}
+	if !roomBehind(t, pair.taskA, pair.artifactID) {
+		t.Fatal("task A's room stands at the head after the burst's last write, so nothing here is tested")
+	}
+
+	clock.Add(int64(staleRoomEvictInterval))
+	// Well inside roomIdleTimeout: a room this test waited that long for would be one that left
+	// because nothing was in it, which is not the closure this row is about.
+	waitFor(t, min(roomWait(t), roomIdleTimeout/2), fmt.Sprintf(
+		"the room the interval refused for %s to be evicted when that window ended, with nothing to notify this process again",
+		staleRoomEvictInterval), func() bool {
+		return pair.taskA.srv.GetDoc(pair.artifactID) == nil
+	})
+	requireNoStaleRoomNote(t, notes, pair.artifactID, "after the window ended")
+}
+
+// A notification sent while the listener has no connection converges on its reconnect. That
+// notification reaches nobody and nothing sends it again, and a redial backs off as far as thirty
+// seconds (pglisten.RedialBackoff), so a room the other process wrote under in that window would
+// hold its reader's stale text until something wrote the document again. What catches it up is
+// the sweep over the rooms this process has loaded that runs after each LISTEN stands
+// (staleRoomEvictor.connected), which is why the wait below is on the reconnect and not on a
+// notification.
+func TestARoomLeftBehindWhileTheListenerWasDownIsEvictedOnTheReconnect(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	var down atomic.Bool
+	down.Store(true)
+	dial := pair.database.Pool.Listener
+	evictor.dial = func(ctx context.Context) (*pgx.Conn, error) {
+		if down.Load() {
+			return nil, errors.New("the stale-room listener has no connection")
+		}
+		return dial(ctx)
+	}
+	evictor.backoff = func(int) time.Duration { return 5 * time.Millisecond }
+	notes, connected := startStaleRoomEvictor(t, evictor)
+
+	// Committed on the other process while the evictor has no connection: its notification
+	// reaches nobody, and task A's room is left behind the head by it.
+	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob writes while the listener is redialing.\n")
+	requireNoStaleRoomNote(t, notes, pair.artifactID, "while the listener had no connection")
+	if pair.taskA.srv.GetDoc(pair.artifactID) == nil {
+		t.Fatal("task A's room left before the listener reconnected, so the reconnect proves nothing")
+	}
+
+	down.Store(false)
+	select {
+	case <-connected:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the stale-room evictor never reconnected")
 	}
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }

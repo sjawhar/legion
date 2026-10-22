@@ -559,3 +559,58 @@ func TestTheListenerBacksOffFromOneSecondToThirtyWithJitter(t *testing.T) {
 		t.Fatalf("RedialBackoff(1) returned %v every time, want jitter", waits)
 	}
 }
+
+// A caller whose wake is sooner than its idle wait is woken then, on the listener's own
+// goroutine, and a wait the wake ended is not pinged: the ping is for a connection that has been
+// idle for ListenIdle, which such a wait was not. That caller is the document rooms' evictor,
+// whose work has to stay on this goroutine (docs/stale_room.go). A notification that arrives
+// first is still reported.
+func TestTheListenerWakesItsCallerBeforeItsIdleWait(t *testing.T) {
+	database := storetest.Open(t)
+	probe := newListenerProbe()
+	listener := probe.listener(database.Pool.Listener)
+	// An idle wait far longer than the wake and than this test's own waits: what ends each wait
+	// below can only be the wake, or the notification at the end.
+	listener.ListenIdle, listener.PingTimeout = 10*time.Second, time.Second
+	const wake = 100 * time.Millisecond
+	wakes := make(chan time.Time, 16)
+	listener.NextWake = func() time.Duration { return wake }
+	listener.OnWake = func() {
+		select {
+		case wakes <- time.Now():
+		default:
+		}
+	}
+	runListener(t, probe, listener)
+	probe.waitConnected(t, 5*time.Second, "first connection")
+	pid := probe.lastConn(t).PgConn().PID()
+
+	started := time.Now()
+	for round := range 3 {
+		select {
+		case <-wakes:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("wake %d did not come within 5s of a %v wake", round+1, wake)
+		}
+	}
+	if waited := time.Since(started); waited < 3*wake {
+		t.Fatalf("three %v wakes came in %v, so the listener is not waiting the wake out", wake, waited)
+	} else if waited >= listener.ListenIdle {
+		t.Fatalf("three %v wakes took %v, as long as the idle wait (%v): the wake is not what ends these waits", wake, waited, listener.ListenIdle)
+	}
+	if dials := probe.dials.Load(); dials != 1 {
+		t.Fatalf("dials over three wakes = %d, want 1", dials)
+	}
+	var query string
+	if err := database.Pool.QueryRow(context.Background(), `select query from pg_stat_activity where pid = $1`, int(pid)).Scan(&query); err != nil {
+		t.Fatalf("read the listener's backend: %v", err)
+	}
+	if query == "-- ping" {
+		t.Fatal("the listener pinged for a wait its caller's wake ended, not one its connection had been idle through")
+	}
+
+	notifyChannel(t, database, "dispatch_events", "woken")
+	if note := probe.waitNote(t, 5*time.Second, "a notification inside a wake's wait"); note != (listenerNote{channel: "dispatch_events", payload: "woken"}) {
+		t.Fatalf("notification inside a wake's wait = %+v, want dispatch_events with payload woken", note)
+	}
+}

@@ -32,8 +32,9 @@ const (
 )
 
 // Listener holds one LISTEN connection of its own (LEGION-690): it dials, listens on Channels,
-// reports each notification, pings the connection when it is idle, and redials on any error. Run
-// is the whole of it, and nothing is opened until it is called.
+// reports each notification, pings the connection when it is idle, wakes a caller that asked to
+// be woken, and redials on any error. Run is the whole of it, and nothing is opened until it is
+// called.
 type Listener struct {
 	// Dial opens the connection the listener hijacks for itself: a caller passes
 	// store.Pool.Listener, a test a proxy's dial.
@@ -53,6 +54,18 @@ type Listener struct {
 	OnNotify func(channel, payload string)
 	// Backoff is the wait before the attempt-th redial in a row; nil is RedialBackoff.
 	Backoff func(attempt int) time.Duration
+	// NextWake and OnWake are a clock for a caller whose own work has to run on this listener's
+	// goroutine: the evictor of stale document rooms decides everything inside OnNotify, so it
+	// cannot put the work it defers on a time.AfterFunc, which would run it on a goroutine of its
+	// own, beside a notification being decided. NextWake is asked, each time round the wait loop,
+	// how long until that caller next wants waking; zero - or a nil field - is never. When that is
+	// sooner than ListenIdle the wait ends there and OnWake is called on this goroutine instead of
+	// the idle ping, which is for a connection that has been idle for ListenIdle and so says
+	// nothing about one that has not. A notification that arrives first is reported as any other
+	// is, and the wake is asked again on the next round. A caller that leaves both nil - the
+	// delivery hub and the event stream relay - waits exactly as it did before.
+	NextWake func() time.Duration
+	OnWake   func()
 }
 
 // Run blocks until ctx ends, then closes its connection and returns. Each time a connection
@@ -104,9 +117,10 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 		l.OnConnected()
 	}
 	for {
-		waitCtx, cancel := context.WithTimeout(ctx, l.idle())
+		wait, waking := l.waitFor()
+		waitCtx, cancel := context.WithTimeout(ctx, wait)
 		notification, err := conn.WaitForNotification(waitCtx)
-		idle := errors.Is(waitCtx.Err(), context.DeadlineExceeded)
+		reached := errors.Is(waitCtx.Err(), context.DeadlineExceeded)
 		cancel()
 		if notification != nil {
 			l.OnNotify(notification.Channel, notification.Payload)
@@ -117,8 +131,14 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 		if ctx.Err() != nil {
 			return true, ctx.Err()
 		}
-		if !idle {
+		if !reached {
 			return true, fmt.Errorf("wait for a notification: %w", err)
+		}
+		if waking {
+			// The caller's wake, not ListenIdle: this connection has been waiting for as long as
+			// the caller asked for and no longer, so there is nothing for the ping to find.
+			l.OnWake()
+			continue
 		}
 		// pgx keeps the connection open when a wait ends at its deadline, so the same connection
 		// answers the ping; one that has gone half-open fails it at pingTimeout.
@@ -156,6 +176,21 @@ func (l *Listener) idle() time.Duration {
 		return DefaultListenIdle
 	}
 	return l.ListenIdle
+}
+
+// waitFor is how long the next wait for a notification runs, and whether its deadline is the
+// caller's wake rather than the idle period: the sooner of the two, so a caller is woken on time
+// however long ListenIdle is, and the ping stays with the wait that really was idle for all of it.
+func (l *Listener) waitFor() (time.Duration, bool) {
+	idle := l.idle()
+	if l.NextWake == nil {
+		return idle, false
+	}
+	wake := l.NextWake()
+	if wake <= 0 || wake >= idle {
+		return idle, false
+	}
+	return wake, true
 }
 
 func (l *Listener) pingWait() time.Duration {

@@ -56,8 +56,10 @@ func notifyDocumentChanged(ctx context.Context, tx pgx.Tx, room string) error {
 // editing elsewhere would never be readable here at all. Two seconds is the service's own idea of
 // "the writing has paused" - the settle delay New defaults to - and it is far past the round trip
 // an eviction asks of a browser (a close, a reconnect, a sync). What it costs is a room left
-// behind by the writes inside the window: it is evicted by the first notification after the
-// window, or leaves at roomIdleTimeout, and meanwhile every durable write from it is refused
+// behind by the writes inside the window, and it costs it only until that window ends: the room
+// is remembered as the interval refuses it and re-examined then (woke), whether or not anything
+// writes the document again - the last notification of a burst is one of the refused ones, and
+// nothing else comes back for it. Meanwhile every durable write from that room is refused
 // (ErrRoomBehindHead), so what a reader of it sees is stale, never written over the document.
 const staleRoomEvictInterval = 2 * time.Second
 
@@ -88,10 +90,10 @@ type staleRoomEvictor struct {
 	backoff                 func(attempt int) time.Duration
 	// now is the clock the interval is measured on, the service's; a test moves its own.
 	now func() time.Time
-	// listening runs after each LISTEN succeeds, and handled after each notification is decided.
-	// Nil outside tests: a test waits on listening before the write whose notification it
-	// expects, since a notification sent before the LISTEN reaches nobody, and reads handled to
-	// know that notification was decided, and how.
+	// listening runs after each LISTEN succeeds and the sweep that follows it (connected), and
+	// handled after each notification is decided. Nil outside tests: a test waits on listening
+	// before the write whose notification it expects, since a notification sent before the LISTEN
+	// reaches nobody, and reads handled to know that notification was decided, and how.
 	listening func()
 	handled   func(artifactID string, evicted bool)
 
@@ -100,14 +102,20 @@ type staleRoomEvictor struct {
 	// interval: every record drops the entries past it, so this is at most the rooms evicted in
 	// the last staleRoomEvictInterval.
 	evicted map[string]time.Time
+	// deferred is when each room the interval refused may be re-examined - that room's last
+	// eviction plus staleRoomEvictInterval - holding only the rooms refused since the last wake:
+	// the wake takes out every room whose window has passed (dueRooms), and a room is put back
+	// only by a refusal of its own.
+	deferred map[string]time.Time
 }
 
 func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
 	return &staleRoomEvictor{
-		service: service,
-		dial:    service.store.Pool.Listener,
-		now:     service.now,
-		evicted: map[string]time.Time{},
+		service:  service,
+		dial:     service.store.Pool.Listener,
+		now:      service.now,
+		evicted:  map[string]time.Time{},
+		deferred: map[string]time.Time{},
 	}
 }
 
@@ -118,10 +126,14 @@ func (s *Service) RunStaleRoomEviction(ctx context.Context) {
 	newStaleRoomEvictor(s).run(ctx)
 }
 
-// run listens until ctx ends. Nothing catches up the notifications sent while it had no
-// connection: a room left behind by one of them is refused every durable write (ErrRoomBehindHead,
-// which is what keeps those writes correct) and leaves at roomIdleTimeout, so the window costs a
-// stale reader and nothing else - the same position Dispatch was in before this listener existed.
+// run listens until ctx ends, and covers the listener's own two windows here rather than leaving
+// the room behind to its idle timeout: roomIdleTimeout is how long a room stays resident after
+// its last peer leaves, so a room with a browser in it never reaches it, and the reader of a room
+// left behind would hold text the store replaced for as long as that tab stayed open. The
+// notifications sent while the listener had no connection reach nobody and are never sent again,
+// so every room this process has loaded is re-examined after each LISTEN succeeds (connected);
+// and a notification the interval refused is re-examined when that room's window ends, on this
+// same goroutine, through the wait's deadline (wakeIn, woke).
 func (e *staleRoomEvictor) run(ctx context.Context) {
 	ctx = store.WithTransactionTracking(ctx)
 	listener := &pglisten.Listener{
@@ -130,10 +142,52 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 		ListenIdle:  e.listenIdle,
 		PingTimeout: e.pingTimeout,
 		Backoff:     e.backoff,
-		OnConnected: e.listening,
+		OnConnected: e.connected(ctx),
 		OnNotify:    e.notified(ctx),
+		NextWake:    e.wakeIn,
+		OnWake:      e.woke(ctx),
 	}
 	listener.Run(ctx)
+}
+
+// connected is the listener's OnConnected: every room this process has loaded, re-examined after
+// each LISTEN stands. It is what covers the notifications sent while the listener had no
+// connection - a redial backs off as far as thirty seconds (pglisten.RedialBackoff) - because
+// each of those reached nobody, nothing sends them again, and a document nobody writes again
+// notifies nobody again. service.roomLoads is every room this process has loaded, each entry
+// dropped when its document is collected (keepInstance), and documentChanged drops a room that is
+// no longer resident, so an entry whose room has gone costs one map lookup.
+//
+// The test hook runs after the sweep, so a test that waits on it waits for the sweep too.
+func (e *staleRoomEvictor) connected(ctx context.Context) func() {
+	return func() {
+		e.service.roomLoads.Range(func(room, _ any) bool {
+			e.documentChanged(ctx, room.(string))
+			return true
+		})
+		if e.listening != nil {
+			e.listening()
+		}
+	}
+}
+
+// woke is the listener's OnWake: the rooms the interval refused, re-examined on the listener's
+// own goroutine once their windows have passed. Nothing else would re-examine them - every
+// notification inside the window is refused, the last of a burst is one of those, and a document
+// nobody writes again notifies nobody again - so without this the refusal is a notification
+// dropped.
+//
+// This is inside the interval's rule, not around it: the rule is the least time between two
+// evictions of one room (staleRoomEvictInterval), and a room re-examined here has waited out
+// exactly that window. It then goes through the whole decision again - GetDoc, the cursor, the
+// in-flight write, the unlocked read and the locked confirmation - so a room that is no longer
+// behind, no longer resident or no longer this process's evicts nothing and simply leaves the set.
+func (e *staleRoomEvictor) woke(ctx context.Context) func() {
+	return func() {
+		for _, room := range e.dueRooms() {
+			e.documentChanged(ctx, room)
+		}
+	}
 }
 
 // notified is the listener's OnNotify: each notification's artifact id, decided on the
@@ -258,15 +312,60 @@ func (s *Service) roomBehindDurableHead(ctx context.Context, room string, cursor
 	return cursor.heldThrough(), head, nil
 }
 
-// mayEvict is the interval's check: it reports whether artifactID may be evicted now, and records
-// nothing. One map lookup, which is what lets documentChanged ask it before it reads the database
-// at all.
+// mayEvict is the interval's check: it reports whether artifactID may be evicted now, and defers
+// the room it refuses - the room and the moment its window ends - so that refusal is a wait
+// rather than a notification dropped (wakeIn, woke). One map lookup for a room it lets through,
+// which is what lets documentChanged ask it before it reads the database at all; a room it
+// refuses pays one store beside that, and that room is one no eviction can follow anyway.
 func (e *staleRoomEvictor) mayEvict(artifactID string) bool {
 	now := e.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	last, evicted := e.evicted[artifactID]
-	return !evicted || now.Sub(last) >= staleRoomEvictInterval
+	if !evicted || now.Sub(last) >= staleRoomEvictInterval {
+		return true
+	}
+	e.deferred[artifactID] = last.Add(staleRoomEvictInterval)
+	return false
+}
+
+// wakeIn is the listener's NextWake: how long until the earliest room the interval refused may be
+// re-examined, and zero - never, so the listener waits out its idle period - while it has refused
+// none. The scan is of the rooms refused since the last wake, at most the rooms resident here, on
+// a loop that already spends a round trip per round.
+func (e *staleRoomEvictor) wakeIn() time.Duration {
+	now := e.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var earliest time.Time
+	for _, at := range e.deferred {
+		if earliest.IsZero() || at.Before(earliest) {
+			earliest = at
+		}
+	}
+	if earliest.IsZero() {
+		return 0
+	}
+	// A window that has already passed - one room's re-examination can outlast another's window -
+	// asks for the shortest wait there is, rather than the zero that would read as "never".
+	return max(earliest.Sub(now), time.Nanosecond)
+}
+
+// dueRooms takes the rooms whose window has passed out of the deferred set, for the wake to
+// re-examine. Taking them out here is what drains the set: documentChanged puts a room back only
+// through a refusal of its own, which carries a window of its own.
+func (e *staleRoomEvictor) dueRooms() []string {
+	now := e.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var due []string
+	for room, at := range e.deferred {
+		if !now.Before(at) {
+			due = append(due, room)
+			delete(e.deferred, room)
+		}
+	}
+	return due
 }
 
 // recordEviction stamps artifactID's eviction, and drops every room whose last eviction is past
@@ -289,4 +388,8 @@ func (e *staleRoomEvictor) recordEviction(artifactID string) {
 		}
 	}
 	e.evicted[artifactID] = now
+	// The eviction is the re-examination a deferred window for this room was waiting for, so that
+	// window is spent: a write that leaves the reloaded room behind again notifies again, and the
+	// refusal that would follow defers a window of its own.
+	delete(e.deferred, artifactID)
 }
