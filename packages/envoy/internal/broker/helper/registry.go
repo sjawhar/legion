@@ -182,6 +182,9 @@ type Registry struct {
 	byPID  map[int]*Session
 	// parent reads a process's parent for the ancestry walks: procParent, or a test's fake.
 	parent func(int) (int, error)
+	// draining is set by Drain on a registry with no sessions and never cleared: the helper is
+	// about to be restarted, and a session registered now would lose its grants to the restart.
+	draining bool
 }
 
 func NewRegistry(path string) *Registry {
@@ -253,17 +256,44 @@ func (r *Registry) RootOrUnknown(pid int) (*Session, error) {
 
 // addRootIfAbsent inserts sess as pid's session only if pid still has none, atomically with the
 // check — the race register() alone cannot close: two simultaneous registrations for one
-// unregistered pid must not both win. Returns the winning session and whether sess itself won.
-func (r *Registry) addRootIfAbsent(pid int, sess *Session) (*Session, bool) {
+// unregistered pid must not both win. Returns the winning session and whether sess itself won;
+// on a draining registry it inserts nothing and returns draining true.
+func (r *Registry) addRootIfAbsent(pid int, sess *Session) (winner *Session, won, draining bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.draining {
+		return nil, false, true
+	}
 	for _, s := range r.byPID {
 		if in, _ := descendsFrom(pid, s.PID, r.parent); in {
-			return s, false
+			return s, false, false
 		}
 	}
 	r.byPID[sess.PID] = sess
-	return sess, true
+	return sess, true, false
+}
+
+// Drain returns the live sessions and, only when there are none, marks the registry draining,
+// atomically with the check, so no session can register between an empty answer and the
+// restart it licenses.
+func (r *Registry) Drain() []*Session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*Session, 0, len(r.byPID))
+	for _, s := range r.byPID {
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		r.draining = true
+	}
+	return out
+}
+
+// Draining reports whether Drain has marked the registry draining.
+func (r *Registry) Draining() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.draining
 }
 
 // Save writes every session's record, atomically, 0600.

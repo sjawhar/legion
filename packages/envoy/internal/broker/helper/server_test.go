@@ -144,6 +144,44 @@ func (r *rig) call(t *testing.T, req Request) Response {
 	return resp
 }
 
+// TestDrainRefusesARegisterThatArrivesAfterIt: a drain that finds no sessions leaves a helper
+// that refuses every later register and enroll-session-key, so none can lose its grants to the
+// restart drain licensed.
+func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
+	r := startRig(t, "")
+	if d := r.call(t, Request{Op: "drain"}); !d.OK || len(d.Sessions) != 0 {
+		t.Fatalf("drain: %+v", d)
+	}
+	for _, op := range []string{"register", "enroll-session-key", "enroll-box"} {
+		resp := r.call(t, Request{Op: op, RuntimeID: "rt", Thumbprint: "tp"})
+		if resp.OK || resp.Code != CodeDraining || resp.Error != "the helper is restarting; retry" {
+			t.Fatalf("%s after drain: %+v", op, resp)
+		}
+	}
+	if s := r.call(t, Request{Op: "sessions"}); len(s.Sessions) != 0 {
+		t.Fatalf("a session registered after drain: %+v", s)
+	}
+}
+
+// TestDrainWithSessionsSetsNothing: a drain that finds sessions answers them and leaves the
+// helper taking registrations.
+func TestDrainWithSessionsSetsNothing(t *testing.T) {
+	r := startRig(t, "")
+	if resp := r.call(t, Request{Op: "register"}); !resp.OK && resp.Code != CodeNoCredential {
+		t.Fatalf("register: %+v", resp)
+	}
+	d := r.call(t, Request{Op: "drain"})
+	if !d.OK || len(d.Sessions) != 1 {
+		t.Fatalf("drain: %+v", d)
+	}
+	if r.srv.Registry.Draining() {
+		t.Fatal("drain with a session marked the helper draining")
+	}
+	if resp := r.call(t, Request{Op: "register"}); resp.Code == CodeDraining {
+		t.Fatalf("register after a drain with sessions: %+v", resp)
+	}
+}
+
 func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 	r := startRig(t, "")
 	resp := r.call(t, Request{Op: "register", WaitSeconds: 5})

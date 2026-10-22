@@ -116,6 +116,11 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	case "sessions":
 		peer.Close()
 		resp = s.sessions()
+	case "drain":
+		// drain is `agent-secrets-helper install`'s restart guard: the sessions, and with none,
+		// a helper that refuses every later register until it exits.
+		peer.Close()
+		resp = s.drain()
 	case "login":
 		// login, login-status, enroll-session-key and unenroll-session-key are pass-through broker
 		// calls, not registry-session ops: a key the helper does not hold is not a registry session
@@ -127,6 +132,10 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		resp = s.loginStatus()
 	case "enroll-session-key":
 		peer.Close()
+		if s.Registry.Draining() {
+			resp = drainingResponse
+			break
+		}
 		resp = s.enrollSessionKey(ctx, req.RuntimeID, req.Thumbprint, req.SessionID)
 	case "unenroll-session-key":
 		peer.Close()
@@ -172,7 +181,11 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 		peer.Close()
 		return Response{Code: CodeKeygen, Error: err.Error()}
 	}
-	existing, won := s.Registry.addRootIfAbsent(pid, sess)
+	existing, won, draining := s.Registry.addRootIfAbsent(pid, sess)
+	if draining {
+		peer.Close()
+		return drainingResponse
+	}
 	if peer.PID() != pid {
 		if won {
 			s.Registry.Remove(sess)
@@ -412,6 +425,22 @@ func (s *Server) sessions() Response {
 	infos := make([]SessionInfo, 0, len(list))
 	for _, sess := range list {
 		infos = append(infos, sess.Info())
+	}
+	return Response{OK: true, Sessions: infos}
+}
+
+// drainingResponse answers a register or enroll-session-key on a helper that drain has marked
+// draining.
+var drainingResponse = Response{Code: CodeDraining, Error: "the helper is restarting; retry"}
+
+func (s *Server) drain() Response {
+	list := s.Registry.Drain()
+	infos := make([]SessionInfo, 0, len(list))
+	for _, sess := range list {
+		infos = append(infos, sess.Info())
+	}
+	if len(infos) == 0 {
+		s.Log.Info("draining: refusing new sessions until restart")
 	}
 	return Response{OK: true, Sessions: infos}
 }

@@ -20,9 +20,10 @@ import (
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved) and
 // the broker URL from --url or AGENT_SECRETS_URL. When the unit's bytes are unchanged it does
 // nothing more. Otherwise it writes the unit, runs `systemctl --user daemon-reload` and
-// `enable --now`, and restarts a running helper (one whose socket answers `sessions`) only when
-// it lists no sessions or restartWithSessions is set; a restart ends the sessions' grants, so
-// with sessions it prints them and why it did not restart, and returns nil.
+// `enable --now`. A helper that was not answering on its socket before that is now started on
+// the new unit. One that was is restarted only when `drain` finds it has no sessions (the helper
+// then refuses new ones until it exits) or restartWithSessions is set; a restart ends the
+// sessions' grants, so with sessions it prints them and why it did not restart, and returns nil.
 func install(args []string, getenv func(string) string, exe string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	url := fs.String("url", "", "the broker's base URL (default $AGENT_SECRETS_URL)")
@@ -66,6 +67,12 @@ WantedBy=default.target
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	cfg, err := loadConfig(getenv)
+	if err != nil {
+		return err
+	}
+	_, err = helper.Call(cfg.Socket, helper.Request{Op: "sessions"}, 2*time.Second)
+	wasRunning := err == nil
 	if err := writeFileAtomic(path, unit); err != nil {
 		return err
 	}
@@ -75,24 +82,42 @@ WantedBy=default.target
 	if err := systemctl("enable", "--now", helper.UnitName); err != nil {
 		return err
 	}
-
-	cfg, err := loadConfig(getenv)
-	if err != nil {
-		return err
-	}
-	resp, err := helper.Call(cfg.Socket, helper.Request{Op: "sessions"}, 2*time.Second)
-	if err != nil || !resp.OK {
-		// Not running: enable --now started it on the new unit.
+	if !wasRunning {
 		return nil
 	}
-	if n := len(resp.Sessions); n > 0 && !*restartWithSessions {
-		for _, s := range resp.Sessions {
-			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State)
+	if !*restartWithSessions {
+		sessions, err := drainHelper(cfg.Socket)
+		if err != nil {
+			return err
 		}
-		fmt.Fprintf(stdout, "not restarted: %d sessions are registered; a restart ends their grants. Re-run with --restart-with-sessions.\n", n)
-		return nil
+		if n := len(sessions); n > 0 {
+			for _, s := range sessions {
+				fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State)
+			}
+			fmt.Fprintf(stdout, "not restarted: %d sessions are registered; a restart ends their grants. Re-run with --restart-with-sessions.\n", n)
+			return nil
+		}
 	}
 	return systemctl("restart", helper.UnitName)
+}
+
+// drainHelper asks the helper at sock to drain: it answers its sessions and, with none, refuses
+// every later register until it exits, so none can start between the answer and the restart.
+// A helper older than the drain op answers it as an unknown op; for that one-time upgrade from
+// an older release, drainHelper falls back to a `sessions` snapshot, which a register racing the
+// restart can still slip past.
+func drainHelper(sock string) ([]helper.SessionInfo, error) {
+	resp, err := helper.Call(sock, helper.Request{Op: "drain"}, 2*time.Second)
+	if err == nil && resp.Code == helper.CodeBadRequest && strings.HasPrefix(resp.Error, "unknown op") {
+		resp, err = helper.Call(sock, helper.Request{Op: "sessions"}, 2*time.Second)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("agent-secrets-helper stopped answering at %s: %w", sock, err)
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("agent-secrets-helper: %s: %s", resp.Code, resp.Error)
+	}
+	return resp.Sessions, nil
 }
 
 func writeFileAtomic(path string, data []byte) error {

@@ -157,6 +157,9 @@ const (
 	// CodeSign answers sign, sign-request or sign-launcher when signing the proof or the request
 	// object failed; the error says why.
 	CodeSign = "SIGN"
+	// CodeDraining answers register and enroll-session-key once `drain` found no sessions: the
+	// helper is about to be restarted, and the caller should retry against the new one.
+	CodeDraining = "DRAINING"
 )
 
 const maxLine = 64 << 10

@@ -70,26 +70,37 @@ func (r *installRig) systemctlCalls(t *testing.T) []string {
 	return strings.Split(strings.TrimSpace(string(data)), "\n")
 }
 
-// fakeHelper answers `sessions` on the rig's socket with the given sessions.
-func (r *installRig) fakeHelper(t *testing.T, sessions []helper.SessionInfo) {
+// fakeHelper answers on the rig's socket with the given sessions and returns the ops it was
+// asked, in order. With knowsDrain false it answers `drain` as an older helper does.
+func (r *installRig) fakeHelper(t *testing.T, sessions []helper.SessionInfo, knowsDrain ...bool) *[]string {
 	t.Helper()
 	ln, err := net.Listen("unix", r.sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	ops := &[]string{}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			_, _ = bufio.NewReader(conn).ReadBytes('\n')
-			data, _ := json.Marshal(helper.Response{OK: true, Sessions: sessions})
+			line, _ := bufio.NewReader(conn).ReadBytes('\n')
+			var req helper.Request
+			_ = json.Unmarshal(line, &req)
+			// install reads each reply before its next call, so this append happens-before the test reads ops.
+			*ops = append(*ops, req.Op)
+			resp := helper.Response{OK: true, Sessions: sessions}
+			if req.Op == "drain" && len(knowsDrain) > 0 && !knowsDrain[0] {
+				resp = helper.Response{Code: helper.CodeBadRequest, Error: "unknown op drain"}
+			}
+			data, _ := json.Marshal(resp)
 			_, _ = conn.Write(append(data, '\n'))
 			_ = conn.Close()
 		}
 	}()
+	return ops
 }
 
 func TestInstallWritesTheUnitForThisBinary(t *testing.T) {
@@ -156,15 +167,49 @@ func TestInstallIsANoOpWhenNothingChanged(t *testing.T) {
 	}
 }
 
-func TestInstallRestartsAHelperWithNoSessions(t *testing.T) {
+func TestInstallDrainsAndRestartsAHelperWithNoSessions(t *testing.T) {
 	r := newInstallRig(t)
-	r.fakeHelper(t, nil)
+	ops := r.fakeHelper(t, nil)
 	if err := r.run("--url", "https://secrets.example"); err != nil {
 		t.Fatal(err)
 	}
 	calls := r.systemctlCalls(t)
 	if len(calls) != 3 || calls[2] != "--user restart agent-secrets-helper.service" {
 		t.Fatalf("systemctl calls: %q", calls)
+	}
+	if strings.Join(*ops, ",") != "sessions,drain" {
+		t.Fatalf("ops asked: %q, want the running check then drain", *ops)
+	}
+}
+
+// TestInstallFallsBackToSessionsOnAnOlderHelper: a helper without the drain op is checked with
+// `sessions`, the one-time upgrade path.
+func TestInstallFallsBackToSessionsOnAnOlderHelper(t *testing.T) {
+	r := newInstallRig(t)
+	ops := r.fakeHelper(t, nil, false)
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	calls := r.systemctlCalls(t)
+	if len(calls) != 3 || calls[2] != "--user restart agent-secrets-helper.service" {
+		t.Fatalf("systemctl calls: %q", calls)
+	}
+	if strings.Join(*ops, ",") != "sessions,drain,sessions" {
+		t.Fatalf("ops asked: %q", *ops)
+	}
+}
+
+// TestInstallDoesNotRestartAHelperThatWasNotRunning: enable --now starts the new unit, so no
+// restart follows.
+func TestInstallDoesNotRestartAHelperThatWasNotRunning(t *testing.T) {
+	r := newInstallRig(t)
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.systemctlCalls(t) {
+		if strings.Contains(c, "restart") {
+			t.Fatalf("restarted a helper that was not running: %q", c)
+		}
 	}
 }
 
