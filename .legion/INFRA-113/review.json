@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-113",
+  "completed": "2026-10-22T08:35:00Z",
+  "round": 1,
+  "decision": "changes_requested",
+  "reviewedHead": "eafdef72267e66ab8f9c5756ae4327cf1bb3a991",
+  "codeHead": "649f70e8ab7ca883198dc65e605b49e02de6acc0",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/tool-contract.ts:187",
+      "description": "The shipped envoy_publish description — rendered verbatim to OpenCode agents by packages/envoy-plugin/src/server.ts:12,70,135, rebuilt into packages/claude-envoy/dist/envoy-channel.js, and repeated as the docs-site row docs/site/src/content/docs/dispatch/envoy.md:123 — says an ad-hoc topic 'reaches the sessions subscribed when it is published, yours included'. For a session the listener delivers to by push it reaches nobody: packages/envoy-plugin/src/server.ts:93 registers with a serve port and no selfSubscribed, so packages/envoy/internal/session/session.go:62 takes the push branch, and no ad-hoc topic is ever fanned out — the listener's only core subscription is notifications.role.> (cmd/listener/main.go:733) and its durable filters to bus.StreamSubjects() (cmd/listener/durable.go:123,45). Such a session subscribes (cmd/listener/api.go subscribeHandler stores the interest with no warning) and then receives nothing, silently, with no delivery exception and no log line. skills/envoy/SKILL.md:143-145 and packages/envoy/AGENTS.md:2196-2203 carry exactly that caveat; the two texts above do not. Both thermonuclear agents raised it independently. Fix: one clause in the shared description and the docs row, then `bun run check-dist` in packages/claude-envoy so the bundle matches."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/envoy/SKILL.md:139-140",
+      "description": "'a subagent's publish to a topic the session that spawned you subscribes to' mixes the third person with the second inside one clause, in a paragraph whose whole job is to be unambiguous. The tester recorded the same observation. Not a defect; worth one word while the file is open."
+    },
+    {
+      "severity": "minor",
+      "file": "pull request body, the CI line",
+      "description": "The body's CI line says the dispatch browser suite was 'still running when this line was written'. It has since settled failure at the code head 649f70e8 on one iPhone hit-box assertion, packages/dispatch/e2e/phone.e2e.ts:545 (1 failed, 1441 passed, 152 skipped), in a package this diff does not touch; it settled success at d1549dd8, whose executable diff is identical. dispatch is not in main's required set, so it gates nothing; the line needs updating at the next round."
+    }
+  ],
+  "adjudicated": [
+    {
+      "source": "thermonuclear-code-quality, Major 1",
+      "finding": "Collapse usesCoreTransport to `HasPrefix(NotificationTopicPrefix) && !ContainsFunc(streamSubjects, subjectsOverlap)` and delete streamCaptures and TestEveryStreamSubjectIsALiteralPrefixAndWildcard.",
+      "disposition": "not taken. It rewrites two of the four hunks held byte-identical with dispatch://INFRA-117 (merged 2026-10-22 onto envoy-infra-integration), which the architect ruled must stay in lockstep until dispatch://INFRA-120; ce-simplify-code reached the same two findings at f910d511 and skipped them for the same reason. The redundancy is also defensive: the explicit role clauses keep a role lane on core NATS even if a future stream subject ever captured one."
+    },
+    {
+      "source": "thermonuclear-code-quality, Major 2",
+      "finding": "Delete the now-redundant fanoutRefusal override in publishDeliveryException (cmd/listener/delivery.go:150-155).",
+      "disposition": "not taken here. Already filed and triaged as dispatch://INFRA-124, recorded in the PR body and in implement.json's openQuestions. Behaviour-neutral, so it is not a correctness finding against this change."
+    }
+  ],
+  "verifiedAtTheForge": {
+    "requiredChecks": "main's rulesets require lint, typecheck, test, pr-title; branch protection adds none. All four are completed/success at the CI head 649f70e8ab7ca883198dc65e605b49e02de6acc0, which is the head of the branch's newest pull_request run, and `gh api compare/649f70e8...eafdef72` reports every changed file under .legion/.",
+    "nonRequired": "dispatch (browser suite) completed failure at 649f70e8 — one iPhone test, unrelated package, success at the identical-code head d1549dd8. Reported to the architect.",
+    "threads": "gh api graphql reports zero review threads and zero reviews on #2105 at this round, so no bot finding needed adjudication.",
+    "e2eLines": "Both E2E (implementer) and E2E (tester) are present in the body, each naming a surface, a command, an observation, a head SHA and a negative control.",
+    "callerCensus": "Re-run at this head: every caller of POST /v1/messages/publish outside tests publishes a notifications. topic (packages/daemon/internal/notify/notify.go:94, packages/envoy-client/src/transport.ts:352, the three plugin tools, packages/envoy/scripts/e2e-local.sh:315,329, packages/pi-envoy/scripts/smoke-delivery.sh:215, scripts/e2e/dispatch-user-turns.sh:455). packages/envoy/internal/broker/wake/envoy.go matches only in a comment and uses /v1/messages/send. The body's list holds; no caller starts taking the 400."
+  }
+}
