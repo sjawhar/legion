@@ -99,9 +99,11 @@ The hub refuses these before it registers anything, with an error naming the inp
 - a `listener.allowedHosts` entry that is not a plain host name or IP address, named by its own
   index in that list, as `listener.allowedHosts[0] is "hub.internal.example:9020": want a host
   name or address with no port, scheme or path`: an entry carrying a port, a scheme, a path or a
-  wildcard such as `*.example-tailnet.ts.net`. The listener refuses the same entry in its own
+  wildcard such as `*.example-tailnet.ts.net`. The listener refuses every such entry in its own
   `ENVOY_ALLOWED_HOSTS` when it boots, so a hub whose listener could not serve is refused before
-  anything registers;
+  anything registers; the plugin additionally refuses an entry that is empty or carries
+  surrounding whitespace, which the listener would have trimmed and served, since the entry is
+  rendered into a comma-joined `docker run` argument where a space would split it;
 - a `sessionUser` whose `nkey` is empty;
 - a missing provider (see [Providers](../README.md#providers)).
 

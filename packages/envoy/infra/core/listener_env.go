@@ -84,6 +84,16 @@ func asciiLower(r rune) rune {
 // its own beside the operator's: each refusal names input and the entry's index within hosts, so
 // an operator reads the index of the entry they wrote. A seed is refused first, naming the entry
 // and never its value, since the refusal below quotes it.
+//
+// This mirrors parseAllowedHosts in packages/envoy/internal/config, by hand: core may not import
+// that package, since a non-test import would put it in `go list -deps ./cmd/...`, the path list
+// a plugin release is cut from (packages/envoy/infra/AGENTS.md, "Release contract"), so an edit
+// to the listener's config would cut a plugin release. core/allowed_hosts_agreement_test.go runs
+// the same entries through both rules and keeps the copy honest, the asymmetry included: the rule
+// here runs one way, since parseAllowedHosts trims an entry and skips an empty one before it
+// applies the shape rule, while this applies it to the entry as written. That extra strictness is
+// deliberate — Env renders the list comma-joined into the unit's docker run argument, where a
+// space would split the argument and an empty entry would render a stray comma.
 func CheckAllowedHosts(input string, hosts []string) error {
 	for i, entry := range hosts {
 		if bus.HoldsSeed(entry) {
