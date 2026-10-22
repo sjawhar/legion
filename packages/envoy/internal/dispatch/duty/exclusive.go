@@ -36,18 +36,31 @@ const (
 	freeLease = `select pg_advisory_unlock($1, hashtext($2))`
 )
 
-// readPeriod answers two things, both from the database's clock: when the pass about to run
-// begins, and whether this loop's period is already served - a pass of the same lease began less
-// than one period ago, on this process or on another. recordPass stores that instant once the pass
-// has run (migration 0115). The comparison is made in the database because two processes' wall
-// clocks differ by whatever their hosts' do, and the database's is the one clock both passes are
-// judged by; the period reaches it as seconds, fraction included, since a Go duration is no SQL
-// interval.
+// readPeriod answers two things, both from the database's clock: which period the tick about to
+// run falls in, and whether a pass has already served it. A period is a bucket of the clock -
+// floor(epoch / period) - rather than a window measured back from now, and the gate asks only
+// whether a row holds that bucket number. recordPass stores the bucket once the pass has run
+// (migration 0115).
+//
+// Buckets rather than a sliding window, because a loop whose period is its ticker's interval
+// skipped about a third of its ticks under one: the ticker fires every interval, the row is
+// stamped a few milliseconds later when the lease is taken, and "began_at > now() - period" then
+// reduces to a comparison of this tick's lease-acquire delay against the previous tick's, which is
+// a coin toss (measured on a lone process against real Postgres: ran 7 skipped 3, ran 6 skipped 4,
+// ran 6 skipped 4 over ten one-second ticks). A bucket does not depend on when the tick fired: a
+// tick one period after the last one is always in the next bucket, whatever the delay, so a lone
+// process makes a pass on every tick and no constant has to be chosen to make that true.
+//
+// Both are read in the database because two processes' wall clocks differ by whatever their
+// hosts' do, and the database's is the one clock every pass is judged by; the period reaches it as
+// seconds, fraction included, since a Go duration is no SQL interval.
 const (
-	readPeriod = `select now(), exists (
-		select 1 from duty_passes where lease = $1 and began_at > now() - make_interval(secs => $2))`
-	recordPass = `insert into duty_passes (lease, began_at) values ($1, $2)
-		on conflict (lease) do update set began_at = excluded.began_at`
+	readPeriod = `with tick as (select floor(extract(epoch from now()) / $2)::bigint as bucket)
+		select tick.bucket, exists (
+			select 1 from duty_passes
+			where lease = $1 and duty_passes.bucket >= tick.bucket) from tick`
+	recordPass = `insert into duty_passes (lease, bucket) values ($1, $2)
+		on conflict (lease) do update set bucket = excluded.bucket`
 )
 
 // errLeaseNotHeld is pg_advisory_unlock answering false: the session this pass ran on did not hold
@@ -111,7 +124,7 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 	// Deferred, so a pass that panics gives its lease back on the way out rather than holding it
 	// for as long as the connection lives.
 	defer freeLeaseOn(conn, name)
-	begins, served, err := periodServed(ctx, conn, name, period)
+	bucket, served, err := periodServed(ctx, conn, name, period)
 	if err != nil {
 		// The record could not be read, so whether this period is served is unknown. The pass
 		// does not run: a tick that runs on no answer is the duplicate work the record is here
@@ -142,40 +155,42 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 		slog.Info("dispatch duty: leased pass cut short by shutdown; its period is left unserved", "lease", name)
 		return false
 	}
-	recordPassOn(conn, name, begins)
+	recordPassOn(conn, name, bucket, period)
 	slog.Info("dispatch duty: leased pass ran", "lease", name)
 	return true
 }
 
-// periodServed reports whether name's period is already served - a pass of this loop began less
-// than period ago, whichever process ran it - and answers the instant, on the database's clock, at
-// which the pass this tick would run begins. A period of zero or less has no period to serve and
-// reads nothing.
-func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, period time.Duration) (begins time.Time, served bool, err error) {
+// periodServed answers the period this tick falls in - the bucket of the database's clock,
+// floor(epoch / period) - and whether a pass has already served it, whichever process ran that
+// pass. A period of zero or less has no period to serve and reads nothing.
+//
+// The comparison is on the bucket number alone, never on a time derived from it: a bucket turned
+// back into an instant and compared against now() would let the acquire-delay jitter back in
+// through a different door.
+func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, period time.Duration) (bucket int64, served bool, err error) {
 	if period <= 0 {
-		return time.Time{}, false, nil
+		return 0, false, nil
 	}
-	err = conn.QueryRow(ctx, readPeriod, name, period.Seconds()).Scan(&begins, &served)
-	return begins, served, err
+	err = conn.QueryRow(ctx, readPeriod, name, period.Seconds()).Scan(&bucket, &served)
+	return bucket, served, err
 }
 
-// recordPassOn records the pass that has just run, so every process's next tick inside the period
-// skips. It writes the instant the pass began, which is what the period is measured from: a loop's
-// ticker measures its interval from the tick that began the pass, and a period measured from the
-// end would be short by the pass's own duration at every tick.
+// recordPassOn records that this pass served its period's bucket, so every process's next tick
+// inside that bucket skips. It writes the bucket the gate read, not one computed again: a second
+// read could land in the next bucket and leave this one looking unserved.
 //
 // It runs on the lease's own connection and before the lease is given back, on a context of its
 // own because the pass's own may already be cancelled - a context that is cancelled is also the
-// one case this is never called in, since a pass shutdown cut short serves no period (Exclusive).
+// one case this is never called in, since a pass shutdown cut short serves no bucket (Exclusive).
 // This comment said the opposite until INFRA-66's second round: that a pass cut short by shutdown
 // still ran and still served its period, which was the behaviour and was wrong both times it was
 // written. A record that never lands only costs one early pass, which is why its failure is
-// logged and not returned. A pass with no period records nothing: begins is the zero time there.
-func recordPassOn(conn *pgxpool.Conn, name string, begins time.Time) {
-	if begins.IsZero() {
+// logged and not returned. A pass with no period records nothing.
+func recordPassOn(conn *pgxpool.Conn, name string, bucket int64, period time.Duration) {
+	if period <= 0 {
 		return
 	}
-	if _, err := conn.Exec(context.Background(), recordPass, name, begins); err != nil {
+	if _, err := conn.Exec(context.Background(), recordPass, name, bucket); err != nil {
 		slog.Error("dispatch duty: record the pass", "lease", name, "error", err)
 	}
 }
