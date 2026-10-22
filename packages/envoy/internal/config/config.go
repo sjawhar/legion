@@ -83,6 +83,14 @@ var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z
 // entries skipped. An entry that is not a host name or an IP address (one carrying a port, a
 // scheme, a path or a stray bracket) is refused naming it, since a Host is compared by its name
 // alone.
+//
+// CheckAllowedHosts in github.com/sjawhar/envoy/infra/core carries this rule by hand on the
+// plugin's side, so a component is refused before it deploys a listener that would not boot, and
+// it is deliberately stricter: it applies the shape rule to the entry as written, so it refuses a
+// padded or an empty entry this function trims or skips, because it renders the list comma-joined
+// into the unit's docker run argument. Every entry refused here is refused there too, and
+// packages/envoy/infra/core/allowed_hosts_agreement_test.go runs the same entries through both
+// rules and pins that asymmetry.
 func parseAllowedHosts(raw string) ([]string, error) {
 	var hosts []string
 	for _, entry := range strings.Split(raw, ",") {

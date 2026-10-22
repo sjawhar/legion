@@ -64,6 +64,7 @@ func plainInputs() map[string]property.Value {
 			})),
 		})),
 		"hostname":       property.New("example-hub"),
+		"tailnetDnsName": property.New("example-tailnet.ts.net"),
 		"tags":           property.New(property.NewArray([]property.Value{property.New("tag:example-host")})),
 		"zone":           property.New("us-central1-a"),
 		"natsImage":      property.New(natsImage),

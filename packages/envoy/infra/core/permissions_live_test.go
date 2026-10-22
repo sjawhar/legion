@@ -258,11 +258,19 @@ func startGrantServer(t *testing.T, image string, grant core.Permissions) (strin
 func startListener(t *testing.T, binary, uri, seed string) (*cmdtest.Process, int) {
 	t.Helper()
 	port := cmdtest.FreeTCPPort(t)
-	env, err := core.ListenerConfig{MachineID: liveMachineID, Port: port}.Env([]string{uri})
+	return startListenerConfig(t, binary, uri, seed, core.ListenerConfig{MachineID: liveMachineID, Port: port}), port
+}
+
+// startListenerConfig runs the listener binary against uri with the environment config renders and
+// the user's seed, so a test that asks what a component's own ListenerConfig does to the running
+// listener starts it from that very config rather than from a hand-written environment.
+func startListenerConfig(t *testing.T, binary, uri, seed string, config core.ListenerConfig) *cmdtest.Process {
+	t.Helper()
+	env, err := config.Env([]string{uri})
 	require.NoError(t, err)
 	cmd := exec.Command(binary)
 	cmd.Env = append(env, core.EnvNATSSeed+"="+seed)
-	return cmdtest.Start(t, "the listener", cmd), port
+	return cmdtest.Start(t, "the listener", cmd)
 }
 
 // healthz returns the status and body /healthz answers on port.
@@ -325,6 +333,24 @@ func postListener(t *testing.T, process *cmdtest.Process, port int, path, body s
 	answer, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "POST %s: %s\n%s", path, answer, process.Output.String())
+}
+
+// postListenerHost posts body to one of the listener's routes over loopback under the request Host
+// host, and returns the status and the body it answered, requiring nothing: it is for the checks
+// that read the answer itself, which the listener's host guard decides.
+func postListenerHost(t *testing.T, port int, path, body, host string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+strconv.Itoa(port)+path, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Host = host
+	req.Header.Set("Content-Type", "application/json")
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	answer, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(answer)
 }
 
 // nextEnvelope returns the next message sub receives within 10 s, with the envelope it carries.
