@@ -133,6 +133,20 @@ func (g *probeRig) pullFails(reason, code, cause string) *probeRig {
 	return g.waitsSaying(reason, pullFailure(reason, code, cause))
 }
 
+// pullsFailed records the kubelet's Failed event for count pulls of testImage that failed with
+// code and cause (pullFailure), folded into one event as the kubelet folds a repeat.
+func (g *probeRig) pullsFailed(count int32, code, cause string) *probeRig {
+	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".pull-failed", Namespace: testNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+		Reason:         "Failed", Type: corev1.EventTypeWarning, Count: count,
+		Message: `Failed to pull image "` + testImage + `": ` + pullFailure("ErrImagePull", code, cause),
+	}, metav1.CreateOptions{}); err != nil {
+		g.t.Fatal(err)
+	}
+	return g
+}
+
 // pullFailure is the kubelet's waiting message for a pull of testImage that failed with cause,
 // containerd's error after its `failed to pull and unpack image "<ref>": `, prefixed by the gRPC
 // code code when the message carries one ("" when it carries none): as ErrImagePull, the error
@@ -395,12 +409,12 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
 			[]string{"container probe waiting: ErrImageNeverPull"}},
 		// The registry answered 404 for the reference: no retry of the pull finds the image, on the
-		// first pull or the back-off after it.
+		// first pull or the back-off after it, once the kubelet has met that answer on two pulls.
 		{"an image the registry does not have", func(g *probeRig) {
-			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found"))
+			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found")).pullsFailed(2, "NotFound", resolving(testImage+": not found"))
 		}, []string{"worker image sha256:" + testDigestHex + " failed its probe: the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack image", ": " + testImage + ": not found"}},
 		{"an image the registry does not have, in back-off", func(g *probeRig) {
-			g.pullFails("ImagePullBackOff", "NotFound", resolving(testImage+": not found"))
+			g.pullFails("ImagePullBackOff", "NotFound", resolving(testImage+": not found")).pullsFailed(2, "NotFound", resolving(testImage+": not found"))
 		}, []string{"the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ImagePullBackOff: Back-off pulling image"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -515,8 +529,14 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 		}, []string{"(container probe waiting: ErrImagePull)"}},
 		// A not-found message under another waiting reason is not a pull's, so it is not read.
 		{"a not-found message on a container that is not pulling", func(g *probeRig) {
-			g.waitsSaying("ContainerCreating", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found")))
+			g.waitsSaying("ContainerCreating", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found"))).pullsFailed(2, "NotFound", resolving(testImage+": not found"))
 		}, []string{"(container probe waiting: ContainerCreating)"}},
+		// The manifest-404 met on one pull only: containerd 2 also answers it for a manifest
+		// request the network cut followed by a blob request the registry answered 404, so it waits
+		// for the kubelet's next pull.
+		{"a missing manifest met on one pull", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found")).pullsFailed(1, "NotFound", resolving(testImage+": not found"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
 			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
 		// A pod whose probe outlasts the attempt: what it logged so far is quoted.
@@ -1662,42 +1682,74 @@ func TestProbeImagePassesOnALongLogWithTheOKLineLast(t *testing.T) {
 }
 
 // TestRegistryHasNoImage accepts only containerd's whole manifest-404 grammar, naming one
-// reference throughout, and leaves the kubelet's pull throttle and any other wording to the retry
-// (pkg/kubelet/images/image_manager.go, EnsureImageExists).
+// reference throughout, in the waiting state and in the kubelet's Failed events for two pulls or
+// more, and leaves the kubelet's pull throttle, any other wording and a single pull's answer to the
+// retry (pkg/kubelet/images/image_manager.go, EnsureImageExists).
 func TestRegistryHasNoImage(t *testing.T) {
 	manifestNotFound := func(image string) string {
 		return `rpc error: code = NotFound desc = failed to pull and unpack image "` + image +
 			`": failed to resolve reference "` + image + `": ` + image + `: not found`
 	}
 	const portImage = "registry.example:5000/legion-worker@sha256:" + testDigestHex
+	failed := func(count int32, message string) corev1.Event {
+		return corev1.Event{Reason: "Failed", Type: corev1.EventTypeWarning, Count: count, Message: `Failed to pull image "` + testImage + `": ` + message}
+	}
+	twice := []corev1.Event{failed(2, manifestNotFound(testImage))}
 	for _, testCase := range []struct {
 		name, reason, message string
+		events                []corev1.Event
 		want                  bool
 	}{
-		{"a missing manifest", "ErrImagePull", manifestNotFound(testImage), true},
-		{"a missing manifest with text after it", "ErrImagePull", manifestNotFound(testImage) + "\n", false},
-		{"a missing manifest whose reference names a registry port", "ErrImagePull", manifestNotFound(portImage), true},
+		{"a missing manifest, met on two pulls", "ErrImagePull", manifestNotFound(testImage), twice, true},
+		{"a missing manifest, met on two pulls recorded apart", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(1, manifestNotFound(testImage)), failed(1, manifestNotFound(testImage))}, true},
+		{"a missing manifest, met on two pulls of an event series", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{{Reason: "Failed", Count: 1, Series: &corev1.EventSeries{Count: 2}, Message: `Failed to pull image "` + testImage + `": ` + manifestNotFound(testImage)}}, true},
+		{"a missing manifest, met on one pull", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(1, manifestNotFound(testImage))}, false},
+		{"a missing manifest, then another failure", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(1, manifestNotFound(testImage)), failed(1, "rpc error: code = Unknown desc = connection reset by peer")}, false},
+		{"a missing manifest, met on no pull", "ErrImagePull", manifestNotFound(testImage), nil, false},
+		{"a missing manifest with text after it", "ErrImagePull", manifestNotFound(testImage) + "\n", twice, false},
+		{"a missing manifest whose reference names a registry port", "ErrImagePull", manifestNotFound(portImage),
+			[]corev1.Event{failed(2, manifestNotFound(portImage))}, true},
 		{"a NotFound whose terminal reference differs", "ErrImagePull",
 			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
-				`": failed to resolve reference "` + testImage + `": ` + portImage + `: not found`, false},
+				`": failed to resolve reference "` + testImage + `": ` + portImage + `: not found`, twice, false},
 		{"a NotFound resolving another reference", "ErrImagePull",
 			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
-				`": failed to resolve reference "` + portImage + `": ` + portImage + `: not found`, false},
+				`": failed to resolve reference "` + portImage + `": ` + portImage + `: not found`, twice, false},
+		{"a NotFound whose resolved reference alone differs", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
+				`": failed to resolve reference "` + portImage + `": ` + testImage + `: not found`, twice, false},
+		{"two Failed events naming mismatched references", "ErrImagePull", manifestNotFound(testImage),
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+
+				`": failed to resolve reference "`+testImage+`": `+portImage+`: not found`)}, false},
 		{"a missing manifest in the kubelet's back-off message", "ImagePullBackOff",
-			`Back-off pulling image "` + testImage + `": ErrImagePull: ` + manifestNotFound(testImage), true},
-		{"a leading whitespace prefix", "ErrImagePull", " " + manifestNotFound(testImage), false},
-		{"a quoted reference", "ErrImagePull",
-			manifestNotFound(`registry.example/"legion-worker@sha256:` + testDigestHex), false},
-		{"the kubelet's image-pull throttle", "ErrImagePull", "pull QPS exceeded", false},
+			`Back-off pulling image "` + testImage + `": ErrImagePull: ` + manifestNotFound(testImage), twice, true},
+		// A pull through containerd's transfer service (2.1 and later, configured as stock),
+		// measured on 2.3.4: the resolution wrapper names no reference.
+		{"a missing manifest, pulled through the transfer service", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage + `": failed to resolve image: ` + testImage + `: not found`,
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+`": failed to resolve image: `+testImage+`: not found`)}, true},
+		{"a transfer-service NotFound naming another reference", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage + `": failed to resolve image: ` + portImage + `: not found`,
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+`": failed to resolve image: `+portImage+`: not found`)}, false},
+		{"a transfer-service node with no host to resolve on", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage + `": failed to resolve image: no resolve hosts: not found`,
+			[]corev1.Event{failed(2, `rpc error: code = NotFound desc = failed to pull and unpack image "`+testImage+`": failed to resolve image: no resolve hosts: not found`)}, false},
+		{"a leading whitespace prefix", "ErrImagePull", " " + manifestNotFound(testImage), twice, false},
+		{"the kubelet's image-pull throttle", "ErrImagePull", "pull QPS exceeded", twice, false},
 		{"a throttle prefix before an old manifest error", "ImagePullBackOff",
-			"pull QPS exceeded: " + manifestNotFound(testImage), false},
+			"pull QPS exceeded: " + manifestNotFound(testImage), twice, false},
+		{"a not-found message on a container that is not pulling", "ContainerCreating", manifestNotFound(testImage), twice, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			got := registryHasNoImage(&corev1.ContainerStateWaiting{
 				Reason: testCase.reason, Message: testCase.message,
-			})
+			}, testCase.events)
 			if got != testCase.want {
-				t.Errorf("registryHasNoImage(%q, %q) = %t, want %t", testCase.reason, testCase.message, got, testCase.want)
+				t.Errorf("registryHasNoImage(%q, %q, %d events) = %t, want %t", testCase.reason, testCase.message, len(testCase.events), got, testCase.want)
 			}
 		})
 	}

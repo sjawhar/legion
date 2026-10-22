@@ -81,44 +81,78 @@ var pullWaiting = map[string]bool{"ErrImagePull": true, "ImagePullBackOff": true
 
 // imageNotFound is containerd's answer to a pull whose reference the registry does not have: its
 // CRI image service wraps the pull's error as `failed to pull and unpack image "<ref>": …`
-// (internal/cri/server/images/image_pull.go at v2, pkg/cri/server/image_pull.go at v1.7), the pull
-// wraps a resolution's as `failed to resolve reference "<ref>": …` (client/pull.go at v2, pull.go
-// at v1.7), and the failure reaches the kubelet as gRPC NotFound only when it is
-// errdefs.ErrNotFound. The resolver's Resolve (core/remotes/docker/resolver.go at v2,
-// remotes/docker/resolver.go at v1.7) answers `<ref>: not found` when the registry answered 404
-// for the manifest. An unauthorized pull (`pull access denied, …`), a refused, reset or timed-out
-// connection, a rate limit and a server error carry another code or none, and stay retried. The
-// resolver's other ErrNotFound answers say nothing of the registry's contents — `no resolve hosts:
-// not found` (the node's registry configuration) and `rejecting <n> byte manifest for <ref>: not
-// found` (a manifest past containerd's size limit) — nor does a NotFound past resolution, `failed
-// to copy: … not found`, a manifest or layer the registry named and then did not serve; so the
-// whole message must be the one grammar, its three references the same (registryHasNoImage), and
-// anything else stays retried. One case the message cannot tell apart: on a node configured with
-// several hosts for one registry (a mirror in containerd's hosts.toml), containerd 2 reports one
-// host's 404 over another host's 403, 429 or 5xx only when no host answered those, but over any
-// request that failed — a refused connection, a timeout, or credentials the host refused
-// (`pull access denied`, `authorization failed`, `failed to authorize`) — so a mirror that lacks the
-// image while the registry behind it is unreachable or refuses the node's credentials is refused
-// as a missing image. The refusal quotes the kubelet, which names the reference, and a mirror that
-// lags its registry is the node's to fix. Measured on kind with containerd 2.0.2 (Kubernetes
-// v1.32.2), 2.1.3 (v1.34.0, pulling through containerd's transfer service) and 2.3.4 (v1.37.0)
-// against public registries, and on 2.0.2 against a stub answering each status: `rpc error: code =
-// NotFound desc = failed to pull and unpack image "<ref>": failed to resolve reference "<ref>":
-// <ref>: not found` for the 404 on each, the wording a GKE node's Failed event quotes for a digest
-// its registry lacks; an ImagePullBackOff's message ends the same way. Docker Hub answers a
-// repository it does not have with 401, read as credentials and retried; another runtime's
-// wording (CRI-O's `manifest unknown`) falls to the retry too.
-var imageNotFound = regexp.MustCompile(`^(?:Back-off pulling image "[^"]+": ErrImagePull: )?rpc error: code = NotFound desc = failed to pull and unpack image "([^"]+)": failed to resolve reference "([^"]+)": (.+): not found$`)
+// (internal/cri/server/images/image_pull.go at v2, pkg/cri/server/image_pull.go at v1.7). A local
+// pull wraps a resolution's as `failed to resolve reference "<ref>": …` (client/pull.go at v2,
+// pull.go at v1.7); a pull through containerd's transfer service, the CRI's default from 2.1 unless
+// its configuration asks for something the service lacks (internal/cri/config/config.go,
+// CheckLocalImagePullConfigs), wraps it as `failed to resolve image: …` (core/transfer/local/
+// pull.go). The failure reaches the kubelet as gRPC NotFound only when it is errdefs.ErrNotFound.
+// The resolver's Resolve (core/remotes/docker/resolver.go at v2, remotes/docker/resolver.go at
+// v1.7) answers `<ref>: not found` when the registry answered 404. An unauthorized pull (`pull
+// access denied, …`), a rate limit and a server error carry another code or none. The resolver's
+// other ErrNotFound answers say nothing of the registry's contents — `no resolve hosts: not found`
+// (the node's registry configuration) and `rejecting <n> byte manifest for <ref>: not found` (a
+// manifest past containerd's size limit) — nor does a NotFound past resolution, `failed to copy: …
+// not found`, a manifest or layer the registry named and then did not serve; so the whole message
+// must be the one grammar, every reference in it the same (namesOneReference).
+//
+// One answer is not enough. containerd 2 resolves a digest as a manifest and then as a blob, and
+// ranks a 404 above a request that failed, so a manifest request the network cut followed by the
+// blob request's 404 — which a registry answers for a manifest it holds, GHCR among them — reads as
+// this answer too. The probe therefore refuses only once the kubelet has met it on two pulls
+// (registryHasNoImage): each pull resolves afresh, and the kubelet's second comes about ten seconds
+// after the first (its image back-off's first step). On a node configured with several hosts for
+// one registry (a mirror in containerd's hosts.toml), containerd 2 likewise reports one host's 404
+// over another host's failed request — a refused connection, a timeout, or credentials the host
+// refused (`pull access denied`, `authorization failed`, `failed to authorize`) — so a mirror that
+// lacks the image while the registry behind it stays unreachable or keeps refusing the node's
+// credentials is refused as a missing image; the refusal quotes the kubelet, which names the
+// reference, and a mirror that lags its registry is the node's to fix.
+//
+// Measured on kind with containerd 2.0.2 (Kubernetes v1.32.2), 2.1.3 (v1.34.0) and 2.3.4 (v1.37.0),
+// whose kind configuration (`discard_unpacked_layers`) keeps the local pull, against public
+// registries, and on 2.0.2 against a stub answering each status: `rpc error: code = NotFound desc =
+// failed to pull and unpack image "<ref>": failed to resolve reference "<ref>": <ref>: not found`
+// for the 404 on each, the wording a GKE node's Failed event quotes for a digest its registry
+// lacks; and on 2.3.4 with that setting removed, so the transfer service pulls: `rpc error: code =
+// NotFound desc = failed to pull and unpack image "<ref>": failed to resolve image: <ref>: not
+// found`, while a repository Docker Hub does not have read `… failed to resolve image: pull access
+// denied, …` with no code. Docker Hub answers such a repository with 401, read as credentials and
+// retried; another runtime's wording (CRI-O's `manifest unknown`) falls to the retry too.
+const imageNotFound = `rpc error: code = NotFound desc = failed to pull and unpack image "([^"]+)": (?:failed to resolve reference "([^"]+)"|failed to resolve image): (.+): not found$`
 
-// registryHasNoImage reports whether w, the probe container's waiting state, is a pull the
-// registry refused because it does not have the image: its whole message imageNotFound, after the
-// back-off's words when it carries them, naming one reference throughout.
-func registryHasNoImage(w *corev1.ContainerStateWaiting) bool {
-	if !pullWaiting[w.Reason] {
+// pullNotFound matches imageNotFound as a pull's waiting message, alone or after the back-off's
+// `Back-off pulling image "<ref>": ErrImagePull: ` (pkg/kubelet/images/image_manager.go,
+// EnsureImageExists, prevPullErrMsg); pullFailedNotFound matches it as the kubelet's Failed event
+// for the pull, `Failed to pull image "<ref>": <error>` (the same function's FailedToPullImage).
+var (
+	pullNotFound       = regexp.MustCompile(`^(?:Back-off pulling image "[^"]+": ErrImagePull: )?` + imageNotFound)
+	pullFailedNotFound = regexp.MustCompile(`^Failed to pull image "[^"]+": ` + imageNotFound)
+)
+
+// namesOneReference reports whether message matches pattern with every reference imageNotFound
+// captures the same: the image's, the resolved reference's on a local pull (none on the transfer
+// service's), and the one the resolver says it did not find.
+func namesOneReference(pattern *regexp.Regexp, message string) bool {
+	m := pattern.FindStringSubmatch(message)
+	return m != nil && m[1] == m[3] && (m[2] == "" || m[2] == m[1])
+}
+
+// registryHasNoImage reports whether the probe container's waiting state w is a pull the registry
+// refused because it does not have the image (pullNotFound), and the pod's events show the kubelet
+// met that answer on two pulls or more: the Failed events whose message is it, counted as the
+// kubelet folds a repeat (eventCount). The first answer alone is no proof (imageNotFound).
+func registryHasNoImage(w *corev1.ContainerStateWaiting, events []corev1.Event) bool {
+	if w == nil || !pullWaiting[w.Reason] || !namesOneReference(pullNotFound, w.Message) {
 		return false
 	}
-	m := imageNotFound.FindStringSubmatch(w.Message)
-	return m != nil && m[1] == m[2] && m[2] == m[3]
+	var pulls int32
+	for _, event := range events {
+		if event.Reason == "Failed" && namesOneReference(pullFailedNotFound, event.Message) {
+			pulls += eventCount(event)
+		}
+	}
+	return pulls >= 2
 }
 
 // digestHex is a sha256 digest's 64 hex.
@@ -473,8 +507,9 @@ const mountRecheck = 15 * time.Second
 
 // stuck is the verdict on a probe pod that has not finished and never will, or nil while waiting
 // can still change it. It stops on an image the kubelet cannot use (definitiveWaiting), the
-// image's own refusal; on an image the registry does not have (registryHasNoImage), which no retry
-// of the pull changes; on a container the kubelet cannot configure, waiting
+// image's own refusal; on an image the registry does not have, from the pod's status and events
+// (registryHasNoImage), which no retry of the pull changes; on a container the kubelet cannot
+// configure, waiting
 // CreateContainerConfigError with a message saying a ConfigMap or Secret the container reads, or a
 // key of one, is missing (missingObject) — the kubelet builds the container's env from those
 // objects at each sync (pkg/kubelet/kubelet_pods.go, makeEnvironmentVariables) and fails the same
@@ -495,10 +530,11 @@ const mountRecheck = 15 * time.Second
 // only a pod bound to it, so an unscheduled pod has no FailedMount to find, and the capacity stop,
 // whose pod holds no node, costs no read. They are read for every scheduled Pending probe pod at
 // most every mountRecheck — mountRead holds when they last were — one podEvents call per read
-// feeding the providers matcher first, when the pod mounts the providers Secret, then the general
-// matcher over the same list. A FailedMount of any other form (the kubelet's ConfigMap or Secret
-// watch not yet synced, the object not yet registered with its manager, the pod's volumes not all
-// mounted yet) is one the kubelet retries, and is left to the budget.
+// feeding the missing-image rule first (a pull's Failed events), then the providers matcher, when
+// the pod mounts the providers Secret, then the general matcher over the same list. A FailedMount
+// of any other form (the kubelet's ConfigMap or Secret watch not yet synced, the object not yet
+// registered with its manager, the pod's volumes not all mounted yet) is one the kubelet retries,
+// and is left to the budget.
 //
 // Ending the attempt on an Unschedulable pod deletes its Sandbox (probeAttempt's deferred delete)
 // and the next attempt, after the retry's longest wait, creates it again: a probe pod that could
@@ -509,11 +545,6 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	if w != nil && definitiveWaiting[w.Reason] {
 		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, w.Reason)
 		return &unusable
-	}
-	if w != nil && registryHasNoImage(w) {
-		missing := imageRefusal(digest, "the registry does not have image %s: pod %s %s, container %s waiting: %s: %s",
-			r.image, name, phaseOf(pod), probeContainer, w.Reason, w.Message)
-		return &missing
 	}
 	if w != nil && w.Reason == "CreateContainerConfigError" && missingObject(w.Message) {
 		refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot configure its container %s (waiting: %s), a ConfigMap or Secret it reads being missing: %s",
@@ -554,6 +585,11 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	events, err := r.podEvents(ctx, pod)
 	if err != nil {
 		return nil
+	}
+	if registryHasNoImage(w, events) {
+		missing := imageRefusal(digest, "the registry does not have image %s: pod %s %s, container %s waiting: %s: %s",
+			r.image, name, phaseOf(pod), probeContainer, w.Reason, w.Message)
+		return &missing
 	}
 	if r.mountsProviders() {
 		secret := ProvidersSecretName(r.project)

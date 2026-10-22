@@ -318,8 +318,9 @@ pass
 
 begin probe-missing-image
 # The shares file with its image's digest swapped for one its repository does not have: the
-# registry answers the probe pod's pull 404, and probe-boot refuses that first failed pull within
-# its first attempt, naming the image, rather than retrying it as a pull that may yet succeed.
+# registry answers the probe pod's pulls 404, and probe-boot refuses once the kubelet has met that
+# answer on two pulls, within its first attempt, naming the image, rather than retrying it as a pull
+# that may yet succeed.
 shares_config=$(awk '$1 == "shares" {print $3}' "$result")
 missing_config=${shares_config%.yaml}-missing-image.yaml
 missing_image=${image%@sha256:*}@sha256:0000000000000000000000000000000000000000000000000000000000000000

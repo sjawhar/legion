@@ -77,8 +77,9 @@ cluster and the image:
     <image>: …`, quoting the kubelet's `rpc error: code = NotFound … not found`): the configured
     digest was never pushed, or was pushed to another repository. Point the daemon at a digest the
     registry holds (`docker manifest inspect <image>` answers for one it has); if it does, and your
-    nodes pull through a mirror, the mirror lacks it. The probe refuses this on the first failed
-    pull; a pull refused for credentials, a network failure or a rate limit is retried instead;
+    nodes pull through a mirror, the mirror lacks it. The probe refuses this once the kubelet has
+    met that answer on two pulls, within about half a minute; a pull refused for credentials, a
+    network failure or a rate limit is retried instead;
   - an agent's model does not resolve (`task agent <name> … role <role> is not configured`), or its
     key does not work: name the role in your overlay's `modelRoles`, re-run `apply.sh`, and check
     the credential your `models.yml` reads;
