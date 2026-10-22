@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-66",
+  "completed": "2026-10-22T15:34:00Z",
+  "round": 1,
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/events.go:190",
+      "description": "The new `if event.ID <= since { continue }` in the live loop silences a reconnecting reader for good after an event-log reset. `since` is the client's own Last-Event-ID / ?since= (events.go:82-93) and is never clamped to the log head; the browser only ever raises it (packages/dispatch/web/src/api/sse.ts:832-834,857). eventStreamRelay.resetCursor answers a `truncate events restart identity` by closing every subscription (event_stream_relay.go:241-257) on the stated ground that each browser's reconnect 'resolves its position against the log as it now stands' - it does not: catch-up (readEventsAfterID) returns nothing for a since above the new head, and every live event of the new log is then dropped by this filter. The connection stays open and heartbeats, so nothing logs or errors. Regression against main, whose live loop made no id comparison at all and whose comment forbade one (pre-image of events.go:153-158). It also contradicts the PR body's `Change:` bullet 'recovers when the event log is reset beneath it'. Fix: resolve the head for every connection, not only a cold one, and clamp since = min(since, head) before the catch-up loop. Found by the thermonuclear deep-review pair (finding 1) and verified against the diff and the client by the reviewer."
+    },
+    {
+      "severity": "important",
+      "file": "pull request body",
+      "description": "No `## Contract change census`. This PR adds a refusal that reaches an HTTP client - docs.ErrRoomBehindHead wraps docs.ErrServiceUnavailable (docs/pending_authors.go:372), which api/server.go:430 maps to 503 - adds the delivery bind refusal classes (delivery/intake.go:360-379), and changes five exported signatures at package boundaries (api.RunSuggestionOutcomeSweep, docs.Service.RunReferenceExcerptReconciliation, architecture.Run, redeliver.Sweeper.Run, delivery.Reconcile.Run, plus outbox.Deps.Leases). The census must carry its search commands, every hit with a disposition, and a rollout line: here an immediate refusal naming what it closes (a document version, settlement or ask retraction written from a room behind the stored history), since a warn-first rollout would be the silent fork the gate exists to stop."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/stale_room.go:189-201",
+      "description": "documentChanged runs the locked confirmation (roomBehindDurableHead: BEGIN + pg_advisory_xact_lock + read, stale_room.go:224-238) before e.allow(artifactID), so the interval cannot make it rare in the case it was written for. staleRoomEvictInterval's own comment (:52-61) names that case - 'one person typing on the other process notifies several times a second' - and in it the room here is behind, the cheap compare at :187 passes it through, and every notification takes the document's blocking advisory lock. pglisten calls OnNotify inline on the one listener goroutine (pglisten/listener.go:106-110), so that wait stalls eviction for every other room this process holds. The evictor's own type comment (:64-68) says the decision is 'a map lookup and one indexed read of max(version)', which the code no longer carries. Fix: check the interval before the locked confirmation and record the eviction after Evict succeeds. Found by the thermonuclear code-quality pair (blocking 1), verified by the reviewer."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:46-56",
+      "description": "'What the claim gives: two healthy processes no longer publish one event twice' holds only for a batch that finishes inside claimWindow (60 s). claimPendingEvents pushes next_attempt_at out and commits (publisher.go:217-232); scanBatch then publishes up to batchSize (100) events outside any transaction, re-checking nothing, and the terminal `update ... where id = $1 and published_at is null` discards RowsAffected. A slow batch lets the other process re-claim and republish rows this one is still publishing. The duplicate sits inside the at-least-once envelope the same comment already states (role lanes carry no nats.MsgId and their receivers drop the repeat by dedupe key), so this is the claim's wording or a per-row re-check, not a design defect. The PR body's `Change:` bullet says 'never', which has the same gap."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/service.go:1393,1442,1805",
+      "description": "settleRoomWithin's repair and backfillBlockIDs advance only the instance cursor they already hold; only Ledger.takeRoomCursors (ledger.go:213) routes through tookResidentVersion, which is what folds a version into a room load still in flight (pending_authors.go:220-256). A repair that commits inside a concurrent room load leaves the fresh instance one version behind the head, after which refuseRoomBehindHead refuses its next durable write until it reloads. Self-healing (the refusal fails the room, which evicts and reloads at the head) and no edit is lost, but advanceRoomCursor's doc comment (pending_authors.go:339-352) lists these sites as covered, which overstates what is wired."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/duty/exclusive.go:213,238-239,247-251",
+      "description": "recordPassOn's Exec and freeLeaseOn's unlock and Close run on a bare context.Background(). On a half-open connection they block without bound: that loop's goroutine is wedged for the life of the process and the Hijack/Close that was meant to destroy the connection holding the session lease never runs. pglisten.Listener bounds exactly this case with PingTimeout (pglisten/listener.go:148-152). A context.WithTimeout on each is the whole fix."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/store/pool.go:248-256",
+      "description": "'INFRA-66 leases seven ... Eight leaves one spare' is not what the code permits: duty.Exclusive acquires a connection before it learns the lease is held (exclusive.go:124-137), and both delivery intakes take deliveryConsumerLease on connections of their own (delivery/intake.go, intakes.go), so eight callers can be inside leases.Acquire at once on an eight-connection pool. Headroom is zero, not one."
+    }
+  ],
+  "ciReadAtTheCodeHead": {
+    "codeHead": "915a20c338af1007cc8eec07031dc1d57ff155f3",
+    "requiredSet": ["lint", "typecheck", "test", "pr-title"],
+    "requiredSetSource": "rulesets on main; branch protection reports no required status checks for this role's read",
+    "observed": "every required name present, completed, success; dispatch-multiprocess, envoy-go, envoy-go-race, dispatch, dispatch-memory, envoy-e2e-local, envoy-smoke, envoy-infra-go, build, changes, pi-legion also success",
+    "aboveTheCodeHead": "compare 915a20c3...c236a36b is ahead and touches only .legion/INFRA-66/implement.json and .legion/INFRA-66/test.json"
+  },
+  "thermonuclear": {
+    "head": "c236a36ba919e67204b054bc6397c6ededbe881f",
+    "deepReview": "CHANGES - 1 medium (the SSE reset silence, adopted as important finding 1), 2 low (adopted as minor findings), 2 ranked hardening items (one adopted)",
+    "codeQuality": "CHANGES - 3 blocking (the evictor's lock order adopted as important finding 3; the pending_authors.go file growth and the roomCursor nil-receiver trap judged fast-follow), 8 fast-follow"
+  },
+  "threads": "none open on the pull request at this head; no bot threads to adjudicate (gh api graphql reviewThreads: 0 nodes)"
+}
