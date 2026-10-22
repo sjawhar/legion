@@ -20,10 +20,13 @@ func TestAReconcilePassWhoseLeaseIsHeldElsewhereAsksGitHubNothing(t *testing.T) 
 	fake := newFakeGitHub(t)
 	reconcile := NewReconcile(pool, fake.newTestClient(), events.NewBroker())
 
+	// 0: this caller stands for the other process's pass while it is inside it, which is all
+	// this row is about, and records no pass of its own -- so what the passes below do is the
+	// lease's doing alone and not the reconcile interval's.
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(ctx, leases, deliveryReconcileLease, func(context.Context) {
+		held <- duty.Exclusive(ctx, leases, deliveryReconcileLease, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})

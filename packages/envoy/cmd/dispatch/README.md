@@ -365,12 +365,16 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Six periodic maintenance loops take a named session-level advisory lease for the length of each
-  pass (`duty.Exclusive`), so one process runs the pass and the other logs a skip. The settlement
-  resumption, the delivery live hub, the event-stream relay, the stale-room evictor and the
-  document rooms' timers stay per-process by design, and the embedding queue, the task progress
-  reconciliation and the outbox's own scan claim their own work; `cmd/dispatch/main.go` says at
-  the call site which loop is which and why.
+- Six periodic maintenance loops run once per period across the processes, not once per process.
+  Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
+  process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
+  recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
+  lands between another's passes — the ordinary case, since each ticker draws its phase at boot
+  and a rolling update starts the second process minutes after the first — finds the period
+  already served and logs the same skip. The settlement resumption, the delivery live hub, the
+  event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
+  design, and the embedding queue, the task progress reconciliation and the outbox's own scan
+  claim their own work; `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored

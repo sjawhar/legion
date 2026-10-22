@@ -52,8 +52,11 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 	}
 	// Every delivery table is truncated before the test, not after: a failed previous run's rows
 	// (useful to inspect) are cleared by the next run that needs a clean slate, not hidden by one
-	// that crashes before its own cleanup runs.
-	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "delivery_reconcile_progress", "delivery_settings"} {
+	// that crashes before its own cleanup runs. duty_passes is cleared with them: this database
+	// is the server's own and outlives the run, where storetest's clones do not, so a reconcile
+	// pass an earlier run recorded inside ReconcileInterval would make this run's pass skip for
+	// a period it did not serve (duty.Exclusive).
+	for _, table := range []string{"delivery_run_jobs", "delivery_runs", "delivery_pull_requests", "delivery_reconcile_progress", "delivery_settings", "duty_passes"} {
 		if _, err := pool.Exec(ctx, "delete from "+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}

@@ -66,10 +66,12 @@ const deliveryReconcileLease = "delivery-reconcile"
 // jittered so a restart does not stampede GitHub, and a server without App credentials logs once
 // and stops: no import can be signed.
 //
-// Each pass runs under deliveryReconcileLease, so one process reconciles however many serve the
-// database. leases is required: unlike StartIntakes, which opens the lease pool itself because it
-// is the boot's error-returning constructor, Run has no error to return, so it takes the pool
-// cmd/dispatch has already opened (and exits at boot without).
+// Each pass runs under deliveryReconcileLease for one ReconcileInterval, so one process
+// reconciles per interval however many serve the database: the two tickers are jittered to phases
+// of their own, so the second's tick lands between the first's rather than on it, and finds the
+// interval reconciled. leases is required: unlike StartIntakes, which opens the lease pool itself
+// because it is the boot's error-returning constructor, Run has no error to return, so it takes
+// the pool cmd/dispatch has already opened (and exits at boot without).
 func (r *Reconcile) Run(ctx context.Context, leases duty.Leases) {
 	duty.RunJittered(ctx, ReconcileInterval, func() bool {
 		if r.HasApp() {
@@ -80,9 +82,10 @@ func (r *Reconcile) Run(ctx context.Context, leases duty.Leases) {
 	}, func(ctx context.Context) { r.leasedPass(ctx, leases) })
 }
 
-// leasedPass runs one reconcile pass under the lease.
+// leasedPass runs one reconcile pass under the lease, for the ReconcileInterval this loop ticks
+// on.
 func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, deliveryReconcileLease, r.runOnce)
+	duty.Exclusive(ctx, leases, deliveryReconcileLease, ReconcileInterval, r.runOnce)
 }
 
 // runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests

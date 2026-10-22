@@ -119,9 +119,11 @@ func Run(ctx context.Context, deps Deps) {
 }
 
 // compactDocuments runs the daily compaction of every document under documentCompactionLease, so
-// that one process does that walk however many serve the database.
+// that one process does that walk however many serve the database, once per compactInterval and
+// not once per process: the period is this loop's own tick, so a process whose ticker fires hours
+// after the other's finds the day's compaction already done and skips it.
 func compactDocuments(ctx context.Context, deps Deps) {
-	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, func(ctx context.Context) {
+	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, compactInterval, func(ctx context.Context) {
 		if err := deps.Docs.CompactAll(ctx); err != nil {
 			slog.Error("dispatch outbox: compact documents", "error", err)
 		}

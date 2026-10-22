@@ -230,13 +230,17 @@ const webhookRedeliveryLease = "webhook-redelivery"
 
 // Run sweeps now and then every interval until ctx ends, logging each sweep's counts: the failed
 // attempts listed, the deliveries they belong to, and how many deliveries had each outcome. Each
-// sweep runs under webhookRedeliveryLease; leases is required, as it is of every leased loop
-// (cmd/dispatch exits at boot if the lease pool cannot be opened).
+// sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what the
+// installation's rate limit pays for that interval however many processes sweep - a process that
+// starts in the middle of another's interval, which is what a rolling update makes, finds that
+// interval swept and skips. The period is interval itself, the loop's own tick, and not the
+// package's Interval. leases is required, as it is of every leased loop (cmd/dispatch exits at
+// boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		duty.Exclusive(ctx, leases, webhookRedeliveryLease, s.sweepAndReport)
+		duty.Exclusive(ctx, leases, webhookRedeliveryLease, interval, s.sweepAndReport)
 		select {
 		case <-ctx.Done():
 			return

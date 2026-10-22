@@ -701,11 +701,12 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	}
 
 	// Another caller holds the lease for as long as its pass runs, as the other process's own
-	// reconciliation does.
+	// reconciliation does. It takes no period, as the reconciliation itself does not: the
+	// durable's configuration is settled by a throttle each process keeps.
 	taken, release := make(chan struct{}), make(chan struct{})
 	ran := make(chan bool, 1)
 	go func() {
-		ran <- duty.Exclusive(ctx, leases, deliveryConsumerLease, func(context.Context) {
+		ran <- duty.Exclusive(ctx, leases, deliveryConsumerLease, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})

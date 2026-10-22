@@ -475,8 +475,13 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		// reconciled is true when the pass does not run -- the lease is held elsewhere, or could
 		// not be taken: a reconciliation that never ran failed nothing, and the subscribe below
 		// says what this process's own state is.
+		//
+		// No period (0): this is not a periodic loop but a step of every bind poll, and what
+		// keeps it from running on each of them is the throttle below, which is this process's
+		// own and deliberately so -- a durable each process binds for itself. So the lease is
+		// asked for mutual exclusion and nothing else.
 		reconciled := true
-		ran := duty.Exclusive(ctx, leases, deliveryConsumerLease, func(context.Context) {
+		ran := duty.Exclusive(ctx, leases, deliveryConsumerLease, 0, func(context.Context) {
 			reconciled = reconcileDurableConsumer(client.JS(), wanted)
 		})
 		if !reconciled {

@@ -320,7 +320,11 @@ func main() {
 	// that must run once overall take a named lease on this pool for the length of their pass
 	// (duty.Exclusive): a lease is a session-level advisory lock on a connection of its own, so
 	// it needs a pool the shared one's sixteen request connections are not spent on. A boot that
-	// cannot open it is a boot whose loops would each run everywhere, so it ends here.
+	// cannot open it is a boot whose loops would each run everywhere, so it ends here. Under that
+	// lease each pass is also recorded with its loop's own period (duty_passes, migration 0115),
+	// which is what makes a loop run once per period rather than once per process: two tickers
+	// started minutes apart almost never meet inside a pass, so the lease alone would exclude
+	// nothing.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the

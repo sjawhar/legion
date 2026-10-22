@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -25,6 +26,8 @@ func leasesOf(t *testing.T, database *store.Store) *pgxpool.Pool {
 
 // Two processes on one database are two callers here, and the second must skip rather than queue:
 // it is refused while the first is still inside its pass, which is the only moment that matters.
+// No period (0) in this row and the two below it: each is about the lease alone, and a period
+// would be a second reason to skip that would hide which one refused the caller.
 func TestExclusiveRefusesASecondCallerWhileTheFirstIsInsideItsPass(t *testing.T) {
 	database := storetest.Open(t)
 	leases := leasesOf(t, database)
@@ -33,7 +36,7 @@ func TestExclusiveRefusesASecondCallerWhileTheFirstIsInsideItsPass(t *testing.T)
 	inside, finish := make(chan struct{}), make(chan struct{})
 	first := make(chan bool, 1)
 	go func() {
-		first <- Exclusive(ctx, leases, "compaction", func(context.Context) {
+		first <- Exclusive(ctx, leases, "compaction", 0, func(context.Context) {
 			close(inside)
 			<-finish
 		})
@@ -41,7 +44,7 @@ func TestExclusiveRefusesASecondCallerWhileTheFirstIsInsideItsPass(t *testing.T)
 	<-inside
 
 	secondRan := false
-	if Exclusive(ctx, leases, "compaction", func(context.Context) { secondRan = true }) {
+	if Exclusive(ctx, leases, "compaction", 0, func(context.Context) { secondRan = true }) {
 		t.Error("the second caller took a lease the first holds")
 	}
 	if secondRan {
@@ -61,7 +64,7 @@ func TestExclusiveFreesTheLeaseWhenThePassReturns(t *testing.T) {
 
 	for pass := 1; pass <= 2; pass++ {
 		ran := false
-		if !Exclusive(ctx, leases, "compaction", func(context.Context) { ran = true }) || !ran {
+		if !Exclusive(ctx, leases, "compaction", 0, func(context.Context) { ran = true }) || !ran {
 			t.Fatalf("pass %d did not run under its own lease", pass)
 		}
 	}
@@ -75,8 +78,8 @@ func TestExclusiveLeasesOfDifferentNamesDoNotExcludeEachOther(t *testing.T) {
 	ctx := context.Background()
 
 	otherRan := false
-	held := Exclusive(ctx, leases, "compaction", func(context.Context) {
-		otherRan = Exclusive(ctx, leases, "redelivery sweep", func(context.Context) {})
+	held := Exclusive(ctx, leases, "compaction", 0, func(context.Context) {
+		otherRan = Exclusive(ctx, leases, "redelivery sweep", 0, func(context.Context) {})
 	})
 	if !held {
 		t.Fatal("the first lease was not taken")
@@ -113,7 +116,7 @@ func TestExclusiveTakesALeaseWhoseHolderDiedWithoutUnlocking(t *testing.T) {
 	waitForRelease(t, database, name)
 
 	ran := false
-	if !Exclusive(ctx, leases, name, func(context.Context) { ran = true }) || !ran {
+	if !Exclusive(ctx, leases, name, 0, func(context.Context) { ran = true }) || !ran {
 		t.Fatal("the dead holder's lease was not free for the next pass")
 	}
 }
@@ -137,4 +140,101 @@ func waitForRelease(t *testing.T, database *store.Store, name string) {
 	if err := waiter.QueryRow(ctx, freeLease, leaseNamespace, name).Scan(&freed); err != nil || !freed {
 		t.Fatalf("give the waited-for lease back: %v (%t)", err, freed)
 	}
+}
+
+// A rolling update starts the second process minutes after the first, so the two processes' ticks
+// of one loop never meet inside a pass: the first has finished and given the lease back long
+// before the second boots, and mutual exclusion alone would let the second run the whole pass
+// again. The pass the first recorded is what refuses it, for as long as the loop's own period,
+// and no longer: once that period has run out the next tick runs, whichever process makes it.
+func TestExclusiveSkipsASecondProcessInsideThePeriod(t *testing.T) {
+	database := storetest.Open(t)
+	second := storetest.SecondProcess(t, database)
+	leases, otherLeases := leasesOf(t, database), leasesOf(t, second)
+	ctx := context.Background()
+	const name = "webhook-redelivery"
+	const period = time.Hour
+
+	ran := false
+	if !Exclusive(ctx, leases, name, period, func(context.Context) { ran = true }) || !ran {
+		t.Fatal("the first process's pass did not run")
+	}
+
+	otherRan := false
+	if Exclusive(ctx, otherLeases, name, period, func(context.Context) { otherRan = true }) {
+		t.Error("the second process took the pass inside a period the first one had served")
+	}
+	if otherRan {
+		t.Error("the second process ran the whole pass again inside the period the first one served")
+	}
+
+	// The recorded pass moved back is the period having run out, which no test waits an hour
+	// for: the repository's other claim rows age their row the same way rather than sleeping.
+	movePassBack(t, database, name, 2*period)
+	if !Exclusive(ctx, otherLeases, name, period, func(context.Context) { otherRan = true }) || !otherRan {
+		t.Error("no pass ran once the recorded one was older than the period")
+	}
+}
+
+// A period of zero or less is no period at all - mutual exclusion and nothing more - which is what
+// the delivery consumers' reconciliation takes: it runs on every bind poll rather than on a
+// ticker, and the throttle that spaces it is its own. Every call runs while the lease is free, and
+// nothing is recorded for a later one to be judged by.
+func TestExclusiveWithoutAPeriodRunsWheneverTheLeaseIsFree(t *testing.T) {
+	database := storetest.Open(t)
+	leases := leasesOf(t, database)
+	ctx := context.Background()
+	const name = "delivery-consumers"
+
+	for pass := 1; pass <= 3; pass++ {
+		ran := false
+		if !Exclusive(ctx, leases, name, 0, func(context.Context) { ran = true }) || !ran {
+			t.Fatalf("pass %d did not run with no period and the lease free", pass)
+		}
+	}
+	if recorded := recordedPasses(t, database, name); recorded != 0 {
+		t.Errorf("a loop with no period recorded %d passes; it has no period for one to serve", recorded)
+	}
+}
+
+// A period is its own loop's, as the lease is: the record is kept per lease, so the compaction
+// that has just run holds back no sweep.
+func TestExclusiveAPeriodHoldsBackOnlyItsOwnLoop(t *testing.T) {
+	database := storetest.Open(t)
+	leases := leasesOf(t, database)
+	ctx := context.Background()
+	const period = time.Hour
+
+	if !Exclusive(ctx, leases, "document-compaction", period, func(context.Context) {}) {
+		t.Fatal("the first loop's pass did not run")
+	}
+	ran := false
+	if !Exclusive(ctx, leases, "webhook-redelivery", period, func(context.Context) { ran = true }) || !ran {
+		t.Error("a loop's pass was refused by another loop's period")
+	}
+}
+
+// movePassBack moves the pass recorded for name back by age, which is how a period that has run
+// out is reached without waiting one out.
+func movePassBack(t *testing.T, database *store.Store, name string, age time.Duration) {
+	t.Helper()
+	moved, err := database.Pool.Exec(context.Background(),
+		`update duty_passes set began_at = began_at - make_interval(secs => $2) where lease = $1`, name, age.Seconds())
+	if err != nil {
+		t.Fatalf("move the recorded %s pass back: %v", name, err)
+	}
+	if moved.RowsAffected() != 1 {
+		t.Fatalf("moved %d recorded %s passes back; the pass that ran recorded none", moved.RowsAffected(), name)
+	}
+}
+
+// recordedPasses is how many passes duty_passes holds for name.
+func recordedPasses(t *testing.T, database *store.Store, name string) int {
+	t.Helper()
+	var recorded int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from duty_passes where lease = $1`, name).Scan(&recorded); err != nil {
+		t.Fatalf("count the recorded %s passes: %v", name, err)
+	}
+	return recorded
 }
