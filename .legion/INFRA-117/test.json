@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-117",
+  "completed": "2026-10-22T06:18:00Z",
+  "head": "e0234413d3d7dca1b81c1f37921f14e98520cefe",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Its rig (packages/envoy/infra/rigtmp) was deleted at its completion, so the same surface was driven independently: a real nats-server v2.15.1 started on the authorization this tree's own core.ListenerPermissions(\"example-hub\")/core.SessionPermissions() render through core.Authorization.Render, the real packages/envoy/cmd/listener built from this head, and a real nats@2.29.2 client as the credential-free session, driven by curl and bun rather than its Go program. All three of its claims reproduced: the 41-entry publish allow headed by notifications.> (50 before), 200 in 2-4 ms with the subscriber receiving the envelope once, 400 for a topic outside notifications. Both of its negative controls reproduced too: the head's listener on the base commit's rendered grant answered 500 in 3.7 ms with the NATS denial named and nats-server logged Publish Violation; the pre-change listener binary (base 2de87cd4f6fe's api.go, nats.go and stream.go, built here) on the new grant answered 500 in 5.003 s with context deadline exceeded. Its adoption claim checks out as well: jj diff --from b096a8708276da700f21230861b9d7b164065124 --to 7424e75ad6a1 --git '~.legion' prints nothing, and its three fix hunks are identical to #2101's head 887cd0e21371b26f670cf6f72435deb58780cbc5."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1 - ListenerPermissions publishes notifications.> in place of the stream prefixes, role lanes and exception lanes, and the rendered users widen with it.",
+      "surface": "In-pod live rig: real nats-server v2.15.1 on the authorization this tree's core.ListenerPermissions(\"example-hub\") and core.SessionPermissions() render, with packages/envoy/cmd/listener built from this head connected as that nkey user and a credential-free nats@2.29.2 session connected as the server's no_auth_user.",
+      "command": "A Go program against this tree's infra module rendered the server config and the listener's environment (core.Authorization.Render, core.ListenerConfig.Env); then `nats-server -c /tmp/rig/nats.conf -js -p 14300 -m 18222`, the listener on PORT=19030, and `curl -X POST http://127.0.0.1:19030/v1/messages/publish -d '{\"topic\":\"notifications.team.deploy-squad\",\"message\":\"deploy complete\"}'` after `POST /v1/interests/subscribe` for that topic.",
+      "observed": "The rendered listener grant is 41 publish entries headed by the single subject notifications.>; compared entry by entry with the base commit's rendering it differs by exactly the ten notification entries (notifications.agent.>, dispatch, github, slack, legion, ghostwispr, whatsapp, the two exception lanes and notifications.role.>) replaced by notifications.>, with every $JS/$KV entry and both subscribe lists identical. The listener reached healthy on that grant, the publish answered 200 in 3 ms, the session received the envelope once, and nats-server logged no violation for the run.",
+      "headSha": "e0234413d3d7dca1b81c1f37921f14e98520cefe",
+      "negativeControl": "The same rig with the pre-change grant, rendered by base commit 2de87cd4f6fe's own core.ListenerPermissions (50 entries) and driven by the head's listener binary: the identical publish answered 500 in 0.0037 s with `bus: NATS denied the publish to \"notifications.team.deploy-squad\": nats: permissions violation`, nats-server logged `Publish Violation - Subject \"notifications.team.deploy-squad\"`, and the subscriber received nothing."
+    },
+    {
+      "criterion": "A2 - every notifications. topic the stream does not capture goes over core NATS with a server confirmation, so the publish is answered at once instead of waiting out JetStream's five-second acknowledgement.",
+      "surface": "The same rig, through the real listener binary and the real server; the publish timed from the HTTP request, the transport read from the delivered message (a JetStream publish carries an _INBOX reply, a core publish none) and from the stream's own state over the monitoring port.",
+      "command": "`curl -w '%{http_code} %{time_total}'` on POST /v1/messages/publish for notifications.team.deploy-squad, notifications.github (one token short of a stream prefix), notifications.githubx.acme, the exception lane of a dispatch topic, and the captured control notifications.github.example-org.example-repo.pr.42.comment; then 120 concurrent publishes (`xargs -P 32`) to notifications.team.load.<n>; then `curl 'http://127.0.0.1:18222/jsz?streams=1&subjects=1'`.",
+      "observed": "Ad-hoc topics answered 200 in 2-4 ms and were delivered once with an empty reply subject; the captured control answered 200 and arrived with an _INBOX reply and was retained in ENVOY_NOTIFICATIONS; the exception lane of a dispatch topic took core and that of an agent topic took JetStream, as the stream's subjects say. 120 concurrent publishes answered 200 120/120, each of the 120 subjects was delivered exactly once, and the stream gained 0 messages. With the server frozen (SIGSTOP) the ad-hoc publish failed closed in 5.004 s with `bus: flush publish to \"notifications.team.frozen3\": nats: timeout` (no false 200), and after SIGCONT the next publish answered 200 in 3 ms and was delivered.",
+      "headSha": "e0234413d3d7dca1b81c1f37921f14e98520cefe",
+      "negativeControl": "The same rig and the same (new) grant with the listener built from base commit 2de87cd4f6fe (its api.go, nats.go and stream.go): the identical publish answered 500 in 5.003 s with {\"error\":\"context deadline exceeded\"} - the reported bug."
+    },
+    {
+      "criterion": "A3 - the listener refuses a topic outside notifications. with a 400, and its tests stay as the adopted pull request has them.",
+      "surface": "The same rig against the built listener.",
+      "command": "POST /v1/messages/publish with each of outside.example, $KV.envoy_roles.x, $JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS, \">\", \"notifications\", notificationsX.team.a, Notifications.team.a, and with notifications.agent.ses_rig, \"notifications.\", notifications..team, a topic holding a space and one holding a newline.",
+      "observed": "Each of the first seven answered 400 {\"error\":\"topic must begin with notifications.\",\"expected\":[\"topic\"]} in about 2 ms and nothing reached NATS (a subscriber on each refused subject received nothing, and the server logged no violation). The agent topic kept its own 400 (cannot publish to agent topics), and the four invalid subjects kept the pre-existing 400 `not a subject NATS accepts`. A 4 119-byte subject answered 413 and payloads of 1 MiB + 1 and 4 MiB answered 413 naming the server's max payload. The adopted tests are unchanged: the twelve files equal commit b096a8708276da700f21230861b9d7b164065124's tree byte for byte.",
+      "headSha": "e0234413d3d7dca1b81c1f37921f14e98520cefe",
+      "negativeControl": "On the same rig and in the same run a notifications. topic answered 200 and was delivered, so the 400 is the prefix rule and not a blanket refusal; and the pre-change listener binary sent outside.example to NATS instead (nats-server logged `Publish Violation - Subject \"outside.example\"` and the API answered 500 after 5.002 s), which is what the 400 replaces."
+    }
+  ],
+  "ciRead": {
+    "codeHead": "7424e75ad6a16beadd5eef7d119d2936f40d0c4d",
+    "note": "Read from GitHub, never re-run. The pull request's head e0234413 is a handoff-only push carrying skip-checks: true, so it has 0 check runs and the code head's verdict is the one that counts; the two heads' code trees are identical (jj diff --from 7424e75ad6a1 --to e0234413d3d7 --git '~.legion' is empty).",
+    "success": [
+      "lint (run 39728714152)",
+      "typecheck (run 39728714152)",
+      "test (run 39728714152)",
+      "pr-title (run 39728714159)",
+      "build (run 39728714121)",
+      "changes (run 39728714158)",
+      "envoy-go (run 39728714158)",
+      "envoy-go-race (run 39728714158)",
+      "envoy-infra-go (run 39728714158)",
+      "envoy-smoke (run 39728714158)",
+      "envoy-e2e-local (run 39728714158)",
+      "dispatch-memory (run 39728714158)"
+    ],
+    "failure": [
+      "dispatch (run 39728714158, job 119658599066) - step 13 \"Test dispatch dashboard\". Pre-existing on this branch line and not this change's: the same job fails at the same step 13 on the plan's baseline head c00fcb28eab9a3b4831007e2cd0996ef1f044021 (#2089's merged head, job 119082906542), and this pull request touches no file under packages/dispatch."
+    ]
+  },
+  "observations": [
+    {
+      "what": "Which hosts the fix reaches. A session that takes deliveries over its own core-NATS subscription receives an ad-hoc topic (Oh My Pi's @sjawhar/pi-envoy, packages/pi-envoy/extensions/envoy.ts:1113, which registers port 0; the Claude Code channel, packages/envoy-client/src/delivery.ts:183). A listener-delivered session - one registered with a port and driving: true, as @sjawhar/opencode-legion-envoy registers (packages/envoy-plugin/src/server.ts:95) - takes deliveries as HTTP prompts the listener posts from its durable JetStream consumer, whose filter_subjects are the eight compiled stream subjects (read from the live consumer over /jsz?consumers=1&config=1). An ad-hoc topic never enters the stream, so it reaches no such session.",
+      "evidence": "On the rig, a session registered with port 19031 and driving: true for both notifications.team.driven and notifications.github.example-org.example-repo.pr.42.> received the captured topic as POST /session/ses_driven/prompt_async in about 50 ms and received nothing for the ad-hoc topic within 4 s, while both publishes answered 200.",
+      "why not a failure": "No acceptance criterion of dispatch://INFRA-117 names it, it is not a regression (before this change the publish failed for every host), and the same gap is in the main-line fix this branch must match (#2101), so closing it here would diverge the branch from the fix it exists to carry. Recorded in the pull request body and reported to the architect as a decision for dispatch://INFRA-113."
+    },
+    {
+      "what": "A publish to a literal wildcard subject under the prefix (notifications.> or notifications.*) is accepted: it answers 200 and is delivered only to a subscriber whose pattern matches the literal > or * token, never fanned out to subscribers of concrete topics.",
+      "evidence": "On the rig both answered 200; the session following notifications.> received them and the session following notifications.team.deploy-squad did not. Unchanged in kind by this diff: before it, the same topics took the JetStream path and failed at the five-second deadline."
+    },
+    {
+      "what": "A core publish the client could not confirm can still land. With the server frozen the ad-hoc publish answered 500 (flush timeout), and the buffered message was delivered once the server resumed.",
+      "evidence": "notifications.team.frozen3 reached the subscriber after SIGCONT though its POST had answered 500. This is the documented contract of bus.confirmPublished (an error means not known to be accepted, never known not to have landed) and is the pre-existing behaviour of every core-transport topic, role lanes included."
+    }
+  ],
+  "testsJudged": {
+    "verdict": "The implementer's tests cover the ways the change broke under probing.",
+    "detail": "TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCapture pins every routing boundary the rig exercised (one token short of a stream prefix, a prefix lookalike, both exception-lane shapes); TestEveryStreamSubjectIsALiteralPrefixAndWildcard pins the assumption streamCaptures rests on, so a future stream subject of another shape fails the suite rather than mis-routing a publish; TestAnAdHocTopicIsPublishedOverCoreNATSAndReachesItsSubscriber pins both the delivery and the absence of stream retention; TestPublishHandlerRefusesATopicOutsideNotifications pins the 400 and that a refused publish reaches NATS not at all; permissions_test.go and the two cloud-config goldens pin the rendered grant for all three users. No red test was written: no probe produced a defect against a stated contract."
+  }
+}
