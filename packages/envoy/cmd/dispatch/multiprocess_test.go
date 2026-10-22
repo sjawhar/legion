@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -721,6 +722,161 @@ func TestADocumentWriteOnOneProcessClosesTheStaleRoomOnTheOther(t *testing.T) {
 	// still had.
 	if text := pair.a.documentText(t, artifactID); text != "after\n" {
 		t.Errorf("A serves %q after B's write; want the current document, %q", text, "after\n")
+	}
+}
+
+// evictionsOf is how many rooms this process has closed behind another process's write, for one
+// document.
+func evictionsOf(p *dispatchProcess, artifactID string) int {
+	return len(p.logLines(`msg="dispatch: closed a document room another process's write left behind"`, "room="+artifactID))
+}
+
+// settlementOwedFor reports whether the document owes a settlement right now, which is the
+// condition the two rows below are told apart by.
+func settlementOwedFor(t *testing.T, pair *dispatchPair, artifactID string) bool {
+	t.Helper()
+	var owed bool
+	if err := pair.database.Pool.QueryRow(context.Background(),
+		`select exists(select 1 from doc_settlements_pending where artifact_id = $1)`, artifactID).Scan(&owed); err != nil {
+		t.Fatalf("read whether %s owes a settlement: %v", artifactID, err)
+	}
+	return owed
+}
+
+// writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
+// client is told to. A write whose own room is failed or reloading is answered
+// 503 DOC_SERVICE_UNAVAILABLE, and the contract is that the caller repeats the same call
+// (skills/dispatch/references/documents.md, and the pull request's contract census). A rig that
+// read that 503 as a failure would report a correct contract as a defect, which one run of this
+// row's first draft did.
+func writeThroughRetrying503s(t *testing.T, p *dispatchProcess, artifactID, find, with string) int {
+	t.Helper()
+	body := fmt.Sprintf(`{"ops":[{"op":"replace","find":%q,"with":%q}]}`, find, with)
+	for attempts := 1; ; attempts++ {
+		response, err := p.send(http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", body)
+		if err != nil {
+			t.Fatalf("write %q over %q: %v", with, find, err)
+		}
+		status := response.StatusCode
+		_ = response.Body.Close()
+		switch {
+		case status == http.StatusOK:
+			return attempts
+		case status != http.StatusServiceUnavailable || attempts >= 20:
+			t.Fatalf("write %q over %q answered %d after %d attempts", with, find, status, attempts)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// burstLeavingTheRoomBehind drives the shape both rows below are about: a first write on B that
+// evicts A's room, A's browser reconnecting as a browser does, and a second write landing inside
+// the two-second eviction interval the first one started, so its notification is one the interval
+// refuses. Afterwards nothing writes that document again, which is the whole point: the last
+// write of a burst is one of the refused ones, and nothing comes back for it.
+func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID string, beforeReload func()) (*docstest.Peer, time.Time) {
+	t.Helper()
+	editor := pair.a.openEditor(t, artifactID, "before\n")
+	writeThroughRetrying503s(t, pair.b, artifactID, "before", "middle")
+	select {
+	case <-editor.Ended:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the room A held never closed after B's first write:\n%s", pair.a.Output.String())
+	}
+	// The eviction's own line is written after the room has closed, so it is waited for rather
+	// than read the moment the socket went.
+	pair.a.waitForLog(t, 10*time.Second,
+		`msg="dispatch: closed a document room another process's write left behind"`, "room="+artifactID)
+	if evictions := evictionsOf(pair.a, artifactID); evictions != 1 {
+		t.Fatalf("want one eviction after the first write, got %d", evictions)
+	}
+	if beforeReload != nil {
+		beforeReload()
+	}
+	reconnected := pair.a.openEditor(t, artifactID, "middle\n")
+	wrote := time.Now()
+	writeThroughRetrying503s(t, pair.b, artifactID, "middle", "after")
+	return reconnected, wrote
+}
+
+// requireTheRoomClosed waits for the room A holds to close and reports how long after the
+// trailing write it took, which is the measurement: the eviction interval's own length means the
+// deferred re-examination, since nothing notified this process again. A room that stays open is
+// reported with the evictor's own lines, which tell a wake that never reached the room from a
+// re-examination that reached no verdict.
+func requireTheRoomClosed(t *testing.T, p *dispatchProcess, editor *docstest.Peer, wrote time.Time, within time.Duration, what string) {
+	t.Helper()
+	select {
+	case <-editor.Ended:
+		t.Logf("%s: the room closed %v after the trailing write", what, time.Since(wrote))
+	case <-time.After(within):
+		t.Fatalf("%s: the reader kept a room the trailing write of the burst left behind - no second eviction in %v.\nThe evictor's own lines, which say whether the re-examination ran and reached no verdict or never reached the room:\n%v\n%v\nThe process's output:\n%s",
+			what, within,
+			p.logLines("close a document room another process's write left behind"),
+			p.logLines("read the head of a document that changed"),
+			p.Output.String())
+	}
+}
+
+// The deferred re-examination, in the branch where something else could also have rescued the
+// room. A notification the eviction interval refuses is remembered and re-examined when that
+// room's window ends; here the room also owes a settlement, so the durable gate would fail it in
+// about six seconds anyway - three refusals two seconds apart, maxSettleFailures of them, ending
+// in failRoomLocked. The window is the shorter of the two and is what closes it.
+func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "OWD")
+	pair.a.createProject(t, project, "Owes a settlement")
+	_, artifactID := pair.a.createIssueIn(t, project, "Written in a burst elsewhere", "before")
+
+	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID, nil)
+	if !settlementOwedFor(t, pair, artifactID) {
+		t.Fatalf("this document owes no settlement, so this row is not the branch it is named for")
+	}
+	requireTheRoomClosed(t, pair.a, reconnected, wrote, 30*time.Second, "owes a settlement")
+}
+
+// The branch the deferred re-examination was built for, and the one nothing else covers: a room
+// no settlement of this process's will ever fail. A settlement is what rescued the room in the
+// row above - refused by the durable gate three times two seconds apart until failRoomLocked -
+// and a reader with the tab open who has typed nothing has no such rescuer, so the window's
+// re-examination is the only path that closes its room, and without it that reader holds text
+// the store replaced for as long as the tab stays open (roomIdleTimeout is how long a room stays
+// resident *after its last peer leaves*, which a room with a browser in it never reaches).
+//
+// How that room is made, and what the construction is and is not. A is given a settle delay no
+// window of this row reaches (DISPATCH_TEST_SETTLE_DELAY, under the test hooks), so no settlement
+// of A's can fire; the document is created and written on B, and A only ever reads it. That
+// removes the rescuer rather than the condition, and it is the stronger of the two for what this
+// row asks, since it leaves the window as the only remaining path whatever else is armed.
+//
+// The condition itself was tried first and did not hold: B was given a settle delay short enough
+// to clear the pending row before A's reconnect loaded the room, and the row asserted that row
+// absent at the load - which passed, and the room still settled, because A's own reconnecting
+// peer appends as it syncs and arms a settlement of its own. With the wake wired that assertion
+// passed only because the window (1.88 s) beat the settle delay (2 s), which is a vacuous pass;
+// the control with the wake unwired is what exposed it. Hence this shape, and hence the
+// assertion below that no settlement of A's ran, which under a 30-minute delay is a real
+// condition rather than a race the window happens to win.
+func TestTheRefusedNotificationClosesARoomNoSettlementWillFail(t *testing.T) {
+	pair := newPair(t)
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, SettleDelay: 30 * time.Minute,
+	})
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey,
+	})
+	pair.a.waitHealthy(t)
+	pair.b.waitHealthy(t)
+
+	project := uniqueProjectKey(t, "OWN")
+	pair.b.createProject(t, project, "No settlement will fail it")
+	_, artifactID := pair.b.createIssueIn(t, project, "Open here, typed into never", "before")
+
+	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID, nil)
+	requireTheRoomClosed(t, pair.a, reconnected, wrote, 30*time.Second, "no settlement will fail it")
+	if settled := pair.a.logLines("dispatch: settle document", artifactID); len(settled) > 0 {
+		t.Errorf("A settled this room after all, so something other than the window could have closed it:\n%v", settled)
 	}
 }
 
