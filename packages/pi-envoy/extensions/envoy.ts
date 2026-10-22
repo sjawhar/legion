@@ -2922,13 +2922,15 @@ export default function envoyExtension(pi: PiApi): void {
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
-          // The listener never delivers a message to the session it names as its source — the
-          // role lane skips the resolved holder and the fanout skips any interest whose session
-          // is the source — and a subagent's source is its parent, so a publish to a role its
-          // own parent holds is accepted, answers with that holder, and reaches nobody. Only
-          // the role case is visible here (a plain topic's subscribers are not in the answer);
-          // AGENTS.md and the envoy skill carry the general rule. A direct envoy_send is
-          // unaffected: the agent-subject lane has no such skip.
+          // The listener never delivers a message to the session it names as its source on a
+          // role or a stream topic — the role lane skips the resolved holder and the fanout skips
+          // any interest whose session is the source — and a subagent's source is its parent, so a
+          // publish to a role its own parent holds is accepted, answers with that holder, and
+          // reaches nobody. An ad-hoc topic, which the listener sends over core NATS, has no such
+          // skip and reaches every subscriber, the source among them. Only the role case is
+          // visible here (a plain topic's subscribers are not in the answer); AGENTS.md and the
+          // envoy skill carry the general rule. A direct envoy_send is unaffected: the
+          // agent-subject lane has no such skip.
           const undelivered = source !== "" && result.holder === source && inSubagent;
           const published =
             result.holder === undefined

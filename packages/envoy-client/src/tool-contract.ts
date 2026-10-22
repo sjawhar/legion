@@ -184,7 +184,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to any topic. ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches the sessions subscribed when it is published, yours included, and is not retained. ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
