@@ -76,19 +76,39 @@ func asciiLower(r rune) rune {
 	return r
 }
 
+// CheckAllowedHosts refuses every entry of hosts the listener would refuse in its own
+// ENVOY_ALLOWED_HOSTS at boot, so a component that renders one is refused before it registers
+// anything rather than deploying a listener that will not start. It is the one rule, and input is
+// the caller's own path for the list — "allowedHosts" for a listener's config, and the
+// component's spelling, such as "listener.allowedHosts", where the component renders entries of
+// its own beside the operator's: each refusal names input and the entry's index within hosts, so
+// an operator reads the index of the entry they wrote. A seed is refused first, naming the entry
+// and never its value, since the refusal below quotes it.
+func CheckAllowedHosts(input string, hosts []string) error {
+	for i, entry := range hosts {
+		if bus.HoldsSeed(entry) {
+			return InputErrorf(input, "%w", SeedRefusal(fmt.Sprintf("%s[%d]", input, i)))
+		}
+		_, _, withPort := net.SplitHostPort(entry)
+		name := allowedHostName(entry)
+		if withPort == nil || !hostEntry.MatchString(entry) || (net.ParseIP(name) == nil && !dnsName.MatchString(name)) {
+			return InputErrorf(input, "%s[%d] is %q: want a host name or address with no port, scheme or path", input, i, entry)
+		}
+	}
+	return nil
+}
+
 // Check refuses a config the listener cannot run on. Each refusal is an InputError.
 //
-// CheckMachineID owns the machine-id rule. ENVOY_HOST_BRIDGE is read untrimmed into every local
+// CheckMachineID owns the machine-id rule and CheckAllowedHosts the allowed-host rule.
+// ENVOY_HOST_BRIDGE is read untrimmed into every local
 // delivery's URL (internal/session/session.go), so a host bridge with surrounding whitespace is
 // refused. Port is always given, since a health check calls it. No value may hold a control
 // character: a watchdog writes the environment, one variable per line, into a heredoc of a script
 // that runs as root on the host, where a line break would end the heredoc and run what follows it.
 // Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
 // container's inputs and the watchdog's env file; that refusal names the field and never quotes
-// the value, and comes before any other refusal of that field. An allowed host the listener would
-// refuse at boot is refused here, by its index, since a listener that will not start serves
-// nothing: an entry carrying a port, a scheme, a path or a stray bracket, or that is no host name
-// or IP address at all. A seed in an entry is refused before that rule, which would quote it.
+// the value, and comes before any other refusal of that field.
 func (c ListenerConfig) Check() error {
 	if bus.HoldsSeed(c.MachineID) {
 		return InputErrorf("machineId", "%w", SeedRefusal("machineId"))
@@ -114,15 +134,8 @@ func (c ListenerConfig) Check() error {
 	if strings.ContainsFunc(c.ListenHost, unicode.IsControl) {
 		return InputErrorf("listenHost", "listenHost contains a control character: %q", c.ListenHost)
 	}
-	for i, entry := range c.AllowedHosts {
-		if bus.HoldsSeed(entry) {
-			return InputErrorf("allowedHosts", "%w", SeedRefusal(fmt.Sprintf("allowedHosts[%d]", i)))
-		}
-		_, _, withPort := net.SplitHostPort(entry)
-		name := allowedHostName(entry)
-		if withPort == nil || !hostEntry.MatchString(entry) || (net.ParseIP(name) == nil && !dnsName.MatchString(name)) {
-			return InputErrorf("allowedHosts", "allowedHosts[%d] is %q: want a host name or address with no port, scheme or path", i, entry)
-		}
+	if err := CheckAllowedHosts("allowedHosts", c.AllowedHosts); err != nil {
+		return err
 	}
 	if c.SOCKS5Proxy != "" {
 		if err := bus.CheckSOCKS5Proxy(c.SOCKS5Proxy); err != nil {

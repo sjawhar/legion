@@ -85,20 +85,25 @@ func TestNatsHubResolverRefusesInvalidListenerAndSessionUserInputs(t *testing.T)
 			edit: func(a *gcp.NatsHubArgs) { a.TailnetDnsName = "" },
 			err:  []string{"tailnetDnsName is required", "its listener answers on"},
 		},
+		// The hub renders its own address as the first entry of the list the listener reads, but a
+		// refusal names the list the operator wrote and the index in it: an operator told
+		// allowedHosts[1] for their first entry would look for an entry they never wrote.
 		{
 			name: "a listener allowed host carrying a port",
 			edit: func(a *gcp.NatsHubArgs) { a.Listener.AllowedHosts = []string{"hub.example.com:9020"} },
-			err:  []string{`allowedHosts[1] is "hub.example.com:9020"`},
+			err:  []string{`listener.allowedHosts[0] is "hub.example.com:9020"`, "no port, scheme or path"},
 		},
 		{
 			name: "a listener allowed host carrying a scheme",
 			edit: func(a *gcp.NatsHubArgs) { a.Listener.AllowedHosts = []string{"https://hub.example.com"} },
-			err:  []string{`allowedHosts[1] is "https://hub.example.com"`},
+			err:  []string{`listener.allowedHosts[0] is "https://hub.example.com"`},
 		},
 		{
-			name: "a wildcard listener allowed host",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.AllowedHosts = []string{"*.example.com"} },
-			err:  []string{`allowedHosts[1] is "*.example.com"`},
+			name: "a wildcard listener allowed host, after one that is fine",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Listener.AllowedHosts = []string{"hub.example.com", "*.example.com"}
+			},
+			err: []string{`listener.allowedHosts[1] is "*.example.com"`},
 		},
 		{
 			name: "a listener without a public key",

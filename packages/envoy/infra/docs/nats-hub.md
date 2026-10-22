@@ -96,9 +96,9 @@ The hub refuses these before it registers anything, with an error naming the inp
 - a `listener` on a hub with no `tailnetDnsName`, since the hub renders the address its listener
   answers on from it, as `tailnetDnsName is required for a hub with a listener: …`. Pulumi
   refuses the hub while it previews it, before anything is registered;
-- a `listener.allowedHosts` entry that is not a plain host name or IP address, named by its
-  index, as `allowedHosts[0] is "hub.internal.example:9020": want a host name or address with no
-  port, scheme or path`: an entry carrying a port, a scheme, a path or a stray bracket, or a
+- a `listener.allowedHosts` entry that is not a plain host name or IP address, named by its own
+  index in that list, as `listener.allowedHosts[0] is "hub.internal.example:9020": want a host
+  name or address with no port, scheme or path`: an entry carrying a port, a scheme, a path or a
   wildcard such as `*.example-tailnet.ts.net`. The listener refuses the same entry in its own
   `ENVOY_ALLOWED_HOSTS` when it boots, so a hub whose listener could not serve is refused before
   anything registers;

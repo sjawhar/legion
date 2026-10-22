@@ -314,8 +314,10 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 // hub without one. The listener runs as machine hostname, listens on the VM's loopback on the
 // listener's default port, and reaches NATS there too. It answers on the hub's own tailnet name,
 // which the tailnet's MagicDNS gives the VM, and on every further address the listener's
-// allowedHosts names; core refuses an entry it would refuse at boot, so a hub that could serve
-// nobody is refused before anything registers.
+// allowedHosts names, so a hub whose listener could serve nobody is refused before anything
+// registers. The operator's entries are checked as their own list, by the rule core owns, so a
+// refusal names listener.allowedHosts and the index the operator wrote, not the index of the
+// rendered list the hub's own address comes first in.
 func resolveListener(args *NatsHubArgs) (*listener, error) {
 	l := args.Listener
 	if l == nil {
@@ -333,6 +335,9 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 	if args.TailnetDnsName == "" {
 		return nil, errors.New("tailnetDnsName is required for a hub with a listener: the hub renders the " +
 			"address its listener answers on from it, so a client reaching the hub by its tailnet name is served")
+	}
+	if err := core.CheckAllowedHosts("listener.allowedHosts", l.AllowedHosts); err != nil {
+		return nil, err
 	}
 	env, err := core.ListenerConfig{
 		MachineID:    args.Hostname,
