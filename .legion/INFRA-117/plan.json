@@ -3,7 +3,7 @@
   "phase": "plan",
   "issue": "INFRA-117",
   "completed": "2026-10-22T04:59:05Z",
-  "planDocument": "dispatch://INFRA-117/artifact/plan",
+  "planDocument": "dispatch://INFRA-117/artifact/plan-md",
   "requiredSkills": {
     "implement": [
       "skill://legion-worker: the phase mechanics, the push rules and the handoff gate this issue runs under; its workspace and identity rules are what keep the non-default base safe.",
