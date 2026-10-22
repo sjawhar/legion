@@ -33,6 +33,7 @@ dev-broker: ready.
   export AGENT_SECRETS_APPROVER=ada@example.com
   export AGENT_SECRETS_HELPER_SOCK=/tmp/agent-secrets-dev.SGUyqq/helper.sock
   export AGENT_SECRETS_OPERATOR_FILE=/tmp/agent-secrets-dev.SGUyqq/operator
+  export AGENT_SECRETS_MACHINE_FILE=/tmp/agent-secrets-dev.SGUyqq/machine.json
   export DEV_BROKER_DIR=/tmp/agent-secrets-dev.SGUyqq
   export PATH=/tmp/agent-secrets-dev.SGUyqq/bin:$PATH
 ...
@@ -44,9 +45,10 @@ creates the database.
 Leave it running, and paste the exports into a second shell. They point the clients at this broker
 and name its UI token, the credential with which Dispatch's server, and here
 `agent-secrets-devrelay` in its place, decides for an approver
-([Concepts](/legion/broker/concepts/#approvals)). They also keep the helper's socket and its
-operator file (the Dispatch login the helper's machine login names, `ada@example.com`) in the
-stack's workdir, so the helper never touches one already running for your user and nothing lands in
+([Concepts](/legion/broker/concepts/#approvals)). They also keep the helper's socket, its
+operator file (the Dispatch login the helper's machine login names, `ada@example.com`) and its
+machine file (the login the helper keeps across restarts) in the stack's workdir, so the helper
+never touches one already running for your user, or your own machine's login, and nothing lands in
 your current directory. Check that `type agent-secrets` names the workdir's `bin/`: a tool manager
 that puts its own directories first on `PATH` at every prompt runs an installed `agent-secrets`
 instead.
@@ -59,7 +61,9 @@ ends, or for the `--ttl` its request names. Every command below runs in that sec
 
 ## Run a helper and log it in
 
-Start the helper in the background, with its log in the workdir, and log it in:
+Start the helper in the background, with its log in the workdir, and log it in. It runs from this
+shell rather than through `agent-secrets-helper install`, since a `systemd --user` unit would not
+carry the exports above and would replace your own helper's unit:
 
 ```sh
 agent-secrets-helper serve 2>"$DEV_BROKER_DIR/helper.log" &
@@ -75,7 +79,8 @@ $ agent-secrets-devrelay machine-approve --code YE9L-5FM5
 ```
 
 and `machine login` exits 0. The helper's log, `$DEV_BROKER_DIR/helper.log`, says
-`machine login issued; the helper holds a launcher credential`.
+`machine login issued; the helper holds a launcher credential`, and a helper you stop and start
+again with the same exports resumes that login from `$AGENT_SECRETS_MACHINE_FILE`.
 
 ## Use secrets from a session
 

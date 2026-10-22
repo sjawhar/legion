@@ -220,6 +220,7 @@ start_process agent sudo -n unshare --uts --fork -- env -i PATH="$work/bin:/usr/
   AGENT_SECRETS_URL="$broker_url" \
   AGENT_SECRETS_HELPER_SOCK="$work/agent/helper.sock" \
   AGENT_SECRETS_OPERATOR_FILE="$work/agent/operator" \
+  AGENT_SECRETS_MACHINE_FILE="$work/agent/machine.json" \
   sh -c 'hostname "$1" && echo $$ >"$2" && exec setpriv --reuid="$3" --regid="$4" --init-groups agent-secrets-helper serve' \
   helper "$AGENT_HOST" "$work/agent/helper.pid" "$(id -u)" "$(id -g)"
 until_true 30 "the helper's pid" test -s "$work/agent/helper.pid"

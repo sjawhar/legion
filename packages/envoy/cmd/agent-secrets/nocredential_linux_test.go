@@ -1,8 +1,8 @@
 // packages/envoy/cmd/agent-secrets/nocredential_linux_test.go
 //go:build linux
 
-// A machine session on a helper that holds no launcher credential has no broker identity: after a
-// reboot or helper restart the helper enrolls no one until the operator logs the machine in, so
+// A machine session on a helper that holds no launcher credential has no broker identity: a helper
+// never logged in, or whose login lapsed or was refused, enrolls no one until the operator logs the machine in, so
 // identity sends its callers to their other backend, and every command that meets the helper's
 // NO_CREDENTIAL answer says so in one line. Linux-only for the real helper's pidfd pinning.
 package main

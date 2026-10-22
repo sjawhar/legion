@@ -156,8 +156,8 @@ func helperInstalled() bool {
 // the helper's sign op — which signs a throwaway proof and changes nothing — answers OK (enrolled)
 // or NOT_ENROLLED (registered and still enrolling) for it. Such a process uses the broker even if
 // its enrollment later fails, and the failure is the broker call's. A registered session on a
-// helper holding no launcher credential (NO_CREDENTIAL: after a reboot or helper restart, until
-// the operator logs the machine in) has none, since that helper enrolls no one; it is exit 1 with
+// helper holding no launcher credential (NO_CREDENTIAL: never logged in, or its login lapsed or was
+// refused, until the operator logs the machine in) has none, since that helper enrolls no one; it is exit 1 with
 // the not-logged-in notice. A helper that cannot be asked — its socket refuses connections, is
 // absent although AGENT_SECRETS_HELPER_SOCK names it or the helper is installed, or gives no
 // answer within identityDeadline — is exit 1 with a notice on stderr, so a caller that then uses

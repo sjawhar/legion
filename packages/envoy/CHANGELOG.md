@@ -4,6 +4,36 @@
 
 ### Added
 
+- A person's machine login is an OAuth 2.0 device authorization grant (RFC 8628) on the secrets
+  broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
+  itself. `agent-secrets machine login` prints the same code, which the person the login names
+  types into Dispatch's machine-login page as before; on approval the helper gets a refresh token
+  bound to the machine's key (DPoP, RFC 9449), and refreshes the login when it starts and every
+  24 hours after. Each refresh moves the credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
+  from then and rotates the refresh token; a rotated token redeemed more than a minute after its
+  replacement ends the login. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
+  its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
+  logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
+  token was reused` at ERROR, and `machine login-status` prints it. While a login is held,
+  `machine login-status`'s stderr says `the machine login renews itself; without a refresh it
+  lapses at <time> (in <duration>)`.
+- The helper keeps its machine login in `AGENT_SECRETS_MACHINE_FILE` (default
+  `~/.config/agent-secrets/machine.json`, mode 0600): the machine key, the credential's id and
+  expiry and the current refresh token. It resumes that login when it starts, so a restart, a
+  reboot or an upgrade keeps the machine logged in, and deletes the file when the broker refuses
+  the login's refresh. A file that is there but is not a machine login stops the helper at start,
+  naming the file.
+- `agent-secrets-helper install [--url URL] [--restart-with-sessions]` writes the helper's
+  `systemd --user` unit (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`, by default
+  under `~/.config`), running this binary's `serve` with `AGENT_SECRETS_URL` from `--url` or the
+  environment and `Restart=always`, then runs `systemctl --user daemon-reload` and
+  `enable --now`. An unchanged unit changes nothing. A helper that was already running is restarted
+  only when it has no sessions registered, or with `--restart-with-sessions`, since a restart ends
+  the sessions' grants; with sessions it lists them, prints `not restarted: <n> sessions are
+  registered; a restart ends their grants. Re-run with --restart-with-sessions.`, and exits 0. The
+  helper's new `drain` op is that check: it answers the registered sessions and, with none, refuses
+  every later register `DRAINING` until the helper exits, so no session starts between the check
+  and the restart.
 - The secrets broker serves a minted secret: a GCP secret with no version tagged
   `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
   its name with that account and its owner and the secret is human-tier. Each release mints a
@@ -411,6 +441,15 @@
 
 ### Changed
 
+- **Breaking:** `agent-secrets-helper` logs a machine in only through the broker's OAuth routes
+  (`POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`), so it needs a secrets
+  broker of this release: against an earlier broker, `agent-secrets machine login` fails. Upgrade
+  the broker before the helpers. The broker still serves `POST /v1/launcher-credentials` and
+  `GET /v1/launcher-credentials/{pending}` for helpers from earlier releases, whose logins it never
+  refreshes.
+- `BROKER_LAUNCHER_CREDENTIAL_SECONDS` defaults to 2592000 (30 days), up from 604800 (7 days), and
+  is how long a machine login lasts without a refresh: an approval mints its credential for that
+  long, and each refresh moves its expiry to that long from then. Its maximum stays 2592000.
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is

@@ -125,7 +125,8 @@ which carries it through brief contention for its address's bucket; a caller tha
 bucket drained for the rest of the credential's life stops it logging in.
 
 A service login a person approved through a device code before this broker keeps working until
-it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (7 days by default) after its approval.
+it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (30 days by default) after its approval:
+nothing refreshes it.
 
 ## Signing in to RDS by IAM token
 
