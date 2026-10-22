@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-127",
-  "completed": "2026-10-22T20:14:00Z",
+  "completed": "2026-10-22T21:20:00Z",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Two ways. (1) Read the named run: GitHub Actions run 39840249110, job 120039730704 (envoy-infra-go), step 'Live tests of envoy-infra against nats-server (natslive)' — the step ran `go test -tags natslive ./core/ ./seed/` and logged `ok github.com/sjawhar/envoy/infra/core 96.768s`, and `packages/envoy/infra/core/hub_host_live_test.go` (blob 53fc56da0f802d7dc0c035c9df160c3a279d11dc) is present at that head 8293cec5eb577e1658afcd16e7a9dcdc5bfc0938 (gh api repos/sjawhar/legion/contents/...?ref=8293cec5), so TestHubListenerServesItsTailnetName and its in-test negative control ran and passed on both nats images. The whole check-run list at that head is 13 success, 9 skipped, 0 failed, lint/typecheck/test/pr-title/envoy-infra-go among the successes. (2) Drove the same surface independently in this pod, which did NOT need the CI job: the implementer's statement that 'no Legion worker machine has a container runtime, so this proof runs in CI and nowhere else' is true of containers but not of the proof — `GOWORK=off GOBIN=/tmp/bin go install github.com/nats-io/nats-server/v2@v2.15.1` builds the hub's own pinned server version (testnats.HubImage is nats:2.15.1-alpine) as a plain binary, and the whole stack then runs here. See the proof entries below; both the 200 on the hub's address and the pre-change 421 reproduced in this pod."
+    "how": "Round 2, at code head 07950b0953d96235620c25c70d5e3cae76588776. The implementer's round-2 proof is round 1's live run re-run at this head (run 39851455055, job 120078546897, step 'Live tests of envoy-infra against nats-server (natslive)'), plus the claim that round 2 changed no executable plugin code and that its new agreement rows are not vacuous. I checked each: (1) the diff f66124f7..07950b09 over packages/envoy/infra/core/listener_env.go and packages/envoy/internal/config/config.go has no removed line and no added line that is not a `//` comment (mechanical filter over `jj diff --git`), so the only file outside packages/envoy/infra in this whole change gained comments alone; (2) the three gcp MagicDNS substitutions render exactly the hand join, driven over three name pairs, two of them outside any golden; (3) the two new asymmetry rows are non-vacuous by mutation, and the guard also catches drift the other way; (4) I re-ran my own round-1 live drive at this head and got the same answers byte for byte. Round 1's verdict stands: the implementer's run is real and its negative control is exercised in the same test. Round 1's `how` is below in `round1`."
   },
   "failures": [],
   "failed": 0,
@@ -57,16 +57,67 @@
       "observed": "The stale 'does not check the request's Host' clause is gone. ENVOY_ALLOWED_HOSTS now appears in the input table (tailnetDnsName and listener.allowedHosts rows), the refusal list, the listener unit's environment line and the rewritten guard paragraph, and the document's quoted refusal `listener.allowedHosts[0] is \"hub.internal.example:9020\": want a host name or address with no port, scheme or path` is character-for-character what I saw the code emit. Its two behavioural claims I drove: 'answers every other Host, an empty one included, with 421' (raw HTTP/1.0 with no Host → 421) and 'a client that dials the hub by its bare MagicDNS label or its tailnet IP is refused' (example-hub:9020 and 100.64.0.7:9020 → 421). check-private-names passed: 'no file or path names the private deployment repository or the company … (4786 files)'.",
       "headSha": "b112e98ba05b6382d92726b4fda830f8938aa1dd",
       "negativeControl": "The same grep for 'not check' hits line 197 of the file at the merge base b48bfb0e, so the check distinguishes the fixed document from the stale one."
+    },
+    {
+      "criterion": "Round 2's own claim: the two new agreement rows pin core's deliberate extra strictness rather than passing vacuously, and the mirror guard still catches drift in the direction that deploys a listener which cannot boot.",
+      "surface": "The shipped guard test TestCoreAndTheListenerAgreeOnAnAllowedHost, run against two mutants of packages/envoy/infra/core/listener_env.go injected with `go test -overlay` (nothing written into the workspace): mutant A makes CheckAllowedHosts trim the entry and skip an empty one, as the listener's parseAllowedHosts does; mutant B drops the hostEntry shape regexp from core's condition, which is the drift the guard exists to catch.",
+      "command": "go test -overlay /tmp/tester/overlay3.json ./core/ -run TestCoreAndTheListenerAgreeOnAnAllowedHost -v and the same with /tmp/tester/overlay4.json, from packages/envoy/infra.",
+      "observed": "Mutant A fails exactly two subtests and no others: TestCoreAndTheListenerAgreeOnAnAllowedHost/_hub.internal.example_ (the padded entry) and /#00 (the empty one) — the two rows coreOnlyRefusedAllowedHosts added this round. So the rows are not vacuous: remove core's strictness and they go red, which is precisely the implementer's claim. Mutant B fails [192.0.2.10], [cafe] and [abc.def] — entries the listener refuses at boot that a laxer core would accept — so the one-way assertion `if loadErr != nil { require.Error(t, checkErr) }` is live, and the rewrite from two-way to one-way did not blunt the guard.",
+      "headSha": "e0a3133b8ee3e7c7ec4ce85fcdb82add8287b6ab",
+      "negativeControl": "The unmutated rule at this head leaves both runs' other rows passing — only the mutated behaviour's own rows fail in each run — so each failure is the mutation's and not a test that fails on anything."
+    },
+    {
+      "criterion": "Round 2's doc comments describe what each side actually does: every entry the listener refuses at boot, core refuses too, and core refuses additionally and only padded or empty entries.",
+      "surface": "The same 23,630-entry differential corpus as round 1, re-run at this head against core.CheckAllowedHosts and the listener's own config.Load, with every asymmetric entry classified mechanically rather than by eye.",
+      "command": "go test -overlay /tmp/tester/overlay2.json ./core/ -run TestTesterAllowedHostCorpusAgreement -v, from packages/envoy/infra.",
+      "observed": "0 entries core accepts and the listener refuses — the claim 'every entry refused here is refused there too' holds across the corpus, not just the table's 20 rows. 165 the other way, and 0 of those 165 is outside the padded-or-empty class (checked in code: strings.TrimSpace(entry) != entry or == \"\"). So both halves of the new comments in core/listener_env.go, internal/config/config.go, the agreement test and docs/nats-hub.md are true as written.",
+      "headSha": "e0a3133b8ee3e7c7ec4ce85fcdb82add8287b6ab",
+      "negativeControl": "The corpus's accepted names (example-hub.example-tailnet.ts.net, [2001:db8::1], 192.0.2.7, a trailing-dot name) pass both rules, so the run is not one that refuses everything, and the same harness reported the same 165/0 split at round 1's head, so the classification is stable."
+    },
+    {
+      "criterion": "Round 2's three core.TailnetHostName substitutions in gcp:Dispatch are byte-identical: the rendered Tailscale Serve configuration, the component's url output and the app's DISPATCH_SERVER_URL still name <hostname>.<tailnetDnsName>.",
+      "surface": "The gcp:Dispatch component itself, driven over three hostname/tailnet pairs — two of which no golden holds — rather than resting on the two unchanged goldens: gcp.ResolveDispatch for the serve configuration, the rendered Deployment pod template for DISPATCH_SERVER_URL, and Construct's own state output for url.",
+      "command": "go test -overlay /tmp/tester/overlay.json ./gcp/ -run TestTesterDispatchMagicDNSJoins -v, from packages/envoy/infra.",
+      "observed": "Each rendering equals the hand join for every pair: serveConfig `{\"TCP\":{\"443\":{\"HTTPS\":true}},\"Web\":{\"example-dispatch.example-tailnet.ts.net:443\":…}}`, and likewise `example-dispatch-2.other-tailnet.ts.net:443` and `dd.t.ts.net:443`; DISPATCH_SERVER_URL `https://<pair>` for all three; the construct's url output `https://example-dispatch.example-tailnet.ts.net`. core.TailnetHostName(h, d) == h + \".\" + d was asserted for each pair in the same run, so the substitution is the identity it claims to be.",
+      "headSha": "e0a3133b8ee3e7c7ec4ce85fcdb82add8287b6ab",
+      "negativeControl": "The two pairs outside the goldens are the control for 'the goldens are unchanged, therefore nothing moved': a substitution that silently dropped the dot or reversed the operands would still match no golden I did not read, and it fails these rows."
+    },
+    {
+      "criterion": "Contract change census: the two refusals it names reach a consumer through the call a person invokes, and the published schema carries both new inputs as optional.",
+      "surface": "The component's own Construct entry point — what `pulumi preview` and `pulumi up` call on a consumer's stack — and the plugin served in process, answering GetSchema as a consumer's codegen reads it.",
+      "command": "go test -overlay /tmp/tester/overlay.json ./gcp/ -run TestTesterCensusConstruct -v and go test -overlay /tmp/tester/overlay5.json ./provider/ -run TestTesterPublishedSchema -v, from packages/envoy/infra.",
+      "observed": "A stack as it stands today (a hub with a listener, no tailnetDnsName) is refused at preview and at up alike, with `envoy-infra:gcp:NatsHub example-hub: tailnetDnsName is required for a hub with a listener: …` and 0 registrations in both; the same stack with the one line added registers 11 children. A wildcard second entry is refused as `listener.allowedHosts[1] is \"*.example-tailnet.ts.net\": …`, the operator's own index. The served schema carries tailnetDnsName (`{\"type\":\"string\",\"plain\":true}`) among gcp:NatsHub's inputs and not among its required set, and allowedHosts (`{\"type\":\"array\",\"items\":{\"type\":\"string\"}}`) among gcp:HubListener's properties and not among its required set, so a consumer's generated client gains both as optional. The census's rollout line — immediate refusal, one line for the one consumer — is what I observed.",
+      "headSha": "e0a3133b8ee3e7c7ec4ce85fcdb82add8287b6ab",
+      "negativeControl": "The refusal path registers nothing: m.Registrations() is empty in both the preview and the apply case, against 11 for the stack with the name, so the refusal happens before anything is created rather than after a partial apply."
+    },
+    {
+      "criterion": "A7 again at round 2's head, and the operator check the new 'Updating a hub' paragraph tells a person to run.",
+      "surface": "The same full hub stack as round 1 in this pod — the hub's rendered cloud-config, a real nats-server v2.15.1 from the Go proxy, the listener binary built from this tree on ports 9020 and 4222 — re-run at this head, with the documented post-replacement check performed as the document words it.",
+      "command": "TESTER_NATS_SERVER=/tmp/bin/nats-server go test -overlay /tmp/tester/overlay.json ./gcp/ -run 'TestTesterDriveHubListener|TestTesterHubRefusals' -v, from packages/envoy/infra.",
+      "observed": "Byte-for-byte the round-1 answers at the new head: Host example-hub.example-tailnet.ts.net:9020 -> 200, that name without its port, upper-cased and with a trailing dot -> 200, the bare label, a tailnet IP, an untold name and an absent or empty Host -> 421, loopback -> 200; every accepted operator entry shape served and 192.0.2.8 refused; every plugin refusal as before. The document's own check works as written: the listener's boot line is `listener API hosts: loopback, example-hub.example-tailnet.ts.net`, naming the address clients dial, and a /v1 route at that address answers 200.",
+      "headSha": "e0a3133b8ee3e7c7ec4ce85fcdb82add8287b6ab",
+      "negativeControl": "The same hub with ENVOY_ALLOWED_HOSTS dropped logged `listener API hosts: loopback` and answered the hub's own address 421 while serving loopback 200 — so the documented boot-line check distinguishes a correctly configured hub from the broken one, which is what it is for."
     }
   ],
   "ciRead": {
-    "head": "8293cec5eb577e1658afcd16e7a9dcdc5bfc0938",
-    "observed": "13 success, 9 skipped, 0 failed. lint (run 39840249298), typecheck (39840249298), test (39840249298), pr-title (39840249124), envoy-infra-go (39840249110, job 120039730704), envoy-go, envoy-go-race, envoy-smoke, envoy-e2e-local, dispatch-memory, build, changes all success. The branch head b112e98b is a handoff-only push carrying `skip-checks: true`, so it has no checks of its own by design; everything static is read here and no CI lane was re-run as evidence.",
-    "note": "envoy-infra-go is not in main's required set (lint, typecheck, test, pr-title only), so it was read by name."
+    "round1": {
+      "head": "8293cec5eb577e1658afcd16e7a9dcdc5bfc0938",
+      "observed": "13 success, 9 skipped, 0 failed. lint (run 39840249298), typecheck (39840249298), test (39840249298), pr-title (39840249124), envoy-infra-go (39840249110, job 120039730704), envoy-go, envoy-go-race, envoy-smoke, envoy-e2e-local, dispatch-memory, build, changes all success. The branch head b112e98b is a handoff-only push carrying `skip-checks: true`, so it has no checks of its own by design; everything static is read here and no CI lane was re-run as evidence.",
+      "note": "envoy-infra-go is not in main's required set (lint, typecheck, test, pr-title only), so it was read by name."
+    },
+    "round2": {
+      "head": "07950b0953d96235620c25c70d5e3cae76588776",
+      "observed": "20 success, 10 skipped, 0 failed. The required set on main is green at this head (lint, typecheck, test, pr-title), envoy-infra-go success and read by name since it is not required, and envoy-go and envoy-go-race success, which matters this round only because packages/envoy/internal/config/config.go gained a doc comment. dispatch-memory, in_progress when the architect looked, is success now. The branch head e0a3133b is the handoff-only push and carries no checks of its own by design. No CI lane was re-run as evidence."
+    }
   },
   "observationsForTheReviewer": [
-    "The proof is runnable in a Legion pod after all. The implementer recorded, and the plan's D7 assumed, that no worker machine has a container runtime and so the live proof can run only in CI. True of testcontainers, not of the proof: `GOWORK=off GOBIN=/tmp/bin go install github.com/nats-io/nats-server/v2@v2.15.1` builds the hub's own pinned server version as a plain binary in this pod, and the listener then runs against it on 127.0.0.1:4222. Nothing in this change needs fixing for that; it is worth knowing for the next Envoy issue whose proof is assumed CI-only.",
-    "core.CheckAllowedHosts is one class stricter than the listener's own rule: an entry with surrounding whitespace, or an empty entry, is refused at preview where the listener would trim or skip it (165 of 23,630 corpus entries, all of that one class; zero in the opposite, hub-down direction). The strictness is protective — a space would split the unit's docker run argument — but the PR body's 'in exactly the cases the listener refuses one at boot', the same sentence in docs/nats-hub.md, and TestCoreAndTheListenerAgreeOnAnAllowedHost's own doc comment ('every entry either side refuses, the other refuses') each state a two-way property that holds only for un-padded entries. A whitespace row in that table would pin the asymmetry as deliberate.",
-    "A request whose target is in absolute form and names the hub (`POST http://example-hub.example-tailnet.ts.net:9020/v1/… HTTP/1.1` with `Host: evil.example.invalid`) is served 200, because Go's net/http takes r.Host from the request target. That is the listener guard's own pre-existing behaviour, not this change's, and no browser can send that form; recorded because this change is the first to give the hub a non-loopback name to be reached by."
-  ]
+    "Round 2 answered round 1's observation 1 (the one-way strictness) in four texts and two test rows; I re-checked both halves against a 23,630-entry corpus and by mutation, and both hold. Round 1's observation 3 (envoy-infra-go not required on main) still stands and is still in the body.",
+    "Round 1's observation 2 is unchanged and still not a defect: a request whose target is in absolute form and names the hub is served 200 with any Host header, because Go's net/http takes r.Host from the request target. Pre-existing listener behaviour, unreachable from a browser.",
+    "The implementer's round-1 E2E line still carries the clause the reviewer's minor finding 4 asked to narrow ('no Legion worker machine has a container runtime, so this proof runs in CI and nowhere else'), now only inside .legion/INFRA-127/implement.json's round-1 proof entry; the body's live E2E (implementer) line is round 2's and does not repeat it. Nothing in the tree makes the claim. Not a gate: the run it describes is real and I verified it twice."
+  ],
+  "round": 2,
+  "round1ImplementerProof": {
+    "verdict": "verified",
+    "how": "See round 1: read run 39840249110 job 120039730704 and drove the same surface independently in the pod with a real nats-server v2.15.1 built from the Go proxy; both the 200 on the hub's address and the pre-change 421 reproduced."
+  }
 }
