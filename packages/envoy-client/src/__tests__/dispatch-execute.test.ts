@@ -7,12 +7,14 @@ import {
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
+  overCapMessage,
   PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
   type SearchResult,
   type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
+import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
 import {
@@ -603,7 +605,7 @@ describe("executeDispatchTool", () => {
         quote: "some text",
         reply_to: "c1",
         reply_to_ask: "a1",
-        body: "x".repeat(2001),
+        body: "x".repeat(DISPATCH_BODY_MAX + 1),
       },
       cwd: "/workspace",
       host: "omp",
@@ -617,7 +619,7 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      "--body is 1 characters over the 2000-character limit (2001/2000)",
+      `--body ${overCapMessage(DISPATCH_BODY_MAX + 1, DISPATCH_BODY_MAX)}`,
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
@@ -1446,7 +1448,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      `- --query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
+      `- --query ${overCapMessage(length, SEARCH_QUERY_MAX)}; search with a short phrase of a few words, not a passage\n`
     );
     expect(requests).toBe(0);
   });

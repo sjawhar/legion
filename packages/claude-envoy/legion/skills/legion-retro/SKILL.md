@@ -178,7 +178,7 @@ the issue — `--issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, 
 issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
 follows the merge's close of the issue. The message must carry this revived implementer's structured
-attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
+attribution footer with `phase` set to `retro`; the body is capped at 32,000 characters:
 
 ```bash
 dispatch message --issue <KEY> --body-file - <<'EOF'

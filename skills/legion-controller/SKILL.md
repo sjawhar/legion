@@ -340,8 +340,8 @@ While you are registered, the daemon's `tick` gives you a turn at least every
 `dispatch read`, and post when its `Events:` show no `message.created` from today.
 
 **What.** One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters,
-written as `skill://dispatch`'s "Writing for the human" says: every issue by its key and title,
-every pull request by its URL.
+since it is a report rather than a log of the day, written as `skill://dispatch`'s "Writing for
+the human" says: every issue by its key and title, every pull request by its URL.
 
 - **Finished.** `dispatch issues --project <PROJECT> --status done --updated-since <the
   previous report's time, or 24 hours ago> --limit 250`, read every page, and keep the issues

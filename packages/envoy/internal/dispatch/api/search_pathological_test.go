@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/cputest"
 )
 
@@ -31,10 +32,15 @@ import (
 // linear-time test holds the parser on the same runs. The `)_` ladder stops at 256 KiB, as before
 // the element limit. `)_` saved in linear time before the fix too and is held to the same growth.
 //
-// Comment and message text is capped at 2,000 characters, an ask question at 800 and an issue title
-// at 1,000 (contracts.IssueTitleMax), too short for a ladder to tell the code before the fix from
-// the code after it: their removed timings measured a 2,000-character `a_` comment at 51 ms before
-// the fix and 56 ms after. The title's ladders, and the duplicate check's against a stored title,
+// A comment, a comment edit, a message and a broadcast hold up to contracts.DispatchBodyMax
+// characters - 32,000 since INFRA-45, sixteen times the 2,000 that was too short for a ladder to
+// tell the code before the fix from the code after it, whose removed timings measured a
+// 2,000-character `a_` comment at 51 ms before the fix and 56 ms after. The raised cap is
+// laddered here ("comment a_"), a full-cap `a_` comment being the longest pathological text a
+// caller can write outside a document; growsLinearly is what holds it, so a write that stops
+// being bounded at the cap fails this test rather than waiting for a reader to notice. An ask
+// question is still capped at 800 and an issue title at 1,000 (contracts.IssueTitleMax), both
+// too short to ladder; the title's ladders, and the duplicate check's against a stored title,
 // went with the title cap (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
 // is indexed through the search_text the document ladders time.
 //
@@ -71,6 +77,25 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 			})
 		})
 	}
+	// A comment's whole body is one search_text run, as a document's is, so the same pathological
+	// shape is timed at the cap a caller may send, in three rungs derived from it: the cap is a
+	// thirty-second of the largest document rung, enough of a span for a ladder since INFRA-45.
+	t.Run("comment a_", func(t *testing.T) {
+		const shape = "a_"
+		sizes := []int{contracts.DispatchBodyMax / 32, contracts.DispatchBodyMax / 4, contracts.DispatchBodyMax}
+		growsLinearly(t, "writing a comment of `"+shape+"`", sizes, func(size int) time.Duration {
+			body := strings.Repeat(shape, size/len(shape))
+			started := time.Now()
+			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": body,
+			}, "alice")
+			elapsed := time.Since(started)
+			if response.Code != http.StatusCreated {
+				t.Fatalf("comment of %s of %q: status=%d body=%.200s", sizeText(size), shape, response.Code, response.Body.String())
+			}
+			return elapsed
+		})
+	})
 	// Replacing a document of many short blocks with as many others, every block changing type,
 	// takes time linear in its blocks (LEGION-465): pmdoc wrote each new block at its own index,
 	// walking the document to it, so the replacement grew with the square of its blocks. A quote of

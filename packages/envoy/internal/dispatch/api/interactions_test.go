@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -523,18 +524,15 @@ func TestInteractionCapsAndAnswerValidation(t *testing.T) {
 		t.Fatalf("blank text answer: status=%d body=%s", blankTextAnswer.Code, blankTextAnswer.Body.String())
 	}
 
+	overCapBody := strings.Repeat("a", contracts.DispatchBodyMax+1)
 	tooLongComment := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-		"body": strings.Repeat("a", 2001), "actor": sessionActor(),
+		"body": overCapBody, "actor": sessionActor(),
 	})
-	if tooLongComment.Code != http.StatusBadRequest || !strings.Contains(tooLongComment.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongComment.Body.String(), "body is 1 characters over the 2000-character limit (2001/2000)") {
-		t.Fatalf("comment cap: status=%d body=%s", tooLongComment.Code, tooLongComment.Body.String())
-	}
+	assertCapExceeded(t, "comment cap", tooLongComment, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
 	tooLongMessage := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
-		"body": strings.Repeat("a", 2001), "actor": sessionActor(),
+		"body": overCapBody, "actor": sessionActor(),
 	})
-	if tooLongMessage.Code != http.StatusBadRequest || !strings.Contains(tooLongMessage.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(tooLongMessage.Body.String(), "body is 1 characters over the 2000-character limit (2001/2000)") {
-		t.Fatalf("message cap: status=%d body=%s", tooLongMessage.Code, tooLongMessage.Body.String())
-	}
+	assertCapExceeded(t, "message cap", tooLongMessage, "body", contracts.DispatchBodyMax+1, contracts.DispatchBodyMax, "")
 }
 
 func TestAskAnswerAcceptsFreeTextAloneOrWithSelection(t *testing.T) {

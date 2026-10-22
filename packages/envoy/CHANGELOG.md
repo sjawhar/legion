@@ -411,6 +411,25 @@
 
 ### Changed
 
+- A comment, comment edit, message or broadcast body is at most 32,000 characters
+  (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
+  `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is
+  generated from `DISPATCH_BODY_MAX` in `packages/contracts`, which also generates the Legion
+  daemon's `dispatch.MessageBodyLimit`, so that daemon's derived `record.MessagePostLimit` moves
+  from 1,956 to 31,956. A comment anchored to a document is also projected into that document's
+  margin, whose budgets are in bytes and do not move with this change: 256 KiB of text per margin
+  record — a thread's comment, its replies and its suggestion's replacement — and 1 MiB per
+  document margin, refused `413 CAP_EXCEEDED`. A body at the new cap is 32,000 bytes of ASCII and
+  up to 96,000 bytes of three-byte text, so one thread record now holds roughly eight full-length
+  comments and fewer in CJK, and a document keeps every comment it has had, so one whose margin is
+  full takes more once it is split.
+  **Rollout:** deploy this Dispatch server before any client that writes a
+  longer body, and in particular before a Legion daemon of this release. A server still on 2,000
+  refuses a body a new client sends, and both skews are real. An over-long `dispatch_message`
+  outbox row is not marked permanently refused: it retries forever at a backoff capped at 64 s,
+  costing one retrying logged row per over-long post and blocking nothing else. Symmetrically, a
+  new `dispatch` CLI, plugin bundle or worker image against an old Dispatch lets an agent compose
+  up to 32,000 characters and take a `400 CAP_EXCEEDED` from the server. No code gates the order.
 - **Breaking:** deploy `0113` with no server of the earlier release running, and never start one
   again after it applies. Stop it, or scale it to zero, before this release boots (a Recreate
   rollout, never a rolling one), and recover a failed deploy forward rather than by rolling the

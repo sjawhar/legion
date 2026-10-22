@@ -201,6 +201,11 @@ const DefaultIssuePageLimit = 50
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = 1000
 
+// DispatchBodyMax is the longest comment, comment-edit, message and broadcast body the server
+// accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
+// refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
+const DispatchBodyMax = 32000
+
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.

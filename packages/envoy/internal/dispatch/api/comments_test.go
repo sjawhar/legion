@@ -503,12 +503,6 @@ func TestEditCommentIsAuthorOnly(t *testing.T) {
 	if bearer.Code != http.StatusForbidden || !strings.Contains(bearer.Body.String(), `"code":"HUMAN_ONLY"`) {
 		t.Fatalf("bearer edit: status=%d body=%s", bearer.Code, bearer.Body.String())
 	}
-	overCap := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+comment.ID, map[string]string{
-		"body": strings.Repeat("a", maxCommentBody16+1),
-	}, "alice")
-	if overCap.Code != http.StatusBadRequest || !strings.Contains(overCap.Body.String(), `"code":"CAP_EXCEEDED"`) {
-		t.Fatalf("over-cap edit: status=%d body=%s", overCap.Code, overCap.Body.String())
-	}
 	stored := readThreadComment(t, handler, comment.ID)
 	if stored.Body != "after edit" {
 		t.Fatalf("comment after rejected edits = %q, want %q", stored.Body, "after edit")

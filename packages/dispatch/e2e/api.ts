@@ -684,6 +684,17 @@ export function getBroadcast(id: string, options: ApiOptions = {}): Promise<Broa
   );
 }
 
+/** `GET /api/v1/issues/{key}/messages`: every root message of the issue, oldest first, each with
+ *  its replies, as the Conversation reads them. */
+export function listIssueMessages(issue: string, options: ApiOptions = {}): Promise<MessageRead[]> {
+  return request<MessageRead[]>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/messages`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
 export function getMessage(
   issue: string,
   messageID: string,

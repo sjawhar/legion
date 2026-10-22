@@ -98,7 +98,12 @@ person, that is an ask, and nothing else reaches their Inbox.
 The server holds every write to a size, and refuses rather than truncates:
 
 - an ask's question is at most 800 characters, with at most eight options;
-- a comment or message body is at most 2,000 characters;
+- a comment or message body is at most 32,000 characters;
+- a comment anchored to a document is also projected into that document's margin, which is bounded
+  in bytes and not by that character limit: 256 KiB per thread, and 1 MiB per document margin. A
+  few long anchored comments therefore fill a thread or a margin where many short ones used to
+  fit, and a comment or suggestion past either bound is refused `413 CAP_EXCEEDED`; a document
+  keeps every comment it has had, so one whose margin is full takes more once it is split;
 - a Markdown document is at most 1 MiB, and any other file at most 25 MiB.
 
 To show a picture inline, pass its local path with `--image` on `dispatch message`,
