@@ -12,19 +12,11 @@ import (
 )
 
 // listenerPublish is the listener's publish grant for example-host-a, written out by hand from
-// Envoy's names as they stand: the notification stream's subjects, the role lanes, every exception
-// lane, the stream and its durable, then each bucket in turn, then the interest bucket's purge.
+// Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
+// every exception lane and any ad-hoc topic), the stream and its durable, then each bucket in turn,
+// then the interest bucket's purge.
 var listenerPublish = []string{
-	"notifications.agent.>",
-	"notifications.dispatch.>",
-	"notifications.github.>",
-	"notifications.slack.>",
-	"notifications.legion.>",
-	"notifications.ghostwispr.>",
-	"notifications.whatsapp.>",
-	"notifications.envoy.exceptions.notifications.agent.>",
-	"notifications.role.>",
-	"notifications.envoy.exceptions.notifications.>",
+	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS",
@@ -172,7 +164,7 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	first.Publish.Allow[0] = "edited"
 	first.Subscribe.Allow[0] = "edited"
 	second := core.HostPermissions("example-host-a")
-	require.Equal(t, "notifications.agent.>", second.Publish.Allow[0])
+	require.Equal(t, "notifications.>", second.Publish.Allow[0])
 	require.Equal(t, "_INBOX.>", second.Subscribe.Allow[0])
 	session := core.SessionPermissions()
 	session.Publish.Allow[0] = "edited"

@@ -901,6 +901,17 @@
 
 ### Fixed
 
+- A publish to an ad-hoc topic (`envoy_publish` to a `notifications.` topic no stream subject
+  captures, such as `notifications.team.deploy-squad`) reaches its subscribers again, answered at
+  once. The listener sends such a topic over core NATS, confirmed as a role lane is
+  (`bus.usesCoreTransport`), where it went to JetStream, which never answers a subject no stream
+  captures while a core subscriber holds it: the publish waited out its five-second
+  acknowledgement deadline and answered 500 `context deadline exceeded`. The listener's NATS grant
+  (`ListenerPermissions`, and so `HostPermissions`) publishes on `notifications.>`, where it listed
+  only the stream's subjects, the role lanes and the exception lanes, so a hub that renders the
+  grant lets the listener make that publish; its rendered authorization changes, which replaces a
+  GCP hub's VM on its next update.
+
 - The listener's `GET /v1/interests/<session_id>` answers 404 only for a session the registry
   holds no record of (`nats.ErrKeyNotFound`), and 503 for a read NATS did not serve (a dropped
   connection, a timeout, a record that does not decode). It used to answer 404 for every failure,

@@ -85,6 +85,14 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
 				require.NoError(t, msg.Respond(nil))
 
+				// A topic outside every stream subject reaches the session subscribed to it.
+				adhoc, err := conn.SubscribeSync("notifications.team.>")
+				require.NoError(t, err)
+				require.NoError(t, conn.Flush())
+				postListener(t, process, port, "/v1/messages/publish", `{"topic":"notifications.team.deploy-squad","message":"example ad-hoc message"}`)
+				team, _ := nextEnvelope(t, process, adhoc)
+				require.Equal(t, "notifications.team.deploy-squad", team.Topic)
+
 				// Every allowed operation came first, so a violation for one would be the first error.
 				require.NoError(t, conn.Publish("outside.example", nil))
 				requireViolation(t, conn, errs, `Publish to "outside.example"`)
@@ -122,8 +130,8 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 // The grants a hub with a listener of its own renders: the listener connects as one user holding
 // ListenerPermissions, and a session presents no credential and becomes the session user, holding
 // SessionPermissions as the server's no_auth_user. The listener reaches healthy, the session
-// registers through it and receives a send, answers a role message's receipt, and is refused a
-// publish its grant does not hold.
+// registers through it and receives a send, answers a role message's receipt, receives a publish to
+// an ad-hoc topic it subscribes to on NATS, and is refused a publish its grant does not hold.
 func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 	listener := buildListener(t)
 	for _, image := range testnats.Images {
@@ -153,6 +161,16 @@ func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 			require.Equal(t, contracts.RoleTopicPrefix+liveRole, forwarded.Topic)
 			require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
 			require.NoError(t, msg.Respond(nil))
+
+			// A topic outside every stream subject, as an agent names one for its team, reaches the
+			// session subscribed to it: the listener publishes it over core NATS, under its grant.
+			adhoc, err := conn.SubscribeSync("notifications.team.>")
+			require.NoError(t, err)
+			require.NoError(t, conn.Flush())
+			postListener(t, process, port, "/v1/messages/publish", `{"topic":"notifications.team.deploy-squad","message":"example ad-hoc message"}`)
+			team, _ := nextEnvelope(t, process, adhoc)
+			require.Equal(t, "notifications.team.deploy-squad", team.Topic)
+			require.Equal(t, "example ad-hoc message", team.PayloadSummary)
 
 			// A session may not publish to another session's inbox directly; only the listener does.
 			other := contracts.AgentSubject("s2")

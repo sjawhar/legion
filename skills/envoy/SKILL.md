@@ -180,6 +180,15 @@ a warning naming the spelling Envoy publishes (`acme.site_io` for `acme/site.io`
 that one instead. A token after the repository that is not a GitHub topic kind (`checks` in
 `acme.widgets.checks.>`) draws a warning naming the kinds.
 
+## Team topics
+
+Any `notifications.` topic that no built-in source owns is yours to name: a group of sessions
+subscribes to `notifications.team.deploy-squad.>`, and any of them publishes there with
+`envoy_publish(topic="notifications.team.deploy-squad.all", message=...)`. Such a topic travels
+live, as a role does: it reaches the sessions subscribed when it is published, it is not retained,
+and a session that subscribes later does not receive earlier messages. Use a role for one owner,
+and `envoy_send` for one session.
+
 ## Roles
 
 Publish to a role; do not subscribe as its holder. A successful `envoy_publish` to a role returns
