@@ -63,6 +63,18 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireAgentStreamRelayed(t, live.conn, live.port)
 				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
 
+				// Dispatch's grant, built on the listener's, publishes every notification topic: an ad-hoc
+				// topic outside every stream subject reaches its subscriber, with no violation.
+				adhoc, err := live.conn.SubscribeSync("notifications.team.>")
+				require.NoError(t, err)
+				require.NoError(t, live.conn.Flush())
+				require.NoError(t, live.dispatchConn.Publish("notifications.team.deploy-squad", []byte("example ad-hoc message")))
+				require.NoError(t, live.dispatchConn.Flush())
+				team, err := adhoc.NextMsg(5 * time.Second)
+				require.NoError(t, err, "the ad-hoc publish under Dispatch's grant reached nobody")
+				require.Equal(t, "notifications.team.deploy-squad", team.Subject)
+				require.NoError(t, adhoc.Unsubscribe())
+
 				// Dispatch's own user holds no session entry: it is a direct publish to a session's
 				// frames that is refused. (A delivery-events consumer it creates can still deliver
 				// any payload onto them, and its _INBOX.> subscription receives every reply on the

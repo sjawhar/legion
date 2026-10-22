@@ -92,6 +92,20 @@ func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)
 }
 
+// streamCaptures reports whether the stream retains a publish to topic: some subject this binary
+// compiles into the stream matches it. Every such subject is a literal prefix followed by `.>`
+// (TestEveryStreamSubjectIsALiteralPrefixAndWildcard), which matches a literal topic exactly when
+// the topic extends that prefix by at least one token, so no subject is split.
+func streamCaptures(topic string) bool {
+	for _, subject := range streamSubjects {
+		prefix := strings.TrimSuffix(subject, ">")
+		if len(topic) > len(prefix) && strings.HasPrefix(topic, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 var streamCfg = &nats.StreamConfig{
 	Name:      Stream,
 	Subjects:  streamSubjects,

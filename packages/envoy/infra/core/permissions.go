@@ -35,8 +35,10 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 
 // ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
 // names. Publish, in this order:
-//   - the notification stream's subjects (bus.StreamSubjects), the role lanes and every exception
-//     lane;
+//   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
+//     lanes, every exception lane, and any other topic a caller of /v1/messages/publish names,
+//     which the listener publishes over core NATS (an ad-hoc topic such as
+//     notifications.team.deploy-squad);
 //   - the stream's info, create and update, its durable's (bus.ListenerDurable) info and create,
 //     the durable's acknowledgements, and JetStream's account info;
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
@@ -47,17 +49,16 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
 func ListenerPermissions(machineID string) Permissions {
 	durable := bus.ListenerDurable(machineID)
-	publish := append(bus.StreamSubjects(),
-		contracts.RoleTopicPrefix+">",
-		bus.ExceptionTopicPrefix+bus.NotificationTopicPrefix+">",
-		jsAPI+"STREAM.INFO."+bus.Stream,
-		jsAPI+"STREAM.CREATE."+bus.Stream,
-		jsAPI+"STREAM.UPDATE."+bus.Stream,
-		jsAPI+"CONSUMER.INFO."+bus.Stream+"."+durable,
-		jsAPI+"CONSUMER.CREATE."+bus.Stream+"."+durable,
-		jsAck+bus.Stream+"."+durable+".>",
-		jsAPI+"INFO",
-	)
+	publish := []string{
+		bus.NotificationTopicPrefix + ">",
+		jsAPI + "STREAM.INFO." + bus.Stream,
+		jsAPI + "STREAM.CREATE." + bus.Stream,
+		jsAPI + "STREAM.UPDATE." + bus.Stream,
+		jsAPI + "CONSUMER.INFO." + bus.Stream + "." + durable,
+		jsAPI + "CONSUMER.CREATE." + bus.Stream + "." + durable,
+		jsAck + bus.Stream + "." + durable + ".>",
+		jsAPI + "INFO",
+	}
 	for _, bucket := range listenerBuckets {
 		publish = append(publish, bucketPermissions(bucket)...)
 	}

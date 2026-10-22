@@ -1609,8 +1609,9 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
 
 `ListenerPermissions(machineID)` is what `envoy-listener` needs as that machine. It publishes to:
 
-- the subjects of the `ENVOY_NOTIFICATIONS` stream (`bus.StreamSubjects()`), the role lanes
-  `notifications.role.>` and every exception lane, `notifications.envoy.exceptions.notifications.>`;
+- every notification topic, `notifications.>`: the subjects of the `ENVOY_NOTIFICATIONS` stream,
+  the role lanes, every exception lane, and the ad-hoc topics `/v1/messages/publish` sends over
+  core NATS (any `notifications.` topic the stream does not capture);
 - the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its durable consumer
   `listener-<m>`'s `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
   `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`;
