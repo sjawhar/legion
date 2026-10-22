@@ -176,6 +176,36 @@ func TestExclusiveSkipsASecondProcessInsideThePeriod(t *testing.T) {
 	}
 }
 
+// A pass shutdown cut short is a part of a pass, not one, so it serves no period: the process
+// that is up at the next tick makes the pass. Recording it would cost a maintenance loop a whole
+// period of work for a task replaced mid-pass - for the webhook sweep, a window of failed
+// deliveries nobody lists - with nothing to show for it afterwards, and a rolling update's
+// SIGTERM is the ordinary way into it.
+func TestExclusiveLeavesThePeriodUnservedWhenShutdownCutsThePassShort(t *testing.T) {
+	database := storetest.Open(t)
+	leases := leasesOf(t, database)
+	const name = "architecture-import"
+	const period = time.Hour
+
+	stopping, stop := context.WithCancel(context.Background())
+	cut := false
+	if Exclusive(stopping, leases, name, period, func(context.Context) {
+		cut = true
+		// The shutdown lands while the pass is still working, as a SIGTERM does.
+		stop()
+	}) {
+		t.Error("a pass its shutdown cut short was reported as a pass that ran")
+	}
+	if !cut {
+		t.Fatal("the pass never ran, so this row measures nothing")
+	}
+
+	ran := false
+	if !Exclusive(context.Background(), leases, name, period, func(context.Context) { ran = true }) || !ran {
+		t.Error("the next tick skipped a period the cut-short pass never served")
+	}
+}
+
 // A period of zero or less is no period at all - mutual exclusion and nothing more - which is what
 // the delivery consumers' reconciliation takes: it runs on every bind poll rather than on a
 // ticker, and the throttle that spaces it is its own. Every call runs while the lease is free, and

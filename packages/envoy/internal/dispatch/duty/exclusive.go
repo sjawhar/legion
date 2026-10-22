@@ -127,6 +127,21 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 		return false
 	}
 	pass(ctx)
+	if ctx.Err() != nil {
+		// Shutdown cut this pass short, so what it did is a part of a pass and not one: the
+		// period is left unserved deliberately, and whichever process is up at the next tick
+		// makes the pass. A record here would be a period served by work that did not finish -
+		// for the webhook sweep, a window of failed deliveries nobody lists; for the daily
+		// compaction, a day - and a rolling update, which sends SIGTERM, is how that would
+		// ordinarily happen rather than rarely. The line says so, so the tick that looks like a
+		// skip is findable afterwards.
+		//
+		// A pass that finished microseconds before the cancellation arrived is read as cut short
+		// too, and costs one early pass next period. That is the safe direction of the two and
+		// is deliberately not tightened: the reverse error is the silent gap above.
+		slog.Info("dispatch duty: leased pass cut short by shutdown; its period is left unserved", "lease", name)
+		return false
+	}
 	recordPassOn(conn, name, begins)
 	slog.Info("dispatch duty: leased pass ran", "lease", name)
 	return true
@@ -149,10 +164,13 @@ func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, period t
 // ticker measures its interval from the tick that began the pass, and a period measured from the
 // end would be short by the pass's own duration at every tick.
 //
-// It runs on the lease's own connection, before the lease is given back, and on a context of its
-// own, because a pass cut short by shutdown still ran and still served its period - and because a
-// record that never lands only costs one early pass, which is why its failure is logged and not
-// returned. A pass with no period records nothing: begins is the zero time there.
+// It runs on the lease's own connection and before the lease is given back, on a context of its
+// own because the pass's own may already be cancelled - a context that is cancelled is also the
+// one case this is never called in, since a pass shutdown cut short serves no period (Exclusive).
+// This comment said the opposite until INFRA-66's second round: that a pass cut short by shutdown
+// still ran and still served its period, which was the behaviour and was wrong both times it was
+// written. A record that never lands only costs one early pass, which is why its failure is
+// logged and not returned. A pass with no period records nothing: begins is the zero time there.
 func recordPassOn(conn *pgxpool.Conn, name string, begins time.Time) {
 	if begins.IsZero() {
 		return

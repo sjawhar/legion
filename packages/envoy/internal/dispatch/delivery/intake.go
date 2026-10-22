@@ -492,7 +492,9 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		// Recording a skip would hold the two intakes of one process, which share the lease, for
 		// settingsPollInterval before either could create the durable the other's pass did not
 		// (TestBothIntakesKeepTheirSubscriptions), and a pass that ran and failed is made again
-		// on the next poll rather than skipped for the window.
+		// on the next poll rather than skipped for the window. A pass shutdown cut short reports
+		// false too (duty.Exclusive), so the window does not start then either: this is the one
+		// caller that reads that answer, and at shutdown the process is going anyway.
 		if ran {
 			throttle.recordReconcile()
 		}
