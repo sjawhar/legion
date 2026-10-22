@@ -217,7 +217,7 @@ write_files:
       AssertPathIsMountPoint=/mnt/disks/data
 
       [Service]
-      ExecStart=/usr/bin/docker run --rm --name envoy-listener --network host --env-file /run/envoy/listener.env -e PORT=9020 -e ENVOY_LISTEN_HOST=127.0.0.1 -e ENVOY_MACHINE_ID=example-hub -e NATS_URLS=nats://127.0.0.1:4222 example.invalid/envoy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+      ExecStart=/usr/bin/docker run --rm --name envoy-listener --network host --env-file /run/envoy/listener.env -e PORT=9020 -e ENVOY_LISTEN_HOST=127.0.0.1 -e ENVOY_ALLOWED_HOSTS=example-hub.example-tailnet.ts.net -e ENVOY_MACHINE_ID=example-hub -e NATS_URLS=nats://127.0.0.1:4222 example.invalid/envoy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
       ExecStartPre=/etc/envoy/listener-seed-env /run/envoy/listener.env example-hub-listener-seed
       TimeoutStartSec=600
       ExecStop=/usr/bin/docker stop -t 30 envoy-listener

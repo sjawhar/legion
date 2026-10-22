@@ -121,6 +121,11 @@ type NatsHubArgs struct {
 	DiskSizeGb     *int               `pulumi:"diskSizeGb,optional"`  // default 20
 	NatsImage      string             `pulumi:"natsImage"`            // pinned: <name>@sha256:<digest>
 	TailscaleImage string             `pulumi:"tailscaleImage"`       // pinned: <name>@sha256:<digest>
+	// The tailnet's DNS name, which the hub's listener's served address is built from: MagicDNS
+	// gives the hub the name <hostname>.<tailnetDnsName>, and that is the address its listener
+	// answers on. It is held to tailnetDNSNameRule whenever it is set, and a hub that runs a
+	// listener must set it.
+	TailnetDnsName string `pulumi:"tailnetDnsName,optional"`
 	// created, with a subnetwork per region, when absent; either may come from the consumer's own
 	// resources
 	Network    pulumi.StringPtrInput `pulumi:"network,optional"`
@@ -165,6 +170,10 @@ type HubListenerArgs struct {
 	Image      string `pulumi:"image"`      // pinned: <name>@sha256:<digest>
 	SeedSecret string `pulumi:"seedSecret"` // a secret id, never the seed
 	NKey       string `pulumi:"nkey"`       // the seed's public key; never the seed
+	// Any further address a client dials this hub by, beyond the hub's own
+	// <hostname>.<tailnetDnsName>, which the hub always serves. Each entry is rendered as written,
+	// since the listener normalizes what it reads.
+	AllowedHosts []string `pulumi:"allowedHosts,optional"`
 }
 
 // Annotate names the type gcp:HubListener in the schema, for the reason NATSUserArgs's gives.
@@ -210,6 +219,12 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	}
 	if !hostnameRule.MatchString(args.Hostname) {
 		return settings{}, fmt.Errorf("hostname %q must match %s", args.Hostname, hostnameRule)
+	}
+	// A hub without a listener reads no tailnet name, so an empty one passes here and
+	// resolveListener requires it of a hub that has one; a name that is set is held to the rule
+	// whether a listener reads it or not.
+	if args.TailnetDnsName != "" && !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
+		return settings{}, fmt.Errorf("tailnetDnsName %q must match %s", args.TailnetDnsName, tailnetDNSNameRule)
 	}
 	if len(args.Tags) == 0 {
 		return settings{}, errors.New("tags: at least one tag is required; the hub advertises its tags as its tailnet identity")
@@ -297,7 +312,10 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 
 // resolveListener checks the hub's listener input and returns the listener it gives, or nil for a
 // hub without one. The listener runs as machine hostname, listens on the VM's loopback on the
-// listener's default port, and reaches NATS there too.
+// listener's default port, and reaches NATS there too. It answers on the hub's own tailnet name,
+// which the tailnet's MagicDNS gives the VM, and on every further address the listener's
+// allowedHosts names; core refuses an entry it would refuse at boot, so a hub that could serve
+// nobody is refused before anything registers.
 func resolveListener(args *NatsHubArgs) (*listener, error) {
 	l := args.Listener
 	if l == nil {
@@ -312,10 +330,15 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 	if l.SeedSecret == args.Hostname+tailnetAuthKeySuffix {
 		return nil, fmt.Errorf("listener.seedSecret %q is the hub's own tailnet auth key secret", l.SeedSecret)
 	}
+	if args.TailnetDnsName == "" {
+		return nil, errors.New("tailnetDnsName is required for a hub with a listener: the hub renders the " +
+			"address its listener answers on from it, so a client reaching the hub by its tailnet name is served")
+	}
 	env, err := core.ListenerConfig{
-		MachineID:  args.Hostname,
-		Port:       core.DefaultListenerPort,
-		ListenHost: "127.0.0.1",
+		MachineID:    args.Hostname,
+		Port:         core.DefaultListenerPort,
+		ListenHost:   "127.0.0.1",
+		AllowedHosts: append([]string{core.TailnetHostName(args.Hostname, args.TailnetDnsName)}, l.AllowedHosts...),
 	}.Env([]string{localNATS})
 	if err != nil {
 		return nil, err
@@ -328,7 +351,9 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 // '_' or whitespace, or percent-encoded), by its path and never its value: the hostname and the
 // tags, quoted by the hub's own refusals and written into the user data; the zone, the machine
 // type and the disk type, the group's and the template's inputs, the disk type also quoted by its
-// refusal; the images, written into the user data; and each user's machine id, which the hub
+// refusal; the images, written into the user data; the tailnet DNS name, which its own refusal
+// quotes and whose address the listener's environment carries, and each of the listener's further
+// allowed hosts, which that environment carries too; and each user's machine id, which the hub
 // turns into that user's rules before core sees them, so core's refusal would name a rule entry
 // the user never wrote. A user's name and rule entries are core's:
 // core.Authorization refuses a seed in either before any refusal of its own quotes it, and the
@@ -338,8 +363,8 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 // (refuseSeedInSecret, refuseSeed).
 func seededInput(args *NatsHubArgs) (string, bool) {
 	type field struct{ path, value string }
-	fields := []field{{"hostname", args.Hostname}, {"zone", args.Zone}, {"natsImage", args.NatsImage},
-		{"tailscaleImage", args.TailscaleImage}}
+	fields := []field{{"hostname", args.Hostname}, {"tailnetDnsName", args.TailnetDnsName},
+		{"zone", args.Zone}, {"natsImage", args.NatsImage}, {"tailscaleImage", args.TailscaleImage}}
 	for i, tag := range args.Tags {
 		fields = append(fields, field{fmt.Sprintf("tags[%d]", i), tag})
 	}
@@ -358,6 +383,9 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 	}
 	if args.Listener != nil {
 		fields = append(fields, field{"listener.image", args.Listener.Image}, field{"listener.seedSecret", args.Listener.SeedSecret})
+		for i, entry := range args.Listener.AllowedHosts {
+			fields = append(fields, field{fmt.Sprintf("listener.allowedHosts[%d]", i), entry})
+		}
 	}
 	for _, f := range fields {
 		if bus.HoldsSeed(f.value) {
