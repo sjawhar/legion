@@ -2419,6 +2419,55 @@ func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
 	}
 }
 
+// TestSSEResumesAfterTheEventLogIsResetBeneathTheReader: the browser suite empties the event log
+// between its scenarios (`truncate ... restart identity cascade`, e2e/seed.ts), so the next row's
+// id is 1 again. The relay notices, ends every open subscription and sends the browser through
+// its reconnect -- and a browser only ever raises its lastEventId, never lowers it
+// (web/src/api/sse.ts), so it comes back asking for a since above the new log's head. Without the
+// handler's clamp, catch-up (`id > since`) matches nothing and the live loop drops every event of
+// the new log for ever, because they all sit at or below that stale since: a reader silent for
+// good, on a connection that stays open and heartbeats, with nothing logged and nothing failed.
+//
+// The assertion is the frame of an event committed after the reset, whose id is below the
+// pre-reset head this connection resumed from. It can reach the reader only through a since the
+// handler clamped to the head it resolved for this connection; an unclamped since drops it, and
+// the only frame this reader then ever sees is a heartbeat.
+func TestSSEResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed before the reset",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue before the reset: status=%d body=%s", response.Code, response.Body.String())
+	}
+	head := eventHead(t, database)
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	// What the browser reconnects with after the relay ended its subscription: the last id it saw,
+	// which the reset has left above the whole new log.
+	scanner := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, head))
+
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed after the reset",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue after the reset: status=%d body=%s", response.Code, response.Body.String())
+	}
+	live := eventHead(t, database)
+	if live >= head {
+		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", live, head)
+	}
+	for id := int64(0); id != live; {
+		id = sseFrameID(t, readSSEFrame(t, scanner))
+		if id > live {
+			t.Fatalf("frame id = %d, above the %d committed after the reset", id, live)
+		}
+	}
+}
+
 func TestJSONMutationsRequireApplicationJSON(t *testing.T) {
 	handler := newTestHandler(t)
 	body := `{"key":"TEST","name":"Test project"}`

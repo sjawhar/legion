@@ -101,14 +101,15 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	// The live feed is the process's event stream relay (event_stream_relay.go), which publishes
 	// every committed event it reads back out of Postgres — this process's and the other
-	// envoy-dispatch process's alike. Subscribing before this connection's own head is resolved
-	// is what leaves no gap: an event committing after the subscription exists lands in the
+	// envoy-dispatch process's alike. Subscribing before this connection reads the log's head is
+	// what leaves no gap: an event committing after the subscription exists lands in the
 	// channel whatever its id, while one committing before it is at or below the head read next
 	// and so is replayed by the catch-up below. The relay reads its cursor before it answers a
 	// subscription, so it cannot already stand past that head either.
 	//
-	// This handler IS a cold client's (no since= and no Last-Event-ID) only request: a client
-	// that fetched its own head through a separate request and then opened this connection with
+	// That ordering is also why the head is read here and not by the client: for a cold client
+	// (no since= and no Last-Event-ID) this handler IS its only request, and a client that
+	// fetched its own head through a separate request and then opened this connection with
 	// since=<that head> would lose an event committing between the two, excluded from catch-up
 	// (id <= since) and missed by a subscription registered only afterwards.
 	subscription, cancel, err := s.eventRelay.subscribe(r.Context())
@@ -117,11 +118,23 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer cancel()
-	if !sinceProvided {
-		if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&since); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	// Every connection resolves the head, a resuming one too, which costs it one extra round
+	// trip. The event log can be reset under a reader (`truncate events restart identity`, the
+	// browser suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends every
+	// open subscription and so sends the browser through its reconnect. The browser only ever
+	// raises its lastEventId and never lowers it (web/src/api/sse.ts), so it resumes with a since
+	// above the new log's head. Unclamped, the live loop below would then drop every event of the
+	// new log for ever, on a connection that stays open and heartbeats: a reader silent for good,
+	// with nothing logged and nothing failed.
+	var head int64
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// A cold client asked for no backlog, and a since above the head can only be an id of a log
+	// this one replaced; both start at the head this connection just read.
+	if !sinceProvided || since > head {
+		since = head
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -166,6 +179,13 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	// opened after it re-emits ids at or below since — events this client has already seen, or
 	// backlog a cold client asked not to get — and sentDuringCatchup cannot be asked about them,
 	// since it holds only the ids catch-up sent, all above since.
+	//
+	// That argument covers a log whose ids only ever grow. A reset reuses them, and the clamp
+	// above is what extends the comparison across one: since is held at or below the head this
+	// connection resolved, so an id the new log hands out is never taken for an id the old log
+	// already showed this reader. What the clamp cannot do is tell this reader apart from the
+	// events of the log it was reading; the relay ends the subscription at a reset instead, and
+	// the reader comes back on a new connection, which resolves the new log's head here.
 	//
 	// Dedup against that bounded set covers an id catch-up sent that is *also* still sitting in
 	// the subscription channel (committed, and thus queryable, in the narrow window between the
