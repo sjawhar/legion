@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-127",
+  "completed": "2026-10-22T20:28:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/infra/core/allowed_hosts_agreement_test.go",
+      "description": "The mirror's guard asserts a property the code does not have. core.CheckAllowedHosts applies the shape rule to the entry as written (core/listener_env.go:87-99); the listener's parseAllowedHosts trims the entry and skips an empty one first (packages/envoy/internal/config/config.go:86-101), so core refuses a padded or empty entry the listener accepts. The test's doc comment (':30-33', \"every entry either side refuses, the other refuses\") and its assertion (require.Equal(t, loadErr != nil, checkErr != nil), ':60-61') state the two-way property, and the table was curated past the one row of the listener's own accept case that would fail it (internal/config/config_test.go:12, \" Hub.Internal.Example. , ,192.0.2.7,[2001:db8::1]\"). docs/nats-hub.md's refusal bullet (\"The listener refuses the same entry in its own ENVOY_ALLOWED_HOSTS when it boots\") and the PR body's Change bullet (\"refused in exactly the cases the listener refuses one at boot\") carry the same false claim to the operator. The direction is fail-safe (0 entries core accepts and the listener refuses, measured by the tester over 23,630 entries and by the deep-review pair over 400,000), so no behaviour changes: what must change is the assertion, which becomes one-way (the listener refuses => core refuses) with explicit padded and empty rows pinning the extra strictness, and the two sentences. Requested by the architect for this round."
+    },
+    {
+      "severity": "important",
+      "file": "pull request #2108 body",
+      "description": "No '## Contract change census'. The pull request adds a refusal at the plugin's input boundary — a hub with a listener and no tailnetDnsName is refused while Pulumi previews it (gcp/natshub.go:335-338) — and a new per-entry refusal on listener.allowedHosts (gcp/natshub.go:339), so every existing stack that builds a gcp:NatsHub with a listener fails preview until it is edited. The census's searches at the head: `grep -rn 'NatsHub' --include=*.go --include=*.ts --include=*.yaml --include=*.md .` and `grep -rn 'gcp:NatsHub' --include=*.md --include=*.yaml .` find no in-tree instantiation beyond the docs example (docs/nats-hub.md:642, updated in this diff), the schema test (provider/provider_test.go:95-115, updated) and prose; the one real consumer is out of tree (theorem-labs/agent-infra, which already holds the tailnet name and is tracked by dispatch://INFRA-120). The rollout is an immediate refusal, not warn-first, and it closes a configuration that silently takes every tailnet session off messaging. All of that is true and already scattered through the body and the spec; it must be stated as the census section, each hit with its disposition and the rollout line."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/docs/nats-hub.md",
+      "description": "The whole served set now derives from one unverified operator string: core.TailnetHostName(args.Hostname, args.TailnetDnsName) (gcp/natshub.go:346), checked only for shape (gcp/natshub.go:226, tailnetDNSNameRule). A value that matches the rule but is not this tailnet's name, or a MagicDNS collision that hands the node <h>-1, renders a hub that previews, applies and stays healthy — the MIG's autohealing check is NATS 8222 (gcp/natshub.go:651-657) and nothing in this repository dials 9020 on the hub — while answering 421 to every client. 'Updating a hub' should name the post-replacement check (read the listener's `listener API hosts:` boot line, or dial <h>.<tailnetDnsName>:9020 on a /v1 route and require 200). Not a gate."
+    },
+    {
+      "severity": "minor",
+      "file": "pull request #2108 body",
+      "description": "The E2E (implementer) line's closing clause, 'No Legion worker machine has a container runtime, so this proof runs in CI and nowhere else', is no longer true: the tester ran the same listener against a real nats-server v2.15.1 installed from the Go proxy in its pod (test.json, observationsForTheReviewer[0]). The run itself and its negative control stand; only the clause needs narrowing to 'testcontainers needs a container runtime no worker machine has, so this run is CI's'. No in-tree text makes the claim (`grep -rn 'container runtime' packages/envoy/infra .github` finds none)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/core/listener_env.go",
+      "description": "Fast-follow, not a gate: the allowed-host rule in core (:49-77,:87-99) is a verbatim copy of the listener's (internal/config/config.go:74-80,86-101,103-121), kept out of an import because the plugin's release is cut from `go list -deps ./cmd/...`. internal/bus is already in that dependency set and already imported here for bus.HoldsSeed, and internal/bus/socks5.go:22-30 is the precedent for a rule both the listener and the plugin's resolver read, so one home would delete the copy and both guard tests. That is a cross-package move of released listener code, too wide for this P1 change; it belongs in the next envoy-infra change beside the gcp/dispatch.go TailnetHostName joins the body already names."
+    }
+  ],
+  "ciRead": {
+    "codeHead": "8293cec5eb577e1658afcd16e7a9dcdc5bfc0938",
+    "requiredOnMain": ["lint", "typecheck", "test", "pr-title"],
+    "observed": "Every required check present, completed and success at 8293cec5 (22 check-runs: 13 success, 9 skipped, 0 failed; envoy-infra-go success and read by name, since main's ruleset does not require it). gh api compare 8293cec5...b6d3aa6c is 'ahead' and every file under .legion/, so these are the checks that stand for the code reviewed. Branch protection on main carries no required_status_checks of its own."
+  },
+  "threads": {
+    "openedByReviewer": 3,
+    "botThreads": 0,
+    "note": "No review thread existed on #2108 before this round (gh api graphql reviewThreads: 0 nodes, reviews: none). The three inline comments of this round are the first."
+  }
+}
