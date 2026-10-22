@@ -3,12 +3,14 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
@@ -58,6 +61,15 @@ type Deps struct {
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
 	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
+	// OAuth is the machine login's OAuth provider. POST /v1/oauth/device_authorization and POST
+	// /v1/oauth/token are mounted only when it is set, with DeviceLogin and TokenHooks.
+	OAuth *oauth.Provider
+	// DeviceLogin opens a device login's record from the device authorization request's form and
+	// the user code the provider minted, in the provider's transaction (oauthstore.TxFrom on ctx);
+	// an error refuses the request (deviceLoginRefusal maps it to the broker's code).
+	DeviceLogin func(ctx context.Context, form url.Values, userCode string) error
+	// TokenHooks are the broker's steps around each token the provider issues.
+	TokenHooks oauth.TokenHooks
 }
 
 type server struct {
@@ -90,6 +102,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 		rereadOverall:   ratelimit.NewBucket(rereadOverall),
 	}
 	for _, route := range routes() {
+		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
+			continue
+		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
 			who, ok := s.authenticate(w, r, route.Handler.auth)
 			if !ok {
@@ -99,6 +114,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 		})
 	}
 }
+
+// oauthRoutes prefixes the routes the OAuth provider serves, which Register mounts only with one.
+const oauthRoutes = "/v1/oauth/"
 
 // authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad

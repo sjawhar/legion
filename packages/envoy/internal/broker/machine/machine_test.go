@@ -29,8 +29,8 @@ const (
 	testApprover = "sjawhar"
 )
 
-// codePattern is the confirmation code's own shape: eight symbols from confirmationAlphabet
-// (a 32-symbol subset of A-Z2-9 with the easily-confused characters removed) as XXXX-XXXX.
+// codePattern is the confirmation code's own shape: eight symbols from oauth.NewUserCode's
+// alphabet (a 32-symbol subset of A-Z2-9 with the easily-confused characters removed) as XXXX-XXXX.
 var codePattern = regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`)
 
 // newFixture wires a Service against a fresh Postgres schema: a real enroll.Service wired with

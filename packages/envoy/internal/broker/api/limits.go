@@ -156,10 +156,14 @@ func (s *server) refuseReread(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // refuseWithRetryAfter answers 429 RATE_LIMITED with the Retry-After a bucket refilled one every
-// every names: whole seconds rounded up, and never 0, which would invite an immediate retry the
-// bucket would refuse again.
+// every names (retryAfterSeconds).
 func refuseWithRetryAfter(w http.ResponseWriter, every time.Duration, msg string) {
-	seconds := max(int((every+time.Second-1)/time.Second), 1)
-	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(every)))
 	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", msg)
+}
+
+// retryAfterSeconds is the Retry-After a bucket refilled one every every names: whole seconds
+// rounded up, and never 0, which would invite an immediate retry the bucket would refuse again.
+func retryAfterSeconds(every time.Duration) int {
+	return max(int((every+time.Second-1)/time.Second), 1)
 }

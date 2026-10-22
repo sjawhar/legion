@@ -81,6 +81,13 @@ func WithTx(ctx context.Context, tx pgx.Tx) context.Context {
 	return context.WithValue(ctx, txKey{}, txState{tx: tx})
 }
 
+// TxFrom is the transaction ctx carries (from WithTx or BeginTX), so a caller handed the
+// provider's context writes its own rows in the same transaction as the provider's.
+func TxFrom(ctx context.Context) (pgx.Tx, bool) {
+	state, ok := ctx.Value(txKey{}).(txState)
+	return state.tx, ok
+}
+
 func (s *Store) db(ctx context.Context) querier {
 	if state, ok := ctx.Value(txKey{}).(txState); ok {
 		return state.tx
@@ -270,8 +277,10 @@ func (s *Store) GetDeviceCodeSessionByUserCode(ctx context.Context, signature st
 	return s.getDevice(ctx, `where user_code_signature = $1`, signature, session)
 }
 
-// getDevice reads the device code the where clause selects: oauth2.ErrNotFound for none, and the
-// request with oauth2.ErrInvalidatedDeviceCode once it has been exchanged.
+// getDevice reads the device code the where clause selects: oauth2.ErrNotFound for none, and for
+// one already exchanged. (The library's device token handler drops the requester the storage
+// contract pairs with oauth2.ErrInvalidatedDeviceCode and answers that pairing 500; ErrNotFound is
+// invalid_grant at the token endpoint and at the user code's approval alike.)
 func (s *Store) getDevice(ctx context.Context, where, signature string, session oauth2.Session) (oauth2.DeviceAuthorizeRequester, error) {
 	var (
 		deviceSignature, userSignature string
@@ -296,7 +305,7 @@ func (s *Store) getDevice(ctx context.Context, where, signature string, session 
 	request.Status = stored.Status
 	request.LastChecked = stored.LastChecked
 	if status == deviceInvalidated {
-		return request, oauth2.ErrInvalidatedDeviceCode
+		return nil, oauth2.ErrNotFound
 	}
 	return request, nil
 }

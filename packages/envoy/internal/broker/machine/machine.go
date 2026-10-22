@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -72,26 +73,6 @@ type Service struct {
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
 // proof.Verifier's and requests.Machine's own retention margin.
 const jtiRetentionMargin = time.Minute
-
-// confirmationAlphabet has 32 symbols, none easily confused with another (no 0/O, no 1/I), so a
-// random byte maps onto it without bias.
-const confirmationAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-
-// confirmationCode is eight random symbols from confirmationAlphabet as XXXX-XXXX.
-func confirmationCode() (string, error) {
-	raw := make([]byte, 8)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
-	code := make([]byte, 0, 9)
-	for i, b := range raw {
-		if i == 4 {
-			code = append(code, '-')
-		}
-		code = append(code, confirmationAlphabet[int(b)%len(confirmationAlphabet)])
-	}
-	return string(code), nil
-}
 
 // hashPendingID is the sha256 of a pending id — machine_login_polls' primary key, so the raw
 // capability a machine polls with is never itself stored.
@@ -180,7 +161,7 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 		return "", "", err
 	}
 
-	code, err = confirmationCode()
+	code, err = oauth.NewUserCode()
 	if err != nil {
 		return "", "", err
 	}

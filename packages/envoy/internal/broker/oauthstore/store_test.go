@@ -100,9 +100,17 @@ func TestDeviceCodeRoundTripsAndIsFoundByUserCode(t *testing.T) {
 	if err := s.InvalidateDeviceCodeSession(ctx, "device-signature"); err != nil {
 		t.Fatalf("InvalidateDeviceCodeSession: %v", err)
 	}
-	got, err := s.GetDeviceCodeSession(ctx, "device-signature", nil)
-	if !errors.Is(err, oauth2.ErrInvalidatedDeviceCode) || got == nil {
-		t.Fatalf("after invalidation: (%v, %v), want the requester and ErrInvalidatedDeviceCode", got, err)
+	for name, get := range map[string]func() (oauth2.DeviceAuthorizeRequester, error){
+		"by device code": func() (oauth2.DeviceAuthorizeRequester, error) {
+			return s.GetDeviceCodeSession(ctx, "device-signature", nil)
+		},
+		"by user code": func() (oauth2.DeviceAuthorizeRequester, error) {
+			return s.GetDeviceCodeSessionByUserCode(ctx, "user-signature", nil)
+		},
+	} {
+		if got, err := get(); !errors.Is(err, oauth2.ErrNotFound) || got != nil {
+			t.Fatalf("%s after invalidation: (%v, %v), want ErrNotFound", name, got, err)
+		}
 	}
 	if err := s.InvalidateDeviceCodeSession(ctx, "device-signature"); !errors.Is(err, oauth2.ErrInvalidatedDeviceCode) {
 		t.Fatalf("second invalidation = %v, want ErrInvalidatedDeviceCode", err)
