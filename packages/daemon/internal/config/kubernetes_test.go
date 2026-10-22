@@ -1037,6 +1037,16 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].nfs.server 127.0.0.1 is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
 		},
 		{
+			name: "an NFS server named localhost",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: LOCALHOST, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server LOCALHOST is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server named localhost with the root's trailing dot",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: localhost., path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server \"localhost.\" must be an IP address or a DNS name, with no scheme, port, path or brackets",
+		},
+		{
 			name: "an NFS server of no address",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::', path: /share}}]\n",
 			want: "runtime.kubernetes.pod.volumes[0].nfs.server :: is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
