@@ -15,6 +15,8 @@
   `dispatch ask` beside `--issue` or `--project` may cite any other issue or document.
 - The `dispatch` skill: `dispatch read` of a document prints its summary, and a document hit
   names its issue on `Issue:`.
+- The `dispatch-first` skill: scout, the spec checker it names, has no shell, so the Dispatch, gh
+  and git output a spec's claims rest on is saved to files and handed to it.
 - The `dispatch` command (`dist/dispatch.js`) ends a write with `(not subscribed to KEY; …)` only
   when none of the session's Envoy subscriptions, as the listener records them, receives every
   event on the issue or document; it used to end every write that way. An ask or an ask reply
