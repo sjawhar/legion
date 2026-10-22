@@ -7,57 +7,21 @@ package api_test
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
+	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 )
-
-// dpopTransport signs an RFC 9449 proof of key for every request it sends.
-type dpopTransport struct {
-	t   *testing.T
-	key *ecdsa.PrivateKey
-}
-
-func (d dpopTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Set("DPoP", dpopProof(d.t, d.key, r.Method, r.URL.String()))
-	return http.DefaultTransport.RoundTrip(r)
-}
-
-// dpopProof is an RFC 9449 proof of key for method on htu.
-func dpopProof(t *testing.T, key *ecdsa.PrivateKey, method, htu string) string {
-	t.Helper()
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key},
-		(&jose.SignerOptions{EmbedJWK: true}).WithType("dpop+jwt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload, err := json.Marshal(map[string]any{"jti": uuid.NewString(), "htm": method, "htu": htu, "iat": time.Now().Unix()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sig, err := signer.Sign(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact, err := sig.CompactSerialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return compact
-}
 
 // deviceMachine is one machine logging in: its key, the OAuth client it logs in with, and the
 // context that client's requests carry the key's proofs in.
@@ -81,7 +45,7 @@ func newDeviceMachine(t *testing.T, rig *brokertest.Rig) *deviceMachine {
 				AuthStyle:     oauth2.AuthStyleInParams,
 			},
 		},
-		ctx: context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: dpopTransport{t: t, key: key}}),
+		ctx: context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)}),
 	}
 }
 
