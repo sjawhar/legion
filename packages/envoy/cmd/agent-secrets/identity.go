@@ -138,8 +138,8 @@ func awaitEnrollment(dir string, wait time.Duration) (gaveUp bool) {
 	return false
 }
 
-// helperInstalled reports whether this machine has the helper's user unit, the file Plan B's
-// launchers (dotfiles shims/omp, scripts/cld, scripts/oc) also read as "the helper is installed".
+// helperInstalled reports whether this machine has the helper's user unit, the file
+// `agent-secrets-helper install` writes and the agent launchers' shims also read as "the helper is installed".
 // Its socket being absent then means the helper is stopped (a clean stop removes the socket),
 // not that this machine has none.
 func helperInstalled() bool {

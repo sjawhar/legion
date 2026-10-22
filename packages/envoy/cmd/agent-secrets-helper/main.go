@@ -3,7 +3,7 @@
 // packages/envoy/cmd/agent-secrets-helper/main.go
 
 // Command agent-secrets-helper is the machine side of agent secrets: a per-user
-// daemon (dotfiles agent-secrets/agent-secrets-helper.service) that keeps this machine's login
+// daemon (the systemd user unit `agent-secrets-helper install` writes) that keeps this machine's login
 // (AGENT_SECRETS_MACHINE_FILE) and refreshes it daily, pins each registered agent session on this
 // machine by pidfd, keeps the session's P-256 key in memory, enrolls it with the secrets broker as
 // kind "session" under the machine's launcher credential, signs broker proofs for the session's
@@ -11,6 +11,8 @@
 //
 //	agent-secrets-helper [serve]     run (the unit's ExecStart)
 //	agent-secrets-helper sessions    list live sessions: pid, runtime_id, enrollment_id, state
+//	agent-secrets-helper install [--url URL] [--restart-with-sessions]
+//	                                 write and enable this binary's systemd user unit
 //	agent-secrets-helper --version   the release this binary was built as
 package main
 
@@ -67,10 +69,14 @@ const usage = `usage:
   agent-secrets-helper [serve]     run the helper: listen on its socket, sign for the machine sessions
                                    registered with it, and enroll each with the broker
   agent-secrets-helper sessions    list live sessions: pid, runtime id, enrollment id, state
+  agent-secrets-helper install [--url URL] [--restart-with-sessions]
+                                   write this binary's systemd user unit, daemon-reload and
+                                   enable it; restart a running helper only if it has no
+                                   sessions, or --restart-with-sessions is given
   agent-secrets-helper --version   print the release this binary was built as
 
 environment:
-  AGENT_SECRETS_URL            the broker's base URL; serve needs it
+  AGENT_SECRETS_URL            the broker's base URL; serve needs it, install writes it into the unit
   AGENT_SECRETS_HELPER_SOCK    the helper's socket
                                (default $XDG_RUNTIME_DIR/agent-secrets/helper.sock)
   AGENT_SECRETS_OPERATOR_FILE  a file holding the operator's Dispatch login, which a machine login
@@ -100,6 +106,10 @@ func main() {
 		fatal(serve(cfg))
 	case "sessions":
 		fatal(printSessions(cfg.Socket))
+	case "install":
+		exe, err := os.Executable()
+		fatal(err)
+		fatal(install(os.Args[2:], os.Getenv, exe, os.Stdout))
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
