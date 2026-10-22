@@ -715,6 +715,15 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 		if err != nil {
 			return nil, err
 		}
+		if claim := volume.PersistentVolumeClaim; claim != nil {
+			if other := slices.IndexFunc(volumes, func(v corev1.Volume) bool {
+				return v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim.ClaimName
+			}); other >= 0 {
+				// The kubelet mounts a PersistentVolume once per pod, from whichever of the two volume
+				// specs it reads last, so one volume's read_only would silently decide the other's.
+				return nil, fmt.Errorf("%s.persistent_volume_claim.name %s is the claim of %s[%d] too: mount the one volume at each path (volume_mounts takes sub_path) instead of naming the claim twice", field, claim.ClaimName, key, other)
+			}
+		}
 		volumes = append(volumes, volume)
 	}
 	return volumes, nil

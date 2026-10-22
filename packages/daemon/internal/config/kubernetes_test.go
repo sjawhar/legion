@@ -177,6 +177,49 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 }
 
+// A share's source is read-only exactly when no volume_mounts entry mounts it writable, for a claim
+// and an NFS export alike, and for a share mounted twice, once of each kind: the kubelet changes
+// ownership on, and the node mounts `-o ro`, only by the source's readOnly. A ConfigMap's source is
+// never touched.
+func TestLoadForValidationSetsAShareReadOnlyAtItsSourceUnlessAMountWritesIt(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+`    pod:
+      volumes:
+        - {name: ro-claim, persistent_volume_claim: {name: ro-claim}}
+        - {name: rw-claim, persistent_volume_claim: {name: rw-claim}}
+        - {name: ro-nfs, nfs: {server: 10.0.0.2, path: /ro}}
+        - {name: rw-nfs, nfs: {server: 10.0.0.2, path: /rw}}
+        - {name: both, nfs: {server: 10.0.0.2, path: /both}}
+        - {name: unmounted, persistent_volume_claim: {name: unmounted}}
+        - {name: route, config_map: {name: legion-operator-route}}
+      volume_mounts:
+        - {volume: ro-claim, mount_path: /mnt/ro-claim}
+        - {volume: rw-claim, mount_path: /mnt/rw-claim, read_only: false}
+        - {volume: ro-nfs, mount_path: /mnt/ro-nfs, read_only: true}
+        - {volume: rw-nfs, mount_path: /mnt/rw-nfs, read_only: false}
+        - {volume: both, mount_path: /mnt/both-ro}
+        - {volume: both, mount_path: /mnt/both-rw, read_only: false}
+        - {volume: route, mount_path: /etc/legion-operator/route}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, v := range cfg.Runtime.Kubernetes.Pod.Volumes {
+		switch {
+		case v.PersistentVolumeClaim != nil:
+			got[v.Name] = v.PersistentVolumeClaim.ReadOnly
+		case v.NFS != nil:
+			got[v.Name] = v.NFS.ReadOnly
+		case v.ConfigMap != nil && v.ConfigMap.DefaultMode != nil:
+			t.Errorf("the ConfigMap volume's source was changed: %+v", v.ConfigMap)
+		}
+	}
+	want := map[string]bool{"ro-claim": true, "rw-claim": false, "ro-nfs": true, "rw-nfs": false, "both": false, "unmounted": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sources' readOnly = %v, want %v", got, want)
+	}
+}
+
 // What a block that sets only its required members settles to: the issue volume at 50Gi, every
 // role's reservation at the daemon's default (the six workflow roles and the controller, each with
 // a cpu and a memory, summing to 3 CPU and 19 GiB over an issue pod's six, and each with its
@@ -1007,6 +1050,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "an NFS export path that is not clean",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 10.0.0.2, path: /share/../etc}}]\n",
 			want: "runtime.kubernetes.pod.volumes[0].nfs.path /share/../etc must be a clean absolute path",
+		},
+		{
+			name: "two volumes naming one claim",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: b, persistent_volume_claim: {name: team-share}}, {name: a, persistent_volume_claim: {name: team-share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[1].persistent_volume_claim.name team-share is the claim of runtime.kubernetes.pod.volumes[0] too: mount the one volume at each path (volume_mounts takes sub_path) instead of naming the claim twice",
 		},
 		{
 			name: "an NFS export that sets read_only on the source",

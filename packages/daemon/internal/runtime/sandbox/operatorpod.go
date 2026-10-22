@@ -125,7 +125,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].name %s is a volume Legion puts in every pod", i, volume.Name)
 		}
 		if claim := volume.PersistentVolumeClaim; claim != nil && legionClaim(claim.ClaimName) {
-			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].persistent_volume_claim.name %s is a claim Legion makes for an issue's or a repository cache's own volume: name a claim of your own", i, claim.ClaimName)
+			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].persistent_volume_claim.name %s is a claim Legion makes for an issue's, a tree's or a repository cache's own volume: name a claim of your own", i, claim.ClaimName)
 		}
 	}
 	imageOwned := append(imageOwnedPaths(), tools.GH, tools.Git, tools.JJ, tools.Legion)
@@ -178,12 +178,19 @@ func overlaps(a, b string) bool {
 	return a == b || under(a, b) || under(b, a)
 }
 
-// legionClaim reports whether claim is named as the volume claims Legion's Sandboxes make are: an
-// issue's or the controller's (IssueClaimName, `issue-legion-…`) or a repository cache's
-// (cacheClaimName, `cache-legion-…`). Every pod mounting such a claim would read and write that
-// issue's workspace or that cache, so an operator volume naming one is refused.
+// legionClaim reports whether claim is named as the volume claims Legion's Sandboxes make or made
+// are: an issue's or the controller's (IssueClaimName, `issue-legion-…`), a repository cache's
+// (cacheClaimName, `cache-legion-…`), or a tree's from the earlier layout legion-v10.0.0 kept
+// (`tree-legion-…`, every clone, workspace and session file of a tree). Every pod mounting such a
+// claim would read and write that workspace or that cache, so an operator volume naming one is
+// refused.
 func legionClaim(claim string) bool {
-	return strings.HasPrefix(claim, issueVolume+"-legion-") || strings.HasPrefix(claim, cacheVolume+"-legion-")
+	for _, prefix := range []string{issueVolume + "-legion-", cacheVolume + "-legion-", "tree-legion-"} {
+		if strings.HasPrefix(claim, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // dashboardURL is whether value is a DISPATCH_PUBLIC_URL boot lets through: a rule narrower than

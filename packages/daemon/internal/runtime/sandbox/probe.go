@@ -667,7 +667,7 @@ func (r *Runtime) shareRefusal(pod *corev1.Pod, name string, events []corev1.Eve
 	var newest *corev1.Event
 	for i := range events {
 		event := &events[i]
-		if event.Reason != "FailedMount" || !shareMountFailed(event.Message) || !eventTime(*event).After(mounted) {
+		if event.Reason != "FailedMount" || !shareMountFailed(event.Message) || !eventTime(*event).After(mounted) || eventCount(*event) < 2 {
 			continue
 		}
 		named := mountedVolume.FindStringSubmatch(event.Message)
@@ -702,6 +702,17 @@ func sharesMountedSince(events []corev1.Event) time.Time {
 		}
 	}
 	return since
+}
+
+// eventCount is how many times the kubelet recorded event: it folds a repeat of the same message
+// into one event and counts it (Count, or the series' count). A share failure seen once may be
+// the network's moment — a server failing over, a maintenance blip — and the kubelet retries
+// it with backoff, so shareRefusal refuses only one the kubelet's retry met again.
+func eventCount(event corev1.Event) int32 {
+	if event.Series != nil && event.Series.Count > event.Count {
+		return event.Series.Count
+	}
+	return event.Count
 }
 
 // eventTime is when event last happened: the series' last observation, else its last timestamp,

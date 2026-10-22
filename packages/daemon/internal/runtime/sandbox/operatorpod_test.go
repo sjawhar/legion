@@ -101,10 +101,13 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		}}, want: "runtime.kubernetes.pod.volumes[1].name launcher-tester is a volume Legion puts in every pod"},
 		{name: "an issue's own claim", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: IssueClaimName("legion-acme-acme-7-architect")}}},
-		}}, want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name issue-legion-acme-acme-7 is a claim Legion makes for an issue's or a repository cache's own volume: name a claim of your own"},
+		}}, want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name issue-legion-acme-acme-7 is a claim Legion makes for an issue's, a tree's or a repository cache's own volume: name a claim of your own"},
 		{name: "a repository cache's own claim", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: cacheClaimName("legion-acme-cache-acme-widgets-1234abcd")}}},
-		}}, want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name cache-legion-acme-cache-acme-widgets-1234abcd is a claim Legion makes for an issue's or a repository cache's own volume: name a claim of your own"},
+		}}, want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name cache-legion-acme-cache-acme-widgets-1234abcd is a claim Legion makes for an issue's, a tree's or a repository cache's own volume: name a claim of your own"},
+		{name: "a tree's claim of the earlier layout", pod: Pod{Volumes: []corev1.Volume{
+			{Name: "share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "tree-legion-share-share-1-architect"}}},
+		}}, want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name tree-legion-share-share-1-architect is a claim Legion makes for an issue's, a tree's or a repository cache's own volume: name a claim of your own"},
 		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/launcher"), want: overlaps("/var/run/legion/launcher", "/var/run/legion/launcher", false)},
 		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"), want: overlaps("/legion/operator", "/legion", false)},
 		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/agent-secrets", false)},
