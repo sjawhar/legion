@@ -44,9 +44,9 @@ const (
 	labelProbe     = "legion.dev/probe"
 	probeContainer = "probe"
 	// probeLogLines is how much of the probe pod's log is read and quoted. The capability table
-	// (internal/capabilities) is one line per row, about twenty, printed before the OK line, so
-	// the TypeScript probe's 50 (LOG_TAIL_LINES, worker-image-probe.ts:59) would leave a refused
-	// image's own messages, printed before the table, out of the tail the refusal quotes. The
+	// (internal/capabilities) is one line per row, about twenty, printed before the OK line, so a
+	// 50-line tail would leave a refused image's own messages, printed before the table, out of the
+	// tail the refusal quotes. The
 	// tail probeLog keeps (probeLogBytes) is kept from its end (lastBytes), so the OK line, the
 	// tail's last line, is in reach whatever a line's length: a capability line is its prefix,
 	// the row's own words, and a command's quoted output cut at 300 characters
@@ -63,7 +63,7 @@ const (
 	// line, the tail's last line, out of reach.
 	probeLogBytes = 64 << 10
 	// probeTerminationGrace is the probe pod's terminationGracePeriodSeconds: it holds nothing to
-	// save (worker-image-probe.ts:144).
+	// save.
 	probeTerminationGrace = 5
 )
 
@@ -86,25 +86,28 @@ var pullWaiting = map[string]bool{"ErrImagePull": true, "ImagePullBackOff": true
 // at v1.7), and the failure reaches the kubelet as gRPC NotFound only when it is
 // errdefs.ErrNotFound. The resolver's Resolve (core/remotes/docker/resolver.go at v2,
 // remotes/docker/resolver.go at v1.7) answers `<ref>: not found` when the registry answered 404
-// for the manifest, and ranks it below any other HTTP status a host answered, so a 401, 403, 429
-// or 5xx is what the pull reports instead. An unauthorized pull (`pull access denied, …`), a
-// refused, reset or timed-out connection, a rate limit and a server error carry another code or
-// none, and stay retried. The resolver's other ErrNotFound answers say nothing of the registry's
-// contents — `no resolve hosts: not found` (the node's registry configuration) and `rejecting <n>
-// byte manifest for <ref>: not found` (a manifest past containerd's size limit) — nor does a
-// NotFound past resolution, `failed to copy: … not found`, a manifest or layer the registry named
-// and then did not serve; so the whole message must be the one grammar, its three references the
-// same (registryHasNoImage), and anything else stays retried. One case the message cannot tell
-// apart: a node configured with several hosts for one registry (a mirror in containerd's
-// hosts.toml) reports a host's 404 over another's network failure, so a mirror that lacks the image
-// while the registry it mirrors is unreachable is refused as a missing image; the refusal quotes
-// the kubelet, which names the reference, and a mirror that lags its registry is the node's to fix.
-// Measured on kind v1.32.2 with containerd 2.0.2 against a public registry and a stub answering
-// each status: `rpc error: code = NotFound desc = failed to pull and unpack image "<ref>": failed
-// to resolve reference "<ref>": <ref>: not found` for the 404, the wording a GKE node's Failed
-// event quotes for a digest its registry lacks; an ImagePullBackOff's message ends the same way.
-// Docker Hub answers a repository it does not have with 401, read as credentials and retried;
-// another runtime's wording (CRI-O's `manifest unknown`) falls to the retry too.
+// for the manifest. An unauthorized pull (`pull access denied, …`), a refused, reset or timed-out
+// connection, a rate limit and a server error carry another code or none, and stay retried. The
+// resolver's other ErrNotFound answers say nothing of the registry's contents — `no resolve hosts:
+// not found` (the node's registry configuration) and `rejecting <n> byte manifest for <ref>: not
+// found` (a manifest past containerd's size limit) — nor does a NotFound past resolution, `failed
+// to copy: … not found`, a manifest or layer the registry named and then did not serve; so the
+// whole message must be the one grammar, its three references the same (registryHasNoImage), and
+// anything else stays retried. One case the message cannot tell apart: on a node configured with
+// several hosts for one registry (a mirror in containerd's hosts.toml), containerd 2 reports one
+// host's 404 over another host's 403, 429 or 5xx only when no host answered those, but over any
+// request that failed — a refused connection, a timeout, or credentials the host refused
+// (`pull access denied`, `authorization failed`, `failed to authorize`) — so a mirror that lacks the
+// image while the registry behind it is unreachable or refuses the node's credentials is refused
+// as a missing image. The refusal quotes the kubelet, which names the reference, and a mirror that
+// lags its registry is the node's to fix. Measured on kind with containerd 2.0.2 (Kubernetes
+// v1.32.2), 2.1.3 (v1.34.0, pulling through containerd's transfer service) and 2.3.4 (v1.37.0)
+// against public registries, and on 2.0.2 against a stub answering each status: `rpc error: code =
+// NotFound desc = failed to pull and unpack image "<ref>": failed to resolve reference "<ref>":
+// <ref>: not found` for the 404 on each, the wording a GKE node's Failed event quotes for a digest
+// its registry lacks; an ImagePullBackOff's message ends the same way. Docker Hub answers a
+// repository it does not have with 401, read as credentials and retried; another runtime's
+// wording (CRI-O's `manifest unknown`) falls to the retry too.
 var imageNotFound = regexp.MustCompile(`^(?:Back-off pulling image "[^"]+": ErrImagePull: )?rpc error: code = NotFound desc = failed to pull and unpack image "([^"]+)": failed to resolve reference "([^"]+)": (.+): not found$`)
 
 // registryHasNoImage reports whether w, the probe container's waiting state, is a pull the
@@ -162,8 +165,8 @@ type ImageProbe struct {
 // or its container cannot be configured for — or waiting: a pod the pool has no room for (stuck),
 // which counts against no attempt budget, since a full pool says nothing about the image and the
 // daemon must stay up until it has room — or transient: anything else, a pod the kubelet itself
-// failed included, retried under p.Retry (worker-image-probe.ts:318-338, 470-508). The report
-// counts the attempts that waited on capacity and keeps the last one's reason, for the
+// failed included, retried under p.Retry. The report counts the attempts that waited on capacity
+// and keeps the last one's reason, for the
 // pool-capacity row of the capability report.
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
@@ -208,8 +211,7 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.Image
 // probing one image in a namespace never contend for one Sandbox. A Prober sets a run of its own
 // (newProber), so its Sandbox is never a booting daemon's or another probe-boot's, and neither
 // takes the other's for a leftover (createProbe); a probe-boot leftover ends at its shutdownTime.
-// The project is slugged to fit a DNS label (probePodName, worker-image-probe.ts:108-116), shorter
-// by what the run takes.
+// The project is slugged to fit a DNS label (probePodName), shorter by what the run takes.
 func probeName(project, hex, run string) string {
 	prefix, suffix := "legion-probe-", "-"+hex[:12]
 	if run != "" {
@@ -384,7 +386,7 @@ func imageRefusal(digest, format string, args ...any) bootprobe.Outcome {
 
 // apiOutcome is an API failure's verdict: the API server refusing what was sent (400, 401, 403,
 // 422, or a 404 on a create: the namespace or the CRD is missing) refuses it again, so it is
-// definitive; anything else is the cluster's moment, retried (worker-image-probe.ts:318-336).
+// definitive; anything else is the cluster's moment, retried.
 func apiOutcome(digest string, err error, doing string, creating bool) bootprobe.Outcome {
 	if apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) || apierrors.IsInvalid(err) ||
 		(creating && apierrors.IsNotFound(err)) {
@@ -405,9 +407,9 @@ func unlessStopped(ctx context.Context, err error, detail string) bootprobe.Outc
 // createProbe creates the probe Sandbox and answers its uid. A Sandbox already holding the name is
 // a leftover of this runtime's own probe only when it carries this project's label — the name is
 // project-scoped, so anything else is another deployment's object, not this runtime's to delete —
-// in which case it is deleted, its pod waited out, and the create repeated
-// (worker-image-probe.ts:369-408). The name is the daemon's for every boot of the project and image,
-// and a Prober's for its run alone (probeName), so neither ever meets the other's Sandbox here.
+// in which case it is deleted, its pod waited out, and the create repeated. The name is the
+// daemon's for every boot of the project and image, and a Prober's for its run alone (probeName),
+// so neither ever meets the other's Sandbox here.
 func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest func() (*unstructured.Unstructured, error), budget time.Duration) (types.UID, bootprobe.Outcome, bool) {
 	create := func() (types.UID, error) {
 		object, err := manifest()
@@ -991,8 +993,8 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 
 // judge is the verdict on a finished probe pod and its log, logErr when the log could not be read
-// (judgeProbeLog, worker-image-probe.ts:470-508), in this order, carrying on a pass what the OK
-// line reported of the image, in Outcome.Report. A pod the kubelet failed for
+// (judgeProbeLog), in this order, carrying on a pass what the OK line reported of the image, in
+// Outcome.Report. A pod the kubelet failed for
 // reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
 // unread log is judged by the read's error. A Failed pod past those is one whose probe container
 // exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an

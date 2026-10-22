@@ -218,9 +218,10 @@ registry the node cannot reach (`i/o timeout`, `connection refused`, `connection
 rate limit (`429`, `toomanyrequests`), a server error, and containerd's other not-found answers (`no
 resolve hosts`, a manifest past its size limit, a manifest or layer the registry named and then did
 not serve) — may pass on a later attempt, and stays under the six-attempt budget. One exception
-follows from containerd reporting a host's 404 over another host's network failure: on a node whose
-containerd tries a mirror before the registry (`hosts.toml`), a mirror without the image while the
-registry is unreachable is refused as a missing image. A volume of the operator's pod block
+follows from containerd 2 reporting one host's 404 over another host's failed request: on a node
+whose containerd tries a mirror before the registry (`hosts.toml`), a mirror without the image is
+refused as a missing image while the registry behind it is unreachable or refuses the node's
+credentials. A volume of the operator's pod block
 (`runtime.kubernetes.pod.volumes`) that a `volume_mounts` entry mounts, naming a ConfigMap or Secret
 that does not exist in the daemon's namespace, or asking a key it lacks, leaves the probe pod
 `Pending` with the kubelet's `FailedMount` (`configmap "<name>" not found` or `configmaps "<name>" not
