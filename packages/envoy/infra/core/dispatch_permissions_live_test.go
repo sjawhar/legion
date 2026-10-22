@@ -99,6 +99,17 @@ func runDispatchPermissions(t *testing.T, dispatch, image string, removeDelivery
 	requireAgentStreamRelayed(t, conn, port)
 	requireWebhookRedeliveryBucket(t, js, process, github)
 
+	// Dispatch's grant, built on the listener's, publishes every notification topic: an ad-hoc
+	// topic outside every stream subject reaches its subscriber, with no violation.
+	adhoc, err := conn.SubscribeSync("notifications.team.>")
+	require.NoError(t, err)
+	require.NoError(t, conn.Publish("notifications.team.deploy-squad", []byte("example ad-hoc message")))
+	require.NoError(t, conn.Flush())
+	team, err := adhoc.NextMsg(5 * time.Second)
+	require.NoError(t, err, "the ad-hoc publish under Dispatch's grant reached nobody")
+	require.Equal(t, "notifications.team.deploy-squad", team.Subject)
+	require.NoError(t, adhoc.Unsubscribe())
+
 	require.NoError(t, conn.Publish("outside.example", nil))
 	requireViolation(t, conn, errs, `Publish to "outside.example"`)
 	for _, violation := range violationsOnceLogged(t, server, "outside.example") {
