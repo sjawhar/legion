@@ -26,6 +26,8 @@ type dispatchCloud struct {
 	listenerToken *random.RandomPassword
 	principal     pulumi.StringOutput
 	seedAccessor  *secretmanager.SecretIamMember
+	// tokenAccessor is set only with agentSecretsTokenSecret.
+	tokenAccessor *secretmanager.SecretIamMember
 }
 
 func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption) (pulumi.ProviderResource, error) {
@@ -135,7 +137,13 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	_, err = sql.NewDatabase(ctx, s.hostname, &sql.DatabaseArgs{Instance: instance.Name, Name: pulumi.String("dispatch")}, child)
+	// deletionProtection also keeps the database itself: PREVENT refuses its delete, which an
+	// instance replacement would otherwise make first.
+	databasePolicy := "DELETE"
+	if s.deletionProtection {
+		databasePolicy = "PREVENT"
+	}
+	_, err = sql.NewDatabase(ctx, s.hostname, &sql.DatabaseArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), DeletionPolicy: pulumi.String(databasePolicy)}, child)
 	if err != nil {
 		return nil, err
 	}
@@ -163,5 +171,14 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor}, nil
+	var tokenAccessor *secretmanager.SecretIamMember
+	if args.AgentSecretsTokenSecret != nil {
+		// The broker token is read by the app at run time through the CSI driver, so the pods'
+		// principal needs the same per-secret accessor grant the NATS seed has.
+		tokenAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-agent-secrets-token-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.AgentSecretsTokenSecret, dispatch, "agentSecretsTokenSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, tokenAccessor: tokenAccessor}, nil
 }

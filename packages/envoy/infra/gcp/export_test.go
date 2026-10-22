@@ -39,6 +39,11 @@ type DispatchSettings struct {
 	StrategyType       string
 	RollingUpdate      *DispatchRollingUpdate
 	ServeConfig        string
+	AgentSecretsURL    string
+	AppClientID        string
+	AppID              string
+	AppKeySecretName   string
+	AppKeySecretKey    string
 }
 
 // ResolveDispatch resolves Dispatch's plain inputs for the external refusal and default tests.
@@ -55,6 +60,11 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		Replicas:           s.replicas,
 		StrategyType:       s.strategy.strategyType,
 		ServeConfig:        s.serveConfig,
+		AgentSecretsURL:    s.agentSecretsURL,
+		AppClientID:        s.appClientID,
+		AppID:              s.appID,
+		AppKeySecretName:   s.appKeySecretName,
+		AppKeySecretKey:    s.appKeySecretKey,
 	}
 	if rolling := s.strategy.rollingUpdate; rolling != nil {
 		settings.RollingUpdate = &DispatchRollingUpdate{MaxUnavailable: rolling.maxUnavailable, MaxSurge: rolling.maxSurge}

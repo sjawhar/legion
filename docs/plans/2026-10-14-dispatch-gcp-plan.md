@@ -119,8 +119,14 @@ The coordinator's decisions inside those rulings, which this plan implements and
 
 Not in this version (the spec's list): meaning search (keyword search only, since embeddings use
 AWS Bedrock, `settings.go:124-126`'s `COHERE_API_KEY` row says so); an S3 file store (files stay in
-Postgres, `settings.go:43-44`); Dispatch's GitHub App and any webhooks; a monitoring alert policy
+Postgres, `settings.go:43-44`); Dispatch's GitHub webhooks; a monitoring alert policy
 (`gcp:Dispatch` declares none; a Dispatch that is down shows as the browser failing to reach it).
+
+As built, the component gained, after this plan: the GitHub App's client ID, numeric ID and key
+by reference (`appClientId`, `appId`, `appPrivateKeySecretName`, `appPrivateKeySecretKey`) and
+the secrets broker's URL and UI token by reference (`agentSecretsUrl`, `agentSecretsTokenSecret`),
+both optional, once the owner chose to run Dispatch with the broker and the App; and server-side
+deletion protection on the instance and the database, driven by `deletionProtection`.
 
 ## Rulings made while planning
 

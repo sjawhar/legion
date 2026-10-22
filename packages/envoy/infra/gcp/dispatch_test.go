@@ -45,6 +45,26 @@ func dispatchArgs() *gcp.DispatchArgs {
 	}
 }
 
+// setApp sets the four GitHub App inputs, which come together.
+func setApp(a *gcp.DispatchArgs) {
+	a.AppClientId = "example-app-client-id"
+	a.AppId = "123456"
+	a.AppPrivateKeySecretName = "example-app-key"
+	a.AppPrivateKeySecretKey = "private-key.b64"
+}
+
+// dispatchBrokerAndAppArgs is dispatchArgs with both optional groups set: the secrets-broker relay
+// (agentSecretsUrl with agentSecretsTokenSecret) and the GitHub App (appClientId, appId and the
+// existing Kubernetes Secret and key that hold the private key).
+func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
+	t.Helper()
+	args := dispatchArgs()
+	args.AgentSecretsUrl = "https://example-broker.internal.example"
+	args.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+	setApp(args)
+	return args
+}
+
 func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
 	return runDispatchNamed(t, "example-dispatch", args, providers)
 }
@@ -122,6 +142,52 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
+		{name: "an agent secrets URL with a path", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://example-broker.internal.example/v1"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no path"}},
+		{name: "an agent secrets URL without a scheme", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "example-broker.internal.example"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "absolute http(s) URL"}},
+		{name: "an agent secrets URL with a user and password", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://user:example-pass@example-broker.internal.example"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
+		{name: "an agent secrets URL with a user alone", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://user@example-broker.internal.example"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
+		{name: "an agent secrets URL with a query", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://example-broker.internal.example?token=example-pass"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
+		{name: "an agent secrets URL with an empty query", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://example-broker.internal.example?"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
+		{name: "an agent secrets URL with a fragment", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://example-broker.internal.example#example-pass"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
+		{name: "an agent secrets URL with an empty fragment", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://example-broker.internal.example#"
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
+		{name: "an agent secrets token secret without its URL", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "required when agentSecretsTokenSecret is set"}},
+		{name: "an app client ID alone", edit: func(a *gcp.DispatchArgs) { a.AppClientId = "example-app-client-id" }, err: []string{"appId, appPrivateKeySecretName, appPrivateKeySecretKey", "required when appClientId is set"}},
+		{name: "an app private key secret name alone", edit: func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretName = "example-app-key" }, err: []string{"appClientId, appId, appPrivateKeySecretKey", "required when appPrivateKeySecretName is set"}},
+		{name: "an app without its ID", edit: func(a *gcp.DispatchArgs) {
+			a.AppClientId = "example-app-client-id"
+			a.AppPrivateKeySecretName = "example-app-key"
+			a.AppPrivateKeySecretKey = "key.pem"
+		}, err: []string{"appId", "required when appClientId is set"}},
+		{name: "a non-numeric app ID", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppId = "12ab" }, err: []string{"appId", "numeric"}},
+		{name: "a zero app ID", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppId = "0" }, err: []string{"appId", "numeric"}},
+		{name: "an invalid app private key secret name", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretName = "Example_Key" }, err: []string{"appPrivateKeySecretName", "DNS subdomain"}},
+		{name: "an invalid app private key secret key", edit: func(a *gcp.DispatchArgs) { setApp(a); a.AppPrivateKeySecretKey = "bad/key" }, err: []string{"appPrivateKeySecretKey", "must match"}},
 		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
 	}
 	for _, c := range cases {
@@ -133,6 +199,7 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 			for _, want := range c.err {
 				require.ErrorContains(t, err, want)
 			}
+			require.NotContains(t, err.Error(), "example-pass", "a refusal never quotes the URL")
 		})
 	}
 }
@@ -187,6 +254,11 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
+		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
+		{"a seed as the app client ID", "appClientId", func(a *gcp.DispatchArgs) { a.AppClientId = seed }},
+		{"a seed as the app ID", "appId", func(a *gcp.DispatchArgs) { a.AppId = seed }},
+		{"a seed as the app private key secret name", "appPrivateKeySecretName", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretName = lower }},
+		{"a seed as the app private key secret key", "appPrivateKeySecretKey", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretKey = seed }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := dispatchArgs()
@@ -823,5 +895,188 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 		inputs := m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()
 		require.Equal(t, protect, inputs["deletionProtection"])
 		require.Equal(t, protect, inputs["settings"].(map[string]any)["deletionProtectionEnabled"])
+		policy := "DELETE"
+		if protect {
+			policy = "PREVENT"
+		}
+		require.Equal(t, policy, m.One(t, "gcp:sql/database:Database").Inputs.Mappable()["deletionPolicy"])
 	}
+}
+
+// Dispatch itself trims one trailing slash off DISPATCH_AGENT_SECRETS_URL, so the component
+// renders the value as Dispatch reads it.
+func TestDispatchTrimsTheAgentSecretsUrlsTrailingSlash(t *testing.T) {
+	args := dispatchBrokerAndAppArgs(t)
+	args.AgentSecretsUrl = "https://example-broker.internal.example/"
+	settings, err := gcp.ResolveDispatch(args)
+	require.NoError(t, err)
+	require.Equal(t, "https://example-broker.internal.example", settings.AgentSecretsURL)
+}
+
+// A blank or whitespace-only value of any secret input Dispatch reads as a credential renders a
+// Secret key Dispatch refuses only at boot (an empty client secret, an empty auth key), so the
+// component refuses it once the input resolves, naming the input and never the value: one rule,
+// refuseDispatchSecret, which both inputs' resolved checks run before anything else.
+func TestDispatchRefusesABlankSecretOnceItResolves(t *testing.T) {
+	for _, input := range []struct {
+		name string
+		edit func(*gcp.DispatchArgs, pulumi.StringInput)
+	}{
+		{"tailnetAuthKey", func(a *gcp.DispatchArgs, v pulumi.StringInput) { a.TailnetAuthKey = v }},
+		{"signInClientSecret", func(a *gcp.DispatchArgs, v pulumi.StringInput) { a.SignInClientSecret = v }},
+	} {
+		for _, row := range []struct{ name, value string }{
+			{"empty", ""},
+			{"whitespace only", " \n\t"},
+		} {
+			t.Run(input.name+", "+row.name, func(t *testing.T) {
+				args := dispatchBrokerAndAppArgs(t)
+				input.edit(args, pulumi.String(row.value))
+				_, err := runDispatch(t, args, true)
+				require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+input.name+
+					" is blank, which no credential is")
+			})
+		}
+	}
+}
+
+func unwrappedProperty(value resource.PropertyValue) resource.PropertyValue {
+	for {
+		switch {
+		case value.IsSecret():
+			value = value.SecretValue().Element
+		case value.IsOutput():
+			value = value.OutputValue().Element
+		default:
+			return value
+		}
+	}
+}
+
+// registrationsOf is every registration of type typ, in order.
+func registrationsOf(m *pulumitest.Mocks, typ string) []pulumitest.Registration {
+	var out []pulumitest.Registration
+	for _, r := range m.Registrations() {
+		if r.Type == typ {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// dispatchSecretData is the <hostname>-dispatch Secret's stringData as the mocks recorded it.
+func dispatchSecretData(t *testing.T, m *pulumitest.Mocks) resource.PropertyMap {
+	t.Helper()
+	for _, registration := range m.Registrations() {
+		if registration.Type == "kubernetes:core/v1:Secret" && registration.Name == "example-dispatch-dispatch" {
+			return unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()
+		}
+	}
+	t.Fatal("no example-dispatch-dispatch Secret registered")
+	return nil
+}
+
+func secretDataKeys(data resource.PropertyMap) []string {
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, string(key))
+	}
+	return keys
+}
+
+// Neither the broker token nor the App key is ever component input, so no Secret, StringData or
+// registered input of the component holds either's material: the sentinels below are what a
+// consumer's secret store would hold, and only references to them are inputs.
+func TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial(t *testing.T) {
+	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY", "DISPATCH_SIGNIN_CLIENT_SECRET",
+	}, secretDataKeys(dispatchSecretData(t, m)))
+	for _, registration := range m.Registrations() {
+		if registration.Type != "kubernetes:core/v1:Secret" {
+			continue
+		}
+		for _, s := range allStrings(resource.NewProperty(registration.Inputs)) {
+			require.NotContains(t, s, "BEGIN", "%s holds PEM material", registration.Name)
+			require.NotContains(t, s, "agent-secrets-token-value", "%s holds the broker token", registration.Name)
+		}
+		require.NotContains(t, secretDataKeys(unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()), "DISPATCH_AGENT_SECRETS_TOKEN")
+		require.NotContains(t, secretDataKeys(unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()), "DISPATCH_APP_PEM_B64")
+	}
+}
+
+// Unset, neither pair leaves a trace: the Secret keeps exactly its four keys, no second
+// SecretProviderClass or accessor exists, and TestDispatchPodMatchesGolden pins the pod template
+// byte-identical to before the inputs existed.
+func TestDispatchSecretCarriesNoBrokerOrAppKeyUnset(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY", "DISPATCH_SIGNIN_CLIENT_SECRET",
+	}, secretDataKeys(dispatchSecretData(t, m)))
+	require.Len(t, registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember"), 1, "only the NATS seed's accessor exists")
+	for _, r := range m.Registrations() {
+		require.NotEqual(t, "example-dispatch-agent-secrets-token", r.Name)
+	}
+}
+
+// With agentSecretsTokenSecret set, a second per-secret accessor for the pod's principal exists,
+// on that secret alone, and the Deployment waits for it.
+func TestDispatchGrantsTheBrokerTokenAccessorOnlyWhenSet(t *testing.T) {
+	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
+	require.NoError(t, err)
+	members := registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember")
+	require.Len(t, members, 2)
+	var token *pulumitest.Registration
+	for i := range members {
+		if members[i].Name == "example-dispatch-agent-secrets-token-accessor" {
+			token = &members[i]
+		}
+	}
+	require.NotNil(t, token)
+	inputs := token.Inputs.Mappable()
+	require.Equal(t, "projects/example-project/secrets/example-agent-secrets-token", inputs["secretId"])
+	require.Equal(t, "roles/secretmanager.secretAccessor", inputs["role"])
+	deployment := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch")
+	require.Contains(t, deployment.RPC.GetDependencies(),
+		"urn:pulumi:s::p::"+dispatchType+"$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-agent-secrets-token-accessor")
+}
+
+// Both pairs set, the pod template gains exactly the broker env pair (DISPATCH_AGENT_SECRETS_URL
+// and DISPATCH_AGENT_SECRETS_TOKEN_FILE), the app env triple (DISPATCH_APP_CLIENT_ID and
+// DISPATCH_APP_ID plain, DISPATCH_APP_PEM_B64 from the consumer's Secret), and the token's own
+// CSI volume mounted into envoy-dispatch alone.
+func TestDispatchPodWithBrokerAndAppMatchesGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-broker-and-app.golden")
+}
+
+// The token's SecretProviderClass is the second of the component: provider gke, the secret's
+// path with /versions/latest, written to the file agent-secrets-token.
+func TestDispatchRegistersTheBrokerTokenSecretProviderClass(t *testing.T) {
+	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
+	require.NoError(t, err)
+	var found bool
+	for _, r := range m.Registrations() {
+		if r.Name != "example-dispatch-agent-secrets-token" || r.Inputs["kind"].StringValue() != "SecretProviderClass" {
+			continue
+		}
+		found = true
+		spec := r.Inputs.Mappable()["spec"].(map[string]any)
+		require.Equal(t, "gke", spec["provider"])
+		require.Equal(t, "- resourceName: projects/example-project/secrets/example-agent-secrets-token/versions/latest\n  path: agent-secrets-token\n",
+			spec["parameters"].(map[string]any)["secrets"])
+	}
+	require.True(t, found)
+}
+
+// With both groups set, the listener's and the front door's pods are exactly as without them: the
+// broker relay and the GitHub App reach the app's envoy-dispatch container alone.
+func TestDispatchBrokerAndAppLeaveTheOtherWorkloadsUnchanged(t *testing.T) {
+	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
 }
