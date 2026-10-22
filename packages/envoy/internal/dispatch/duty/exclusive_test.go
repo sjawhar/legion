@@ -170,7 +170,7 @@ func TestExclusiveSkipsASecondProcessInsideThePeriod(t *testing.T) {
 
 	// The recorded pass moved back is the period having run out, which no test waits an hour
 	// for: the repository's other claim rows age their row the same way rather than sleeping.
-	movePassBack(t, database, name, 2)
+	movePassBack(t, database, name, 2*period)
 	if !Exclusive(ctx, otherLeases, name, period, func(context.Context) { otherRan = true }) || !otherRan {
 		t.Error("no pass ran once the recorded one was older than the period")
 	}
@@ -269,12 +269,13 @@ func TestExclusiveDoesNotLockOutALoopWhosePeriodGrows(t *testing.T) {
 	}
 }
 
-// movePassBack moves the pass recorded for name back by age, which is how a period that has run
-// out is reached without waiting one out.
-func movePassBack(t *testing.T, database *store.Store, name string, periods int64) {
+// movePassBack moves the boundary recorded for name back by age, which is how a period that has
+// run out is reached without waiting one out.
+func movePassBack(t *testing.T, database *store.Store, name string, age time.Duration) {
 	t.Helper()
 	moved, err := database.Pool.Exec(context.Background(),
-		`update duty_passes set bucket = bucket - $2 where lease = $1`, name, periods)
+		`update duty_passes set boundary = boundary - make_interval(secs => $2) where lease = $1`,
+		name, age.Seconds())
 	if err != nil {
 		t.Fatalf("move the recorded %s pass back: %v", name, err)
 	}

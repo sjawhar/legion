@@ -17,31 +17,45 @@
 -- the decision and the record both sit inside the lease, so no process's tick can read a row the
 -- pass it would skip for has not written yet.
 --
--- bucket is the period itself rather than a time: floor(extract(epoch from now()) / period), read
--- and recorded in the database, never computed in Go. Two processes' wall clocks differ by
--- whatever their hosts' do, so the database's is the one clock every pass is judged by, and the
--- gate asks only whether a row holds the current bucket - never whether a time derived from one is
--- recent enough.
+-- boundary is the aligned start of the period a pass served, to_timestamp(floor(extract(epoch
+-- from now()) / period) * period), read and recorded in the database and never computed in Go:
+-- two processes' wall clocks differ by whatever their hosts' do, so the database's is the one
+-- clock every pass is judged by. The gate compares this tick's boundary with the stored one -
+-- both boundaries, never an instant.
 --
--- Buckets rather than a window measured back from now, because a loop whose period is its
+-- Boundaries rather than a window measured back from now, because a loop whose period is its
 -- ticker's interval lost about a third of its ticks under one: the ticker fires every interval,
 -- the row is stamped a few milliseconds later when the lease is taken, and "began_at > now() -
 -- period" then reduces to this tick's lease-acquire delay against the previous tick's, which is a
 -- coin toss (measured on a lone process against real Postgres: ran 7 skipped 3, ran 6 skipped 4,
--- ran 6 skipped 4 over ten one-second ticks). A tick one period after the last one is always in
--- the next bucket, whatever the delay, so a lone process makes a pass on every tick and no
+-- ran 6 skipped 4 over ten one-second ticks). A tick one period after the last is always at the
+-- next boundary, whatever the delay, so a lone process makes a pass on every tick and no
 -- tolerance constant has to be chosen to make that true.
 --
+-- period_ns is stored because a boundary alone cannot tell which scale produced it, and the gate
+-- counts a stored boundary only against a tick of the same period. That is not redundant with the
+-- boundary and must not be dropped as if it were: docs.RunReferenceExcerptReconciliation varies
+-- its own period between ticks - two seconds while drift remains, five minutes when none does -
+-- and a two-second boundary is within two seconds of now while that tick's five-minute boundary
+-- is on average 150 seconds behind it, so a scale-blind comparison refuses that loop's interval
+-- tick about 149 times in 150 (measured). A record made on another scale therefore serves
+-- nothing: the first tick of a changed period runs, and the loop is on its own scale from then
+-- on, at the cost of one pass per change - the direction to err in, since the other direction is
+-- a loop that stops. It is the whole number of nanoseconds the caller's own period is, stored and
+-- compared as that integer, with the seconds the arithmetic above needs derived from it in
+-- numeric: a scale equality decided by a float's rounding would be the same defect in a new coat.
+--
 -- What it costs: period boundaries are fixed rather than sliding, so a pass can run at the end of
--- one bucket and another at the start of the next - two passes close together, never two in a
--- bucket. For the loops leased here that is accepted deliberately. The lease exists against N
--- processes making N times one result's work, and a bucket holds one pass however many processes
+-- one period and another at the start of the next - two passes close together, never two in a
+-- period. For the loops leased here that is accepted deliberately. The lease exists against N
+-- processes making N times one result's work, and a period holds one pass however many processes
 -- serve the database; a pair across a boundary is a burst of two rather than a sustained
 -- doubling, the rate over any two periods is unchanged, and the webhook sweep's deliveries are
--- claimed individually by its NATS key-value compare-and-set either way.
+-- claimed individually by its NATS key-value compare-and-set either way. Bucketing bounds the
+-- work at one pass per aligned period, not one pass per any window of that length.
 --
 -- Mutual exclusion is not this table's: it is the advisory lease (duty.Exclusive), and it has to
--- be, because a pass that spans a boundary holds its lease while the bucket moves on. The bucket
+-- be, because a pass that spans a boundary holds its lease while the boundary moves on. The row
 -- says a period has been served; the lease says no two passes run at once.
 --
 -- A new table: nothing existing is read, locked or rewritten here, and the release before this one
@@ -50,5 +64,6 @@
 -- running every pass, as it does today, while the newer one skips the periods it finds served.
 create table duty_passes (
     lease text primary key,
-    bucket bigint not null
+    boundary timestamptz not null,
+    period_ns bigint not null
 );

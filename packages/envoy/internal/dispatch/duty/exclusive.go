@@ -36,31 +36,49 @@ const (
 	freeLease = `select pg_advisory_unlock($1, hashtext($2))`
 )
 
-// readPeriod answers two things, both from the database's clock: which period the tick about to
-// run falls in, and whether a pass has already served it. A period is a bucket of the clock -
-// floor(epoch / period) - rather than a window measured back from now, and the gate asks only
-// whether a row holds that bucket number. recordPass stores the bucket once the pass has run
-// (migration 0115).
+// readPeriod answers two things, both from the database's clock: the aligned start of the period
+// the tick about to run falls in - to_timestamp(floor(epoch / period) * period) - and whether a
+// pass has already served that period. recordPass stores that boundary, with the period it was
+// computed from, once the pass has run (migration 0115).
 //
-// Buckets rather than a sliding window, because a loop whose period is its ticker's interval
-// skipped about a third of its ticks under one: the ticker fires every interval, the row is
-// stamped a few milliseconds later when the lease is taken, and "began_at > now() - period" then
-// reduces to a comparison of this tick's lease-acquire delay against the previous tick's, which is
-// a coin toss (measured on a lone process against real Postgres: ran 7 skipped 3, ran 6 skipped 4,
-// ran 6 skipped 4 over ten one-second ticks). A bucket does not depend on when the tick fired: a
-// tick one period after the last one is always in the next bucket, whatever the delay, so a lone
-// process makes a pass on every tick and no constant has to be chosen to make that true.
+// Boundaries rather than a window measured back from now, because a loop whose period is its
+// ticker's interval skipped about a third of its ticks under one: the ticker fires every
+// interval, the row is stamped a few milliseconds later when the lease is taken, and
+// "began_at > now() - period" then reduces to a comparison of this tick's lease-acquire delay
+// against the previous tick's, which is a coin toss (measured on a lone process against real
+// Postgres: ran 7 skipped 3, ran 6 skipped 4, ran 6 skipped 4 over ten one-second ticks). Both
+// sides of this comparison are boundaries rather than instants, so it cannot turn on that delay:
+// a tick one period after the last one is always at the next boundary, and no tolerance constant
+// has to be chosen to make that true.
 //
-// Both are read in the database because two processes' wall clocks differ by whatever their
-// hosts' do, and the database's is the one clock every pass is judged by; the period reaches it as
-// seconds, fraction included, since a Go duration is no SQL interval.
+// The period is stored and compared beside the boundary because a boundary means nothing on
+// another period's scale. docs.RunReferenceExcerptReconciliation varies its own period between
+// ticks - two seconds while drift remains, five minutes when none does - and its two-second
+// boundary lies at or after the current five-minute one for all but the first two seconds of
+// every five-minute bucket, so a comparison that ignored the scale would refuse that loop's
+// interval tick about 149 times in 150 (measured; and under the bucket-number form this
+// replaces, which was scale-dependent in the same way, it refused every later tick for ever).
+// A record made on another scale therefore serves nothing: the first tick of a changed period
+// runs, and the loop is on its own scale from then on. That costs one pass at each change, which
+// is the direction to err in - the other direction is a loop that stops.
+//
+// Everything is read in the database because two processes' wall clocks differ by whatever their
+// hosts' do, and the database's is the one clock every pass is judged by. The period crosses as
+// the whole number of nanoseconds a Go duration is, stored and compared as that integer, and the
+// seconds the boundary arithmetic needs are derived from it in numeric: a scale equality decided
+// by a float's rounding would be this same defect in a new coat.
 const (
-	readPeriod = `with tick as (select floor(extract(epoch from now()) / $2)::bigint as bucket)
-		select tick.bucket, exists (
+	readPeriod = `with tick as (
+			select to_timestamp(
+				floor(extract(epoch from now()) / ($2::numeric / 1000000000))
+				* ($2::numeric / 1000000000)) as boundary)
+		select tick.boundary, exists (
 			select 1 from duty_passes
-			where lease = $1 and duty_passes.bucket >= tick.bucket) from tick`
-	recordPass = `insert into duty_passes (lease, bucket) values ($1, $2)
-		on conflict (lease) do update set bucket = excluded.bucket`
+			where lease = $1 and duty_passes.period_ns = $2
+			  and duty_passes.boundary >= tick.boundary) from tick`
+	recordPass = `insert into duty_passes (lease, boundary, period_ns) values ($1, $2, $3)
+		on conflict (lease) do update set boundary = excluded.boundary,
+			period_ns = excluded.period_ns`
 )
 
 // errLeaseNotHeld is pg_advisory_unlock answering false: the session this pass ran on did not hold
@@ -124,7 +142,7 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 	// Deferred, so a pass that panics gives its lease back on the way out rather than holding it
 	// for as long as the connection lives.
 	defer freeLeaseOn(conn, name)
-	bucket, served, err := periodServed(ctx, conn, name, period)
+	boundary, served, err := periodServed(ctx, conn, name, period)
 	if err != nil {
 		// The record could not be read, so whether this period is served is unknown. The pass
 		// does not run: a tick that runs on no answer is the duplicate work the record is here
@@ -155,42 +173,44 @@ func Exclusive(ctx context.Context, leases Leases, name string, period time.Dura
 		slog.Info("dispatch duty: leased pass cut short by shutdown; its period is left unserved", "lease", name)
 		return false
 	}
-	recordPassOn(conn, name, bucket, period)
+	recordPassOn(conn, name, boundary, period)
 	slog.Info("dispatch duty: leased pass ran", "lease", name)
 	return true
 }
 
-// periodServed answers the period this tick falls in - the bucket of the database's clock,
-// floor(epoch / period) - and whether a pass has already served it, whichever process ran that
-// pass. A period of zero or less has no period to serve and reads nothing.
+// periodServed answers the aligned start of the period this tick falls in - the boundary
+// to_timestamp(floor(epoch / period) * period) on the database's clock - and whether a pass has
+// already served that period, whichever process ran it. A period of zero or less has no period to
+// serve and reads nothing.
 //
-// The comparison is on the bucket number alone, never on a time derived from it: a bucket turned
-// back into an instant and compared against now() would let the acquire-delay jitter back in
-// through a different door.
-func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, period time.Duration) (bucket int64, served bool, err error) {
+// Both sides of the comparison are boundaries, never an instant: a boundary compared against
+// now() would let the acquire-delay jitter back in through a different door. And a stored
+// boundary counts only against a tick of the same period, since a boundary carries no record of
+// the scale that produced it (readPeriod).
+func periodServed(ctx context.Context, conn *pgxpool.Conn, name string, period time.Duration) (boundary time.Time, served bool, err error) {
 	if period <= 0 {
-		return 0, false, nil
+		return time.Time{}, false, nil
 	}
-	err = conn.QueryRow(ctx, readPeriod, name, period.Seconds()).Scan(&bucket, &served)
-	return bucket, served, err
+	err = conn.QueryRow(ctx, readPeriod, name, period.Nanoseconds()).Scan(&boundary, &served)
+	return boundary, served, err
 }
 
-// recordPassOn records that this pass served its period's bucket, so every process's next tick
-// inside that bucket skips. It writes the bucket the gate read, not one computed again: a second
-// read could land in the next bucket and leave this one looking unserved.
+// recordPassOn records that this pass served its period, as the boundary the gate read and the
+// period that produced it. It writes that boundary rather than one computed again: a second read
+// could land in the next period and leave this one looking unserved.
 //
 // It runs on the lease's own connection and before the lease is given back, on a context of its
 // own because the pass's own may already be cancelled - a context that is cancelled is also the
-// one case this is never called in, since a pass shutdown cut short serves no bucket (Exclusive).
+// one case this is never called in, since a pass shutdown cut short serves no period (Exclusive).
 // This comment said the opposite until INFRA-66's second round: that a pass cut short by shutdown
 // still ran and still served its period, which was the behaviour and was wrong both times it was
 // written. A record that never lands only costs one early pass, which is why its failure is
 // logged and not returned. A pass with no period records nothing.
-func recordPassOn(conn *pgxpool.Conn, name string, bucket int64, period time.Duration) {
+func recordPassOn(conn *pgxpool.Conn, name string, boundary time.Time, period time.Duration) {
 	if period <= 0 {
 		return
 	}
-	if _, err := conn.Exec(context.Background(), recordPass, name, bucket); err != nil {
+	if _, err := conn.Exec(context.Background(), recordPass, name, boundary, period.Nanoseconds()); err != nil {
 		slog.Error("dispatch duty: record the pass", "lease", name, "error", err)
 	}
 }
