@@ -1,0 +1,119 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-113",
+  "completed": "2026-10-22T06:35:00Z",
+  "proof": [
+    {
+      "criterion": "AC1 — an ad-hoc topic publish answers at once and reaches a session subscribed to it",
+      "surface": "The Docker-free production-like rig committed at .legion/INFRA-113/rig/run.sh: a real nats-server v2.15.1 started with the hub's own arguments (-js --store_dir … -m …) under the authorization core.ListenerPermissions + core.SessionPermissions render through core.Authorization.Render, the real cmd/listener binary with exactly the environment core.ListenerConfig.Env produces, a real credential-free core-NATS subscriber connected as the server's no_auth_user, and the real HTTP route POST /v1/messages/publish.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && NATS_VERSION=v2.15.1 bash .legion/INFRA-113/rig/run.sh \"$LEGION_WORKSPACE/packages/envoy\" \"$LEGION_WORKSPACE/packages/envoy\" /tmp/rig-head2",
+      "observed": "topic=notifications.team.deploy-squad.all http=200 time_total=0.002705s; the subscriber printed RECEIVED subject=notifications.team.deploy-squad.all bytes=370 with the published envelope's event_id fc0a477f20b5d4efa86575393be88abc; the nats-server log held no Violation line (the rig printed '== nats-server violations' then '(none)').",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "The same rig over an origin/main checkout at 945cd0cea1fdfa0fed66b7506d5bd1c3aa55d9aa (git -C /tmp clone --depth 1 -b main https://github.com/sjawhar/legion mainctl; rig run over /tmp/mainctl/packages/envoy for both the grant and the listener) answered topic=notifications.team.deploy-squad.all http=500 time_total=5.003362s body={\"error\":\"context deadline exceeded\"}, the subscriber received nothing for that topic, and nats-server logged 'Publish Violation - Subject \"notifications.team.deploy-squad.all\"'."
+    },
+    {
+      "criterion": "AC2 — a topic the stream captures is unchanged",
+      "surface": "The same rig run: the real listener publishing notifications.github.probe.all, a topic the stream's notifications.github.> subject captures, to the real nats-server, read by the same credential-free core-NATS subscriber.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && NATS_VERSION=v2.15.1 bash .legion/INFRA-113/rig/run.sh \"$LEGION_WORKSPACE/packages/envoy\" \"$LEGION_WORKSPACE/packages/envoy\" /tmp/rig-head2",
+      "observed": "topic=notifications.github.probe.all http=200 time_total=0.005859s, and the subscriber printed RECEIVED subject=notifications.github.probe.all bytes=360 — the captured topic still takes JetStream and still arrives.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "The origin/main run at 945cd0cea1 answered the same topic http=200 time_total=0.007312s with the same RECEIVED line, which is what makes the AC1 row discriminating: only the ad-hoc topic changed, the captured one is identical on both sides."
+    },
+    {
+      "criterion": "AC3 — a topic outside notifications. is refused and nothing is published",
+      "surface": "The same rig run: POST /v1/messages/publish against the real listener binary with topic $KV.envoy_roles.example-role, the key-value subject that holds the records saying which session holds a role, with the role-claim bucket's message count read from the real server's own monitoring endpoint /jsz?streams=1 before and after.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && NATS_VERSION=v2.15.1 bash .legion/INFRA-113/rig/run.sh \"$LEGION_WORKSPACE/packages/envoy\" \"$LEGION_WORKSPACE/packages/envoy\" /tmp/rig-head2",
+      "observed": "topic=$KV.envoy_roles.example-role http=400 time_total=0.001741s body={\"error\":\"topic must begin with notifications.\",\"expected\":[\"topic\"]}, and the rig's own reads of the server printed 'KV_envoy_roles before: 0 message(s)' and 'KV_envoy_roles after: 0 message(s)' — nothing was published.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "The origin/main run at 945cd0cea1 answered the same request http=200 time_total=0.002342s with a full envelope body, and its counts went 'KV_envoy_roles before: 0 message(s)' → 'KV_envoy_roles after: 1 message(s)': at main any holder of the listener's bearer can write the role-claim bucket through this route."
+    },
+    {
+      "criterion": "AC5 — the transport table holds for every row, exception lanes included",
+      "surface": "The bus package's pure unit tests over usesCoreTransport and streamCaptures, run in this pod (no Docker needed; a wider -run would start a testcontainer and panic the binary).",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/bus -run '^(TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCapture|TestEveryStreamSubjectIsALiteralPrefixAndWildcard)$' -v",
+      "observed": "Both PASS. The table now carries the exception lane of a captured non-agent topic, notifications.envoy.exceptions.notifications.github.acme.widgets.pr.1.comment → core NATS, beside the two the adopted work already had (the agent subject's lane → JetStream, the role lane's → core).",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "Flipping that row's expectation to false fails the test with 'usesCoreTransport(\"notifications.envoy.exceptions.notifications.github.acme.widgets.pr.1.comment\") = true, want false'; the row is decided by streamSubjects holding exactly one exception subject, notifications.envoy.exceptions.notifications.agent.> (internal/bus/stream.go:76)."
+    },
+    {
+      "criterion": "AC6 — ListenerPermissions grants notifications.> and the rendered hub cloud-config matches its golden",
+      "surface": "The envoy-infra module's pure unit suites in this pod.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy/infra && go test ./core/ && go test ./gcp/ -run 'CloudConfig|Golden|Cloud'",
+      "observed": "ok github.com/sjawhar/envoy/infra/core and ok github.com/sjawhar/envoy/infra/gcp. The grant's first publish entry is now notifications.>, and both cloud-config goldens were updated with it.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "The goldens are the control: leaving packages/envoy/infra/gcp/testdata/cloud-config.golden at its old grant fails TestCloudConfigGolden with the rendered authorization's diff, which is how the golden caught the change in the first place."
+    },
+    {
+      "criterion": "AC7 — the live hub-shaped proof: the listener's grant may publish notifications.> on a real server and a credential-free session receives it",
+      "surface": "CI, because the live permission suite needs Docker, which this pod does not have: job envoy-infra-go of the 'Legion Envoy and Contracts' workflow, step go test -tags natslive ./core/ ./seed/.",
+      "command": "gh run view 39729831923 --repo sjawhar/legion (job envoy-infra-go, https://github.com/sjawhar/legion/actions/runs/39729831923/job/119662127379)",
+      "observed": "pass in 4m1s at this head. That job runs permissions_live_test.go, whose ad-hoc block publishes notifications.team.deploy-squad through the real listener under the rendered grant and asserts a credential-free subscriber receives it.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "Recorded on the superseded pull request sjawhar/legion#2101 by the session that first wrote this change: with the transport rule taken back out, those same live tests fail. Not re-run here — this pod has no Docker and no CI lane is re-run as evidence."
+    },
+    {
+      "criterion": "AC8 — the listener's own suites, including the 400 and the ad-hoc delivery through the API",
+      "surface": "CI, because the listener suites start NATS through testcontainers: jobs envoy-go, envoy-go-race, envoy-smoke and envoy-e2e-local of the 'Legion Envoy and Contracts' workflow.",
+      "command": "gh pr checks 2105 --repo sjawhar/legion (run 39729831923)",
+      "observed": "envoy-go, envoy-go-race, envoy-smoke and envoy-e2e-local all pass at this head. They carry TestAnAdHocTopicIsPublishedOverCoreNATSAndReachesItsSubscriber, TestAnAdHocPublishNATSDeniesReturnsTheDenial, TestPublishHandlerDeliversAnAdHocTopicToItsSubscriber and TestEveryStreamSubjectIsALiteralPrefixAndWildcard.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "The rig's origin/main row is the control for the same behaviour on a real server: at main the ad-hoc publish answers 500 after 5.003362s and the subscriber receives nothing."
+    },
+    {
+      "criterion": "AC9 — the committed claude-envoy bundle is a fresh build",
+      "surface": "The repository's own build check, locally and in CI's claude-envoy job.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/claude-envoy && bun run check-dist",
+      "observed": "'dist/ and legion/ match a fresh build'. The bundle was regenerated with the pinned Bun 1.3.14 after the tool-contract change rather than having the pull request's hunk ported into it; CI's claude-envoy job passed in 35s at this head.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "Before the regeneration, check-dist failed against the edited packages/envoy-client/src/tool-contract.ts, which is why the bundle is rebuilt rather than patched."
+    },
+    {
+      "criterion": "AC11 — the pull request is Legion's and #2101 is closed pointing at it",
+      "surface": "GitHub.",
+      "command": "gh pr view 2105 --repo sjawhar/legion --json headRefName,baseRefName,state,body and gh pr view 2101 --repo sjawhar/legion --json state",
+      "observed": "https://github.com/sjawhar/legion/pull/2105 is open from legion/INFRA-113 onto main with 'Dispatch: INFRA-113' in its body; sjawhar/legion#2101 is CLOSED with a comment naming #2105 and what was adopted. #2102 was left open for dispatch://INFRA-117.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "gh pr view 2101 --json state answered OPEN before the close and CLOSED after it."
+    },
+    {
+      "criterion": "AC13 — the four shared source hunks are compared against dispatch://INFRA-117's head and every difference is published to the architect",
+      "surface": "GitHub's file list for the child issue's pull request, against this branch's own diff of the same four files.",
+      "command": "gh api repos/sjawhar/legion/pulls/2104/files --paginate --jq '.[] | select(.filename | test(\"internal/bus/(nats|stream)\\\\.go$|cmd/listener/api\\\\.go$|infra/core/permissions\\\\.go$\")) | \"=== \\(.filename)\\n\\(.patch)\"' compared with jj -R \"$LEGION_WORKSPACE\" diff --from 9d3d7f17155b --to legion/INFRA-113@origin --git packages/envoy/internal/bus/nats.go packages/envoy/internal/bus/stream.go packages/envoy/cmd/listener/api.go packages/envoy/infra/core/permissions.go",
+      "observed": "67 changed lines on each side, and the two changed-line sets are identical. Run against both #2102 and the child's current head #2104 (7424e75ad6a16beadd5eef7d119d2936f40d0c4d): identical both times. No difference to publish; the result was reported to the architect.",
+      "headSha": "d1549dd894b963dba4ec8ee33025cc42495acab2",
+      "negativeControl": "The comparison is over changed lines only, so it would show a difference the moment either side's hunk moved: the child's pre-existing bucketPermissions refactor of packages/envoy/infra/core/permissions.go, which the architect named as out of this fix, appears only as context and correctly does not register."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/bus/stream.go — streamCaptures(topic), the literal-prefix match against each stream subject",
+    "packages/envoy/internal/bus/nats.go — usesCoreTransport gains the clause for a notifications. topic the stream does not capture, and Publish's doc comment follows",
+    "packages/envoy/internal/bus/adhoc_topic_test.go — new: the transport table (with the exception lane of a captured non-agent topic), the stream-subject shape guard, the live ad-hoc publish and the denial test",
+    "packages/envoy/infra/core/permissions.go — ListenerPermissions publishes notifications.> in place of the stream subjects, the role lanes and the exception lanes",
+    "packages/envoy/infra/core/permissions_test.go, permissions_live_test.go — the grant's unit assertion and the live ad-hoc publish and receipt",
+    "packages/envoy/infra/gcp/testdata/cloud-config.golden, cloud-config-without-listener-or-session-user.golden — the rendered authorization",
+    "packages/envoy/cmd/listener/api.go — publishHandler refuses a topic outside notifications. with 400",
+    "packages/envoy/cmd/listener/main_test.go — the refusal, and the ad-hoc delivery through the API",
+    "packages/envoy/CHANGELOG.md — one Unreleased/Fixed entry covering the transport rule, the grant and the refusal with its measured ground",
+    "packages/envoy/AGENTS.md — the overview bullet, the fanout-exception sentence, the Security paragraph's core-publish clause, the /v1/messages/publish row and a new ad-hoc topic bullet",
+    "packages/envoy/docs/architecture.md, packages/envoy/infra/AGENTS.md, packages/envoy/infra/README.md, .dispatch/architecture/envoy-listener.md, docs/site/src/content/docs/dispatch/envoy.md, skills/envoy/SKILL.md — the text the change makes false",
+    "packages/envoy-client/src/tool-contract.ts — the envoy_publish tool's description; packages/pi-envoy/extensions/envoy.ts — the plugin's own text; packages/claude-envoy/dist/envoy-channel.js — regenerated, never patched"
+  ],
+  "trickyParts": [
+    "The grant alone fixes nothing. The rig's third configuration — the fixed grant with an origin/main listener — still answers http=500 after 5.005382s, because the listener still sends the topic to JetStream. The routing change is the load-bearing half; the grant only stops the hub's NATS denying it.",
+    "The eighteen files main had not touched since the adopted branch's base were taken verbatim with jj restore. The other three were re-applied by hand onto main's current text, because restore takes file state and would silently drop main's own change: packages/envoy/CHANGELOG.md (its Fixed heading moved from 901 to 921), packages/envoy/AGENTS.md (four sites, all shifted), and packages/claude-envoy/dist/envoy-channel.js, which is a committed build artefact CI rebuilds and compares byte for byte, so it was regenerated rather than ported.",
+    "packages/envoy/AGENTS.md:1841 explained the explicit core publish of a fanout refusal by a reason this change removes. Settled by reading the code rather than assuming: listenerDeliveryHandler's switch (cmd/listener/delivery.go:285-292) sends role and agent topics elsewhere, and fanoutRefusal: true is set only at delivery.go:657 and :677, both inside fanoutDelivery, so a fanout refusal's original topic is never a control topic and its exception subject is never one the stream captures. After this change bus.usesCoreTransport already routes it over core NATS, so the explicit client.PublishCore at delivery.go:150-155 restates the routing rule's own answer for every reachable input. The branch was left exactly as it was and the sentence corrected to describe the code as this change leaves it; see openQuestions.",
+    "Two of the three exception-lane rows the plan asked for were already in the adopted table test. Only the lane of a captured non-agent topic was missing, and that is the row that distinguishes the two cases: the stream captures notifications.envoy.exceptions.notifications.agent.> and no other lane."
+  ],
+  "deviations": [
+    "The plan's two proof departures, both approved by the architect on 2026-10-22: this pod has no Docker (no docker, podman or nerdctl on PATH and no /var/run/docker.sock), so the natslive suite is claimed from CI's envoy-infra-go job by run id rather than run here, and the implementer's own proof is the Docker-free rig. Both of the architect's conditions are met: the pull request quotes the rig in both directions, with the defect reproducing at origin/main and the publish violation named, and it names the CI run id; and the rig stays under .legion/INFRA-113/, which retro removes.",
+    "The simplify pass applied one of nine findings — grantedTopic moved to its file's import block — and skipped the rest. Four of the skips are inside the four source files shared with dispatch://INFRA-117 (strings.CutPrefix in streamCaptures, folding usesCoreTransport's two role clauses into the new one, a notifications const in permissions.go, and subjectsOverlap inside streamCaptures): each is cosmetic or allocates on the publish path, and each would diverge a hunk that must stay in lockstep with that issue until dispatch://INFRA-120's merge. The architect ruled independently on 2026-10-22 that none of the overlapping findings is taken on either line. The reasons are written on the pull request's Thermo line."
+  ],
+  "openQuestions": [
+    "The fanoutRefusal branch of publishDeliveryException (cmd/listener/delivery.go:150-155) is reachable but now redundant: after this change the routing rule gives the same transport for every input that reaches it. Removing it is a behaviour-neutral cleanup this issue deliberately does not make, on the architect's instruction that a documentation fix may not move behaviour. It wants an issue of its own, and it is reported to the architect."
+  ],
+  "discoveredComplexity": [
+    "The repository holds one text that publishes a bare subject through this route: docs/superpowers/plans/2026-04-11-enable-tsnet-listener.md records a 2026-04 security probe that published test.security and test.health. It is a record, not a caller, but re-running that probe verbatim now gets the 400 instead of the 200 it recorded. The full caller census, re-run at this head, is on the Dispatch issue as a comment and in the pull request body.",
+    "CI's dispatch job (the Dispatch browser suite) runs for well over forty minutes on this head and had not settled when this handoff was written. It touches nothing this change edits; every other job of the three workflows passed."
+  ]
+}
