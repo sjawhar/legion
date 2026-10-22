@@ -1057,6 +1057,67 @@ func TestProbeImageRefusesAClaimThatIsNotThere(t *testing.T) {
 	}
 }
 
+// A ReadWriteOncePod claim another pod holds leaves the probe pod Unschedulable for as long as any
+// issue pod runs, since every Legion pod mounts the pod block's claims: the scheduler's
+// ErrReasonReadWriteOncePodConflict is a refusal naming the claims, at once, never a capacity wait.
+func TestProbeImageRefusesAReadWriteOncePodClaimInUse(t *testing.T) {
+	message := "0/3 nodes are available: 3 node(s) unavailable due to PersistentVolumeClaim with ReadWriteOncePod access mode already in-use by another pod. preemption: not eligible"
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+	}))
+	g.finishes(func(p *corev1.Pod) {
+		p.Spec.NodeName = ""
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: message, LastTransitionTime: metav1.NewTime(rigNow),
+		}}}
+	})
+	p := probeOptions(t)
+	p.Budget = unfinishedBudget
+
+	err := g.probe(p)
+
+	wantContains(t, err, "a ReadWriteOncePod claim it mounts is held by another pod", "gives volumes team from, so they must be ReadWriteMany: "+message)
+	if n := g.creates.Load(); n != 1 {
+		t.Errorf("ran the probe %d times, want once", n)
+	}
+}
+
+// A FailedMount for a volume an admission webhook injected into the probe pod names a volume the
+// admitted pod carries but the pod block does not: it is that volume's, never blamed on the pod
+// block's one claim as its PersistentVolume would be.
+func TestProbeImageNeverBlamesAClaimForAnInjectedVolume(t *testing.T) {
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+	}))
+	g.finishes(func(p *corev1.Pod) {
+		p.Spec.NodeName = "ip-192-0-2-7"
+		p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: "istiod-ca-cert", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "mesh.example"}}})
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+		}}}
+	})
+	message := `MountVolume.SetUp failed for volume "istiod-ca-cert" : rpc error: code = Unknown desc = mesh agent down`
+	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+		Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message, LastTimestamp: metav1.NewTime(rigNow.Add(-time.Minute)),
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	p := probeOptions(t)
+	p.Budget = unfinishedBudget
+
+	err := g.probe(p)
+
+	if err != nil && strings.Contains(err.Error(), `PersistentVolumeClaim "team-share"`) {
+		t.Fatalf("ProbeImage = %v, blamed the operator's claim for an injected volume", err)
+	}
+	wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+}
+
 // A share the kubelet mounted on the node but whose root the node cannot read — an NFS server that
 // accepts the mount and fails every read after it, `Remote I/O error` — fails a gVisor container's
 // start rather than its mount: runsc cannot read the mount list its gofer wrote, and the kubelet

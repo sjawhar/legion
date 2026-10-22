@@ -600,6 +600,7 @@ func readPod(value *yaml.Node) (PodConfig, error) {
 	if pod.VolumeMounts, err = readPodMounts(fields["volume_mounts"], pod.Volumes); err != nil {
 		return PodConfig{}, err
 	}
+	readOnlyShares(pod.Volumes, pod.VolumeMounts)
 	if pod.ServiceAccount, err = optionalString(fields["service_account"], podKey+".service_account"); err != nil {
 		return PodConfig{}, err
 	}
@@ -639,6 +640,27 @@ func readPodEnv(value *yaml.Node) (map[string]string, error) {
 		env[name] = text
 	}
 	return env, nil
+}
+
+// readOnlyShares marks a share's own source read-only when no volume_mounts entry mounts it
+// writable. A read-only container mount alone leaves the volume writable to the kubelet, which, for
+// a claim whose CSI driver's fsGroupPolicy is File, changes the group and mode of every file on the
+// share to the pods' fsGroup at each mount (pkg/volume/csi/csi_mounter.go, supportsFSGroup, which
+// only the source's readOnly turns off); the source's readOnly also mounts an NFS export `-o ro` on
+// the node, and lets a ReadOnlyMany claim attach. A share any mount writes keeps a writable source.
+func readOnlyShares(volumes []corev1.Volume, mounts []corev1.VolumeMount) {
+	for i := range volumes {
+		v := &volumes[i]
+		if v.PersistentVolumeClaim == nil && v.NFS == nil {
+			continue
+		}
+		writable := slices.ContainsFunc(mounts, func(m corev1.VolumeMount) bool { return m.Name == v.Name && !m.ReadOnly })
+		if v.PersistentVolumeClaim != nil {
+			v.PersistentVolumeClaim.ReadOnly = !writable
+		} else {
+			v.NFS.ReadOnly = !writable
+		}
+	}
 }
 
 // readPodVolumes is `pod.volumes`: each named once, with exactly one source.
@@ -727,7 +749,8 @@ func readClaimSource(value *yaml.Node, key string) (*corev1.PersistentVolumeClai
 
 // readNFSSource is an NFS source: the server, an IP address or a DNS name the nodes resolve, with no
 // scheme, port, path or brackets (the kubelet mounts `<server>:<path>` and brackets an IPv6
-// address itself), and the export's clean absolute path. Whether a pod mounts it read-only is its
+// address itself), never an IPv4 address in IPv6 form (`::ffff:a.b.c.d`, which the kubelet reads as
+// IPv4 and leaves unbracketed), and the export's clean absolute path. Whether a pod mounts it read-only is its
 // `volume_mounts` entry's (read_only).
 func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error) {
 	if value.Kind != yaml.MappingNode {
@@ -743,6 +766,9 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 	}
 	if net.ParseIP(server) == nil && (len(validation.IsDNS1123Subdomain(strings.ToLower(server))) != 0 || numericLastLabel(server)) {
 		return nil, fmt.Errorf("%s.server %q must be an IP address or a DNS name, with no scheme, port, path or brackets", key, server)
+	}
+	if ip := net.ParseIP(server); ip != nil && ip.To4() != nil && strings.Contains(server, ":") {
+		return nil, fmt.Errorf("%s.server %q is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write %s", key, server, ip.To4())
 	}
 	exportPath, err := requiredString(fields["path"], key+".path", "")
 	if err != nil {

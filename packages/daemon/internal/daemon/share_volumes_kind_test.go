@@ -53,11 +53,12 @@ func shareLiveCases(server string) []struct{ name, project, pod string } {
 }
 
 // shareLivePod is the pod block each case's file must load to: the claim and the export as the
-// case names them, the claim mounted read-only and the export writable.
+// case names them, the claim mounted read-only — its source read-only too, since no mount writes
+// it — and the export writable.
 func shareLivePod(claimName, server, exportPath string) config.PodConfig {
 	return config.PodConfig{
 		Volumes: []corev1.Volume{
-			{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName}}},
+			{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName, ReadOnly: true}}},
 			{Name: "scratch", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: server, Path: exportPath}}},
 		},
 		VolumeMounts: []corev1.VolumeMount{

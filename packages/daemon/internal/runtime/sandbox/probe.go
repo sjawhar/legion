@@ -476,6 +476,13 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 		if strings.Contains(scheduled.Message, unboundClaims) && slices.ContainsFunc(r.pod.Volumes, func(v corev1.Volume) bool { return v.PersistentVolumeClaim != nil }) {
 			return nil
 		}
+		if strings.Contains(scheduled.Message, readWriteOncePodInUse) {
+			if claims := r.blockClaims(); len(claims) != 0 {
+				refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot be placed: a ReadWriteOncePod claim it mounts is held by another pod, and every Legion pod mounts the claims runtime.kubernetes.pod.volumes gives volumes %s from, so they must be ReadWriteMany: %s",
+					name, strings.Join(claims, ", "), scheduled.Message)}
+				return &refused
+			}
+		}
 		since := scheduled.LastTransitionTime.Time
 		if since.IsZero() {
 			since = pod.CreationTimestamp.Time
@@ -502,9 +509,9 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 		}
 	}
 	if volume, message := missingVolume(events); message != "" {
-		return r.blockVolumeRefusal(name, volume, message)
+		return r.blockVolumeRefusal(pod, name, volume, message)
 	}
-	if refused := r.shareRefusal(name, events); refused != nil {
+	if refused := r.shareRefusal(pod, name, events); refused != nil {
 		return refused
 	}
 	return nil
@@ -612,6 +619,29 @@ func (r *Runtime) missingClaim(message string) (volume, quoted string) {
 // the claim may still bind, so it is no refusal either, and the attempt waits on it to its budget.
 const unboundClaims = "pod has unbound immediate PersistentVolumeClaims"
 
+// readWriteOncePodInUse is the scheduler's wording for a pod whose ReadWriteOncePod claim another
+// pod holds (pkg/scheduler/framework/plugins/volumerestrictions/volume_restrictions.go,
+// ErrReasonReadWriteOncePodConflict). Every Legion pod mounts the pod block's claims at once, so
+// while any issue pod runs, the probe pod waits on it forever: a refusal, not a capacity wait.
+const readWriteOncePodInUse = "PersistentVolumeClaim with ReadWriteOncePod access mode already in-use by another pod"
+
+// blockClaims names the pod block's persistent_volume_claim volumes, in its order.
+func (r *Runtime) blockClaims() []string {
+	var claims []string
+	for _, v := range r.pod.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			claims = append(claims, v.Name)
+		}
+	}
+	return claims
+}
+
+// podHasVolume reports whether the admitted pod's spec carries a volume of that name: one the
+// runtime sent, or one an admission webhook added, which is never a PersistentVolume's name.
+func podHasVolume(pod *corev1.Pod, volume string) bool {
+	return slices.ContainsFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == volume })
+}
+
 // shareRefusal is the refusal for the newest FailedMount among events whose mount of a share the
 // pod block gives the pod (an nfs volume, or a persistent_volume_claim one) ran and failed for good
 // (shareMountFailed) and is still the pod's state, or nil when the events hold none. A share's
@@ -628,10 +658,12 @@ const unboundClaims = "pod has unbound immediate PersistentVolumeClaims"
 //
 // The kubelet names a volume as its spec does (volume.Spec.Name, pkg/volume/plugins.go): an nfs
 // volume by the pod's own name for it, a claim's by the PersistentVolume it is bound to, which
-// blockVolumeRefusal maps back to the pod block's claim. A name the block does not hold, in a
-// block with no claim, is no share of the block's, and is left to the budget.
-func (r *Runtime) shareRefusal(name string, events []corev1.Event) *bootprobe.Outcome {
+// blockVolumeRefusal maps back to the pod block's claim. A name the admitted pod's spec carries but
+// the block does not (a volume an admission webhook injected) is no share of the block's, nor is
+// any name when the block names no claim; both are left to the budget.
+func (r *Runtime) shareRefusal(pod *corev1.Pod, name string, events []corev1.Event) *bootprobe.Outcome {
 	mounted := sharesMountedSince(events)
+	claims := len(r.blockClaims())
 	var newest *corev1.Event
 	for i := range events {
 		event := &events[i]
@@ -646,7 +678,7 @@ func (r *Runtime) shareRefusal(name string, events []corev1.Event) *bootprobe.Ou
 		switch {
 		case ok && v.NFS == nil && v.PersistentVolumeClaim == nil:
 			continue // a ConfigMap, Secret or projected volume: missingVolume's to judge
-		case !ok && !slices.ContainsFunc(r.pod.Volumes, func(v corev1.Volume) bool { return v.PersistentVolumeClaim != nil }):
+		case !ok && (claims == 0 || podHasVolume(pod, named[1])):
 			continue
 		}
 		if newest == nil || eventTime(*event).After(eventTime(*newest)) {
@@ -656,7 +688,7 @@ func (r *Runtime) shareRefusal(name string, events []corev1.Event) *bootprobe.Ou
 	if newest == nil {
 		return nil
 	}
-	return r.blockVolumeRefusal(name, mountedVolume.FindStringSubmatch(newest.Message)[1], newest.Message)
+	return r.blockVolumeRefusal(pod, name, mountedVolume.FindStringSubmatch(newest.Message)[1], newest.Message)
 }
 
 // sharesMountedSince is when the kubelet last began or finished pulling one of the pod's images
@@ -686,8 +718,9 @@ func eventTime(event corev1.Event) time.Time {
 	return event.CreationTimestamp.Time
 }
 
-// retryableCSICode are the gRPC codes Kubernetes' CSI client treats as an operation that may still
-// be under way, and retries (pkg/volume/csi/csi_client.go, isFinalError): an Aborted call (the
+// retryableCSICode are the gRPC codes Kubernetes' CSI client does not treat as final, an
+// operation that may still be under way on the driver (pkg/volume/csi/csi_client.go,
+// isFinalError; the kubelet retries every failed mount with backoff either way): an Aborted call (the
 // Filestore driver's answer while another operation on the volume runs, pkg/csi_driver/node.go), a
 // deadline the kubelet's 2-minute CSI timeout cut (a slow first Filestore mount), an Unavailable
 // driver (its node plugin restarting), a Canceled call and an exhausted resource.
@@ -718,23 +751,18 @@ func (r *Runtime) blockVolumeNamed(volume string) (corev1.Volume, bool) {
 	return r.pod.Volumes[i], true
 }
 
-// blockVolumeRefusal is volumeRefusal for a volume as a kubelet event names it. The probe pod's
-// only volumes are the providers volume and the pod block's, so a name the block does not hold is
-// the PersistentVolume one of the block's claims is bound to (volume.Spec.Name): the one claim's
-// volume when the block names one claim, and, when it names several, a refusal naming the
+// blockVolumeRefusal is volumeRefusal for a volume as a kubelet event names it. A name the pod
+// block holds, or one the admitted pod's spec carries (a volume an admission webhook added, which
+// volumeRefusal says the block does not name), is that volume. Any other name is the
+// PersistentVolume one of the block's claims is bound to (volume.Spec.Name): the one claim's volume
+// when the block names one claim, and, when it names several, a refusal naming the
 // PersistentVolume and every claim it may belong to, since the runtime reads no claim (the
-// daemon's Role grants none) to tell which. A block with no claim keeps volumeRefusal's "does not
-// name".
-func (r *Runtime) blockVolumeRefusal(name, volume, message string) *bootprobe.Outcome {
-	if _, ok := r.blockVolumeNamed(volume); ok {
+// daemon's Role grants none) to tell which.
+func (r *Runtime) blockVolumeRefusal(pod *corev1.Pod, name, volume, message string) *bootprobe.Outcome {
+	if _, ok := r.blockVolumeNamed(volume); ok || podHasVolume(pod, volume) {
 		return r.volumeRefusal(name, volume, message)
 	}
-	var claims []string
-	for _, v := range r.pod.Volumes {
-		if v.PersistentVolumeClaim != nil {
-			claims = append(claims, v.Name)
-		}
-	}
+	claims := r.blockClaims()
 	switch len(claims) {
 	case 0:
 		return r.volumeRefusal(name, volume, message)

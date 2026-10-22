@@ -147,7 +147,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 					{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-routes"}}},
 				}}}},
 				{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds"}}},
-				{Name: "team-share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}},
+				{Name: "team-share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share", ReadOnly: true}}},
 				{Name: "nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "nas.internal.example", Path: "/exports/builds"}}},
 			},
 			VolumeMounts: []corev1.VolumeMount{
@@ -987,6 +987,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "an NFS server in inet_aton's hexadecimal form",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 0x0a000002, path: /share}}]\n",
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "0x0a000002" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server as an IPv4-mapped IPv6 address",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::ffff:10.0.0.2', path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "::ffff:10.0.0.2" is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write 10.0.0.2`,
 		},
 		{
 			name: "an NFS export with no path",
