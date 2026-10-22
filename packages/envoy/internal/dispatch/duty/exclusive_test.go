@@ -244,6 +244,31 @@ func TestExclusiveAPeriodHoldsBackOnlyItsOwnLoop(t *testing.T) {
 	}
 }
 
+// A loop whose period changes between ticks must keep running. The reference-excerpt
+// reconciliation is one: it asks for referenceExcerptStep (2 s) while a full batch says drift
+// remains and for ReferenceExcerptReconcileInterval (5 min) once none does, and it passes that
+// wait as its period (docs.RunReferenceExcerptReconciliation). So a pass recorded under the
+// short period is read back by a tick under the long one, and a record that cannot be compared
+// across the two stops the loop for good: every mention a version write could not cut, and
+// everything rebuild-refs inserts, keeps the document's name instead of an excerpt, with no line
+// saying why.
+func TestExclusiveDoesNotLockOutALoopWhosePeriodGrows(t *testing.T) {
+	database := storetest.Open(t)
+	leases := leasesOf(t, database)
+	ctx := context.Background()
+	const name = "reference-excerpts"
+	const step, interval = 2 * time.Second, 5 * time.Minute
+
+	stepped := false
+	if !Exclusive(ctx, leases, name, step, func(context.Context) { stepped = true }) || !stepped {
+		t.Fatal("the drift step's own pass did not run, so this row measures nothing")
+	}
+	ran := false
+	if !Exclusive(ctx, leases, name, interval, func(context.Context) { ran = true }) || !ran {
+		t.Error("the loop's full-interval tick was refused by the pass its own shorter-period tick recorded; no later tick of that loop can ever run")
+	}
+}
+
 // movePassBack moves the pass recorded for name back by age, which is how a period that has run
 // out is reached without waiting one out.
 func movePassBack(t *testing.T, database *store.Store, name string, periods int64) {
