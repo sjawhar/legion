@@ -145,6 +145,49 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	}, core.HostPermissions("example-host-a"))
 }
 
+func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
+	hostPublish := append([]string{}, listenerPublish...)
+	for index, subject := range hostPublish {
+		hostPublish[index] = strings.ReplaceAll(subject, "example-host-a", "example-dispatch")
+	}
+	dispatchPublish := append(append(hostPublish, "_INBOX.>", "agentstream.*.frames"),
+		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-events",
+		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>",
+		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-events",
+		"$JS.ACK.ENVOY_NOTIFICATIONS.delivery-events.>",
+		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-jobs",
+		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-jobs.>",
+		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-jobs",
+		"$JS.ACK.ENVOY_NOTIFICATIONS.delivery-jobs.>",
+		"$JS.API.STREAM.INFO.KV_envoy_webhook_redelivery",
+		"$JS.API.STREAM.CREATE.KV_envoy_webhook_redelivery",
+		"$JS.API.DIRECT.GET.KV_envoy_webhook_redelivery.>",
+		"$JS.API.STREAM.MSG.GET.KV_envoy_webhook_redelivery",
+		"$KV.envoy_webhook_redelivery.>",
+		"$JS.API.CONSUMER.CREATE.KV_envoy_webhook_redelivery.>",
+		"$JS.API.CONSUMER.DELETE.KV_envoy_webhook_redelivery.>",
+		"$JS.FC.KV_envoy_webhook_redelivery.>",
+		"agentstream.*.control",
+	)
+	want := core.Permissions{
+		Publish: core.Rules{Allow: dispatchPublish},
+		Subscribe: core.Rules{Allow: []string{
+			"_INBOX.>", "notifications.role.> envoy-listener-example-dispatch",
+			"notifications.>", "agentstream.*.control", "agentstream.*.frames",
+		}},
+	}
+	got := core.DispatchPermissions("example-dispatch")
+	require.Equal(t, want, got)
+
+	host := core.HostPermissions("example-dispatch")
+	for _, entry := range host.Publish.Allow {
+		require.Contains(t, got.Publish.Allow, entry)
+	}
+	for _, entry := range host.Subscribe.Allow {
+		require.Contains(t, got.Subscribe.Allow, entry)
+	}
+}
+
 // nats-server takes a repeated entry, so a duplicate would be noise in every rendered block; none of
 // the sets holds one, the union included.
 func TestNoSetRepeatsAnEntry(t *testing.T) {

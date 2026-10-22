@@ -32,6 +32,8 @@ type Mocks struct {
 	// Computed, when not nil, returns what a resource's provider would compute: its id, "" for
 	// <name>-id, and the outputs it adds to the resource's state.
 	Computed func(args pulumi.MockResourceArgs) (id string, outputs resource.PropertyMap)
+	// CallResult, when not nil, answers an invoke as the resource provider would.
+	CallResult func(args pulumi.MockCallArgs) (resource.PropertyMap, error)
 
 	mu         sync.Mutex
 	registered []Registration
@@ -62,26 +64,43 @@ func (m *Mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Prop
 	return id, state, nil
 }
 
-// Call answers a function call with its arguments.
 func (m *Mocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	if m.CallResult != nil {
+		return m.CallResult(args)
+	}
 	return args.Args, nil
 }
 
-// One returns the single registration of type typ, failing the test when there is none or more.
-func (m *Mocks) One(t testing.TB, typ string) Registration {
+// one returns the single registration match answers true for, failing the test when there is none
+// or more with format, whose first verb takes the number found.
+func (m *Mocks) one(t testing.TB, match func(Registration) bool, format string, args ...any) Registration {
 	t.Helper()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var found []Registration
 	for _, r := range m.registered {
-		if r.Type == typ {
+		if match(r) {
 			found = append(found, r)
 		}
 	}
 	if len(found) != 1 {
-		t.Fatalf("%d registrations of %s, want 1", len(found), typ)
+		t.Fatalf(format, append([]any{len(found)}, args...)...)
 	}
 	return found[0]
+}
+
+// One returns the single registration of type typ, failing the test when there is none or more.
+func (m *Mocks) One(t testing.TB, typ string) Registration {
+	t.Helper()
+	return m.one(t, func(r Registration) bool { return r.Type == typ }, "%d registrations of %s, want 1", typ)
+}
+
+// Named returns the single registration of type typ and name name, failing the test when there is
+// none or more.
+func (m *Mocks) Named(t testing.TB, typ, name string) Registration {
+	t.Helper()
+	return m.one(t, func(r Registration) bool { return r.Type == typ && r.Name == name },
+		"%d registrations of %s named %s, want 1", typ, name)
 }
 
 // Registrations returns every registration, in order.

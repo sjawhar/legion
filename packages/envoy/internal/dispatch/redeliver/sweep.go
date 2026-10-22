@@ -43,7 +43,7 @@ const (
 	// Bucket is the JetStream KV bucket holding the sweep's cursor and one record per delivery
 	// it acted on. Its TTL is GitHub's own horizon: past three days GitHub neither lists nor
 	// redelivers an attempt, so nothing older is worth remembering.
-	Bucket = "envoy_webhook_redelivery"
+	Bucket = bus.WebhookRedeliveryBucket
 	// Interval is how often the running sweep lists failures.
 	Interval = 2 * time.Minute
 	// Lookback is how far back every continuous sweep lists, and all a first sweep lists: a

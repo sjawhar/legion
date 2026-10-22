@@ -126,3 +126,30 @@ func TestListenerConfigEnv(t *testing.T) {
 		})
 	}
 }
+
+func TestListenerConfigSOCKS5Proxy(t *testing.T) {
+	config := core.ListenerConfig{
+		MachineID:   "example-dispatch",
+		Port:        core.DefaultListenerPort,
+		SOCKS5Proxy: "127.0.0.1:1055",
+	}
+	env, err := config.Env([]string{"nats://hub.internal.example:4222"})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"PORT=9020",
+		"ENVOY_MACHINE_ID=example-dispatch",
+		"NATS_URLS=nats://hub.internal.example:4222",
+		"ENVOY_ALLOW_REMOTE_NATS=1",
+		"ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055",
+	}, env)
+
+	err = (core.ListenerConfig{
+		MachineID:   "example-dispatch",
+		Port:        core.DefaultListenerPort,
+		SOCKS5Proxy: "socks5://127.0.0.1:1055",
+	}).Check()
+	requireInputError(t, err, "socks5Proxy", "ENVOY_NATS_SOCKS5_PROXY")
+
+	_, err = config.Env([]string{"nats://127.0.0.1:4222"})
+	requireInputError(t, err, "socks5Proxy", "natsUrls")
+}

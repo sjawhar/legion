@@ -58,8 +58,9 @@ The hub refuses these before it registers anything, with an error naming the inp
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in the
   hub's own name or an input it carries into the user data, a child or a refusal: `hostname`, a
-  tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId`, or the listener's
-  `image` or `seedSecret`. The error names the input by its path and never its value, as
+  tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId` or `dispatchMachineId`,
+  or the listener's `image` or `seedSecret`. The error names the input by its path and never its
+  value, as
   `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
   seed in the hub's own name as `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed
   (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another resource, so a
@@ -101,6 +102,9 @@ The hub refuses these before it registers anything, with an error naming the inp
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
   listener's own `machineId`: the set names that machine's durable consumer and queue group.
+- `dispatchMachineId`: the user shared by `envoy-dispatch` and the listener beside it, granted
+  `DispatchPermissions(dispatchMachineId)`. Give it that listener's `machineId`, since the set
+  names its durable consumer and queue group.
 - `daemon: true`: the dedicated user of one Legion daemon, granted `DaemonPermissions()` (see
   [Permission sets](../README.md#permission-sets)). Its seed belongs only to that daemon.
 - `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional
@@ -133,9 +137,10 @@ policy is the gate on 4222: which devices it lets reach the hub's 4222 decides w
 A `listener` opens a second door, port 9020, with or without a session user, and it grants far
 more ([The hub's listener](#the-hubs-listener)).
 
-A user is refused when it names more than one of `machineId`, `daemon: true` and `permissions`, or
-none, or when its `machineId` or `nkey` is empty, named by its index alone, as
-`users[1]: nkey is required`, since these come before the authorization has checked the names. It is refused too for each of the
+A user is refused when it names more than one of `machineId`, `dispatchMachineId`, `daemon: true`
+and `permissions`, or none, or when its `machineId`, `dispatchMachineId` or `nkey` is empty, named
+by its index alone, as `users[1]: nkey is required`, since these come before the authorization has
+checked the names. It is refused too for each of the
 authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
@@ -560,8 +565,8 @@ The whole `Pulumi.yaml` of a project with one hub in the project `example-projec
 tailnet auth key from a secret config value. `example-hub`, `example-project`, the
 `example.invalid` images and each `<...>` are placeholders for your own values. Its users are
 `example-host-a`, the host whose listener [the module's YAML example](../README.md#yaml)
-runs, and `example-operator`, a client with permissions of its own. It runs a listener of its own,
-whose seed is in the secret `example-hub-listener-seed`, and admits a client presenting no
+runs; `example-operator`, a client with permissions of its own; and `example-dispatch`, the user
+`envoy-dispatch` shares with its listener. It runs a listener of its own, whose seed is in the secret `example-hub-listener-seed`, and admits a client presenting no
 credential as `example-sessions`. The users' public keys are the placeholders `core`'s tests use,
 and the listener's and the session user's are placeholders too: put in the ones
 `envoy-infra seed generate` printed for your users and your listener, and one whose seed you
@@ -608,6 +613,9 @@ resources:
             subscribe:
               allow: [">"]
               deny: ["$SYS.>"]
+        - name: example-dispatch
+          nkey: UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD
+          dispatchMachineId: example-dispatch
       listener:
         image: example.invalid/envoy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
         seedSecret: example-hub-listener-seed

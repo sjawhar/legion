@@ -1,0 +1,109 @@
+{
+  "metadata": {
+    "labels": {
+      "app": "example-dispatch-tailnet"
+    }
+  },
+  "spec": {
+    "containers": [
+      {
+        "env": [
+          {
+            "name": "TS_AUTHKEY",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "TS_AUTHKEY",
+                "name": "example-dispatch-tailnet-auth-key"
+              }
+            }
+          },
+          {
+            "name": "TS_AUTH_ONCE",
+            "value": "true"
+          },
+          {
+            "name": "TS_KUBE_SECRET",
+            "value": "example-dispatch-tailscale-state"
+          },
+          {
+            "name": "TS_USERSPACE",
+            "value": "true"
+          },
+          {
+            "name": "TS_SOCKS5_SERVER",
+            "value": "0.0.0.0:1055"
+          },
+          {
+            "name": "TS_SERVE_CONFIG",
+            "value": "/etc/tailscale/serve.json"
+          },
+          {
+            "name": "TS_HOSTNAME",
+            "value": "example-dispatch"
+          },
+          {
+            "name": "TS_EXTRA_ARGS",
+            "value": "--advertise-tags=tag:example-dispatch"
+          },
+          {
+            "name": "TS_ENABLE_HEALTH_CHECK",
+            "value": "true"
+          },
+          {
+            "name": "TS_LOCAL_ADDR_PORT",
+            "value": "127.0.0.1:9002"
+          }
+        ],
+        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "tailscale",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "wget",
+              "-qO-",
+              "http://127.0.0.1:9002/healthz"
+            ]
+          },
+          "periodSeconds": 10
+        },
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "startupProbe": {
+          "exec": {
+            "command": [
+              "wget",
+              "-qO-",
+              "http://127.0.0.1:9002/healthz"
+            ]
+          },
+          "failureThreshold": 36,
+          "periodSeconds": 5
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/etc/tailscale",
+            "name": "serve"
+          }
+        ]
+      }
+    ],
+    "enableServiceLinks": false,
+    "serviceAccountName": "example-dispatch",
+    "volumes": [
+      {
+        "configMap": {
+          "name": "example-dispatch-serve"
+        },
+        "name": "serve"
+      }
+    ]
+  }
+}

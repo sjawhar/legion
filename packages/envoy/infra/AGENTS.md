@@ -41,7 +41,7 @@ versions. Never add the module to the root `go.work`.
 | `nats/` | The schema types every NATS component shares, whatever its cloud, importing no cloud package: `RulesArgs`, `nats:Rules`, one direction's permissions of a NATS user, which `aws:User` and `gcp:Permissions` take (`rules.go`). A type shared by components of more than one cloud lives here, never in one cloud's package, so a single-cloud consumer's SDK shows no other cloud's types; `gcp/imports_test.go` fails if the `gcp` package compiles any `aws` package. |
 | `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. `fargate.go` holds what both register identically: each child's options, its tags, the log group and the task definition's base. |
 | `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its own tests hold `ListenerEnv.Check`'s refusals; `aws/`'s pin its texts, building each component from one example. |
-| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
+| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`); `gcp:Dispatch` (`dispatch.go`, `dispatch_cloud.go`, `dispatch_kube.go`) and its Kubernetes and Serve renderings, golden-tested in `testdata/dispatch-*.golden`. |
 | `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The tests' harness: the mock engine a component's unit tests run on (`Mocks`, `Construct`, `mocks.go`), and the live tests' plugin build and pulumi CLI. |
@@ -66,6 +66,11 @@ versions. Never add the module to the root `go.work`.
   with a refused input and one per missing provider, each asserting nothing registered beyond the
   test's providers. The AWS components resolve in `NatsServiceArgs.validate` and
   `WebhookListenerArgs.validate`.
+
+- **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
+  `random` providers before registering anything, then builds a Kubernetes provider from its
+  cluster's exec-plugin kubeconfig. Every Kubernetes child uses that explicit provider and depends
+  on the cluster; none falls back to a default Kubernetes provider.
 - **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
   listener's environment that the resolver can make (`machineId`, `port`, `listenHost`,
   `hostBridge`), run once before anything registers; `ListenerConfig.Env` runs `Check` again, so no
@@ -270,8 +275,11 @@ users, the listener reaches `"status":"healthy"` as a user holding `ListenerPerm
 session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
 receives a send and a role message, and is refused a publish to another session's subject; and a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
-The
-`envoy-infra-go` job in
+`core/dispatch_permissions_live_test.go`
+also starts `testpg.Image`, builds and runs the real `envoy-dispatch` against `DispatchPermissions`,
+and proves both delivery durables, the outbox, the agent stream relay and the redelivery bucket;
+its negative control removes the delivery durable's filtered create permission and receives that
+server violation alone. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh

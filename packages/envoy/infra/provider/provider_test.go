@@ -121,6 +121,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	// hub's, so a consumer running both writes them alike.
 	require.Contains(t, user.Properties, "nkey")
 	require.NotContains(t, user.Properties, "publicKey")
+	require.Contains(t, user.Properties, "dispatchMachineId")
 	require.Equal(t, "boolean", user.Properties["daemon"].Type)
 	for _, direction := range []string{"publish", "subscribe"} {
 		require.Equal(t, "#/types/envoy-infra:nats:Rules",
@@ -128,6 +129,15 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	}
 	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
 	require.ElementsMatch(t, []string{"allow"}, s.Types["envoy-infra:nats:Rules"].Required)
+}
+
+func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
+	dispatch, ok := servedSchema(t).Resources["envoy-infra:gcp:Dispatch"]
+	require.True(t, ok, "the schema lists envoy-infra:gcp:Dispatch")
+	require.True(t, dispatch.IsComponent)
+	require.True(t, dispatch.InputProperties["tailnetAuthKey"].Secret)
+	require.True(t, dispatch.InputProperties["signInClientSecret"].Secret)
+	require.True(t, dispatch.Properties["agentToken"].Secret)
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {

@@ -239,7 +239,7 @@ func flatPayload(fields map[string]json.RawMessage) (map[string]string, error) {
 // over githubIntakeSubject, with the flow control below. The server holds a backlog undelivered
 // until a subscriber attaches, so a restart with events waiting loses none of them and none of
 // them count against MaxAckPending in the meantime.
-const deliveryConsumerName = "delivery-events"
+const deliveryConsumerName = bus.DispatchDeliveryDurable
 
 // githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The
 // handler decides what to do with each (route), and fetches nothing for the ones this slice does

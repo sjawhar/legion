@@ -34,10 +34,11 @@ const (
 	templateType    = "gcp:compute/instanceTemplate:InstanceTemplate"
 	groupType       = "gcp:compute/instanceGroupManager:InstanceGroupManager"
 
-	// Two user public keys, the placeholders core's tests use, and the keys of the listener's user
+	// Three user public keys, the placeholders core's tests use, and the keys of the listener's user
 	// and the session user, whose seeds nobody kept.
 	keyA        = "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO"
 	keyB        = "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG"
+	keyC        = "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 	keyListener = "UBZEZDPQNFYMZ4J4XOLTB2IN5PBPZ6FZEGY55R623A4GPBPZLTQFKDYV"
 	keySessions = "UCNPQVMRWOOJWCD7XDVLH6MEOVFBMTV4LAQSKZYROSETYJVFAWDMNKVA"
 
@@ -57,22 +58,43 @@ const (
 // an account's email and member, a network's and a health check's self link, a template's unique
 // self link and a group's name.
 func newMocks() *pulumitest.Mocks {
-	return &pulumitest.Mocks{Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
-		out := resource.PropertyMap{}
-		switch args.TypeToken {
-		case accountType:
-			email := args.Inputs["accountId"].StringValue() + "@example-project.iam.gserviceaccount.com"
-			out["email"] = resource.NewProperty(email)
-			out["member"] = resource.NewProperty("serviceAccount:" + email)
-		case networkType, healthCheckType:
-			out["selfLink"] = resource.NewProperty(args.Name + "-self-link")
-		case templateType:
-			out["selfLinkUnique"] = resource.NewProperty(args.Name + "-self-link-unique")
-		case groupType:
-			out["name"] = resource.NewProperty(args.Name + "-group")
-		}
-		return "", out
-	}}
+	return &pulumitest.Mocks{
+		Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
+			out := resource.PropertyMap{}
+			switch args.TypeToken {
+			case accountType:
+				email := args.Inputs["accountId"].StringValue() + "@example-project.iam.gserviceaccount.com"
+				out["email"] = resource.NewProperty(email)
+				out["member"] = resource.NewProperty("serviceAccount:" + email)
+			case networkType, healthCheckType:
+				out["selfLink"] = resource.NewProperty(args.Name + "-self-link")
+			case templateType:
+				out["selfLinkUnique"] = resource.NewProperty(args.Name + "-self-link-unique")
+			case groupType:
+				out["name"] = resource.NewProperty(args.Name + "-group")
+			case "gcp:container/cluster:Cluster":
+				out["endpoint"] = resource.NewProperty("example-endpoint")
+				out["masterAuth"] = resource.NewProperty(resource.PropertyMap{
+					"clusterCaCertificate": resource.NewProperty("ZXhhbXBsZS1jYQ=="),
+				})
+				out["name"] = resource.NewProperty(args.Name)
+			case "gcp:sql/databaseInstance:DatabaseInstance":
+				out["connectionName"] = resource.NewProperty("example-project:us-central1:example-dispatch")
+			case "random:index/randomPassword:RandomPassword":
+				out["result"] = resource.NewProperty(args.Name + "-result")
+			}
+			return "", out
+		},
+		CallResult: func(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+			if args.Token == "gcp:organizations/getProject:getProject" {
+				return resource.PropertyMap{
+					"projectId": resource.NewProperty("example-project"),
+					"number":    resource.NewProperty("123456789012"),
+				}, nil
+			}
+			return args.Args, nil
+		},
+	}
 }
 
 // children returns every registration but the hub and the test's provider.
@@ -119,9 +141,9 @@ func runNamed(t *testing.T, name string, args *gcp.NatsHubArgs, check func(*gcp.
 	return m, err
 }
 
-// exampleArgs are a hub serving one host by its machine id and one user with explicit
-// permissions, running a listener of its own and admitting a client with no credential as the
-// session user, on placeholders.
+// exampleArgs are a hub serving a host by its machine id, Dispatch by its listener's machine id,
+// and one user with explicit permissions, running a listener of its own and admitting a client
+// with no credential as the session user, on placeholders.
 func exampleArgs() *gcp.NatsHubArgs {
 	return &gcp.NatsHubArgs{
 		Users: []gcp.NATSUserArgs{
@@ -130,6 +152,7 @@ func exampleArgs() *gcp.NatsHubArgs {
 				Publish:   nats.RulesArgs{Allow: []string{">"}},
 				Subscribe: nats.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 			}},
+			{Name: "example-dispatch", NKey: keyC, DispatchMachineID: pulumi.StringRef("example-dispatch")},
 		},
 		TailnetAuthKey: pulumi.String(authKey),
 		Hostname:       "example-hub",
@@ -639,7 +662,23 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
 				}
 			},
-			err: []string{`users[0]: machineId and permissions are both set`},
+			err: []string{`users[0]`, "machineId", "permissions", "both set"},
+		},
+		{
+			name: "a user naming both machine ids",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Users[0].DispatchMachineID = pulumi.StringRef("example-dispatch")
+			},
+			err: []string{`users[0]`, "machineId", "dispatchMachineId", "both set"},
+		},
+		{
+			name: "a user naming Dispatch and explicit permissions",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Users[2].Permissions = &gcp.PermissionsArgs{
+					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
+				}
+			},
+			err: []string{`users[2]`, "dispatchMachineId", "permissions", "both set"},
 		},
 		{
 			name: "a user naming both a machine id and daemon",
@@ -654,12 +693,17 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 		{
 			name: "a user naming neither a machine id nor permissions",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Permissions = nil },
-			err:  []string{`users[1]: name machineId, daemon, or permissions`},
+			err:  []string{`users[1]: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions`},
 		},
 		{
 			name: "a user with an empty machine id",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef("") },
 			err:  []string{`users[0]: machineId is empty`},
+		},
+		{
+			name: "a user with an empty Dispatch machine id",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("") },
+			err:  []string{`users[2]: dispatchMachineId is empty`},
 		},
 		{
 			name: "a user without a public key",
@@ -700,6 +744,30 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 }
 
+func TestNatsHubRefusesConflictingUserPermissionInputsBeforeRegistering(t *testing.T) {
+	permissions := &gcp.PermissionsArgs{
+		Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*gcp.NatsHubArgs)
+	}{
+		{"machineId and permissions", func(a *gcp.NatsHubArgs) { a.Users[0].Permissions = permissions }},
+		{"machineId and dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[0].DispatchMachineID = pulumi.StringRef("example-dispatch")
+		}},
+		{"dispatchMachineId and permissions", func(a *gcp.NatsHubArgs) { a.Users[2].Permissions = permissions }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := exampleArgs()
+			tc.edit(args)
+			m, err := run(t, args, nil, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: users[")
+			require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
+		})
+	}
+}
+
 // A seed in any input the hub itself renders, registers or quotes in a refusal is refused naming
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
 // quote and the user data holds; the zone, machine type and disk type, which reach the group and
@@ -727,6 +795,9 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 			a.TailscaleImage = "example.invalid/" + seed + digest
 		}},
 		{"a seed inside a machine id", "users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(inside) }},
+		{"a seed inside a Dispatch machine id", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[2].DispatchMachineID = pulumi.StringRef(inside)
+		}},
 		// A reader or a decoder takes a seed in lowercase, or split by '.', '-', '_' or whitespace, as
 		// the seed.
 		{"a lowercase seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = lower }},
@@ -752,6 +823,12 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a lowercase machine id", "users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(lower) }},
 		{"a machine id split by a space", "users[0].machineId", func(a *gcp.NatsHubArgs) {
 			a.Users[0].MachineID = pulumi.StringRef(splitSeed(seed, " "))
+		}},
+		{"a lowercase Dispatch machine id", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[2].DispatchMachineID = pulumi.StringRef(lower)
+		}},
+		{"a Dispatch machine id split by a space", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[2].DispatchMachineID = pulumi.StringRef(splitSeed(seed, " "))
 		}},
 	})
 }
@@ -795,7 +872,7 @@ func TestNatsHubPassesOnCoresSeedRefusalOfUsers(t *testing.T) {
 		}, "users[1]: machineId and permissions are both set; name one"},
 		{"a seed as the name of a user naming neither", func(a *gcp.NatsHubArgs) {
 			a.Users[1].Name, a.Users[1].Permissions = lower, nil
-		}, "users[1]: name machineId, daemon, or permissions"},
+		}, "users[1]: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions"},
 		{"a seed as the name of a user with an empty machine id", func(a *gcp.NatsHubArgs) {
 			a.Users[0].Name, a.Users[0].MachineID = seed, pulumi.StringRef("")
 		}, "users[0]: machineId is empty"},
