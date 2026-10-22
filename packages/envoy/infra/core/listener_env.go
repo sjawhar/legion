@@ -3,6 +3,8 @@ package core
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -29,6 +31,49 @@ type ListenerConfig struct {
 	ListenHost  string // "" leaves ENVOY_LISTEN_HOST unset, so the listener binds 127.0.0.1
 	HostBridge  string // "" leaves ENVOY_HOST_BRIDGE unset
 	SOCKS5Proxy string // "" leaves ENVOY_NATS_SOCKS5_PROXY unset
+	// AllowedHosts are the names a client may reach the listener's /v1 interface by,
+	// ENVOY_ALLOWED_HOSTS. An empty list leaves the variable unset, and a listener that requires
+	// no bearer then answers 421 to every request whose Host is not loopback
+	// (cmd/listener/apiauth.go, servesHost); an entry is rendered as written, since the listener
+	// normalizes what it reads.
+	AllowedHosts []string
+}
+
+// TailnetHostName is the address a client reaches the listener of the tailnet machine hostname by,
+// a tailnet's MagicDNS giving every machine a name under its tailnet's DNS name, and so the entry
+// that machine's listener must serve for a client to be answered at all.
+func TailnetHostName(hostname, tailnetDNSName string) string {
+	return hostname + "." + tailnetDNSName
+}
+
+// hostEntry is an allowed host's shape: a name or an IPv4 address, or an IPv6 address with or
+// without its brackets, and never a port, a scheme or a path. dnsName is a host name
+// allowedHostName has normalized: dot-separated labels of letters, digits and inner hyphens.
+// Both mirror packages/envoy/internal/config, whose parseAllowedHosts refuses at boot what Check
+// refuses here, and which core may not import, since the plugin's release is cut from what
+// `go list -deps ./cmd/...` names; core/allowed_hosts_agreement_test.go holds the two to one rule.
+var (
+	hostEntry = regexp.MustCompile(`^(\[[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*\]|[0-9A-Fa-f:.]+|[A-Za-z0-9.-]+)$`)
+	dnsName   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+)
+
+// allowedHostName is an entry as the listener compares it, config.HostName's normalization: the
+// port stripped, the brackets taken off an IPv6 address, ASCII letters lower-cased, and one
+// trailing dot dropped. Only ASCII is folded, as DNS folds it.
+func allowedHostName(entry string) string {
+	if name, _, err := net.SplitHostPort(entry); err == nil {
+		entry = name
+	} else if strings.HasPrefix(entry, "[") && strings.HasSuffix(entry, "]") {
+		entry = entry[1 : len(entry)-1]
+	}
+	return strings.TrimSuffix(strings.Map(asciiLower, entry), ".")
+}
+
+func asciiLower(r rune) rune {
+	if 'A' <= r && r <= 'Z' {
+		return r + 'a' - 'A'
+	}
+	return r
 }
 
 // Check refuses a config the listener cannot run on. Each refusal is an InputError.
@@ -40,7 +85,10 @@ type ListenerConfig struct {
 // that runs as root on the host, where a line break would end the heredoc and run what follows it.
 // Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
 // container's inputs and the watchdog's env file; that refusal names the field and never quotes
-// the value, and comes before any other refusal of that field.
+// the value, and comes before any other refusal of that field. An allowed host the listener would
+// refuse at boot is refused here, by its index, since a listener that will not start serves
+// nothing: an entry carrying a port, a scheme, a path or a stray bracket, or that is no host name
+// or IP address at all. A seed in an entry is refused before that rule, which would quote it.
 func (c ListenerConfig) Check() error {
 	if bus.HoldsSeed(c.MachineID) {
 		return InputErrorf("machineId", "%w", SeedRefusal("machineId"))
@@ -66,6 +114,16 @@ func (c ListenerConfig) Check() error {
 	if strings.ContainsFunc(c.ListenHost, unicode.IsControl) {
 		return InputErrorf("listenHost", "listenHost contains a control character: %q", c.ListenHost)
 	}
+	for i, entry := range c.AllowedHosts {
+		if bus.HoldsSeed(entry) {
+			return InputErrorf("allowedHosts", "%w", SeedRefusal(fmt.Sprintf("allowedHosts[%d]", i)))
+		}
+		_, _, withPort := net.SplitHostPort(entry)
+		name := allowedHostName(entry)
+		if withPort == nil || !hostEntry.MatchString(entry) || (net.ParseIP(name) == nil && !dnsName.MatchString(name)) {
+			return InputErrorf("allowedHosts", "allowedHosts[%d] is %q: want a host name or address with no port, scheme or path", i, entry)
+		}
+	}
 	if c.SOCKS5Proxy != "" {
 		if err := bus.CheckSOCKS5Proxy(c.SOCKS5Proxy); err != nil {
 			return InputErrorf("socks5Proxy", "%s %w", bus.SOCKS5ProxyEnvVar, err)
@@ -84,7 +142,9 @@ func (c ListenerConfig) Check() error {
 // one holding a control character, for Check's reason, or an nkey seed anywhere in it, as a
 // password in its userinfo would be. Each refusal is an InputError naming natsUrls, and none quotes
 // the URL. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a server bus.LocalNATSURL
-// does not vouch for, since the listener refuses such a server without it.
+// does not vouch for, since the listener refuses such a server without it. ENVOY_ALLOWED_HOSTS
+// follows the ENVOY_LISTEN_HOST block, and only when the config lists a host, so a listener
+// without one renders what it always rendered.
 func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	if err := c.Check(); err != nil {
 		return nil, err
@@ -113,6 +173,9 @@ func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	env := []string{"PORT=" + strconv.Itoa(c.Port)}
 	if c.ListenHost != "" {
 		env = append(env, "ENVOY_LISTEN_HOST="+c.ListenHost)
+	}
+	if len(c.AllowedHosts) > 0 {
+		env = append(env, "ENVOY_ALLOWED_HOSTS="+strings.Join(c.AllowedHosts, ","))
 	}
 	env = append(env,
 		"ENVOY_MACHINE_ID="+c.MachineID,
