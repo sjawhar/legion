@@ -120,10 +120,20 @@ runtime:
           projected:
             sources:
               - service_account_token: {audience: "model-gateway.example.com", expiration_seconds: 3600, path: token}
+        # An existing network share, mounted into every pod (docs/kubernetes.md, Operator
+        # configuration): a PersistentVolumeClaim you made in this namespace, bound to the share
+        # (a Filestore instance, an NFS export), or an NFS export the nodes reach. An inline csi
+        # volume is not offered: a CSI driver runs outside gVisor's isolation.
+        # - name: team-share
+        #   persistent_volume_claim: {name: team-share}
+        # - name: nas
+        #   nfs: {server: nas.internal.example, path: /exports/builds}
       volume_mounts:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
         - {volume: operator-token, mount_path: /var/run/operator}
+        # - {volume: team-share, mount_path: /mnt/team}                    # read-only by default
+        # - {volume: nas, mount_path: /mnt/nas, read_only: false}          # writable
 
 # The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
 # capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets

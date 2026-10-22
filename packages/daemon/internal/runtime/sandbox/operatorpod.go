@@ -79,6 +79,8 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // collides with what Legion puts in a pod, naming both. A variable the runtime, the image, or every
 // launch sets would reach the agent's container twice, and one that places Oh My Pi's sessions
 // would move them off the store Legion resumes them from; a volume name would be in the pod twice;
+// a persistent_volume_claim naming one of Legion's own claims (legionClaim) would hand every pod an
+// issue's workspace or a repository cache;
 // a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
 // runs from hides it or is hidden by it; and a mount at, under, or above xdgStateHome
 // (/home/legion/.local/state), the path Legion reserves in the image's home directory: no role's
@@ -121,6 +123,9 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	for i, volume := range pod.Volumes {
 		if slices.Contains(volumes, volume.Name) {
 			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].name %s is a volume Legion puts in every pod", i, volume.Name)
+		}
+		if claim := volume.PersistentVolumeClaim; claim != nil && legionClaim(claim.ClaimName) {
+			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].persistent_volume_claim.name %s is a claim Legion makes for an issue's, a tree's or a repository cache's own volume: name a claim of your own", i, claim.ClaimName)
 		}
 	}
 	imageOwned := append(imageOwnedPaths(), tools.GH, tools.Git, tools.JJ, tools.Legion)
@@ -171,6 +176,21 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 func overlaps(a, b string) bool {
 	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
 	return a == b || under(a, b) || under(b, a)
+}
+
+// legionClaim reports whether claim is named as the volume claims Legion's Sandboxes make or made
+// are: an issue's or the controller's (IssueClaimName, `issue-legion-…`), a repository cache's
+// (cacheClaimName, `cache-legion-…`), or a tree's from the earlier layout legion-v10.0.0 kept
+// (`tree-legion-…`, every clone, workspace and session file of a tree). Every pod mounting such a
+// claim would read and write that workspace or that cache, so an operator volume naming one is
+// refused.
+func legionClaim(claim string) bool {
+	for _, prefix := range []string{issueVolume + "-legion-", cacheVolume + "-legion-", "tree-legion-"} {
+		if strings.HasPrefix(claim, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // dashboardURL is whether value is a DISPATCH_PUBLIC_URL boot lets through: a rule narrower than

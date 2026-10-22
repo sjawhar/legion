@@ -87,11 +87,17 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
               - config_map: {name: legion-operator-routes}
         - name: operator-creds
           secret: {name: legion-operator-creds}
+        - name: team-share
+          persistent_volume_claim: {name: team-share}
+        - name: nas
+          nfs: {server: nas.internal.example, path: /exports/builds}
       volume_mounts:
         - {volume: operator-config, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-config, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
         - {volume: operator-token, mount_path: /var/run/operator}
         - {volume: operator-creds, mount_path: /etc/legion-operator/creds, read_only: false}
+        - {volume: team-share, mount_path: /mnt/team}
+        - {volume: nas, mount_path: /mnt/nas, read_only: false}
 provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 `)
 
@@ -141,12 +147,16 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 					{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-routes"}}},
 				}}}},
 				{Name: "operator-creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-operator-creds"}}},
+				{Name: "team-share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share", ReadOnly: true}}},
+				{Name: "nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "nas.internal.example", Path: "/exports/builds"}}},
 			},
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "operator-config", MountPath: "/home/legion/.omp/profiles/legion/agent/models.yml", SubPath: "models.yml", ReadOnly: true},
 				{Name: "operator-config", MountPath: "/etc/legion-operator/overlay.yml", SubPath: "overlay.yml", ReadOnly: true},
 				{Name: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
 				{Name: "operator-creds", MountPath: "/etc/legion-operator/creds"},
+				{Name: "team-share", MountPath: "/mnt/team", ReadOnly: true},
+				{Name: "nas", MountPath: "/mnt/nas"},
 			},
 		},
 		// The cache's reservation sets cpu alone, requested in full; the rest is the default's,
@@ -164,6 +174,49 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 	if want := []ProviderKey{{Env: "ANTHROPIC_API_KEY", Secret: "anthropic_api_key"}}; !reflect.DeepEqual(cfg.ProviderKeys, want) {
 		t.Errorf("ProviderKeys = %+v, want %+v: under runtime kubernetes each names a key of the providers Secret", cfg.ProviderKeys, want)
+	}
+}
+
+// A share's source is read-only exactly when no volume_mounts entry mounts it writable, for a claim
+// and an NFS export alike, and for a share mounted twice, once of each kind: the kubelet changes
+// ownership on, and the node mounts `-o ro`, only by the source's readOnly. A ConfigMap's source is
+// never touched.
+func TestLoadForValidationSetsAShareReadOnlyAtItsSourceUnlessAMountWritesIt(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+`    pod:
+      volumes:
+        - {name: ro-claim, persistent_volume_claim: {name: ro-claim}}
+        - {name: rw-claim, persistent_volume_claim: {name: rw-claim}}
+        - {name: ro-nfs, nfs: {server: 10.0.0.2, path: /ro}}
+        - {name: rw-nfs, nfs: {server: 10.0.0.2, path: /rw}}
+        - {name: both, nfs: {server: 10.0.0.2, path: /both}}
+        - {name: unmounted, persistent_volume_claim: {name: unmounted}}
+        - {name: route, config_map: {name: legion-operator-route}}
+      volume_mounts:
+        - {volume: ro-claim, mount_path: /mnt/ro-claim}
+        - {volume: rw-claim, mount_path: /mnt/rw-claim, read_only: false}
+        - {volume: ro-nfs, mount_path: /mnt/ro-nfs, read_only: true}
+        - {volume: rw-nfs, mount_path: /mnt/rw-nfs, read_only: false}
+        - {volume: both, mount_path: /mnt/both-ro}
+        - {volume: both, mount_path: /mnt/both-rw, read_only: false}
+        - {volume: route, mount_path: /etc/legion-operator/route}
+`), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, v := range cfg.Runtime.Kubernetes.Pod.Volumes {
+		switch {
+		case v.PersistentVolumeClaim != nil:
+			got[v.Name] = v.PersistentVolumeClaim.ReadOnly
+		case v.NFS != nil:
+			got[v.Name] = v.NFS.ReadOnly
+		case v.ConfigMap != nil && v.ConfigMap.DefaultMode != nil:
+			t.Errorf("the ConfigMap volume's source was changed: %+v", v.ConfigMap)
+		}
+	}
+	want := map[string]bool{"ro-claim": true, "rw-claim": false, "ro-nfs": true, "rw-nfs": false, "both": false, "unmounted": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sources' readOnly = %v, want %v", got, want)
 	}
 }
 
@@ -896,17 +949,137 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "a pod volume with no source",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: creds}]\n",
-			want: "runtime.kubernetes.pod.volumes[0] must set exactly one of secret, config_map, projected",
+			want: "runtime.kubernetes.pod.volumes[0] must set exactly one of secret, config_map, projected, persistent_volume_claim, nfs",
 		},
 		{
 			name: "a pod volume with two sources",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: creds, secret: {name: a}, config_map: {name: b}}]\n",
-			want: "runtime.kubernetes.pod.volumes[0] must set exactly one of secret, config_map, projected",
+			want: "runtime.kubernetes.pod.volumes[0] must set exactly one of secret, config_map, projected, persistent_volume_claim, nfs",
+		},
+		{
+			name: "a pod volume naming a claim and an NFS export",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: share, persistent_volume_claim: {name: team-share}, nfs: {server: 10.0.0.2, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0] must set exactly one of secret, config_map, projected, persistent_volume_claim, nfs",
 		},
 		{
 			name: "a pod volume of another kind",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: scratch, empty_dir: {}}]\n",
 			want: "unknown key runtime.kubernetes.pod.volumes[0].empty_dir",
+		},
+		{
+			name: "a host path, which Autopilot refuses",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: host, host_path: {path: /srv}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].host_path",
+		},
+		{
+			name: "a claim with no name",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: share, persistent_volume_claim: {}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name is required",
+		},
+		{
+			name: "a claim name no claim can have",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: share, persistent_volume_claim: {name: Team_Share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].persistent_volume_claim.name "Team_Share" is no PersistentVolumeClaim's name: a claim is named with lowercase letters, digits, '-' and '.', starting and ending with a letter or digit, in at most 253 characters`,
+		},
+		{
+			name: "a claim that sets read_only on the source",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: share, persistent_volume_claim: {name: team-share, read_only: true}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].persistent_volume_claim.read_only",
+		},
+		{
+			name: "a claim that is not a mapping",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: share, persistent_volume_claim: team-share}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].persistent_volume_claim must be a mapping",
+		},
+		{
+			name: "an NFS export with no server",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server is required",
+		},
+		{
+			name: "an NFS server given as a URL",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 'nfs://nas.internal.example', path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "nfs://nas.internal.example" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server with a port",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 'nas.internal.example:2049', path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "nas.internal.example:2049" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server with the export in it",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '10.0.0.2:/share', path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "10.0.0.2:/share" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server in brackets",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '[fd00::2]', path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "[fd00::2]" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server in inet_aton's octal form",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 010.0.0.2, path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "010.0.0.2" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server in inet_aton's short form",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 1.2.3, path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "1.2.3" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server in inet_aton's hexadecimal form",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 0x0a000002, path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "0x0a000002" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
+		},
+		{
+			name: "an NFS server on the node's loopback",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 127.0.0.1, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server 127.0.0.1 is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server named localhost",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: LOCALHOST, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server LOCALHOST is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server named localhost with the root's trailing dot",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: localhost., path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server \"localhost.\" must be an IP address or a DNS name, with no scheme, port, path or brackets",
+		},
+		{
+			name: "an NFS server of no address",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::', path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server :: is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server as an IPv4-mapped IPv6 address",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::ffff:10.0.0.2', path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server "::ffff:10.0.0.2" is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write 10.0.0.2`,
+		},
+		{
+			name: "an NFS export with no path",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 10.0.0.2}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.path is required",
+		},
+		{
+			name: "an NFS export path that is relative",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 10.0.0.2, path: share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.path share must be a clean absolute path",
+		},
+		{
+			name: "an NFS export path that is not clean",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 10.0.0.2, path: /share/../etc}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.path /share/../etc must be a clean absolute path",
+		},
+		{
+			name: "two volumes naming one claim",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: b, persistent_volume_claim: {name: team-share}}, {name: a, persistent_volume_claim: {name: team-share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[1].persistent_volume_claim.name team-share is the claim of runtime.kubernetes.pod.volumes[0] too: mount the one volume at each path (volume_mounts takes sub_path) instead of naming the claim twice",
+		},
+		{
+			name: "an NFS export that sets read_only on the source",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 10.0.0.2, path: /share, read_only: false}}]\n",
+			want: "unknown key runtime.kubernetes.pod.volumes[0].nfs.read_only",
 		},
 		{
 			name: "a pod volume with no name",

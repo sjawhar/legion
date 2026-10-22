@@ -891,6 +891,330 @@ func TestProbeImageRefusesAContainerTheKubeletCannotConfigure(t *testing.T) {
 	}
 }
 
+// A share the pod block gives the pod — an NFS export, or a PersistentVolumeClaim — whose mount the
+// kubelet ran and that failed leaves the probe pod Pending, never Failed: a FailedMount event in the
+// kubelet's `… : mount failed: …` or a CSI driver's `… : rpc error: code = …` grammar is the answer,
+// a refusal naming the volume, the share the pod block gives it from, and the kubelet's message,
+// given once. The kubelet names an NFS volume by the pod's own name for it but a claim's by the
+// PersistentVolume it is bound to, which the runtime cannot read, so an event naming no volume of
+// the pod block is the one claim's; with two claims it names the PersistentVolume and both. The
+// kubelet's `Unable to attach or mount volumes` summary is left to the budget, and so is a share
+// failure in a pod block naming no share at all. The messages are the kubelet's own, read from
+// gVisor pods on a kind node and from a gVisor pod on GKE Autopilot.
+func TestProbeImageRefusesAShareThePodCannotMount(t *testing.T) {
+	// retried is the event's count: 1 for a failure the kubelet has met once, else 2, the least
+	// the probe refuses a CSI failure at.
+	retried := func(once bool) int32 {
+		if once {
+			return 1
+		}
+		return 2
+	}
+	nfs := corev1.Volume{Name: "nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "10.0.0.2", Path: "/share"}}}
+	claim := func(volume, name string) corev1.Volume {
+		return corev1.Volume{Name: volume, VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: name}}}
+	}
+	route := corev1.Volume{Name: "operator-route", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-route"}}}}
+	timedOut := func(volume, export string) string {
+		return `MountVolume.SetUp failed for volume "` + volume + `" : mount failed: exit status 32
+Mounting command: mount
+Mounting arguments:  -t nfs ` + export + ` /var/lib/kubelet/pods/ea568681-eb15-45a0-838d-dfbd9d6aefb4/volumes/kubernetes.io~nfs/` + volume + `
+Output: mount.nfs: Connection timed out for ` + export + ` on /var/lib/kubelet/pods/ea568681-eb15-45a0-838d-dfbd9d6aefb4/volumes/kubernetes.io~nfs/` + volume
+	}
+	csi := `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = Internal desc = mount "/var/lib/kubelet/plugins/kubernetes.io/csi/filestore.csi.storage.gke.io/0a/globalmount" failed on node gk3-node: mount failed: exit status 32`
+	csiCode := func(code, desc string) string {
+		return `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = ` + code + ` desc = ` + desc
+	}
+	secretMissing := `MountVolume.SetUp failed for volume "pvc-1b2c" : fetching NodePublishSecretRef legion/smb-creds failed: kubernetes.io/csi: failed to find the secret smb-creds in the namespace legion with error: secrets "smb-creds" not found`
+	for _, testCase := range []struct {
+		name    string
+		volumes []corev1.Volume
+		message string
+		refused bool
+		want    []string
+		// pulledAfter records the kubelet's Pulling event after the FailedMount: every volume
+		// mounted since.
+		pulledAfter bool
+		// once records the failure once: a first failure the kubelet has not yet retried.
+		once bool
+	}{
+		{"an NFS export that never answers", []corev1.Volume{route, nfs}, timedOut("nas", "10.0.0.2:/share"), true,
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false, false},
+		{"an NFS export the server refuses", []corev1.Volume{nfs},
+			`MountVolume.SetUp failed for volume "nas" : mount failed: exit status 32` + "\nOutput: mount.nfs: access denied by server while mounting 10.0.0.2:/share", true,
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false, false},
+		{"a claim's NFS volume, named by its PersistentVolume", []corev1.Volume{route, claim("team", "team-share")}, timedOut("team-pv", "10.0.0.9:/share"), true,
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false, false},
+		{"a claim's Filestore volume, through its CSI driver", []corev1.Volume{claim("team", "team-share")}, csi, true,
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false, false},
+		{"one of two claims' volumes", []corev1.Volume{claim("team", "team-share"), claim("cache", "build-cache")}, timedOut("pv-7", "10.0.0.9:/share"), true,
+			[]string{`cannot mount PersistentVolume "pv-7", bound to one of the claims runtime.kubernetes.pod.volumes gives volumes team, cache from`}, false, false},
+		{"a share still waiting in the kubelet's summary", []corev1.Volume{nfs},
+			"Unable to attach or mount volumes: unmounted volumes=[nas], unattached volumes=[]: timed out waiting for the condition", false, nil, false, false},
+		{"a mount failure for a volume no share of the pod block can be", []corev1.Volume{route}, timedOut("elsewhere", "10.0.0.9:/share"), false, nil, false, false},
+		{"a CSI call the kubelet retries: Aborted", []corev1.Volume{claim("team", "team-share")}, csiCode("Aborted", "An operation with the given Volume ID projects/p/locations/l/instances/i/volumes/v already exists"), false, nil, false, false},
+		{"a CSI call the kubelet retries: DeadlineExceeded", []corev1.Volume{claim("team", "team-share")}, csiCode("DeadlineExceeded", "context deadline exceeded"), false, nil, false, false},
+		{"a CSI call the kubelet retries: Unavailable", []corev1.Volume{claim("team", "team-share")},
+			`MountVolume.SetUp failed for volume "pvc-1b2c" : rpc error: code = Unavailable desc = connection error: desc = "transport: Error while dialing: dial unix /var/lib/kubelet/plugins/filestore.csi.storage.gke.io/csi.sock: connect: connection refused"`, false, nil, false, false},
+		{"a CSI call the kubelet retries: ResourceExhausted", []corev1.Volume{claim("team", "team-share")}, csiCode("ResourceExhausted", "quota"), false, nil, false, false},
+		{"a share failure a later try cleared", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), false, nil, true, false},
+		{"a claim's CSI Secret missing, named by its PersistentVolume", []corev1.Volume{route, claim("team", "team-share")}, secretMissing, true,
+			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false, false},
+		{"an NFS export that never answers, on its first event", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), true,
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false, true},
+		{"a CSI failure the kubelet has not yet retried", []corev1.Volume{claim("team", "team-share")}, csi, false, nil, false, true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var mounts []corev1.VolumeMount
+			for _, volume := range testCase.volumes {
+				mounts = append(mounts, corev1.VolumeMount{Name: volume.Name, MountPath: "/mnt/" + volume.Name, ReadOnly: true})
+			}
+			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Pod.Volumes, o.Pod.VolumeMounts = testCase.volumes, mounts }))
+			g.waits("ContainerCreating")
+			at := metav1.NewTime(rigNow.Add(-time.Minute))
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message, LastTimestamp: at, Count: retried(testCase.once),
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if testCase.pulledAfter {
+				if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+					ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".pull", Namespace: testNamespace},
+					InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+					Reason:         "Pulling", Type: corev1.EventTypeNormal, Message: `Pulling image "worker"`, LastTimestamp: metav1.NewTime(at.Add(time.Second)),
+				}, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, append(testCase.want, testCase.message)...)
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a share the pod cannot mount, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount") {
+				t.Errorf("ProbeImage = %v, refused a mount it should have left to the budget", err)
+			}
+		})
+	}
+}
+
+// A probe pod whose operator claim is missing never reaches a node: the scheduler leaves it Pending,
+// PodScheduled=False Unschedulable, saying `persistentvolumeclaim "<name>" not found` (or `is being
+// deleted`, or `bound to non-existent persistentvolume "<pv>"`), the first of them the message GKE Autopilot's scheduler gave a gVisor pod naming a claim that did not
+// exist. That is a refusal naming the volume and the claim, given on the first pass whatever the
+// pod's age, and never a capacity wait: no node the pool adds places it. A claim the pod block does
+// not name is no operator's mistake and falls to the capacity rule, and so does a claim that exists
+// but is not bound yet (`pod has unbound immediate PersistentVolumeClaims`), which is left to the
+// budget rather than counted as waiting on capacity, since it may yet bind.
+func TestProbeImageRefusesAClaimThatIsNotThere(t *testing.T) {
+	team := corev1.Volume{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}
+	unplaced := func(message string, age time.Duration) func(*corev1.Pod) {
+		return func(p *corev1.Pod) {
+			p.Spec.NodeName = ""
+			p.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+				Message: message, LastTransitionTime: metav1.NewTime(rigNow.Add(-age)),
+			}}}
+		}
+	}
+	notFound := `0/17 nodes are available: persistentvolumeclaim "team-share" not found. not found`
+	for _, testCase := range []struct {
+		name, message string
+		age           time.Duration
+		refused       bool
+	}{
+		{"the claim not found", notFound, 0, true},
+		{"the claim being deleted", `0/3 nodes are available: persistentvolumeclaim "team-share" is being deleted.`, 0, true},
+		{"the claim's volume gone, past the boot timeout", `0/3 nodes are available: persistentvolumeclaim "team-share" bound to non-existent persistentvolume "team-pv".`, testOptions().BootTimeout + time.Second, true},
+		{"another claim not found", `0/3 nodes are available: persistentvolumeclaim "someone-else" not found. not found`, 0, false},
+		{"the claim not bound yet, past the boot timeout", "0/1 nodes are available: pod has unbound immediate PersistentVolumeClaims. not found", testOptions().BootTimeout + time.Second, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			logged := &lockedLog{}
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Log = slogTo(logged)
+				o.Pod.Volumes = []corev1.Volume{team}
+				o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+			}))
+			g.finishes(unplaced(testCase.message, testCase.age))
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, `cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share": `+testCase.message)
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a claim that is not there, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount") {
+				t.Errorf("ProbeImage = %v, blamed the pod block for a claim it does not name or that may yet bind", err)
+			}
+			if strings.Contains(testCase.message, unboundClaims) && strings.Contains(logged.String(), "waiting on capacity") {
+				t.Errorf("an unbound claim was read as a capacity wait:\n%s", logged.String())
+			}
+		})
+	}
+}
+
+// A CSI driver's final failure the kubelet has met twice is refused, whether the event records the
+// repeat in its Count or, as an events.k8s.io/v1 recorder does, in its Series alone; a CSI failure
+// met once is left to the budget.
+func TestProbeImageCountsACSIFailureBySeries(t *testing.T) {
+	message := `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = Internal desc = mount failed: exit status 32`
+	for _, testCase := range []struct {
+		name    string
+		count   int32
+		series  *corev1.EventSeries
+		refused bool
+	}{
+		{"met twice, by Count", 2, nil, true},
+		{"met twice, by Series alone", 1, &corev1.EventSeries{Count: 2, LastObservedTime: metav1.NewMicroTime(rigNow.Add(-time.Minute))}, true},
+		{"met once", 1, nil, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+				o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+			}))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message,
+				LastTimestamp: metav1.NewTime(rigNow.Add(-time.Minute)), Count: testCase.count, Series: testCase.series,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, `cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share": `+message)
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+		})
+	}
+}
+
+// A ReadWriteOncePod claim another pod holds leaves the probe pod Unschedulable for as long as any
+// issue pod runs, since every Legion pod mounts the pod block's claims: the scheduler's
+// ErrReasonReadWriteOncePodConflict is a refusal naming the claims, at once, never a capacity wait.
+func TestProbeImageRefusesAReadWriteOncePodClaimInUse(t *testing.T) {
+	message := "0/3 nodes are available: 3 node(s) unavailable due to PersistentVolumeClaim with ReadWriteOncePod access mode already in-use by another pod. preemption: not eligible"
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+	}))
+	g.finishes(func(p *corev1.Pod) {
+		p.Spec.NodeName = ""
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: message, LastTransitionTime: metav1.NewTime(rigNow),
+		}}}
+	})
+	p := probeOptions(t)
+	p.Budget = unfinishedBudget
+
+	err := g.probe(p)
+
+	wantContains(t, err, "a ReadWriteOncePod claim it mounts is held by another pod", "gives volumes team from, so they must be ReadWriteMany: "+message)
+	if n := g.creates.Load(); n != 1 {
+		t.Errorf("ran the probe %d times, want once", n)
+	}
+}
+
+// A FailedMount for a volume an admission webhook injected into the probe pod names a volume the
+// admitted pod carries but the pod block does not: it is that volume's, never blamed on the pod
+// block's one claim as its PersistentVolume would be.
+func TestProbeImageNeverBlamesAClaimForAnInjectedVolume(t *testing.T) {
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+	}))
+	g.finishes(func(p *corev1.Pod) {
+		p.Spec.NodeName = "ip-192-0-2-7"
+		p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: "istiod-ca-cert", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "mesh.example"}}})
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}},
+		}}}
+	})
+	message := `MountVolume.SetUp failed for volume "istiod-ca-cert" : rpc error: code = Unknown desc = mesh agent down`
+	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+		Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message, LastTimestamp: metav1.NewTime(rigNow.Add(-time.Minute)), Count: 3,
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	p := probeOptions(t)
+	p.Budget = unfinishedBudget
+
+	err := g.probe(p)
+
+	if err != nil && strings.Contains(err.Error(), `PersistentVolumeClaim "team-share"`) {
+		t.Fatalf("ProbeImage = %v, blamed the operator's claim for an injected volume", err)
+	}
+	wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+}
+
+// A share the kubelet mounted on the node but whose root the node cannot read — an NFS server that
+// accepts the mount and fails every read after it, `Remote I/O error` — fails a gVisor container's
+// start rather than its mount: runsc cannot read the mount list its gofer wrote, and the kubelet
+// records StartError, exit code 128, `… reading mounts file: …`. That message, observed from a
+// gVisor pod on a kind node over such a server, names no volume, so with a share in the pod block
+// the refusal names every share and quotes it, and does not blame the image; without one, the same
+// failure stays the image's.
+func TestProbeImageNamesTheSharesWhenGVisorCannotReadTheMounts(t *testing.T) {
+	const message = "failed to start containerd task \"3c5f\": OCI runtime start failed: starting container: reading mounts file: error unmarshaling mounts: unexpected end of JSON input\nJSON bytes:\n"
+	nas := corev1.Volume{Name: "nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "10.0.0.2", Path: "/share"}}}
+	for _, testCase := range []struct {
+		name    string
+		volumes []corev1.Volume
+		want    string
+	}{
+		{"a share in the pod block", []corev1.Volume{nas}, `could not start its container probe over its mounts, which gVisor could not read: check the shares runtime.kubernetes.pod.volumes gives it, "nas" (NFS export 10.0.0.2:/share), are readable from the node: ` + message},
+		{"no share in the pod block", nil, "failed its probe: pod " + probeSandboxName + " Failed (container probe terminated: StartError, exit code 128)"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Pod.Volumes = testCase.volumes
+				for _, v := range testCase.volumes {
+					o.Pod.VolumeMounts = append(o.Pod.VolumeMounts, corev1.VolumeMount{Name: v.Name, MountPath: "/mnt/" + v.Name, ReadOnly: true})
+				}
+			}))
+			g.finishes(func(p *corev1.Pod) {
+				p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 128, Reason: "StartError", Message: message}},
+				}}}
+			})
+
+			err := g.probe(probeOptions(t))
+
+			wantContains(t, err, testCase.want)
+			if n := g.creates.Load(); n != 1 {
+				t.Errorf("ran the probe %d times, want once: either verdict is definitive", n)
+			}
+		})
+	}
+}
+
 // unschedulable leaves a probe pod as the scheduler leaves one the pool has no room for: Pending,
 // on no node, with PodScheduled=False Unschedulable and the scheduler's message, since age before
 // the rig's clock.
