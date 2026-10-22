@@ -4,8 +4,8 @@
 # pod the daemon's own code launches under gVisor, which reads a file from the claim's share, is
 # refused a write there (its mount is read-only by default), and writes a file to the export it
 # mounts with `read_only: false` that the NFS server then holds. `legion probe-boot` mounts both
-# shares, and refuses a claim that does not exist and an export the server does not have, each
-# naming the volume and its share.
+# shares, and refuses a claim that does not exist, an export the server does not have and a server
+# that never answers, each naming the volume and its share.
 # The pod is built by Legion's own code: the daemon's loader reads the legion.yaml, its
 # sandboxOptions builds the Agent Sandbox runtime, which launches the issue's root through Agent
 # Sandbox v1.0.3's controller (internal/daemon/share_volumes_live_test.go). The share is an
@@ -217,7 +217,7 @@ on_kind driver \
 read -r _ pod _ < <(awk '$1 == "shares"' "$result")
 [ -n "${pod:-}" ] && [ "$pod" != - ] || fail "the launch driver recorded no pod"
 pod=${pod#*/}
-for name in shares missing-claim missing-export; do
+for name in shares missing-claim missing-export silent-server; do
   cp "$(awk -v n="$name" '$1 == n {print $3}' "$result")" "$evidence/$name-legion.yaml"
 done
 pass
@@ -302,4 +302,12 @@ begin probe-missing-export
 probe missing-export 'cannot mount volume "scratch", which runtime.kubernetes.pod.volumes gives it from NFS export '"$server"':/absent' \
   'mount failed: '
 note "missing-export: probe-boot exit 1: $(grep -m1 'cannot mount' <<<"$probed")"
+pass
+
+begin probe-silent-server
+# 192.0.2.10 is RFC 5737's documentation range: no host answers, so the node's mount.nfs times out
+# after its own two minutes of retries, and the probe refuses that first failure within one attempt.
+probe silent-server 'cannot mount volume "scratch", which runtime.kubernetes.pod.volumes gives it from NFS export 192.0.2.10:/scratch' \
+  'mount failed: '
+note "silent-server: probe-boot exit 1 in $((SECONDS - check_started))s: $(grep -m1 'cannot mount' <<<"$probed" | cut -c1-300)"
 pass

@@ -3535,25 +3535,25 @@ mounted through a claim the operator made, whose driver the cluster's administra
 files. A claim named as Legion's own
 claims are (`issue-legion-…`, `cache-legion-…`, and `tree-legion-…` of the earlier layout) is refused at load, since every pod would then mount
 an issue's workspace or a repository cache. The server must be an IP address or a DNS name with no
-scheme, port or path, and the export a clean absolute path; the claim a Kubernetes name, named by
+scheme, port or path, and neither the node's loopback nor an unspecified address, and the export a clean absolute path; the claim a Kubernetes name, named by
 one volume only (the kubelet mounts a claim's volume once per pod, so two volumes of one claim
 would let one's `read_only` decide the other's; mount the one volume at each path instead). A share
 the pods cannot mount refuses the boot in the image probe, naming the volume and the share: a claim
 the scheduler cannot find, is deleting or has lost its volume (`persistentvolumeclaim "<name>" not
 found`, `… is being deleted`, `… bound to non-existent persistentvolume …`, at once, never counted as
 a capacity wait), a mount the node ran and that failed (`… : mount failed: …`, a server that never
-answers or has no such export, or a CSI driver's `… : rpc error: code = …`), refused once the
-kubelet's retry has met it again (the event's count is two or more), and a share mounted but
-unreadable,
+answers or has no such export, refused on the kubelet's first report, which already stands for
+mount.nfs's own retries of about two minutes; or a CSI driver's `… : rpc error: code = …`, refused
+once the kubelet's retry, seconds later, has met it again), and a share mounted but unreadable,
 which gVisor reports as the container's failed start (`reading mounts file: …`). With two or more
 claims in the block, a claim's failure names its PersistentVolume and every claim it may be bound
 to, since the daemon reads no claim to tell which. A CSI failure whose gRPC code says the operation
 may still be under way (`Aborted`, `DeadlineExceeded`, `Unavailable`, `ResourceExhausted`,
 `Canceled`, the codes the kubelet's CSI client does not treat as final) is left to the attempt's
 budget while the kubelet retries it, as is a failure the image pull after it shows a later try
-cleared. The kubelet retries every failed mount with backoff; a failure it met twice is refused
-even when the network would have answered later, and the boot stops until the operator starts the
-daemon again. A claim that exists but is not bound yet is waited on through every attempt of the
+cleared. The kubelet retries every failed mount with backoff; a refused share is refused even when
+the network would have answered later, and the daemon exits, so whatever started it (its
+Deployment, or the operator) starts it again. A claim that exists but is not bound yet is waited on through every attempt of the
 probe's budget, then fails as any probe that never completed does, and a `ReadWriteOncePod` claim
 another pod holds is refused at once. The daemon needs no right on
 PersistentVolumeClaims for any of this: the pod names the claim and the kubelet mounts it. An `nfs`
