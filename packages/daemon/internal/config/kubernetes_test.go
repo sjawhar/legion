@@ -1052,6 +1052,21 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].nfs.server :: is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
 		},
 		{
+			name: "an NFS server with a dotted capital I",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"nas.\u0130nternal.example\", path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an ASCII host, an IP address or an ASCII DNS name; got "nas.\u0130nternal.example"`,
+		},
+		{
+			name: "an NFS server with a Kelvin sign",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"\u212Aube.example\", path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an ASCII host, an IP address or an ASCII DNS name; got "\u212aube.example"`,
+		},
+		{
+			name: "an NFS server named localhost with a long s",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"localho\u017Ft\", path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an ASCII host, an IP address or an ASCII DNS name; got "localho\u017ft"`,
+		},
+		{
 			name: "an NFS server as an IPv4-mapped IPv6 address",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::ffff:10.0.0.2', path: /share}}]\n",
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "::ffff:10.0.0.2" is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write 10.0.0.2`,
@@ -1389,6 +1404,25 @@ func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// A mixed-case ASCII name passes: DNS names compare without regard to ASCII case.
+func TestNFSServerMayBeMixedCaseASCII(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n      volumes: [{name: nas, nfs: {server: NAS.Internal.Example, path: /share}}]\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Runtime.Kubernetes.Pod.Volumes[0].NFS.Server; got != "NAS.Internal.Example" {
+		t.Errorf("server = %q, want it as written", got)
+	}
+}
+
+// A broker URL whose host only Unicode case folding makes localhost is no loopback host.
+func TestBrokerNamedLocalhostWithALongSIsNotLoopback(t *testing.T) {
+	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: http://localho\u017Ft:13380\n"+agentSecretsTokenFile), noEnv)
+	if err == nil || !strings.Contains(err.Error(), "must use https unless the host is a loopback address") {
+		t.Fatalf("err %v, want the https refusal", err)
 	}
 }
 

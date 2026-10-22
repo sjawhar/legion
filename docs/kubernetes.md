@@ -1440,7 +1440,7 @@ worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` 
 `envoy_url` and each `nats_urls` entry are endpoints, not request URLs: they refuse a query string
 or fragment. This is a breaking configuration change for a file that has either; put credentials in
 URL userinfo or in a Secret, never in a query.
-`advertise_host` is an IP address or a DNS name, the host alone, and only `runtime: kubernetes`
+`advertise_host` is an IP address or an ASCII DNS name, the host alone, and only `runtime: kubernetes`
 accepts it. A pod's own IP changes on every restart, so a daemon running inside the cluster binds
 `0.0.0.0` and lets `advertise_host` name the Service DNS name that reaches whichever pod is live.
 Pods dial it at the port the worker stream listens on, so the Service exposes `worker_stream_port`
@@ -3534,7 +3534,7 @@ mounted through a claim the operator made, whose driver the cluster's administra
 `host_path` is refused too: Autopilot refuses a host path, and one would hand the agent the node's
 files. A claim named as Legion's own
 claims are (`issue-legion-…`, `cache-legion-…`, and `tree-legion-…` of the earlier layout) is refused at load, since every pod would then mount
-an issue's workspace or a repository cache. The server must be an IP address or a DNS name with no
+an issue's workspace or a repository cache. The server must be an IP address or an ASCII DNS name with no
 scheme, port or path, and neither the node's loopback nor an unspecified address, and the export a clean absolute path; the claim a Kubernetes name, named by
 one volume only (the kubelet mounts a claim's volume once per pod, so two volumes of one claim
 would let one's `read_only` decide the other's; mount the one volume at each path instead). A share

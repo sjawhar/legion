@@ -1259,6 +1259,8 @@ func TestAdvertiseHostMustBeABareHost(t *testing.T) {
 		{"a space", `"legion daemon"`, refused + " (legion daemon)"},
 		{"a space inside a DNS name", `"legion daemon.legion.svc"`, refused + " (legion daemon.legion.svc)"},
 		{"a zoned IPv6 address", `"fe80::1%eth0"`, refused + " (fe80::1%eth0)"},
+		{"a dotted capital I", "nas.\u0130nternal.example", `advertise_host must be an ASCII host, an IP address or an ASCII DNS name; got "nas.\u0130nternal.example"`},
+		{"a Kelvin sign", "\u212Aube.example", `advertise_host must be an ASCII host, an IP address or an ASCII DNS name; got "\u212aube.example"`},
 		{"blank", `""`, "advertise_host must not be empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1275,6 +1277,7 @@ func TestAdvertiseHostMustBeABareHost(t *testing.T) {
 func TestAdvertiseHostAcceptsABareHostOrIPAddress(t *testing.T) {
 	for _, tc := range []struct{ name, value string }{
 		{"a DNS name", "legion-daemon.legion.svc"},
+		{"a mixed-case DNS name", "Legion-Daemon.Legion.SVC"},
 		{"an IPv4 address", "192.0.2.10"},
 		{"a bare IPv6 address", "2001:db8::1"},
 	} {

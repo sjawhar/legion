@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -368,13 +369,36 @@ func readPluginSource(value *yaml.Node, key string) (string, error) {
 	return source, nil
 }
 
-// isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
+// isLoopbackHost is localhost in ASCII, with or without the root's trailing dot, or a loopback IP
+// address. strings.EqualFold alone would also match `localhoſt` (U+017F, the long s, folds to `s`),
+// a name no resolver takes for localhost.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+	if name := strings.TrimSuffix(host, "."); isASCII(name) && strings.EqualFold(name, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// isASCII reports whether s holds no rune above unicode.MaxASCII.
+func isASCII(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
+}
+
+// refuseNonASCIIHost refuses a host with any rune above unicode.MaxASCII. It runs before a host is
+// lower-cased for validation.IsDNS1123Subdomain: strings.ToLower folds `İ` (U+0130) to `i` and the
+// Kelvin sign (U+212A) to `k`, so the lower-cased name would pass while the value kept, as written,
+// is one no node's resolver resolves.
+func refuseNonASCIIHost(key, host string) error {
+	if !isASCII(host) {
+		return fmt.Errorf("%s must be an ASCII host, an IP address or an ASCII DNS name; got %+q", key, host)
+	}
+	return nil
 }
 
 // isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`): no host at all, which only a
@@ -393,6 +417,9 @@ func readAdvertiseHost(value *yaml.Node, key string) (*string, error) {
 	read, err := readNonEmptyString(value, key)
 	if err != nil || read == nil {
 		return read, err
+	}
+	if err := refuseNonASCIIHost(key, *read); err != nil {
+		return nil, err
 	}
 	if host := *read; net.ParseIP(host) == nil && len(validation.IsDNS1123Subdomain(strings.ToLower(host))) != 0 {
 		return nil, fmt.Errorf("%s must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself (%s)", key, host)
@@ -771,6 +798,9 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 	}
 	server, err := requiredString(fields["server"], key+".server", "")
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseNonASCIIHost(key+".server", server); err != nil {
 		return nil, err
 	}
 	if net.ParseIP(server) == nil && (len(validation.IsDNS1123Subdomain(strings.ToLower(server))) != 0 || numericLastLabel(server)) {
