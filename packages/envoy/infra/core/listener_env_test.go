@@ -35,10 +35,10 @@ func TestListenerConfigCheck(t *testing.T) {
 	}{
 		{name: "the default port", in: core.ListenerConfig{MachineID: "m", Port: core.DefaultListenerPort}},
 		{name: "a host bridge", in: core.ListenerConfig{MachineID: "m", Port: core.DefaultListenerPort, HostBridge: "127.0.0.1"}},
-		{name: "no machine id", in: core.ListenerConfig{Port: 9020}, input: "machineId", err: "machineId is required"},
-		{name: "a blank machine id", in: core.ListenerConfig{MachineID: " ", Port: 9020}, input: "machineId", err: "machineId is required"},
-		{name: "a machine id with a newline", in: core.ListenerConfig{MachineID: "a\nENVEOF\nid", Port: 9020}, input: "machineId", err: `machineId contains a control character: "a\nENVEOF\nid"`},
-		{name: "a machine id with a tab", in: core.ListenerConfig{MachineID: "example\thost", Port: 9020}, input: "machineId", err: `machineId contains a control character: "example\thost"`},
+		{name: "no machine id", in: core.ListenerConfig{Port: 9020}, input: "machineId", err: "machineId is empty"},
+		{name: "a blank machine id", in: core.ListenerConfig{MachineID: " ", Port: 9020}, input: "machineId", err: "machineId has leading or trailing whitespace"},
+		{name: "a machine id with a newline", in: core.ListenerConfig{MachineID: "a\nENVEOF\nid", Port: 9020}, input: "machineId", err: "machineId contains a control character"},
+		{name: "a machine id with a tab", in: core.ListenerConfig{MachineID: "example\thost", Port: 9020}, input: "machineId", err: "machineId contains a control character"},
 		{name: "port 0, which is no port", in: core.ListenerConfig{MachineID: "m"}, input: "port", err: "port 0 is outside 1-65535"},
 		{name: "a negative port", in: core.ListenerConfig{MachineID: "m", Port: -1}, input: "port", err: "port -1 is outside 1-65535"},
 		{name: "a port above 65535", in: core.ListenerConfig{MachineID: "m", Port: 65536}, input: "port", err: "port 65536 is outside 1-65535"},
@@ -125,4 +125,31 @@ func TestListenerConfigEnv(t *testing.T) {
 			require.Equal(t, c.want, got)
 		})
 	}
+}
+
+func TestListenerConfigSOCKS5Proxy(t *testing.T) {
+	config := core.ListenerConfig{
+		MachineID:   "example-dispatch",
+		Port:        core.DefaultListenerPort,
+		SOCKS5Proxy: "127.0.0.1:1055",
+	}
+	env, err := config.Env([]string{"nats://hub.internal.example:4222"})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"PORT=9020",
+		"ENVOY_MACHINE_ID=example-dispatch",
+		"NATS_URLS=nats://hub.internal.example:4222",
+		"ENVOY_ALLOW_REMOTE_NATS=1",
+		"ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055",
+	}, env)
+
+	err = (core.ListenerConfig{
+		MachineID:   "example-dispatch",
+		Port:        core.DefaultListenerPort,
+		SOCKS5Proxy: "socks5://127.0.0.1:1055",
+	}).Check()
+	requireInputError(t, err, "socks5Proxy", "ENVOY_NATS_SOCKS5_PROXY")
+
+	_, err = config.Env([]string{"nats://127.0.0.1:4222"})
+	requireInputError(t, err, "socks5Proxy", "natsUrls")
 }

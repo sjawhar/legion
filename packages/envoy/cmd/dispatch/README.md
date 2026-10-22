@@ -69,6 +69,11 @@ When no GitHub App credentials are configured, the server still starts, but
 the GitHub proxy answers `503 GITHUB_TOKEN_UNAVAILABLE`, and saving a project's
 architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 
+For a Google Cloud deployment, use `envoy-infra:gcp:Dispatch` from
+`packages/envoy/infra`. It supplies the private Cloud SQL connection, the tailnet entry point,
+and the pod environment this binary needs; see that component's README for its inputs, the IAM
+grant it writes and the one the consumer writes.
+
 ## Webhook redelivery
 
 GitHub does not redeliver a webhook delivery that failed. When NATS is configured and the App's
@@ -576,12 +581,32 @@ count, and re-derives them from source text on the next write. It aborts server 
 migration record or schema change only when an existing artifact has no owning issue. On success
 it backfills each artifact's project and generated `ref_key`.
 
+A migration runs while the build before it is still serving. The app Deployment of
+`envoy-infra:gcp:Dispatch` rolls above one replica (`packages/envoy/infra/README.md`), so from the
+start of a rollout until the last pod of the previous release is gone — and again for as long as a
+rollback lasts — the previous image's queries run against the new schema. A migration may
+therefore only add: a table, an index, a trigger, a column that is nullable or defaulted, a
+constraint added `not valid`. In the same release as the code that depends on it, it may not drop
+or rename a column or a table, change a column's type, or tighten a constraint the running build's
+queries would violate. Each of those is split across two releases: the first makes the schema
+accept both shapes, and the second removes the old one once no pod serves it.
+
+The census below does not cover this. It reports locks, sizes and counts — what a migration would
+wait behind and how much it would rewrite — not whether the previous build's queries still answer
+against the new schema; that one-release gap is the author's to reason about. The five-second
+`pgmigrate.LockTimeout` also bites harder under a rolling update than under `Recreate`, which
+stops the previous pods before the new one boots: while a deployment rolls, the old build's
+connections are still open and still holding locks on the tables the migration wants, so a
+migration that applies cleanly against an idle database can fail the new pod's boot.
+
 ### Pre-deploy census
 
-Before a deployment rolls a new image, it runs `envoy-dispatch census` with the service's
-`DATABASE_URL`, as a one-off task under the service's own database credentials, and the census is
-a gate: a census that refuses fails the deploy before the service moves, and nothing accepts a
-refusal and rolls past it.
+`envoy-dispatch census` is run before a new image goes out, with the service's `DATABASE_URL` and
+under the service's own database credentials, and it is a gate: a census that refuses stops the
+deploy before the service moves, and nothing accepts a refusal and rolls past it. No deployment of
+`envoy-infra:gcp:Dispatch` runs one — the component registers no census task — so an operator runs
+it by hand against the deployment's database before updating the image, with the `kubectl run`
+recipe in `packages/envoy/infra/README.md`.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census

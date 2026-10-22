@@ -24,31 +24,29 @@ const EnvNATSSeed = bus.NkeySeedEnvVar
 // later. A component checks the config once, before it registers anything, and Env adds the URLs
 // when they are known.
 type ListenerConfig struct {
-	MachineID  string // ENVOY_MACHINE_ID
-	Port       int    // PORT, 1-65535: a component resolves its default, DefaultListenerPort
-	ListenHost string // "" leaves ENVOY_LISTEN_HOST unset, so the listener binds 127.0.0.1
-	HostBridge string // "" leaves ENVOY_HOST_BRIDGE unset
+	MachineID   string // ENVOY_MACHINE_ID
+	Port        int    // PORT, 1-65535: a component resolves its default, DefaultListenerPort
+	ListenHost  string // "" leaves ENVOY_LISTEN_HOST unset, so the listener binds 127.0.0.1
+	HostBridge  string // "" leaves ENVOY_HOST_BRIDGE unset
+	SOCKS5Proxy string // "" leaves ENVOY_NATS_SOCKS5_PROXY unset
 }
 
 // Check refuses a config the listener cannot run on. Each refusal is an InputError.
 //
-// The listener requires ENVOY_MACHINE_ID and refuses it blank (internal/config/config.go), and
-// reads ENVOY_HOST_BRIDGE untrimmed into every local delivery's URL (internal/session/session.go),
-// so a host bridge with surrounding whitespace is refused. Port is always given, since a health
-// check calls it. No value may hold a control character: a watchdog writes the environment, one
-// variable per line, into a heredoc of a script that runs as root on the host, where a line break
-// would end the heredoc and run what follows it. Nor may one hold an nkey seed (bus.HoldsSeed),
-// which the environment would carry, in the container's inputs and the watchdog's env file; that
-// refusal names the field and never quotes the value, and comes before any refusal that quotes it.
+// CheckMachineID owns the machine-id rule. ENVOY_HOST_BRIDGE is read untrimmed into every local
+// delivery's URL (internal/session/session.go), so a host bridge with surrounding whitespace is
+// refused. Port is always given, since a health check calls it. No value may hold a control
+// character: a watchdog writes the environment, one variable per line, into a heredoc of a script
+// that runs as root on the host, where a line break would end the heredoc and run what follows it.
+// Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
+// container's inputs and the watchdog's env file; that refusal names the field and never quotes
+// the value, and comes before any other refusal of that field.
 func (c ListenerConfig) Check() error {
-	if strings.TrimSpace(c.MachineID) == "" {
-		return InputErrorf("machineId", "machineId is required")
-	}
 	if bus.HoldsSeed(c.MachineID) {
 		return InputErrorf("machineId", "%w", SeedRefusal("machineId"))
 	}
-	if strings.ContainsFunc(c.MachineID, unicode.IsControl) {
-		return InputErrorf("machineId", "machineId contains a control character: %q", c.MachineID)
+	if err := CheckMachineID("machineId", c.MachineID); err != nil {
+		return err
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return InputErrorf("port", "port %d is outside 1-65535", c.Port)
@@ -67,6 +65,11 @@ func (c ListenerConfig) Check() error {
 	}
 	if strings.ContainsFunc(c.ListenHost, unicode.IsControl) {
 		return InputErrorf("listenHost", "listenHost contains a control character: %q", c.ListenHost)
+	}
+	if c.SOCKS5Proxy != "" {
+		if err := bus.CheckSOCKS5Proxy(c.SOCKS5Proxy); err != nil {
+			return InputErrorf("socks5Proxy", "%s %w", bus.SOCKS5ProxyEnvVar, err)
+		}
 	}
 	return nil
 }
@@ -117,6 +120,12 @@ func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	)
 	if remote {
 		env = append(env, bus.AllowRemoteEnvVar+"=1")
+	} else if c.SOCKS5Proxy != "" {
+		return nil, InputErrorf("socks5Proxy", "socks5Proxy needs a remote natsUrls URL because %s is set only with %s=1",
+			bus.SOCKS5ProxyEnvVar, bus.AllowRemoteEnvVar)
+	}
+	if c.SOCKS5Proxy != "" {
+		env = append(env, bus.SOCKS5ProxyEnvVar+"="+c.SOCKS5Proxy)
 	}
 	if c.HostBridge != "" {
 		env = append(env, "ENVOY_HOST_BRIDGE="+c.HostBridge)

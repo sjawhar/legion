@@ -32,6 +32,11 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 		{ExceptionTopicPrefix + "notifications.github.acme.widgets.pr.1.comment", true},
 		{"notifications.githubx.acme", true},
 		{"notifications.github", true},
+		// A `*` or `>` in a published topic is a character of it, not a wildcard: the stream's
+		// literal-prefix subjects capture none of these, so they take core NATS.
+		{"notifications.>", true},
+		{"notifications.*.deploy", true},
+		{ExceptionTopicPrefix + ">", true},
 		{contracts.AgentTopicPrefix + "ses_a", false},
 		{ExceptionTopicPrefix + contracts.AgentTopicPrefix + "ses_a", false},
 		{"notifications.dispatch.issue.ACME-1.ask.opened", false},

@@ -43,7 +43,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 
 	// The durable an earlier release left: its filter subjects, and the server's own flow control.
 	legacy := natsgo.ConsumerConfig{
-		Durable:        deliveryConsumerName,
+		Durable:        bus.DispatchDeliveryDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubjects: []string{
 			"notifications.github.*.*.pr.*",
@@ -69,7 +69,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	// yet", not a failure.
 	var info *natsgo.ConsumerInfo
 	waitFor(t, 20*time.Second, func() bool {
-		read, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		read, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		if errors.Is(err, natsgo.ErrConsumerNotFound) {
 			return false
 		}
@@ -80,7 +80,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 		return info.Config.MaxAckPending == intakeMaxAckPending && info.Config.AckWait == intakeAckWait()
 	}, func() string {
 		if info == nil {
-			return fmt.Sprintf("no durable named %s after %s", deliveryConsumerName, 20*time.Second)
+			return fmt.Sprintf("no durable named %s after %s", bus.DispatchDeliveryDurable, 20*time.Second)
 		}
 		return fmt.Sprintf("durable ack_wait/max_ack_pending = %s/%d after %s, want %s/%d (bind must correct an earlier release's flow control)",
 			info.Config.AckWait, info.Config.MaxAckPending, 20*time.Second, intakeAckWait(), intakeMaxAckPending)
@@ -359,7 +359,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	// floor whichever plural set the durable carries. The first messages are acknowledged through
 	// a pull fetch, which reaches them in stream order, so the ack floor sits at the last of them.
 	if _, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
-		Durable: deliveryConsumerName,
+		Durable: bus.DispatchDeliveryDurable,
 		FilterSubjects: []string{
 			contracts.GithubWorkflowSubject("acme", "widgets", pathBaseForTest(settings.DeployWorkflowPath), ">"),
 			contracts.GithubWorkflowSubject("acme", "widgets", pathBaseForTest(settings.PRChecksWorkflowPath), ">"),
@@ -372,7 +372,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the jetstream API: %v", err)
 	}
-	legacy, err := js.Consumer(ctx, bus.Stream, deliveryConsumerName)
+	legacy, err := js.Consumer(ctx, bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("look up the plural-filter durable: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	if err := batch.Error(); err != nil || got != acknowledged {
 		t.Fatalf("fetch the first %d messages: got %d, err %v", acknowledged, got, err)
 	}
-	before, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	before, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("read the plural-filter durable: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	t.Log(intakeStateReport(t, natsClient))
 
-	after, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	after, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("read the replacement durable: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestIntakeKeepsUpWithABurstOfDeliveryEvents(t *testing.T) {
 	// A redelivery, which flow control that did not fit the handler would cause, arrives within
 	// the ack wait; give one time to land before reading the consumer's state.
 	time.Sleep(2 * time.Second)
-	info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	info, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("read consumer info: %v", err)
 	}

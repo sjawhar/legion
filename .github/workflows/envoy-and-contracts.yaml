@@ -876,9 +876,9 @@ jobs:
   # the Envoy binaries and the daemon build with, and every go command below runs in that
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
-  # nats-server, on testnats.Image and testnats.HubImage, pulled first for the reason
-  # .github/actions/pull-test-images gives. The per-target compile runs in pr-and-main.yaml's
-  # required lint job.
+  # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
+  # for the reason .github/actions/pull-test-images gives. The per-target compile runs in
+  # pr-and-main.yaml's required lint job.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -893,12 +893,13 @@ jobs:
         with:
           go-version-file: packages/envoy/infra/go.mod
           cache-dependency-path: packages/envoy/infra/go.sum
-      - name: Pull the NATS test container images
+      - name: Pull the NATS and Postgres test container images
         uses: ./.github/actions/pull-test-images
         with:
           consts: |
             packages/envoy/internal/testnats/nats.go Image
             packages/envoy/internal/testnats/nats.go HubImage
+            packages/envoy/internal/testpg/testpg.go Image
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)

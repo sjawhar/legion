@@ -25,6 +25,9 @@ const (
 	SessionBucket = "envoy_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
+	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
+	// webhook's failed deliveries (internal/dispatch/redeliver).
+	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 )
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
@@ -34,6 +37,14 @@ const NotificationTopicPrefix = "notifications."
 // ExceptionTopicPrefix begins a delivery's exception lane: a failed or refused delivery is reported
 // on ExceptionTopicPrefix followed by its original topic.
 const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
+
+// DispatchDeliveryDurable is the stream's durable consumer Dispatch's delivery intake binds, over
+// every GitHub notification (internal/dispatch/delivery).
+const DispatchDeliveryDurable = "delivery-events"
+
+// DispatchJobDurable is the stream's durable consumer Dispatch's job intake binds, over a deploy
+// run's job events (internal/dispatch/delivery).
+const DispatchJobDurable = "delivery-jobs"
 
 // ListenerDurable is the durable consumer of the stream that the listener of machine machineID
 // binds. A space in the machine id is a hyphen in the name.
@@ -84,7 +95,9 @@ func StreamSubjects() []string {
 // streamCaptures reports whether the stream retains a publish to topic: some subject this binary
 // compiles into the stream matches it. Every such subject is a literal prefix followed by `.>`
 // (TestEveryStreamSubjectIsALiteralPrefixAndWildcard), which matches a literal topic exactly when
-// the topic extends that prefix by at least one token, so no subject is split.
+// the topic extends that prefix by at least one token, so no subject is split. A topic is read
+// literally: a `*` or `>` in it is a character of the topic, not a wildcard, which is what nats.go
+// publishes it as.
 func streamCaptures(topic string) bool {
 	for _, subject := range streamSubjects {
 		prefix := strings.TrimSuffix(subject, ">")

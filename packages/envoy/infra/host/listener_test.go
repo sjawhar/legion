@@ -305,10 +305,12 @@ func TestListenerRefusesInvalidInputs(t *testing.T) {
 			err: []string{`adopt.watchdog names "example-host-a-watchdog", but watchdog is not set`},
 		},
 		{
-			name:  "port 0, refused by core with the component's name",
-			edit:  func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(0) },
-			err:   []string{"envoy-infra:host:Listener example-host-a: port 0 is outside 1-65535"},
-			input: "port",
+			name: "a machine id with a dot, refused by core with the component's name",
+			edit: func(a *host.ListenerArgs) {
+				a.MachineID = "example.host-a"
+			},
+			err:   []string{"envoy-infra:host:Listener example-host-a: machineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry"},
+			input: "machineId",
 		},
 	}
 	// The watchdog's create script echoes the listener's name inside double quotes, so a name

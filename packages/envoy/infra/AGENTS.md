@@ -34,14 +34,14 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `SeedRefusal`, the refusal naming where a value holding a seed came from (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions`, `HostPermissions` and `DaemonPermissions` (`permissions.go`). The seed detector every layer calls is `bus.HoldsSeed` (`packages/envoy/internal/bus/nkey.go`), which Envoy's own processes share. |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `SeedRefusal`, the refusal naming where a value holding a seed came from (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions`, `HostPermissions`, `DaemonPermissions` and `DispatchPermissions` (`permissions.go`). The seed detector every layer calls is `bus.HoldsSeed` (`packages/envoy/internal/bus/nkey.go`), which Envoy's own processes share. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), the error naming and version paging both share (`errors.go`), and the contract every store's tests run (`store_contract_test.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `nats/` | The schema types every NATS component shares, whatever its cloud, importing no cloud package: `RulesArgs`, `nats:Rules`, one direction's permissions of a NATS user, which `aws:User` and `gcp:Permissions` take (`rules.go`). A type shared by components of more than one cloud lives here, never in one cloud's package, so a single-cloud consumer's SDK shows no other cloud's types; `gcp/imports_test.go` fails if the `gcp` package compiles any `aws` package. |
 | `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. `fargate.go` holds what both register identically: each child's options, its tags, the log group and the task definition's base. |
 | `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its own tests hold `ListenerEnv.Check`'s refusals; `aws/`'s pin its texts, building each component from one example. |
-| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
+| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`); `gcp:Dispatch` (`dispatch.go`, `dispatch_cloud.go`, `dispatch_kube.go`) and its Kubernetes and Serve renderings, golden-tested in `testdata/dispatch-*.golden`. |
 | `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The tests' harness: the mock engine a component's unit tests run on (`Mocks`, `Construct`, `mocks.go`), and the live tests' plugin build and pulumi CLI. |
@@ -66,11 +66,25 @@ versions. Never add the module to the root `go.work`.
   with a refused input and one per missing provider, each asserting nothing registered beyond the
   test's providers. The AWS components resolve in `NatsServiceArgs.validate` and
   `WebhookListenerArgs.validate`.
-- **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
-  listener's environment that the resolver can make (`machineId`, `port`, `listenHost`,
-  `hostBridge`), run once before anything registers; `ListenerConfig.Env` runs `Check` again, so no
-  caller renders a config `Check` refuses, then adds `natsUrls`, the one value that may be another
-  resource's output, and checks it, inside the `ApplyT` that computes the container's environment.
+
+- **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
+  `random` providers before registering anything, then builds a Kubernetes provider from its
+  cluster's exec-plugin kubeconfig. Every Kubernetes child uses that explicit provider and depends
+  on the cluster; none falls back to a default Kubernetes provider.
+- **Refusals.** Every refusal names the input. `core.CheckMachineID` is the one machine-id rule
+  shared by `core.ListenerConfig.Check` and the hub's users. It refuses an empty id; leading or
+  trailing whitespace; `.`, `*`, `>`, `/` or `\`; control characters; and whitespace other than
+  an ordinary space; and any id over 246 bytes, so `listener-<id>` fits NATS's 255-byte consumer-name
+  limit. The hub also refuses two ids that give one durable (`a b` and `a-b` collide), an id that
+  takes the hub listener's durable, and a second `dispatchMachineId` user, since every one binds
+  `core.DispatchDurables()`. An ordinary space is accepted only inside the id and becomes a hyphen in
+  `bus.ListenerDurable`'s `listener-<id>` and `bus.ListenerQueue`'s
+  `envoy-listener-<id>`. A seed check that already precedes this rule stays first.
+  `core.ListenerConfig.Check` also holds the checks of the listener's environment that the
+  resolver can make (`port`, `listenHost`, `hostBridge`), run once before anything registers;
+  `ListenerConfig.Env` runs `Check` again, so no caller renders a config `Check` refuses, then
+  adds `natsUrls`, the one value that may be another resource's output, and checks it, inside the
+  `ApplyT` that computes the container's environment.
   A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
   container's `envs` resolve, after the component and its image have registered, not the
   constructor. The watchdog's create script runs as root on the host
@@ -103,11 +117,32 @@ versions. Never add the module to the root `go.work`.
   with `network`; `network`, `subnetwork` and the secret `tailnetAuthKey` are checked for a seed
   once they resolve (`gcp.refuseSeed`, `gcp.refuseSeedInSecret`, which keeps the key secret and
   never quotes it). Its resolver refuses a seed in every string input the hub itself carries
-  first (`gcp.seededInput`: hostname, tags, zone, machine type, images, each user's machine id),
-  naming the input's path and never its value; a string input added to the hub joins that list,
-  with a row in `TestNatsHubRefusesASeedInAnyPlainInput`. A user's name and rule entries are
-  core's to refuse, and the hub's own user refusals, which run before core's, name a user by its
-  index alone (`TestNatsHubPassesOnCoresSeedRefusalOfUsers`).
+  first (`gcp.seededInput`: hostname, tags, zone, machine type, images, each user's `machineId` and
+  `dispatchMachineId`), naming the input's path and never its value; a string input added to the
+  hub joins that list, with a row in `TestNatsHubRefusesASeedInAnyPlainInput`. A user's name and
+  rule entries are core's to refuse, and the hub's own user refusals, which run before core's,
+  name a user by its index alone (`TestNatsHubPassesOnCoresSeedRefusalOfUsers`).
+  `gcp:Dispatch` follows the same shape: `NewDispatch` refuses a seed in its own name first
+  (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
+  string input the component carries (`gcp.dispatchSeededInput`, one row each in
+  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret`,
+  `natsSeedSecret` and `agentSecretsTokenSecret` are checked for a seed once they resolve, before
+  any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `TestConstructRefusesASeedInADispatchInput`); the two credentials `tailnetAuthKey` and
+  `signInClientSecret` are also refused blank or whitespace-only then, through the one rule both
+  run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since neither
+  can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker token
+  (`agentSecretsTokenSecret`, a Secret Manager resource path read through a second
+  SecretProviderClass, with its own per-secret accessor member) and the GitHub App key
+  (`appPrivateKeySecretName` and `appPrivateKeySecretKey`, a Kubernetes Secret GKE SecretSync
+  creates at run time, which the component never parses, creates or waits on) enter by reference,
+  so their values never enter the component or Pulumi state
+  (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`); the GitHub App's four inputs come together,
+  each missing one named (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
+  inside the `ApplyT` that renders the listener container's environment, where core's `Env`
+  refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
+  `natsUrl`, each a `core.InputError` naming it, wrapped with the component's type and name and
+  never a panic (`gcp.dispatchListenerEnv`, `TestDispatchRefusesABadNatsURLOnceItResolves`).
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
@@ -164,8 +199,8 @@ versions. Never add the module to the root `go.work`.
   `gcp/tailnet_joined_test.go` and `gcp/data_disk_test.go` run the secret fetcher, the listener's
   seed script, the joined script and the data disk's bootcmd entry as the golden holds them, so a
   change to any of them is tested there.
-- **Permission sets.** `core/permissions.go` builds the listener, session and host sets from names
-  that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
+- **Permission sets.** `core/permissions.go` builds the listener, session, host and Dispatch sets
+  from names that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
   `packages/envoy/daemonpermissions.Grant`, which builds the daemon's shared grant from those same
   names so its real-NATS proof and the hub cannot diverge. The plugin and the command compile only
   `daemonpermissions`, `internal/bus` and `internal/contracts` from Envoy (`go list -deps ./cmd/...`),
@@ -271,8 +306,14 @@ nothing the set allows; without the durable's consumer create, the listener neve
 the server's `no_auth_user` holding `SessionPermissions`, registers, receives a send, a role
 message and a publish to an ad-hoc topic, and is refused a publish to another session's subject; and a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
-The
-`envoy-infra-go` job in
+`core/dispatch_permissions_live_test.go` also starts `testpg.Image`, builds and runs the real
+`envoy-dispatch` against `DispatchPermissions`, with the test client connected as a second user of
+its own (`testClientPermissions`, the session set plus the exact calls its checks make), and proves
+both delivery durables (each binds and acknowledges a message), the outbox's owner-topic JetStream
+publish, the agent stream relay, Dispatch creating the redelivery bucket, which the test client
+then reads and writes, and that Dispatch's own user is refused a publish to a session's frames; its
+negative control removes the delivery durable's filtered create permission and receives that server
+violation alone. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
