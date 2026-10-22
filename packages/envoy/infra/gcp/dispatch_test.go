@@ -354,7 +354,8 @@ func TestDispatchRegistersItsCloudResources(t *testing.T) {
 }
 
 // The accessor's member is a principal in the cluster's Workload Identity pool, which Google
-// creates with the cluster; IAM refuses a member of a pool that does not exist yet.
+// creates with the cluster; IAM may refuse a member of a pool that does not exist yet (unproven:
+// the plan's hardening ledger), so the grant waits for the cluster.
 func TestDispatchSeedAccessorWaitsForTheCluster(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)

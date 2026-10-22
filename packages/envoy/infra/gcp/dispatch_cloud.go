@@ -152,13 +152,14 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 		return nil, err
 	}
 	// The principal lives in the cluster's Workload Identity pool, which Google creates with the
-	// cluster; IAM may refuse a member of a pool that does not exist yet (unproven: the plan's
-	// hardening ledger). It is built from the cluster's own WorkloadIdentityConfig, so it
-	// resolves only once the pool exists. The
-	// component's own seed grant below waits for it that way. A consumer's grant taken from the
-	// `principal` output resolves later still, once every child has registered, the app
-	// Deployment's readiness wait included, and that wait needs roles/cloudsql.client already
-	// granted: the consumer grants it from the principal's known form, not from the output.
+	// cluster. It is built from the cluster's own WorkloadIdentityConfig, so it resolves only once
+	// the pool exists, and the component's own seed grant below, built from it, waits for the
+	// cluster: IAM may refuse a member of a pool that does not exist yet (unproven: the plan's
+	// hardening ledger). A consumer's grant taken from the `principal` output would resolve later
+	// still, once every child has registered, the app Deployment's readiness wait included, and
+	// that wait needs roles/cloudsql.client already granted, so the consumer grants that role from
+	// the principal's known form, not from the output; whether IAM accepts it before the pool
+	// exists is the same unproven question.
 	principal := pulumi.All(project.Number(), cluster.WorkloadIdentityConfig.WorkloadPool()).ApplyT(func(values []interface{}) (string, error) {
 		number, err := outputString(values[0])
 		if err != nil {
