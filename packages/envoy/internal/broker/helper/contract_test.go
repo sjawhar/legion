@@ -55,27 +55,35 @@ type contractRig struct {
 	srv          *Server
 	sock         string
 	sessionsPath string
+	machineFile  string
 	logBuf       *syncBuffer
 	cancel       context.CancelFunc
 }
 
-// newContractRig mounts a real broker (brokertest.NewRig, with options) and serves this package's
-// own Server on a real unix socket, its Broker pointed at that real broker's URL and OperatorFile,
-// both logging to logBuf through one logger, as cmd/agent-secrets-helper wires them. Every
-// socket/registry/operator artifact lives under its own TempDir, never under $HOME — the caller
-// is expected to have set HOME to a separate, otherwise-untouched TempDir of its own so it can
-// later assert nothing wrote there.
+// newContractRig mounts a real broker (brokertest.NewRig, with options) and serves a helper
+// against it (startContractHelper) with a machine file of its own.
 func newContractRig(t *testing.T, options ...brokertest.Option) *contractRig {
 	t.Helper()
-	broker := brokertest.NewRig(t, options...)
+	return startContractHelper(t, brokertest.NewRig(t, options...), filepath.Join(t.TempDir(), "agent-secrets", "machine.json"), http.DefaultClient)
+}
+
+// startContractHelper serves this package's own Server on a real unix socket, its Broker pointed
+// at broker's URL and OperatorFile, keeping its login at machineFile and sending its broker calls
+// through client, both logging to logBuf through one logger, and starts it as
+// cmd/agent-secrets-helper does: the Broker resumes any login machineFile holds, then the Server
+// recovers its sessions and listens. Every socket/registry/operator artifact lives under its own
+// TempDir, never under $HOME — the caller is expected to have set HOME to a separate,
+// otherwise-untouched TempDir of its own so it can later assert nothing wrote there.
+func startContractHelper(t *testing.T, broker *brokertest.Rig, machineFile string, client *http.Client) *contractRig {
+	t.Helper()
 	artifacts := t.TempDir()
 	logBuf := &syncBuffer{}
 	sessionsPath := filepath.Join(artifacts, "sessions.json")
-	cr := &contractRig{broker: broker, sessionsPath: sessionsPath, logBuf: logBuf}
+	cr := &contractRig{broker: broker, sessionsPath: sessionsPath, machineFile: machineFile, logBuf: logBuf}
 	log := slog.New(slog.NewTextHandler(logBuf, nil))
 	cr.srv = &Server{
 		Registry: NewRegistry(sessionsPath),
-		Broker:   &Broker{URL: broker.URL, OperatorFile: broker.OperatorFile, HTTP: http.DefaultClient, Log: log},
+		Broker:   &Broker{URL: broker.URL, OperatorFile: broker.OperatorFile, MachineFile: machineFile, HTTP: client, Log: log},
 		Hostname: "contract-test-host",
 		PeerOf:   PeerOf,
 		Log:      log,
@@ -99,9 +107,24 @@ func newContractRig(t *testing.T, options ...brokertest.Option) *contractRig {
 		cancel()
 		<-served
 	})
+	if err := cr.srv.Broker.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
 	cr.srv.Recover(ctx)
 	go func() { defer close(served); _ = cr.srv.Serve(ctx, ln) }()
 	return cr
+}
+
+// login logs cr's helper in, has the rig's operator approve it, and waits for the credential.
+func (cr *contractRig) login(t *testing.T) string {
+	t.Helper()
+	code, err := cr.srv.Broker.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, cr.srv.Broker)
+	return credentialID
 }
 
 func (cr *contractRig) call(t *testing.T, req Request) Response {
@@ -113,9 +136,9 @@ func (cr *contractRig) call(t *testing.T, req Request) Response {
 	return resp
 }
 
-// waitForIssued blocks until the background login poller (pollLogin's 2s->10s backoff) installs
-// the machine credential, or fails the test — longer than the package's own waitFor, since a
-// real broker round trip plus that backoff can outrun a 2 s deadline.
+// waitForIssued blocks until the background login poller (pollLogin, at the broker's 5 s
+// interval) installs the machine credential, or fails the test — longer than the package's own
+// waitFor, since a real broker round trip plus that interval can outrun a 5 s deadline.
 func waitForIssued(t *testing.T, b *Broker) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -152,8 +175,8 @@ func contractDecode[T any](t *testing.T, body []byte) T {
 // enrolls kind session -> sign produces a proof the real broker's own /v1/enrollments/self
 // accepts -> the launcher credential is expired by direct SQL -> the next EnrollSessionKey names the login command
 // again. It also proves the machine key, the session key, and every proof this test produced
-// never touch disk (neither an arbitrary $HOME nor the registry's own persisted sessions.json
-// state file) or a log line.
+// never reach a log line or the registry's own persisted sessions.json state file, and that
+// nothing is written under $HOME but the machine file the Broker names (here outside it).
 func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

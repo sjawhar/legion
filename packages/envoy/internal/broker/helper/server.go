@@ -699,21 +699,22 @@ func (s *Server) save() {
 	}
 }
 
-// Recover runs at start: every recorded session whose process is still the same incarnation is
-// pinned again with a fresh key and adopted (enrolled and exit-watched); a recorded process that
-// is gone just has its enrollment revoked. A re-pinned session takes its recorded enrollment as
-// its lapsed id (setLapsed), so its own enrollLoop revokes that id before enrolling the fresh
-// key, exactly as after a refused renew: the real broker's idempotent-enroll conflict is keyed on
-// (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of the old row's revoke
-// can be refused outright (409 ALREADY_ENROLLED) even though it carries a fresh key. While the
+// Recover runs at start, after the Broker has resumed any machine login it keeps (Broker.Start):
+// every recorded session whose process is still the same incarnation is pinned again with a fresh
+// key and adopted (enrolled and exit-watched); a recorded process that is gone just has its
+// enrollment revoked. A re-pinned session takes its recorded enrollment as its lapsed id
+// (setLapsed), so its own enrollLoop revokes that id before enrolling the fresh key, exactly as
+// after a refused renew: the real broker's idempotent-enroll conflict is keyed on
+// (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of the old row's revoke can
+// be refused outright (409 ALREADY_ENROLLED) even though it carries a fresh key. While the
 // re-pinned session lives, the lapsed id is on its record from the save below until the revoke
-// lands, so a second restart before then — a restart discards the launcher credential, so before
-// the next login no revoke can succeed — still revokes it. That revoke runs inside the one
-// goroutine adopt starts for the re-pinned session, never on this loop's own goroutine, so one
-// session waiting on its own revoke never blocks Recover from moving on to the next recorded
-// session. Should that session end while the revoke is still retrying, its record goes with it,
-// and revokeLapsed hands the id to the bounded independent revoke; before a login those three
-// tries cannot succeed either, and the id ends with its lease (see revokeLapsed's doc comment).
+// lands, so a second restart before then — with no machine login kept on disk, no revoke can
+// succeed before the next login — still revokes it. That revoke runs inside the one goroutine
+// adopt starts for the re-pinned session, never on this loop's own goroutine, so one session
+// waiting on its own revoke never blocks Recover from moving on to the next recorded session.
+// Should that session end while the revoke is still retrying, its record goes with it, and
+// revokeLapsed hands the id to the bounded independent revoke; with no login those three tries
+// cannot succeed either, and the id ends with its lease (see revokeLapsed's doc comment).
 func (s *Server) Recover(ctx context.Context) {
 	recs, err := LoadRecords(s.Registry.path)
 	if err != nil {

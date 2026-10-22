@@ -5,7 +5,9 @@ package helper
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -59,12 +63,14 @@ const failAlways = 1 << 30
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
 // claim instead of a bearer token: enrollUnauthorizedNext simulates an
 // expired or revoked credential (401 LAUNCHER_INVALID) independent of failFirst's unrelated 503.
-// The fake also serves the machine-login routes a Broker.Login talks to: POST
-// /v1/launcher-credentials verifies the posted request object with record.VerifyRequestObject and
-// mints a pending id and confirmation code; GET /v1/launcher-credentials/{pending} answers
-// loginOutcome ("issued" by default, or "denied"/"expired" when a test sets it before Login, or
-// "pending" to hold the login undecided until the test sets "issued"), minting a fresh credential
-// id on "issued".
+// The fake also serves the OAuth device grant a Broker.Login talks to: POST
+// /v1/oauth/device_authorization verifies the posted request object with
+// record.VerifyRequestObject and that dpop_jkt is its key, and mints a device code and user code;
+// POST /v1/oauth/token requires a DPoP proof of that key on every call and answers the device code
+// grant with loginOutcome ("issued" by default, or "denied"/"expired" when a test sets it before
+// Login, or "pending" to hold the login undecided until the test sets "issued"), minting a fresh
+// credential id on "issued", and the refresh grant with refreshOutcome ("" rotates the refresh
+// token and moves the expiry, "invalid_grant" refuses it, "unavailable" answers 503).
 type fakeBroker struct {
 	mu               sync.Mutex
 	srv              *httptest.Server
@@ -90,16 +96,20 @@ type fakeBroker struct {
 	lastProof              string // the Proof header the most recent Enroll call carried
 	lastProofURL           string // the exact URL that Proof header was signed for
 
-	lastLoginRequest   string // the compact request object the most recent POST /v1/launcher-credentials carried
+	lastLoginRequest   string // the compact request object the most recent device authorization carried
 	pendingThumbprint  string // the embedded key's thumbprint from that request object
-	pendingID          string // the opaque id minted for the most recent login
-	pendingCode        string // the confirmation code minted for the most recent login
-	loginOutcome       string // what the pending login's poll answers: "issued", "pending", "denied", or "expired"
+	deviceCode         string // the device code minted for the most recent login
+	pendingCode        string // the user code minted for the most recent login
+	loginOutcome       string // what the device code grant answers: "issued", "pending", "denied", or "expired"
 	issuedCredentialID string // the launcher credential id minted for the most recent "issued" login
-	// loginLifetime is how long an issued credential lives: the poll answers expires_at that far
-	// past the poll, a week unless a test shortens it; zero answers no expires_at, as a broker from
-	// before it does.
-	loginLifetime time.Duration
+	// loginLifetime is how long an issued or refreshed credential lives: the token answer names
+	// credential_expires_at that far past it, a week unless a test shortens it; zero names none, a
+	// token answer the helper cannot keep.
+	loginLifetime  time.Duration
+	refreshTokens  map[string]string // live refresh token -> the credential it refreshes
+	refreshOutcome string            // what the refresh grant answers: "" (rotate), "invalid_grant", or "unavailable"
+	refreshes      int               // refresh grants answered
+	tokens         int               // tokens minted, for unique values
 
 	// refuseRenewNext answers the next N renews 401. renewRefusalCode defaults to
 	// ENROLLMENT_NOT_LIVE, the current broker's terminal renewal verdict; a test names
@@ -136,7 +146,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	f := &fakeBroker{
 		enrolled: map[string]string{}, byTP: map[string]string{}, runtimeIDToID: map[string]string{},
 		leaseExpiry: map[string]time.Time{}, seen: map[string]bool{}, lease: 900 * time.Second,
-		loginOutcome: "issued", loginLifetime: 7 * 24 * time.Hour,
+		loginOutcome: "issued", loginLifetime: 7 * 24 * time.Hour, refreshTokens: map[string]string{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
@@ -306,49 +316,120 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		f.leaseExpiry[id] = lease
 		writeJSON(w, 200, map[string]string{"lease_expires_at": lease.UTC().Format(time.RFC3339Nano)})
 	})
-	mux.HandleFunc("POST /v1/launcher-credentials", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/oauth/device_authorization", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		var body struct {
-			Request string `json:"request"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		f.lastLoginRequest = body.Request
-		ro, err := record.VerifyRequestObject(body.Request, f.srv.URL, time.Minute, time.Now())
-		if err != nil {
-			writeJSON(w, 400, map[string]string{"code": "INVALID_REQUEST", "error": err.Error()})
+		_ = r.ParseForm()
+		f.lastLoginRequest = r.PostForm.Get("request")
+		ro, err := record.VerifyRequestObject(f.lastLoginRequest, f.srv.URL, time.Minute, time.Now())
+		if err != nil || r.PostForm.Get("client_id") != oauthClientID || r.PostForm.Get("dpop_jkt") != ro.Thumbprint {
+			writeJSON(w, 400, map[string]string{"error": "invalid_request", "error_description": fmt.Sprintf("REQUEST_INVALID: %v", err)})
 			return
 		}
 		f.pendingThumbprint = ro.Thumbprint
 		f.next++
-		f.pendingID = fmt.Sprintf("pending-%d", f.next)
+		f.deviceCode = fmt.Sprintf("device-%d", f.next)
 		f.pendingCode = fakeConfirmationCode()
-		writeJSON(w, http.StatusAccepted, map[string]string{"pending_id": f.pendingID, "code": f.pendingCode})
+		writeJSON(w, 200, map[string]any{"device_code": f.deviceCode, "user_code": f.pendingCode, "verification_uri": f.srv.URL, "expires_in": 900, "interval": 1})
 	})
-	mux.HandleFunc("GET /v1/launcher-credentials/{pending}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if r.PathValue("pending") != f.pendingID {
-			w.WriteHeader(404)
+		_ = r.ParseForm()
+		oauthError := func(status int, code string) { writeJSON(w, status, map[string]string{"error": code}) }
+		if r.PostForm.Get("client_id") != oauthClientID {
+			oauthError(401, "invalid_client")
 			return
 		}
-		switch f.loginOutcome {
-		case "denied", "expired", "pending":
-			writeJSON(w, 200, map[string]string{"state": f.loginOutcome})
-			return
-		default:
+		switch r.PostForm.Get("grant_type") {
+		case "urn:ietf:params:oauth:grant-type:device_code":
+			if r.PostForm.Get("device_code") != f.deviceCode {
+				oauthError(400, "invalid_grant")
+				return
+			}
+			if !dpopProves(r, f.srv.URL+"/v1/oauth/token", f.pendingThumbprint) {
+				oauthError(400, "invalid_dpop_proof")
+				return
+			}
+			switch f.loginOutcome {
+			case "pending":
+				oauthError(400, "authorization_pending")
+				return
+			case "denied":
+				oauthError(400, "access_denied")
+				return
+			case "expired":
+				oauthError(400, "expired_token")
+				return
+			}
 			f.next++
 			f.issuedCredentialID = fmt.Sprintf("lcred-%d", f.next)
-			issued := map[string]string{"state": "issued", "credential_id": f.issuedCredentialID}
-			if f.loginLifetime != 0 {
-				issued["expires_at"] = time.Now().Add(f.loginLifetime).UTC().Format(time.RFC3339Nano)
+			f.deviceCode = "" // a device code is spent by the grant it issues
+			f.writeTokens(w, f.issuedCredentialID)
+		case "refresh_token":
+			id, ok := f.refreshTokens[r.PostForm.Get("refresh_token")]
+			if !ok || !dpopProves(r, f.srv.URL+"/v1/oauth/token", f.pendingThumbprint) {
+				oauthError(400, "invalid_grant")
+				return
 			}
-			writeJSON(w, 200, issued)
+			f.refreshes++
+			switch f.refreshOutcome {
+			case "invalid_grant":
+				oauthError(400, "invalid_grant")
+				return
+			case "unavailable":
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			delete(f.refreshTokens, r.PostForm.Get("refresh_token"))
+			f.writeTokens(w, id)
+		default:
+			oauthError(400, "unsupported_grant_type")
 		}
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// writeTokens answers a token grant for credentialID with a fresh access and refresh token and
+// the credential's extras, keeping the refresh token as the one that credential's next refresh
+// spends. With loginLifetime zero it names no expiry. The caller holds f.mu.
+func (f *fakeBroker) writeTokens(w http.ResponseWriter, credentialID string) {
+	f.tokens++
+	refresh := fmt.Sprintf("refresh-%d", f.tokens)
+	f.refreshTokens[refresh] = credentialID
+	answer := map[string]any{
+		"access_token": fmt.Sprintf("access-%d", f.tokens), "token_type": "DPoP", "expires_in": 900,
+		"refresh_token": refresh, "credential_id": credentialID,
+	}
+	if f.loginLifetime != 0 {
+		answer["credential_expires_at"] = time.Now().Add(f.loginLifetime).UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, 200, answer)
+}
+
+// dpopProves reports whether r carries a DPoP proof for POST htu signed by the key whose
+// thumbprint is thumbprint.
+func dpopProves(r *http.Request, htu, thumbprint string) bool {
+	sig, err := jose.ParseSigned(r.Header.Get("DPoP"), []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil || sig.Signatures[0].Protected.JSONWebKey == nil {
+		return false
+	}
+	jwk := sig.Signatures[0].Protected.JSONWebKey
+	payload, err := sig.Verify(jwk)
+	if err != nil {
+		return false
+	}
+	sum, err := jwk.Thumbprint(crypto.SHA256)
+	if err != nil || base64.RawURLEncoding.EncodeToString(sum) != thumbprint {
+		return false
+	}
+	var c struct {
+		HTM string `json:"htm"`
+		HTU string `json:"htu"`
+	}
+	return json.Unmarshal(payload, &c) == nil && c.HTM == http.MethodPost && c.HTU == htu
 }
 
 // fakeConfirmationCode mints an 8-symbol confirmation code as XXXX-XXXX, matching the shape (if
@@ -419,12 +500,18 @@ func operatorFile(t *testing.T, operator string) string {
 	return of
 }
 
+// machineFilePath is a machine file path in a fresh temp directory, for a test Broker's MachineFile.
+func machineFilePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "agent-secrets", "machine.json")
+}
+
 // loggedInBroker builds a Broker against f, logs it in against the fake's default "issued"
 // outcome, and waits for the credential to install, so a test can exercise Enroll/Renew/Revoke
 // without exercising Login itself.
 func loggedInBroker(t *testing.T, f *fakeBroker, operator string) *Broker {
 	t.Helper()
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, operator), HTTP: f.srv.Client()}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, operator), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -432,11 +519,12 @@ func loggedInBroker(t *testing.T, f *fakeBroker, operator string) *Broker {
 	return b
 }
 
-// waitFor polls cond until it is true or 2s pass, whichever comes first, failing the test on
-// timeout.
+// waitFor polls cond until it is true or 5s pass, whichever comes first, failing the test on
+// timeout. A login's first token poll comes a second after its device authorization (the
+// interval the fake names).
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -446,9 +534,9 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("condition never became true")
 }
 
-func TestLoginHoldsTheKeyInMemoryAndEnrollSignsLauncherProofs(t *testing.T) {
-	f := newFakeBroker(t) // records the login request object; issues after one poll
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
+func TestLoginHoldsTheKeyAndEnrollSignsLauncherProofs(t *testing.T) {
+	f := newFakeBroker(t) // records the login request object; issues on the first poll
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	code, err := b.Login(context.Background(), "example-host-devbox")
 	if err != nil || !regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`).MatchString(code) {
 		t.Fatalf("code %q err %v", code, err)
@@ -474,12 +562,14 @@ func TestLoginHoldsTheKeyInMemoryAndEnrollSignsLauncherProofs(t *testing.T) {
 // TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand covers the fail-closed contract:
 // Enroll before any Login names the login command; once a broker 401 LAUNCHER_INVALID clears the
 // credential (expired or revoked), the very next Enroll names it again, with no auto-relogin. The
-// machine key and credential id are asserted to never touch disk by walking a temp HOME.
+// refusal keeps the machine file, since the broker answers it for clock skew or a URL mismatch as
+// well, and the next start's refresh settles whether the login still stands; nothing else is
+// written under HOME.
 func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	f := newFakeBroker(t)
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
 	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
@@ -506,6 +596,9 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("cleared credential: expected the remedy again, got %v", err)
 	}
+	if _, err := LoadMachineFile(b.MachineFile); err != nil {
+		t.Fatalf("a 401 LAUNCHER_INVALID must keep the machine file: %v", err)
+	}
 
 	files := 0
 	if err := filepath.WalkDir(home, func(_ string, d fs.DirEntry, err error) error {
@@ -520,7 +613,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	if files != 0 {
-		t.Fatalf("the machine key and credential id must never touch disk; found %d file(s) under HOME", files)
+		t.Fatalf("nothing but the machine file may be written; found %d file(s) under HOME", files)
 	}
 }
 
@@ -630,7 +723,7 @@ func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.
 // fresh rather than reusing the denied/expired attempt's key.
 func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 	f := newFakeBroker(t)
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 
 	f.mu.Lock()
 	f.loginOutcome = "denied"

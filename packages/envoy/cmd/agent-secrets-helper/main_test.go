@@ -61,12 +61,32 @@ func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Socket != "/run/user/7/agent-secrets/helper.sock" || cfg.StatePath != "/run/user/7/agent-secrets/sessions.json" ||
-		cfg.OperatorFile != "/home/u/.config/agent-secrets/operator" {
+		cfg.OperatorFile != "/home/u/.config/agent-secrets/operator" || cfg.MachineFile != "/home/u/.config/agent-secrets/machine.json" {
 		t.Fatalf("defaults: %+v", cfg)
 	}
-	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock"}))
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock", "AGENT_SECRETS_MACHINE_FILE": "/tmp/x/m.json"}))
 	if cfg.StatePath != "/tmp/x/sessions.json" {
 		t.Fatalf("state sits beside the socket: %q", cfg.StatePath)
+	}
+	if cfg.MachineFile != "/tmp/x/m.json" {
+		t.Fatalf("AGENT_SECRETS_MACHINE_FILE must name the machine file: %q", cfg.MachineFile)
+	}
+}
+
+// TestServeRefusesAMachineFileThatDoesNotParse: a machine file that is there but is not a machine
+// login stops serve before it listens, naming the file, rather than serving with no login.
+func TestServeRefusesAMachineFileThatDoesNotParse(t *testing.T) {
+	dir := t.TempDir()
+	machineFile := filepath.Join(dir, "machine.json")
+	if err := os.WriteFile(machineFile, []byte("not a login"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{URL: "https://s", Socket: dir + "/h.sock", OperatorFile: dir + "/none", MachineFile: machineFile, StatePath: dir + "/s.json"}
+	if err := serve(cfg); err == nil || !strings.Contains(err.Error(), machineFile) {
+		t.Fatalf("serve on an unreadable machine file: %v; want an error naming %s", err, machineFile)
+	}
+	if _, err := os.Stat(cfg.Socket); err == nil {
+		t.Fatal("serve listened despite the unreadable machine file")
 	}
 }
 
@@ -75,7 +95,7 @@ func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 // OperatorFile does not stop it from listening and answering `sessions` either.
 func TestServeStartsWithoutCredentialAndAnswersSessions(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config{URL: "https://s", Socket: dir + "/h.sock", OperatorFile: dir + "/none", StatePath: dir + "/s.json"}
+	cfg := config{URL: "https://s", Socket: dir + "/h.sock", OperatorFile: dir + "/none", MachineFile: dir + "/machine.json", StatePath: dir + "/s.json"}
 	done := make(chan error, 1)
 	go func() { done <- serve(cfg) }()
 	t.Cleanup(func() {
@@ -103,8 +123,9 @@ func TestServeStartsWithoutCredentialAndAnswersSessions(t *testing.T) {
 	}
 }
 
-// fakeBroker answers the broker routes a logged-in helper calls: a machine login that issues at
-// once with a week's expiry, enrollments, and revokes.
+// fakeBroker answers the broker routes a logged-in helper calls: a machine login, as an OAuth
+// device grant, that issues on the first token poll with a week's expiry, enrollments, and
+// revokes.
 func fakeBroker(t *testing.T) *httptest.Server {
 	t.Helper()
 	reply := func(w http.ResponseWriter, status int, v any) {
@@ -114,11 +135,12 @@ func fakeBroker(t *testing.T) *httptest.Server {
 	}
 	var enrollments atomic.Int64
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/launcher-credentials", func(w http.ResponseWriter, _ *http.Request) {
-		reply(w, http.StatusAccepted, map[string]string{"pending_id": "pending-1", "code": "KQ7M-X4PZ"})
+	mux.HandleFunc("POST /v1/oauth/device_authorization", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, http.StatusOK, map[string]any{"device_code": "device-1", "user_code": "KQ7M-X4PZ", "verification_uri": "https://s", "expires_in": 900, "interval": 1})
 	})
-	mux.HandleFunc("GET /v1/launcher-credentials/pending-1", func(w http.ResponseWriter, _ *http.Request) {
-		reply(w, http.StatusOK, map[string]string{"state": "issued", "credential_id": "lcred-1", "expires_at": time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)})
+	mux.HandleFunc("POST /v1/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, http.StatusOK, map[string]any{"access_token": "access-1", "token_type": "DPoP", "expires_in": 900, "refresh_token": "refresh-1",
+			"credential_id": "lcred-1", "credential_expires_at": time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)})
 	})
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, _ *http.Request) {
 		reply(w, http.StatusCreated, map[string]string{"enrollment_id": fmt.Sprintf("enr-%d", enrollments.Add(1)), "lease_expires_at": time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339Nano)})
@@ -157,7 +179,7 @@ func registerChild(t *testing.T, sock string) {
 // `pkill -f "agent-secrets-helper serve"` matches the unit's helper too) stops the helper as
 // systemd's own stop does, with exit 0, since a non-zero exit would leave every stop failed. The
 // unit's journal then says only that it ended, so the helper's last line names the signal, how
-// many sessions it had and that it held a launcher credential, which the next start does not.
+// many sessions it had and that it held a launcher credential.
 func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
 	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {

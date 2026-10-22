@@ -83,12 +83,12 @@ func cmdMachineLogin(args []string, stdout, stderr io.Writer) int {
 // unapproved or is still pending leaves the credential an earlier login installed in place, and
 // the helper keeps enrolling sessions with it, so that still prints "issued" and exits 0, and
 // stderr names the most recent login and its code. While a credential is held, stderr also says
-// when it expires and how long that is from now: the broker mints no renewal, so before then a
-// new machine login a human approves must replace it (the helper warns in its journal a day ahead
-// and drops the credential at that moment). A helper or broker from before the expiry was
-// reported gets a line saying it is unknown. A helper from before credential_held reports
-// only the most recent login, which reads "issued" exactly while its credential is held. The
-// helper reports a credential it dropped, because the broker refused it or it reached its expiry,
+// that the login renews itself and when it lapses if no refresh reaches the broker, and how long
+// that is from now (the helper refreshes it daily, warns in its journal a day before that moment,
+// and drops the credential then). A helper or broker from before the expiry was reported gets a
+// line saying it is unknown. A helper from before credential_held reports only the most recent
+// login, which reads "issued" exactly while its credential is held. The helper reports a
+// credential it dropped, because the broker refused it or its refresh or it reached its expiry,
 // as "expired", the word the dotfiles launcher gate matches, until a login starts or settles (a
 // login still pending reads "pending"). Every answer with no credential says on stderr why, in
 // the words the helper's journal uses for the same answer (helper.NoCredentialReason): the cause
@@ -142,7 +142,9 @@ func cmdMachineLoginStatus(args []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
-// credentialExpiry is login-status's line about when the held launcher credential expires.
+// credentialExpiry is login-status's line about when the held launcher credential lapses: the
+// machine login renews itself while the helper's refresh reaches the broker, so the time is when
+// it lapses only if no refresh does.
 func credentialExpiry(expiresAt string, now time.Time) string {
 	if expiresAt == "" {
 		return "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)"
@@ -155,7 +157,7 @@ func credentialExpiry(expiresAt string, now time.Time) string {
 	if left <= 0 {
 		return fmt.Sprintf("the launcher credential expired at %s; run: agent-secrets machine login", expiresAt)
 	}
-	return fmt.Sprintf("the launcher credential expires at %s (in %s); the broker has no renewal, so a new machine login a human approves must replace it before then", expiresAt, roughDuration(left))
+	return fmt.Sprintf("the machine login renews itself; without a refresh it lapses at %s (in %s)", expiresAt, roughDuration(left))
 }
 
 // roughDuration is d to the minute, with days: 6d23h59m, 3h5m, 0m.

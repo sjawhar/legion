@@ -52,9 +52,9 @@ type Response struct {
 	State               string        `json:"state,omitempty"`                 // register: enrolling | enrolled
 	LoginState          string        `json:"login_state,omitempty"`           // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
 	CredentialHeld      bool          `json:"credential_held,omitempty"`       // login-status: the helper holds a launcher credential, whatever the most recent login's state
-	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential expires; empty while none is held or its broker did not say
-	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it, or it reached the expiry the broker named), and no login has started or settled since
-	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused or dropExpired); a helper from before this field sends LoginRefused alone
+	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential lapses without a refresh; empty while none is held
+	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it or its refresh, or it reached its expiry), and no login has started or settled since
+	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused, dropRefreshRefused or dropExpired); a helper from before this field sends LoginRefused alone
 	LeaseExpires        string        `json:"lease_expires,omitempty"`         // enroll-session-key: RFC3339Nano
 	Proof               string        `json:"proof,omitempty"`                 // sign: a session proof; sign-launcher: a launcher proof of the machine credential
 	CredentialID        string        `json:"credential_id,omitempty"`         // sign-launcher: the machine credential the proof names, so a machine revoke can tell this machine's own login
@@ -69,8 +69,11 @@ type Response struct {
 const (
 	// dropRefused: the broker answered a launcher proof 401 LAUNCHER_INVALID (clearOnInvalid).
 	dropRefused = "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"
-	// dropExpired: the credential reached the expiry the broker named when it issued it
-	// (watchExpiry).
+	// dropRefreshRefused: the broker answered the machine login's refresh invalid_grant
+	// (Broker.refresh), and the helper deleted its machine file.
+	dropRefreshRefused = "the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh token was reused"
+	// dropExpired: the credential reached the expiry the broker last named, with no refresh moving
+	// it (watchExpiry).
 	dropExpired = "the launcher credential reached its expiry"
 )
 
@@ -94,7 +97,7 @@ func NoCredentialReason(loginState string, refused bool, dropped string) string 
 	case loginState == "expired":
 		return "the most recent machine login expired before anyone approved it"
 	case loginState == "":
-		return "no machine login since the helper started; a restart discards the launcher credential"
+		return "no machine login since the helper started, and none kept on this machine"
 	default:
 		return "the most recent machine login is " + loginState
 	}

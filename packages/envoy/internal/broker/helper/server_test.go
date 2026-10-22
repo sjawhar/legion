@@ -54,7 +54,7 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 	}
 	r.srv = &Server{
 		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client(), Log: log},
+		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
 		Hostname: "testhost",
 		Log:      log,
 		MinRenew: 50 * time.Millisecond,
@@ -431,7 +431,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	// A second helper on the same state and the same fake broker.
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -551,7 +551,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -654,7 +654,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	r.fake.revokeFailFirst = failAlways
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -904,9 +904,8 @@ func TestUnregisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T
 }
 
 // delayingTransport delays a request whose path contains match, letting a test hold the fake's
-// GET /v1/launcher-credentials/{pending} poll open long enough to observe a machine login sit
-// "pending" — the fake otherwise answers "issued" on its very first poll, closing that window
-// before a second socket round trip could ever land inside it.
+// token endpoint poll open long enough to observe a machine login sit "pending" past a second
+// socket round trip.
 type delayingTransport struct {
 	http.RoundTripper
 	delay time.Duration
@@ -933,7 +932,7 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *t
 	r.srv.Broker.HTTP = &http.Client{Transport: &delayingTransport{
 		RoundTripper: r.fake.srv.Client().Transport,
 		delay:        300 * time.Millisecond,
-		match:        "/v1/launcher-credentials/",
+		match:        "/v1/oauth/token",
 	}}
 	before := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"})
 	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets machine login") {
