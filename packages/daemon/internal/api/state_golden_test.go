@@ -27,9 +27,160 @@ func goldenPath(name string) string {
 	return filepath.Join("..", "..", "..", "contracts", "fixtures", "daemon-api", name)
 }
 
+// settingsFixtureFile is the maximal kubernetes legion.yaml the state golden and the settings tests
+// share: every key the loader models is set, and every value a credential, its source or its file
+// could be is a planted fixture a test can look for in the wire bytes (a PEM that is no key, a DSN
+// password that opens nothing, `*_file` paths, the kubeconfig, the session DSN secret's key, each
+// provider key's store key, the pod's env values, volume, Secret and ServiceAccount names, userinfo
+// on `envoy_url` and the first `nats_urls` entry, which the settings mask, and userinfo and a query
+// on `plugins.pi_envoy`'s tarball URL, which the settings mask and drop while `pi_legion` pins the
+// version form). Every path the settings emit (`state_dir`, `instructions`) is a fixed absolute
+// literal, so the golden does not churn with the temporary directory the file is written under.
+// Hosts are placeholders.
+const settingsFixtureFile = `project: LEGION
+port: 13370
+bind: 0.0.0.0
+advertise_host: legion-daemon.internal.example
+postgres_dsn: postgres://legion:fixture-dsn-password@postgres.internal.example:5432/legion
+state_dir: /var/lib/legion
+admission_cap: 4
+daemon_url: http://legion-daemon.internal.example:13370
+worker_stream_port: 13371
+provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY_FIXTURE, GEMINI_API_KEY: GEMINI_API_KEY_FIXTURE}
+instructions: /etc/legion/deployment-instructions.md
+worker_boot_timeout_seconds: 180
+worker_boot_registration_deadline_intervals: 2
+worker_rpc_timeout_seconds: 8
+worker_stop_timeout_seconds: 30
+tree_stop_timeout_seconds: 90
+slow_command_timeout_seconds: 600
+probe_interval_seconds: 20
+controller_wake_interval_seconds: 1800
+launch_failure_limit: 4
+prompt_failure_limit: 5
+prompt_retire_limit: 3
+operator_token_file: /var/run/legion/OPERATOR_TOKEN
+envoy_url: http://legion:fixture-envoy-password@envoy-listener.internal.example:9020
+nats_urls: [nats://legion:fixture-nats-password@nats.internal.example:4222, nats://nats-2.internal.example:4222]
+envoy_token_file: /var/run/legion/ENVOY_TOKEN
+nats_nkey_seed_file: /var/run/legion/NATS_NKEY_SEED
+nats_daemon_nkey_seed_file: /var/run/legion/NATS_DAEMON_NKEY_SEED
+dispatch_url: https://dispatch.internal.example
+dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
+projects:
+  LEGION:
+    slack_channels: [C0123ABCD, C0123ABCE]
+  WIDGETS:
+    merge_queue_role: merge-queue
+    merge:
+      by_hand: ['^deploy/', '\.sql$']
+gates:
+  design: root-issues
+github_apps:
+  implement:
+    app_id: "1001"
+    private_key: |
+      -----BEGIN PRIVATE KEY-----
+      fixture
+      -----END PRIVATE KEY-----
+    installations: {sjawhar: "2001", acme: "2002"}
+  review:
+    app_id: "1002"
+    private_key: |
+      -----BEGIN PRIVATE KEY-----
+      fixture
+      -----END PRIVATE KEY-----
+    installations: {sjawhar: "2003"}
+linger_hours: 1.5
+production_check_hours: 240
+review_round_cap: 4
+max_fix_attempts: 5
+controller: daemon
+worker_backends: {tester: omp}
+capabilities:
+  decided:
+    pool-capacity: "the pool is sized by hand for the admission cap"
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    storage_class: gp3
+    issue_volume: 30Gi
+    kubeconfig: /etc/legion/kubeconfig
+    context: legion-daemon@fixture-cluster
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN_FIXTURE
+    scheduling:
+      node_selector: {node.kubernetes.io/instance-type: m7i.xlarge}
+      tolerations:
+        - {key: dedicated, operator: Equal, value: legion, effect: NoSchedule}
+        - {key: spot, operator: Exists, effect: NoExecute}
+      priority_class: legion-workers
+    resources:
+      implementer: {cpu: 1500m, memory: 8Gi}
+      controller: {cpu: 2, cpu_request: 1, memory: 6Gi, memory_request: 4Gi}
+    pod:
+      env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, OPERATOR_FIXTURE_FLAG: operator-fixture-value}
+      service_account: fixture-operator-account
+      volumes:
+        - name: operator-creds
+          secret: {name: fixture-operator-creds}
+      volume_mounts:
+        - {volume: operator-creds, mount_path: /etc/legion-operator/creds}
+    agent_secrets:
+      url: https://agent-secrets.internal.example
+      token_file: /var/run/secrets/agent-secrets/token
+      audience: fixture-broker-audience
+      token_expiry_seconds: 1800
+    plugins:
+      pi_legion: 10.4.0
+      pi_envoy: https://legion:fixture-plugin-password@plugins.internal.example/pi-envoy-10.4.0.tgz?token=fixture-plugin-token
+    setup: [/bin/sh, -c, 'echo fixture-setup']
+    repository_cache:
+      volume: 40Gi
+      refresh_minutes: 15
+      retain_hours: 48
+      resources: {cpu: 500m, memory: 1Gi}
+`
+
+// minimalSettingsFile is the smallest tmux legion.yaml that loads: every other setting is a
+// default, which is what the Stage 3 and operator-claim goldens and the defaults test show.
+const minimalSettingsFile = `project: DEMO
+postgres_dsn: postgres://legion:fixture-dsn-password@127.0.0.1:5432/legion
+state_dir: /var/lib/legion
+`
+
+// loadSettingsFile writes body as a legion.yaml under t.TempDir() and loads it as the daemon does,
+// reading no environment, so the resolved values are the file's and the defaults alone.
+func loadSettingsFile(t *testing.T, body string) config.Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "legion.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write legion.yaml: %v", err)
+	}
+	cfg, err := config.Load(path, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	return cfg
+}
+
+// settingsFixtureConfig is settingsFixtureFile loaded.
+func settingsFixtureConfig(t *testing.T) config.Config {
+	t.Helper()
+	return loadSettingsFile(t, settingsFixtureFile)
+}
+
+// minimalSettingsConfig is minimalSettingsFile loaded.
+func minimalSettingsConfig(t *testing.T) config.Config {
+	t.Helper()
+	return loadSettingsFile(t, minimalSettingsFile)
+}
+
 // populatedState carries every optional the state shape has, so the fixture pins the full shape
 // rather than Stage 1's empty record.
-func populatedState() State {
+func populatedState(t *testing.T) State {
+	t.Helper()
 	approvedVersion := 6
 	return State{
 		Daemon: DaemonInfo{
@@ -210,11 +361,13 @@ func populatedState() State {
 				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
 			}},
 		},
+		// The resolved maximal kubernetes file, so the fixture pins every key `settings` can carry.
+		Settings: SettingsOf(settingsFixtureConfig(t)),
 	}
 }
 
 func TestStateGolden(t *testing.T) {
-	golden(t, "state.json", populatedState())
+	golden(t, "state.json", populatedState(t))
 }
 
 func TestStateStage3Golden(t *testing.T) {
@@ -245,6 +398,7 @@ func TestStateStage3Golden(t *testing.T) {
 			NextAt:    time.Date(2026, 9, 22, 17, 32, 0, 0, time.UTC),
 			LastError: "Dispatch unavailable",
 		}},
+		Settings: SettingsOf(minimalSettingsConfig(t)),
 	})
 }
 
@@ -281,6 +435,7 @@ func TestStateOperatorClaimGolden(t *testing.T) {
 			},
 		},
 		PendingStatusWrites: []PendingStatusWrite{},
+		Settings:            SettingsOf(minimalSettingsConfig(t)),
 	})
 }
 

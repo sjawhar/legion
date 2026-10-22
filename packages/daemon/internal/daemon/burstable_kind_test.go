@@ -68,11 +68,11 @@ var burstableLiveCases = []struct {
 
 // writeBurstableLiveConfig writes the case's legion.yaml, and the token files it names, under
 // dir: the worker stream bound at streamHost, the worker image, the cluster as kubeconfig's
-// kubeContext, and resources appended to its runtime.kubernetes block. Its project maps no
-// repository in the file, which the loader refuses; the repository the proof launches on is the
-// runtime's mapping (burstableLiveRuntime). The hosts no stub dials are documentation
-// placeholders.
-func writeBurstableLiveConfig(t *testing.T, dir, project, streamHost, image, kubeconfig, kubeContext, resources string) string {
+// kubeContext, and extra appended to its runtime.kubernetes block (a `resources` block here, the
+// share proof's `pod` block in share_volumes_kind_test.go). Its project maps no repository in the
+// file, which the loader refuses; the repository the proof launches on is the runtime's mapping
+// (burstableLiveRuntime). The hosts no stub dials are documentation placeholders.
+func writeBurstableLiveConfig(t *testing.T, dir, project, streamHost, image, kubeconfig, kubeContext, extra string) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ runtime:
     storage_class: standard
     kubeconfig: %[5]s
     context: %[6]s
-%[7]s`, project, filepath.Join(dir, "state"), streamHost, image, kubeconfig, kubeContext, resources)
+%[7]s`, project, filepath.Join(dir, "state"), streamHost, image, kubeconfig, kubeContext, extra)
 	path := filepath.Join(dir, "legion.yaml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)

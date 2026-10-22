@@ -10,11 +10,6 @@ import (
 	"unicode/utf16"
 )
 
-// MessageBodyLimit is the longest message body Dispatch accepts, in UTF-16 code units: the server
-// refuses a longer one with CAP_EXCEEDED on every attempt (packages/envoy/internal/dispatch/api/
-// messages.go maxMessageBody16, counted by server.go len16).
-const MessageBodyLimit = 2000
-
 // MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code
 // units, so a character outside the Basic Multilingual Plane counts twice.
 func MessageBodyLength(body string) int {

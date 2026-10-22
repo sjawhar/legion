@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 
@@ -331,13 +332,16 @@ test("isBareReferenceBody accepts only whitespace-joined bare references", () =>
 });
 
 // Every comment body and ask question passes this check as it renders, and a comment holds up to
-// 2,000 UTF-16 units. A body of repeated schemes splits into references in exponentially many
-// ways, and a pattern that tried them ran for minutes in V8 on one of these bodies, hanging every
-// reader's tab; JavaScriptCore, which runs these tests, gives up after a second or so per body.
-test("isBareReferenceBody reads 2,000-character bodies of repeated schemes in one pass", () => {
+// DISPATCH_BODY_MAX UTF-16 units. A body of repeated schemes splits into references in
+// exponentially many ways, and a pattern that tried them ran for minutes in V8 on one of these
+// bodies, hanging every reader's tab; JavaScriptCore, which runs these tests, gives up after a
+// second or so per body.
+test(`isBareReferenceBody reads ${DISPATCH_BODY_MAX}-character bodies of repeated schemes in one pass`, () => {
   const start = performance.now();
   for (const scheme of ["http://", "https://", "dispatch://"]) {
-    const references = scheme.repeat(Math.floor(1998 / scheme.length));
+    // The repeat leaves room for the two units the ` x` and `\nx` cases append, so every body
+    // here is at or just under the cap.
+    const references = scheme.repeat(Math.floor((DISPATCH_BODY_MAX - 2) / scheme.length));
     expect(isBareReferenceBody(`${references} x`)).toBe(false);
     expect(isBareReferenceBody(`${references}\nx`)).toBe(false);
     expect(isBareReferenceBody(references)).toBe(true);

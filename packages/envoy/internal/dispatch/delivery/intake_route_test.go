@@ -280,7 +280,7 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 		if err != nil {
 			t.Fatalf("read stream info: %v", err)
 		}
-		info, err = natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err = natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		if err != nil {
 			t.Fatalf("read consumer info: %v", err)
 		}
@@ -346,7 +346,7 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 
 	// The old-path envelope is acknowledged without being fetched.
 	waitFor(t, 30*time.Second, func() bool {
-		info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		return err == nil && info.NumPending == 0 && info.NumAckPending == 0
 	}, func() string {
 		return fmt.Sprintf("the intake did not acknowledge the old path's envelope\n%s", intakeStateReport(t, natsClient))

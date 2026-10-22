@@ -183,9 +183,10 @@ comment with `--comment`. No result carries a subscription topic: opening an ask
 one with `dispatch comment --reply-to-ask`, makes the session a follower of that ask (its answer
 and replies reach the session directly, server-side), and the command prints
 `Following ask <id> on <owner>: …` after its result the first time the session follows that ask.
-Whole-issue or whole-document subscription is the model's own `envoy_subscribe` of the topic every
+Whole-issue or whole-document subscription is the model's own `envoy_subscribe` of the topic a
 write result names (`notifications.dispatch.issue.<KEY>.>` or
-`notifications.dispatch.document.<PROJECT>.<SLUG>.>`).
+`notifications.dispatch.document.<PROJECT>.<SLUG>.>`), which it names only when none of the
+session's subscriptions, as the Envoy listener records them, covers that owner.
 
 The shared specs in `@legion/contracts` supply each command's description and flags:
 `@legion/envoy-client`'s `dispatch-command.ts` derives one command per spec and one flag per field.

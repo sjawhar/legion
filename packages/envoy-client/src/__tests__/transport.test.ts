@@ -177,6 +177,23 @@ describe("EnvoyClient", () => {
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/interests/ses_sender");
   });
 
+  test("sends a failed request once more by default, and only once with retry false", async () => {
+    const down = () => new Response("down", { status: 503 });
+    for (const [retry, sent] of [
+      [undefined, 2],
+      [false, 1],
+    ] as const) {
+      const recorded = recordFetch([down(), down()]);
+      const client = createEnvoyClient({
+        baseUrl: "http://listener",
+        fetch: recorded.fetch,
+        ...(retry === undefined ? {} : { retry }),
+      });
+      await expect(client.getInterest("ses_sender")).rejects.toThrow("failed with 503");
+      expect([retry, recorded.requests.length]).toEqual([retry, sent]);
+    }
+  });
+
   test("sends a direct message and parses the listener envelope", async () => {
     const recorded = recordFetch([
       jsonResponse({

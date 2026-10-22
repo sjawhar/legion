@@ -1380,6 +1380,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			reports:      s.capabilityReports,
 			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
+			settings:     api.SettingsOf(cfg),
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -1501,6 +1502,9 @@ type source struct {
 	// caches is the Kubernetes runtime's repository caches with their last health reads
 	// (sandbox.Runtime.RepositoryCaches); nil under a runtime that keeps none.
 	caches func() []sandbox.CacheStatus
+	// settings is the resolved configuration as the state shows it, built once here: Load reads
+	// legion.yaml once and an edit to it restarts the daemon, so once-at-boot is live.
+	settings api.Settings
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1608,6 +1612,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		FirstBootAt:   firstBootAt,
 		StartedAt:     s.startedAt,
 	}
+	state.Settings = s.settings
 	state.Admission.Cap = s.admissionCap
 	controller, _, err := s.store.ControllerTx(ctx, tx, s.projectToken)
 	if err != nil {

@@ -12,19 +12,11 @@ import (
 )
 
 // listenerPublish is the listener's publish grant for example-host-a, written out by hand from
-// Envoy's names as they stand: the notification stream's subjects, the role lanes, every exception
-// lane, the stream and its durable, then each bucket in turn, then the interest bucket's purge.
+// Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
+// every exception lane and any ad-hoc topic), the stream and its durable, then each bucket in turn,
+// then the interest bucket's purge.
 var listenerPublish = []string{
-	"notifications.agent.>",
-	"notifications.dispatch.>",
-	"notifications.github.>",
-	"notifications.slack.>",
-	"notifications.legion.>",
-	"notifications.ghostwispr.>",
-	"notifications.whatsapp.>",
-	"notifications.envoy.exceptions.notifications.agent.>",
-	"notifications.role.>",
-	"notifications.envoy.exceptions.notifications.>",
+	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS",
@@ -145,6 +137,37 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	}, core.HostPermissions("example-host-a"))
 }
 
+func TestDispatchPermissions(t *testing.T) {
+	dispatchPublish := append(append([]string{}, listenerPublish...),
+		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-events",
+		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>",
+		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-events",
+		"$JS.ACK.ENVOY_NOTIFICATIONS.delivery-events.>",
+		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-jobs",
+		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-jobs.>",
+		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-jobs",
+		"$JS.ACK.ENVOY_NOTIFICATIONS.delivery-jobs.>",
+		"$JS.API.STREAM.INFO.KV_envoy_webhook_redelivery",
+		"$JS.API.STREAM.CREATE.KV_envoy_webhook_redelivery",
+		"$JS.API.DIRECT.GET.KV_envoy_webhook_redelivery.>",
+		"$JS.API.STREAM.MSG.GET.KV_envoy_webhook_redelivery",
+		"$KV.envoy_webhook_redelivery.>",
+		"$JS.API.CONSUMER.CREATE.KV_envoy_webhook_redelivery.>",
+		"$JS.API.CONSUMER.DELETE.KV_envoy_webhook_redelivery.>",
+		"$JS.FC.KV_envoy_webhook_redelivery.>",
+		"agentstream.*.control",
+	)
+	want := core.Permissions{
+		Publish: core.Rules{Allow: dispatchPublish},
+		Subscribe: core.Rules{Allow: []string{
+			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
+			"agentstream.*.frames",
+		}},
+	}
+	got := core.DispatchPermissions("example-host-a")
+	require.Equal(t, want, got)
+}
+
 // nats-server takes a repeated entry, so a duplicate would be noise in every rendered block; none of
 // the sets holds one, the union included.
 func TestNoSetRepeatsAnEntry(t *testing.T) {
@@ -153,6 +176,7 @@ func TestNoSetRepeatsAnEntry(t *testing.T) {
 		"session":  core.SessionPermissions(),
 		"host":     core.HostPermissions("example-host-a"),
 		"daemon":   core.DaemonPermissions(),
+		"dispatch": core.DispatchPermissions("example-host-a"),
 	}
 	for name, p := range sets {
 		for direction, allow := range map[string][]string{"publish": p.Publish.Allow, "subscribe": p.Subscribe.Allow} {
@@ -172,7 +196,7 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	first.Publish.Allow[0] = "edited"
 	first.Subscribe.Allow[0] = "edited"
 	second := core.HostPermissions("example-host-a")
-	require.Equal(t, "notifications.agent.>", second.Publish.Allow[0])
+	require.Equal(t, "notifications.>", second.Publish.Allow[0])
 	require.Equal(t, "_INBOX.>", second.Subscribe.Allow[0])
 	session := core.SessionPermissions()
 	session.Publish.Allow[0] = "edited"
@@ -182,6 +206,12 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	daemon.Subscribe.Allow[0] = "edited"
 	require.Equal(t, "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", core.DaemonPermissions().Publish.Allow[0])
 	require.Equal(t, "notifications.envoy.exceptions.notifications.role.>", core.DaemonPermissions().Subscribe.Allow[0])
+	dispatch := core.DispatchPermissions("example-host-a")
+	dispatch.Publish.Allow[0] = "edited"
+	dispatch.Subscribe.Allow[0] = "edited"
+	again := core.DispatchPermissions("example-host-a")
+	require.Equal(t, "notifications.>", again.Publish.Allow[0])
+	require.Equal(t, "_INBOX.>", again.Subscribe.Allow[0])
 }
 
 // A set drops into a User as its rules, and the authorization renders it.

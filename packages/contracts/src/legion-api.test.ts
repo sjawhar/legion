@@ -649,6 +649,39 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
+// The daemon's resolved legion.yaml (contract 35): the golden carries the file's `max_fix_attempts`
+// and `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations with no key, a
+// Stage 3 state carries the defaults, the two typed keys are positive integers, the rest rides
+// loosely, and the block cannot be dropped: a plugin from before the field refuses the state.
+test("the state golden carries the daemon's settings with no credential, and the block cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.settings.max_fix_attempts).toBe(5);
+  expect(state.settings.worker_boot_timeout_seconds).toBe(180);
+  const apps = state.settings.github_apps as { implement: Record<string, unknown> };
+  expect(Object.keys(apps.implement).sort()).toEqual(["app_id", "installations"]);
+
+  const stage3 = LegionStateResponse.parse(fixture("state-stage3.json"));
+  expect(stage3.settings.max_fix_attempts).toBe(3);
+  expect(stage3.settings.worker_boot_timeout_seconds).toBe(120);
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.settings;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+
+  const zero = fixture("state.json") as { settings: Record<string, unknown> };
+  zero.settings.max_fix_attempts = 0;
+  expect(LegionStateResponse.safeParse(zero).success).toBeFalse();
+
+  const typed = fixture("state.json") as { settings: Record<string, unknown> };
+  typed.settings.max_fix_attempts = "5";
+  expect(LegionStateResponse.safeParse(typed).success).toBeFalse();
+
+  const text = readFileSync(path.join(fixtureDir, "state.json"), "utf8");
+  expect(text).not.toMatch(/BEGIN .*PRIVATE KEY/);
+  expect(text).not.toMatch(/postgres:\/\//);
+  expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
+});
+
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is
 // Stage 2's shape and the merge-queue holder's in production — and state lists that issue for the
 // claim's sake. The document parsed here is the one a live daemon served with such a claim on it:

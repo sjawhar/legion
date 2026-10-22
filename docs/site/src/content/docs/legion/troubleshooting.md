@@ -86,6 +86,19 @@ cluster and the image:
     the boot, and `legion probe-boot` shows the same refusal before a restart; a container waiting
     `CreateContainerConfigError` for an object its environment reads (`… cannot configure its
     container probe (waiting: CreateContainerConfigError) …`) has the same remedy;
+  - the probe pod cannot mount a share of your `runtime.kubernetes.pod` block (`… cannot mount volume
+    "<name>", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "<claim>" …`
+    or `… from NFS export <server>:<path> …`): the claim is missing from the daemon's namespace
+    (`persistentvolumeclaim "<claim>" not found`), or the node's mount failed (`mount failed: …`,
+    such as `mount.nfs: Connection timed out` for a server the nodes cannot reach, or `access denied
+    by server` for an export it does not have). Create the claim, or check that the nodes reach the
+    server and the export exists. `… could not start its container probe over its mounts, which
+    gVisor could not read …` is a share the node mounted but cannot read: check the server's export
+    and its NFS version. With two or more claims the refusal reads `… cannot mount PersistentVolume
+    "<pv>", bound to one of the claims runtime.kubernetes.pod.volumes gives volumes <a>, <b> from …`:
+    `kubectl get pv <pv> -o jsonpath='{.spec.claimRef.name}'` names the claim. A CSI driver's
+    `Aborted`, `DeadlineExceeded`, `Unavailable`, `ResourceExhausted` or `Canceled` is left to the probe's
+    budget while the kubelet retries it; a claim must be `ReadWriteMany`, since every issue pod mounts it from its own node;
   - the image names another NATS user than the daemon's seed: put the agents' seed in the providers
     Secret's `NATS_NKEY_SEED` key;
   - `capability <name> is missing: <detail>` in the quoted log: the image lacks a tool the capability

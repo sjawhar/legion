@@ -1,3 +1,4 @@
+import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import type { MutationKey } from "@tanstack/react-query";
 import {
   type ClipboardEvent,
@@ -1026,7 +1027,7 @@ export function MentionComposer({
         <textarea
           aria-label={bodyLabel}
           className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${inline ? "min-h-11 resize-none" : "min-h-24"} ${inputClasses(true)} ${textPrimaryOnSurface}`}
-          maxLength={kind === "ask" ? 800 : 2000}
+          maxLength={kind === "ask" ? ASK_QUESTION_MAX : DISPATCH_BODY_MAX}
           onBeforeInput={onBeforeBodyInput}
           onChange={(event) => onBodyChange(event.target.value, event.target.selectionStart)}
           onDrop={

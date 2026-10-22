@@ -52,15 +52,15 @@ type natsServer interface {
 }
 
 func TestHostPermissionsOnRealServers(t *testing.T) {
-	listener := buildListener(t)
+	listener := buildEnvoyCommand(t, "listener")
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
 			t.Run("the listener reaches healthy and a session as the same user receives", func(t *testing.T) {
 				t.Parallel()
-				seed, server, uri := startHostServer(t, image.Ref, core.HostPermissions(liveMachineID))
+				seed, server, uri := startGrantServer(t, image.Ref, core.HostPermissions(liveMachineID))
 				process, port := startListener(t, listener, uri, seed)
-				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port))
+				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
 				conn, errs := connect(t, uri, seed)
 				received, err := conn.SubscribeSync(contracts.AgentSubject(liveSession))
@@ -85,6 +85,14 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
 				require.NoError(t, msg.Respond(nil))
 
+				// A topic outside every stream subject reaches the session subscribed to it.
+				adhoc, err := conn.SubscribeSync("notifications.team.>")
+				require.NoError(t, err)
+				require.NoError(t, conn.Flush())
+				postListener(t, process, port, "/v1/messages/publish", `{"topic":"notifications.team.deploy-squad","message":"example ad-hoc message"}`)
+				team, _ := nextEnvelope(t, process, adhoc)
+				require.Equal(t, "notifications.team.deploy-squad", team.Topic)
+
 				// Every allowed operation came first, so a violation for one would be the first error.
 				require.NoError(t, conn.Publish("outside.example", nil))
 				requireViolation(t, conn, errs, `Publish to "outside.example"`)
@@ -103,7 +111,7 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(entry string) bool { return entry == removed })
 				require.Len(t, grant.Publish.Allow, held-1, "the grant does not hold %s", removed)
 
-				seed, server, uri := startHostServer(t, image.Ref, grant)
+				seed, server, uri := startGrantServer(t, image.Ref, grant)
 				process, port := startListener(t, listener, uri, seed)
 				requireNeverHealthy(t, port)
 				// The removed subject is what the server refused, and all it refused: the listener
@@ -122,16 +130,16 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 // The grants a hub with a listener of its own renders: the listener connects as one user holding
 // ListenerPermissions, and a session presents no credential and becomes the session user, holding
 // SessionPermissions as the server's no_auth_user. The listener reaches healthy, the session
-// registers through it and receives a send, answers a role message's receipt, and is refused a
-// publish its grant does not hold.
+// registers through it and receives a send, answers a role message's receipt, receives a publish to
+// an ad-hoc topic it subscribes to on NATS, and is refused a publish its grant does not hold.
 func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
-	listener := buildListener(t)
+	listener := buildEnvoyCommand(t, "listener")
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
 			seed, server, uri := startSplitServer(t, image.Ref)
 			process, port := startListener(t, listener, uri, seed)
-			t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port))
+			t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
 			conn, errs := connect(t, uri, "")
 			received, err := conn.SubscribeSync(contracts.AgentSubject(liveSession))
@@ -154,6 +162,16 @@ func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 			require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
 			require.NoError(t, msg.Respond(nil))
 
+			// A topic outside every stream subject, as an agent names one for its team, reaches the
+			// session subscribed to it: the listener publishes it over core NATS, under its grant.
+			adhoc, err := conn.SubscribeSync("notifications.team.>")
+			require.NoError(t, err)
+			require.NoError(t, conn.Flush())
+			postListener(t, process, port, "/v1/messages/publish", `{"topic":"notifications.team.deploy-squad","message":"example ad-hoc message"}`)
+			team, _ := nextEnvelope(t, process, adhoc)
+			require.Equal(t, "notifications.team.deploy-squad", team.Topic)
+			require.Equal(t, "example ad-hoc message", team.PayloadSummary)
+
 			// A session may not publish to another session's inbox directly; only the listener does.
 			other := contracts.AgentSubject("s2")
 			require.NoError(t, conn.Publish(other, nil))
@@ -172,7 +190,7 @@ func TestSessionPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
-			seed, server, uri := startHostServer(t, image.Ref, core.SessionPermissions())
+			seed, server, uri := startGrantServer(t, image.Ref, core.SessionPermissions())
 			conn, errs := connect(t, uri, seed)
 			_, err := conn.SubscribeSync(contracts.AgentSubject(liveSession))
 			require.NoError(t, err)
@@ -206,21 +224,21 @@ func startSplitServer(t *testing.T, image string) (string, natsServer, string) {
 	return seed, server, uri
 }
 
-// buildListener builds packages/envoy/cmd/listener from this branch as Envoy's own jobs do, in the
-// workspace of the repository's root go.work, and returns the binary.
-func buildListener(t *testing.T) string {
+// buildEnvoyCommand builds packages/envoy/cmd/<name> from this branch as Envoy's own jobs do, in
+// the workspace of the repository's root go.work, and returns the binary envoy-<name>.
+func buildEnvoyCommand(t *testing.T, name string) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "envoy-listener")
+	binary := filepath.Join(t.TempDir(), "envoy-"+name)
 	build := exec.Command("go", "build", "-o", binary, ".")
-	build.Dir = filepath.Join("..", "..", "cmd", "listener")
+	build.Dir = filepath.Join("..", "..", "cmd", name)
 	out, err := build.CombinedOutput()
-	require.NoError(t, err, "build the listener: %s", out)
+	require.NoError(t, err, "build envoy-%s: %s", name, out)
 	return binary
 }
 
-// startHostServer runs image with one nkey user holding grant as the server's whole authorization,
+// startGrantServer runs image with one nkey user holding grant as the server's whole authorization,
 // and returns the user's seed, the server and its client URL.
-func startHostServer(t *testing.T, image string, grant core.Permissions) (string, natsServer, string) {
+func startGrantServer(t *testing.T, image string, grant core.Permissions) (string, natsServer, string) {
 	t.Helper()
 	seed, public := testnats.User(t)
 	config, err := core.Authorization{Users: []core.User{{
@@ -247,33 +265,41 @@ func startListener(t *testing.T, binary, uri, seed string) (*cmdtest.Process, in
 	return cmdtest.Start(t, "the listener", cmd), port
 }
 
-// healthz returns the body /healthz answers on port.
-func healthz(port int) (string, error) {
+// healthz returns the status and body /healthz answers on port.
+func healthz(port int) (int, string, error) {
 	client := http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/healthz")
 	if err != nil {
-		return "", err
+		return 0, "", err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
-	return string(body), err
+	return resp.StatusCode, string(body), err
 }
 
-// requireHealthy waits up to liveHealthWindow for /healthz to answer "healthy" and returns that
-// body.
-func requireHealthy(t *testing.T, process *cmdtest.Process, port int) string {
+// listenerHealthy is the answer the listener's /healthz gives once its durable is bound.
+func listenerHealthy(_ int, body string) bool { return strings.Contains(body, `"status":"healthy"`) }
+
+// requireHealthy waits up to window for /healthz to answer a response healthy accepts and returns
+// that body, failing at once when process exits first.
+func requireHealthy(t *testing.T, process *cmdtest.Process, port int, window time.Duration, healthy func(status int, body string) bool) string {
 	t.Helper()
-	deadline := time.Now().Add(liveHealthWindow)
+	deadline := time.Now().Add(window)
+	var status int
 	var body string
 	var err error
 	for time.Now().Before(deadline) {
-		if body, err = healthz(port); err == nil && strings.Contains(body, `"status":"healthy"`) {
+		if status, body, err = healthz(port); err == nil && healthy(status, body) {
 			return body
 		}
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-process.Exited:
+			t.Fatalf("the process exited before /healthz answered healthy:\n%s", process.Output.String())
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
-	t.Fatalf("the listener did not answer \"healthy\" within %s: last body %q, error %v\n%s",
-		liveHealthWindow, body, err, process.Output.String())
+	t.Fatalf("/healthz did not answer healthy within %s: last status %d, body %q, error %v\n%s",
+		window, status, body, err, process.Output.String())
 	return ""
 }
 
@@ -283,7 +309,7 @@ func requireNeverHealthy(t *testing.T, port int) {
 	t.Helper()
 	deadline := time.Now().Add(liveHealthWindow)
 	for time.Now().Before(deadline) {
-		if body, err := healthz(port); err == nil && strings.Contains(body, `"status":"healthy"`) {
+		if status, body, err := healthz(port); err == nil && listenerHealthy(status, body) {
 			t.Fatalf("the listener answered \"healthy\": %s", body)
 		}
 		time.Sleep(time.Second)

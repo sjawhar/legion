@@ -214,8 +214,8 @@ func validateBroadcastInput(body, delivery, key string, sessionIDs []string) ([]
 	if strings.TrimSpace(body) == "" {
 		return nil, errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}
-	if length := len16(body); length > maxMessageBody16 {
-		return nil, capExceededError("body", length, maxMessageBody16)
+	if length := len16(body); length > contracts.DispatchBodyMax {
+		return nil, capExceededError("body", length, contracts.DispatchBodyMax)
 	}
 	if !validDelivery(delivery) {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "delivery must be one of btw, aside, steer")

@@ -7,12 +7,14 @@ import {
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
+  overCapMessage,
   PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
   type SearchResult,
   type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
+import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
 import {
@@ -22,7 +24,7 @@ import {
   resolveIssueDocumentId,
 } from "../dispatch-execute";
 import { DispatchClient } from "../dispatch-http";
-import { dispatchFollowNotice } from "../dispatch-subscribe";
+import { followedAsk } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -83,7 +85,7 @@ const architectureComponentsGuidance =
   'Project LEGION has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
 const createdIssueLine =
-  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216 (not subscribed to LEGION-216; envoy_subscribe notifications.dispatch.issue.LEGION-216.> for every event on it)";
+  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216";
 
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
@@ -239,8 +241,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
     expect(result.text).toBe(
       `Asked ask-1 on DSP-41 (urgency med): ${releaseQuestion}\n` +
-        "You follow this ask: its answer and replies reach you directly. " +
-        "For every event on DSP-41: envoy_subscribe notifications.dispatch.issue.DSP-41.>"
+        "You follow this ask: its answer and replies reach you directly."
     );
   });
 
@@ -604,7 +605,7 @@ describe("executeDispatchTool", () => {
         quote: "some text",
         reply_to: "c1",
         reply_to_ask: "a1",
-        body: "x".repeat(2001),
+        body: "x".repeat(DISPATCH_BODY_MAX + 1),
       },
       cwd: "/workspace",
       host: "omp",
@@ -618,7 +619,7 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      "--body is 1 characters over the 2000-character limit (2001/2000)",
+      `--body ${overCapMessage(DISPATCH_BODY_MAX + 1, DISPATCH_BODY_MAX)}`,
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
@@ -871,9 +872,7 @@ describe("executeDispatchTool", () => {
       { body: "Sounds good", in_reply_to: parent },
       { body: "Sounds good", in_reply_to: parent },
     ]);
-    const posted =
-      "Posted message message-2 (dispatch://DSP-42/message/message-2) " +
-      "(not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)";
+    const posted = "Posted message message-2 (dispatch://DSP-42/message/message-2)";
     expect(bareIDResult.text).toBe(posted);
     expect(refResult.text).toBe(posted);
   });
@@ -1292,7 +1291,7 @@ describe("executeDispatchTool", () => {
       offset: 0,
       limit: 20,
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/search?q=astrolabe"]);
   });
 
@@ -1449,7 +1448,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      `- --query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
+      `- --query ${overCapMessage(length, SEARCH_QUERY_MAX)}; search with a short phrase of a few words, not a passage\n`
     );
     expect(requests).toBe(0);
   });
@@ -1730,7 +1729,7 @@ describe("executeDispatchTool", () => {
       },
     });
     expect(requests).toEqual(["/api/v1/asks/open?author_session=session-1"]);
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
   });
 
   test("dispatch_open_asks reports its active-owner scope when no asks are open", async () => {
@@ -2481,10 +2480,10 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13 (not subscribed to LEGION-13; envoy_subscribe notifications.dispatch.issue.LEGION-13.> for every event on it)"
+      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13"
     );
     expect(result.details).toEqual({ issue: "LEGION-13" });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
   });
 
@@ -2525,7 +2524,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said} (not subscribed to LEGION-13; envoy_subscribe notifications.dispatch.issue.LEGION-13.> for every event on it)`
+      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said}`
     );
   });
 
@@ -3086,16 +3085,14 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text:
-        `ACME-175: status in_progress -> testing; linked ${pullRequest} (2 links) ` +
-        "(not subscribed to ACME-175; envoy_subscribe notifications.dispatch.issue.ACME-175.> for every event on it)",
+      text: `ACME-175: status in_progress -> testing; linked ${pullRequest} (2 links)`,
       details: {
         issue: "ACME-175",
         status: "testing",
         external_links: [existingLink.url, pullRequest],
       },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       { method: "GET", pathname: "/api/v1/issues/ACME-175" },
       {
@@ -3161,9 +3158,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text:
-        "ACME-176: external links cleared " +
-        "(not subscribed to ACME-176; envoy_subscribe notifications.dispatch.issue.ACME-176.> for every event on it)",
+      text: "ACME-176: external links cleared",
       details: {
         issue: "ACME-176",
         status: "in_progress",
@@ -3900,6 +3895,471 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/valid dispatch/);
   });
 
+  describe("owner arguments that would be dropped or disagree", () => {
+    const noNetwork = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+    const problemsOf = (
+      tool: string,
+      args: Record<string, unknown>,
+      env: Record<string, string> = {}
+    ) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env,
+        exec: repoExec("owner/repo"),
+        fetchImpl: noNetwork,
+      }).then(
+        () => {
+          throw new Error(`${tool} was not refused`);
+        },
+        (error: unknown) => {
+          if (!(error instanceof ToolInputError)) throw error;
+          return error.problems;
+        }
+      );
+    const commentID = "cccccccc-0000-4000-8000-000000000042";
+
+    test("a ref that names nothing is refused with the grammar alone, never a missing issue", async () => {
+      for (const env of [{}, { LEGION_ISSUE: "DSP-7" }] as Record<string, string>[]) {
+        const problems = await problemsOf("dispatch_read", { ref: "dispatch://DSP-42/nope" }, env);
+        expect(problems).toHaveLength(1);
+        expect(problems[0]).toStartWith("ref must be a valid dispatch:// reference");
+      }
+    });
+
+    test("an ask or comment written through its issue document is refused, naming the address Dispatch gives it", async () => {
+      const throughSpec = `dispatch://DSP-42/artifact/spec/comment/${commentID}`;
+      const named = `${throughSpec} names a comment through its document, which Dispatch does not address; name it dispatch://DSP-42/comment/${commentID}`;
+      expect(await problemsOf("dispatch_read", { ref: throughSpec })).toEqual([named]);
+      expect(await problemsOf("dispatch_resolve_comment", { comment: throughSpec })).toEqual([
+        named,
+      ]);
+      const askThroughSpec = "dispatch://DSP-42/artifact/spec@v2/ask/aaaaaaaa";
+      expect(
+        await problemsOf("dispatch_follow", { ask: askThroughSpec, action: "follow" })
+      ).toEqual([
+        `${askThroughSpec} names an ask through its document, which Dispatch does not address; name it dispatch://DSP-42/ask/aaaaaaaa`,
+      ]);
+    });
+
+    test("read refuses owners that disagree and an artifact its ref would drop", async () => {
+      for (const ref of [
+        "dispatch://DSP-42/artifact/spec@v1",
+        "dispatch://CORE/artifact/runbook@v3",
+      ]) {
+        expect(await problemsOf("dispatch_read", { ref })).toEqual([
+          `dispatch read prints the live document's summary, so the version ref ${ref} names would be dropped: read that version with dispatch doc-read --ref ${ref}`,
+        ]);
+      }
+      const versionedItem = `dispatch://CORE/artifact/runbook@v3/comment/${commentID}`;
+      expect(await problemsOf("dispatch_read", { ref: versionedItem })).toEqual([
+        `${versionedItem} names a comment at a document version, which a comment does not have; name it dispatch://CORE/artifact/runbook/comment/${commentID}`,
+      ]);
+      // A project document's ref is named by its document.
+      expect(
+        await problemsOf("dispatch_read", {
+          issue: "DSP-42",
+          ref: "dispatch://CORE/artifact/runbook",
+        })
+      ).toEqual([
+        "issue DSP-42 and ref dispatch://CORE/artifact/runbook name two owners; --ref dispatch://CORE/artifact/runbook alone acts on CORE/runbook, and --issue DSP-42 alone acts on DSP-42",
+      ]);
+      expect(
+        await problemsOf("dispatch_read", { issue: "DSP-42", ref: "dispatch://OTHER-9" })
+      ).toEqual([
+        "issue DSP-42 and ref dispatch://OTHER-9 name two owners; --ref dispatch://OTHER-9 alone acts on OTHER-9, and --issue DSP-42 alone acts on DSP-42",
+      ]);
+      const comment = `dispatch://DSP-42/comment/${commentID}`;
+      expect(
+        await problemsOf("dispatch_read", { project: "CORE", artifact: "runbook", ref: comment })
+      ).toEqual([
+        `project CORE and ref ${comment} name two owners; --ref ${comment} alone acts on DSP-42, and --project CORE --artifact runbook alone acts on that project document`,
+      ]);
+      expect(await problemsOf("dispatch_read", { ref: comment, artifact: "spec" })).toEqual([
+        `ref ${comment} names no document, so dispatch read would read it and drop artifact spec: drop --artifact to read the ref, or read the document with --issue DSP-42 --artifact spec`,
+      ]);
+      expect(
+        await problemsOf("dispatch_read", { ref: "dispatch://DSP-42/spec", artifact: "notes-md" })
+      ).toEqual([
+        "artifact notes-md and ref dispatch://DSP-42/spec name two documents; --ref dispatch://DSP-42/spec alone names spec, and --issue DSP-42 --artifact notes-md names notes-md",
+      ]);
+    });
+
+    test("comment refuses a document it would post past without a quote", async () => {
+      const dropped = (document: string) =>
+        `dispatch comment posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`;
+      expect(
+        await problemsOf("dispatch_comment", { issue: "DSP-42", artifact: "notes.md", body: "x" })
+      ).toEqual([dropped("notes.md")]);
+      expect(
+        await problemsOf("dispatch_comment", { ref: "dispatch://DSP-42/spec", body: "x" })
+      ).toEqual([dropped("spec")]);
+      expect(
+        await problemsOf(
+          "dispatch_comment",
+          { artifact: "notes.md", reply_to: commentID, body: "x" },
+          { LEGION_ISSUE: "DSP-42" }
+        )
+      ).toEqual([dropped("notes.md")]);
+      expect(
+        await problemsOf("dispatch_comment", {
+          ref: "dispatch://DSP-42/artifact/notes-md@v2",
+          quote: "old line",
+          body: "x",
+        })
+      ).toEqual([
+        "dispatch comment acts on the live document, so the version ref dispatch://DSP-42/artifact/notes-md@v2 names would be dropped: drop its @v2",
+      ]);
+    });
+
+    test("ask refuses a document it would open past without an anchor, and two documents", async () => {
+      expect(
+        await problemsOf("dispatch_ask", {
+          issue: "DSP-42",
+          artifact: "notes.md",
+          question: releaseQuestion,
+        })
+      ).toEqual([
+        `dispatch ask opens the ask on the issue unless anchor quotes a document, so artifact notes.md would be dropped: add --anchor-json '{"artifact":"notes.md","quote":"<exact text>"}' to ask about a passage of it, or drop --artifact`,
+      ]);
+      expect(
+        await problemsOf("dispatch_ask", {
+          issue: "DSP-42",
+          artifact: "spec",
+          anchor: { artifact: "notes.md", quote: "old line" },
+          question: releaseQuestion,
+        })
+      ).toEqual([
+        "artifact spec and anchor.artifact notes.md name two documents; name the document once",
+      ]);
+    });
+
+    test("suggest and doc-edit refuse an issue the ref disagrees with", async () => {
+      const ref = "dispatch://OTHER-9/artifact/notes-md";
+      const twoOwners = `issue DSP-42 and ref ${ref} name two owners; --ref ${ref} alone acts on OTHER-9, and --issue DSP-42 alone acts on DSP-42`;
+      expect(
+        await problemsOf("dispatch_suggest", {
+          issue: "DSP-42",
+          ref,
+          quote: "old line",
+          replace_with: "new line",
+        })
+      ).toEqual([twoOwners]);
+      expect(
+        await problemsOf("dispatch_doc_edit", {
+          issue: "DSP-42",
+          ref,
+          ops: [{ op: "replace", find: "old line", with: "new line" }],
+        })
+      ).toEqual([twoOwners]);
+    });
+
+    test("doc-read refuses a list ref, two owners, two documents and two versions", async () => {
+      expect(await problemsOf("dispatch_doc_read", { ref: "dispatch://DSP-42/log" })).toEqual([
+        "ref dispatch://DSP-42/log names the event log on DSP-42; dispatch doc-read would act on DSP-42 and drop the log: read it with dispatch read, or name DSP-42 with issue DSP-42",
+      ]);
+      expect(await problemsOf("dispatch_doc_read", { ref: "dispatch://DSP-42/children" })).toEqual([
+        "ref dispatch://DSP-42/children names the children on DSP-42; dispatch doc-read would act on DSP-42 and drop the children: read it with dispatch read, or name DSP-42 with issue DSP-42",
+      ]);
+      expect(
+        await problemsOf("dispatch_doc_read", {
+          issue: "DSP-42",
+          ref: "dispatch://OTHER-9/artifact/notes-md",
+        })
+      ).toEqual([
+        "issue DSP-42 and ref dispatch://OTHER-9/artifact/notes-md name two owners; --ref dispatch://OTHER-9/artifact/notes-md alone acts on OTHER-9, and --issue DSP-42 alone acts on DSP-42",
+      ]);
+      expect(
+        await problemsOf("dispatch_doc_read", {
+          artifact: "notes.md",
+          ref: "dispatch://DSP-42/spec",
+        })
+      ).toEqual([
+        "artifact notes.md and ref dispatch://DSP-42/spec name two documents; --ref dispatch://DSP-42/spec alone names spec, and --issue DSP-42 --artifact notes.md names notes.md",
+      ]);
+      expect(
+        await problemsOf("dispatch_doc_read", {
+          ref: "dispatch://DSP-42/artifact/notes-md@v2",
+          version: 1,
+        })
+      ).toEqual([
+        "version 1 and ref dispatch://DSP-42/artifact/notes-md@v2 name two versions; name the version once",
+      ]);
+    });
+  });
+
+  test("an ask on one owner cites another issue's comment or an issue, as a citation only", async () => {
+    const asked: Array<{ path: string; question: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/runbook-md") {
+        return response({ id: "artifact-runbook", project: "CORE", slug: "runbook-md" });
+      }
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([]);
+      if (target.pathname.endsWith("/asks") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { question: string };
+        asked.push({ path: target.pathname, question: body.question });
+        const onProject = target.pathname.startsWith("/api/v1/artifacts/");
+        return response({
+          id: "ask-1",
+          issue_key: onProject ? null : "DSP-41",
+          artifact_id: onProject ? "artifact-runbook" : null,
+          urgency: "med",
+          question: body.question,
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const otherComment = "dispatch://OTHER-9/comment/cccccccc-0000-4000-8000-000000000042";
+
+    await executeAsk(
+      { issue: "DSP-41", question: changedReleaseQuestion, ref: otherComment },
+      fetchImpl as typeof fetch
+    );
+    await executeAsk(
+      {
+        project: "CORE",
+        artifact: "runbook-md",
+        question: changedReleaseQuestion,
+        ref: "dispatch://DSP-42",
+      },
+      fetchImpl as typeof fetch
+    );
+
+    expect(asked).toEqual([
+      {
+        path: "/api/v1/issues/DSP-41/asks",
+        question: `${changedReleaseQuestion}\n\nRef: ${otherComment}`,
+      },
+      {
+        path: "/api/v1/artifacts/artifact-runbook/asks",
+        question: `${changedReleaseQuestion}\n\nRef: dispatch://DSP-42`,
+      },
+    ]);
+  });
+
+  describe("an ask or comment a ref names on an owner it is not on", () => {
+    const commentID = "cccccccc-0000-4000-8000-000000000042";
+    const askID = "aaaaaaaa-0000-4000-8000-000000000042";
+    // Both items are on OTHER-9; every ref below names them on DSP-42 by their full id.
+    const writes: string[] = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(String(url));
+      if ((init?.method ?? "GET") !== "GET") writes.push(`${init?.method} ${target.pathname}`);
+      if (target.pathname === `/api/v1/comments/${commentID}`) {
+        return response({ comment: { id: commentID, issue_key: "OTHER-9" }, replies: [] });
+      }
+      if (target.pathname === `/api/v1/asks/${askID}`) {
+        return response({ ask: { id: askID, issue_key: "OTHER-9" }, replies: [], answers: [] });
+      }
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/runbook-md") {
+        return response({ id: "artifact-runbook", project: "CORE", slug: "runbook-md" });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    }) as typeof fetch;
+    const problemsOf = (tool: string, args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      }).then(
+        () => {
+          throw new Error(`${tool} was not refused`);
+        },
+        (error: unknown) => {
+          if (!(error instanceof ToolInputError)) throw error;
+          return error.problems;
+        }
+      );
+    const comment = `dispatch://DSP-42/comment/${commentID}`;
+    const ask = `dispatch://DSP-42/ask/${askID}`;
+    const offComment = `${comment} names comment ${commentID} on DSP-42, but it is on OTHER-9; name it dispatch://OTHER-9/comment/${commentID}`;
+    const offAsk = `${ask} names ask ${askID} on DSP-42, but it is on OTHER-9; name it dispatch://OTHER-9/ask/${askID}`;
+
+    test("read refuses it", async () => {
+      expect(await problemsOf("dispatch_read", { ref: comment })).toEqual([offComment]);
+      expect(await problemsOf("dispatch_read", { ref: ask })).toEqual([offAsk]);
+      const onDocument = `dispatch://CORE/artifact/runbook-md/comment/${commentID}`;
+      expect(await problemsOf("dispatch_read", { ref: onDocument })).toEqual([
+        `${onDocument} names comment ${commentID} on CORE/runbook-md, but it is on OTHER-9; name it dispatch://OTHER-9/comment/${commentID}`,
+      ]);
+    });
+
+    test("the writes refuse it before writing", async () => {
+      writes.length = 0;
+      expect(await problemsOf("dispatch_resolve_comment", { comment })).toEqual([offComment]);
+      expect(await problemsOf("dispatch_follow", { ask, action: "follow" })).toEqual([offAsk]);
+      expect(
+        await problemsOf("dispatch_resolve_ask", { ask, kind: "resolved", reason: "Done." })
+      ).toEqual([offAsk]);
+      expect(await problemsOf("dispatch_edit_ask", { ask, urgency: "high" })).toEqual([offAsk]);
+      expect(writes).toEqual([]);
+    });
+  });
+
+  test("an external issue beside a ref is compared once Dispatch resolves it", async () => {
+    const commentID = "cccccccc-0000-4000-8000-000000000042";
+    const fetchFor = (key: string) =>
+      (async (url: RequestInfo | URL) => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/issues/resolve") return response({ key });
+        if (target.pathname === `/api/v1/comments/${commentID}`) {
+          return response({
+            comment: {
+              id: commentID,
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Agreed.",
+              anchor: null,
+              reply_to: null,
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-09-09T00:00:00Z",
+            },
+            replies: [],
+          });
+        }
+        if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }) as typeof fetch;
+    const read = (key: string) =>
+      executeDispatchTool({
+        tool: "dispatch_read",
+        args: { issue: "owner/repo#12", ref: `dispatch://DSP-42/comment/${commentID}` },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchFor(key),
+      });
+
+    expect((await read("DSP-42")).details).toEqual({ issue: "DSP-42" });
+    await expect(read("OTHER-9")).rejects.toThrow(
+      `issue owner/repo#12 and ref dispatch://DSP-42/comment/${commentID} name two owners; --ref dispatch://DSP-42/comment/${commentID} alone acts on DSP-42, and --issue owner/repo#12 alone acts on OTHER-9`
+    );
+  });
+
+  test("an ask cites a document ref without taking it as the document it asks about", async () => {
+    const requests: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      expect(new URL(String(url)).pathname).toBe("/api/v1/issues/DSP-41/asks");
+      const body = JSON.parse(String(init?.body));
+      requests.push(body);
+      return response({
+        id: "ask-1",
+        issue_key: "DSP-41",
+        urgency: "med",
+        question: body.question,
+      });
+    };
+    const ref = "dispatch://DSP-41/artifact/notes-md@v2";
+
+    await executeAsk(
+      { issue: "DSP-41", question: changedReleaseQuestion, ref },
+      fetchImpl as typeof fetch
+    );
+
+    expect(requests).toEqual([expect.not.objectContaining({ anchor: expect.anything() })]);
+    expect(requests).toEqual([
+      expect.objectContaining({ question: `${changedReleaseQuestion}\n\nRef: ${ref}` }),
+    ]);
+  });
+
+  test("reads an issue's document as a document summary, from artifact, ref, or a search hit's link", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Native workspace",
+          status: "in_progress",
+          primary_artifact_id: "artifact-42",
+          artifacts: [
+            {
+              id: "artifact-42",
+              slug: "spec",
+              name: "spec.md",
+              primary: true,
+              project: "DSP",
+              versions: [{ version: 1 }, { version: 2 }],
+            },
+            {
+              id: "artifact-43",
+              slug: "notes-md",
+              name: "notes.md",
+              primary: false,
+              project: "DSP",
+              versions: [{ version: 1 }],
+              approval: { state: "approved", version: 1, by: { kind: "user", id: "sami" } },
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("artifact"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const read = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_read",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+    const summary = (name: string, slug: string, versions: number, approval?: string) => ({
+      text: [
+        `Document: DSP-42 / ${name}`,
+        "Issue: DSP-42 [in_progress] Native workspace",
+        `Reference: dispatch://DSP-42/artifact/${slug}`,
+        `Versions: ${versions}`,
+        ...(approval === undefined ? [] : [approval]),
+        "Referenced by:",
+        "- none",
+        "Links:",
+        "- none",
+      ].join("\n"),
+      details: { issue: "DSP-42", document: `DSP-42/${slug}` },
+    });
+    const spec = summary("spec.md", "spec", 2);
+    const notes = summary("notes.md", "notes-md", 1, "Approval: approved v1 by sami");
+
+    expect(await read({ issue: "DSP-42", artifact: "spec.md" })).toEqual(spec);
+    expect(await read({ ref: "dispatch://DSP-42/spec" })).toEqual(spec);
+    // The links dispatch search returns for a document hit, and the Spec tab's own address.
+    expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec?q=workspace" })).toEqual(
+      spec
+    );
+    expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec#b-ship-it" })).toEqual(spec);
+    expect(await read({ ref: "http://dispatch.test/issues/DSP-42/spec" })).toEqual(spec);
+    expect(
+      await read({ ref: "http://dispatch.test/issues/DSP-42/artifacts/notes-md?q=workspace" })
+    ).toEqual(notes);
+    // A summary is of the live document, so a version it would drop is refused.
+    await expect(read({ ref: "dispatch://DSP-42/artifact/notes-md@v1" })).rejects.toThrow(
+      "read that version with dispatch doc-read --ref dispatch://DSP-42/artifact/notes-md@v1"
+    );
+    expect(requests).toContain(
+      `/api/v1/references?to=${encodeURIComponent("dispatch://DSP-42/artifact/notes-md")}`
+    );
+  });
+
   test("reads a named artifact version from a singular dispatch URI", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -3942,7 +4402,7 @@ describe("executeDispatchTool", () => {
       text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
@@ -4439,7 +4899,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).not.toContain("ask ");
     expect(result.text).not.toContain("plan-gap-analyst");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
   });
 
   // A request names the latest version, and a new version moves it there and back to its agent: a
@@ -5490,9 +5950,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text:
-        "Applied 2 ops (no new version) (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)\n" +
-        "Document token: sha256:after-edit",
+      text: "Applied 2 ops (no new version)\nDocument token: sha256:after-edit",
       details: { issue: "DSP-42", applied: 2, token: "sha256:after-edit" },
     });
     expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
@@ -5545,8 +6003,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Applied 2 ops; nothing changed (no new version); operations 0, 1 changed nothing" +
-        " (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)\n" +
+      "Applied 2 ops; nothing changed (no new version); operations 0, 1 changed nothing\n" +
         "Document token: sha256:unchanged"
     );
     expect(result.details).toEqual({
@@ -5845,6 +6302,7 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: fetchImpl as typeof fetch,
+      subscriptions: async () => ["notifications.agent.session-42"],
     });
 
     expect(paths).toContain(expectedPath);
@@ -5860,7 +6318,7 @@ describe("executeDispatchTool", () => {
           : "(not subscribed to CORE/runbook-md; envoy_subscribe notifications.dispatch.document.CORE.runbook-md.> for every event on it)"
       );
     } else {
-      expect(dispatchFollowNotice(result.details)).toBeNull();
+      expect(followedAsk(result.details)).toBeNull();
     }
   });
 
@@ -6130,8 +6588,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       "Uploaded garrett-reply-draft.md as version 1 " +
-        "(artifact slug garrett-reply-draft-md; dispatch://DSP-42/artifact/garrett-reply-draft-md) " +
-        "(not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)"
+        "(artifact slug garrett-reply-draft-md; dispatch://DSP-42/artifact/garrett-reply-draft-md)"
     );
   });
 
@@ -6412,6 +6869,7 @@ describe("executeDispatchTool", () => {
         "- JSON API — Use the HTTP API.",
         "- MCP API",
         "State: answered",
+        "Ask id: aaaaaaaa-0000-4000-8000-000000000042",
         "Answer:",
         "- By: sami",
         "- Selected: JSON",
@@ -6428,7 +6886,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
@@ -6467,6 +6925,8 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: fetchImpl as typeof fetch,
+      // The session holds no subscription that covers DSP-42: the reply names the line that would.
+      subscriptions: async () => ["notifications.agent.session-1"],
     });
 
     expect(result.text).toBe(
@@ -6566,12 +7026,13 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: fetchImpl as typeof fetch,
+      // A subscription covers DSP-42 already: the reply names no line to subscribe with.
+      subscriptions: async () => ["notifications.dispatch.issue.DSP-42.>"],
     });
 
     expect(result.text).toBe(
       `Replied on ask ${askID} (comment comment-2; ask now waiting on agent). ` +
-        "You follow this ask: its answer and replies reach you directly. " +
-        "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
+        "You follow this ask: its answer and replies reach you directly."
     );
     expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
     expect(requests).toEqual([
@@ -6655,32 +7116,47 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       `Replied on ask ${askID} (comment comment-3). ` +
-        "You follow this ask: its answer and replies reach you directly. " +
-        "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
+        "You follow this ask: its answer and replies reach you directly."
     );
     expect(result.details).not.toHaveProperty("ask_waiting_on");
   });
 
-  test("a plain comment follows nothing and names the whole-issue opt-in", async () => {
+  test("a plain comment follows nothing and names the whole-issue opt-in only when no subscription covers the issue", async () => {
     const fetchImpl = async (): Promise<Response> =>
       response({ id: "comment-2", issue_key: "DSP-42", ask_id: null, reply_to: null });
+    const comment = (subscriptions?: () => Promise<readonly string[] | null>) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-42", body: "Looks good." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        ...(subscriptions === undefined ? {} : { subscriptions }),
+      });
+    const note =
+      " (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)";
 
-    const result = await executeDispatchTool({
-      tool: "dispatch_comment",
-      args: { issue: "DSP-42", body: "Looks good." },
-      cwd: "/workspace",
-      host: "omp",
-      config,
-      env: {},
-      exec: repoExec("owner/repo"),
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-
-    expect(result.text).toBe(
-      "Posted comment comment-2 (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)"
-    );
-    expect(result.details).toEqual({ issue: "DSP-42", comment: "comment-2" });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    for (const [topics, text] of [
+      [[], `Posted comment comment-2${note}`],
+      [
+        ["notifications.agent.session-1", "notifications.dispatch.issue.DSP-4.>"],
+        `Posted comment comment-2${note}`,
+      ],
+      [["notifications.dispatch.issue.DSP-42.>"], "Posted comment comment-2"],
+      [["notifications.dispatch.>"], "Posted comment comment-2"],
+      // The subscriptions could not be read: nothing says what the session receives.
+      [null, "Posted comment comment-2"],
+    ] as const) {
+      const result = await comment(async () => topics);
+      expect([topics, result.text]).toEqual([topics, text]);
+      expect(result.details).toEqual({ issue: "DSP-42", comment: "comment-2" });
+      expect(followedAsk(result.details)).toBeNull();
+    }
+    // A host that reads no subscriptions (Envoy off) says nothing about them.
+    expect((await comment()).text).toBe("Posted comment comment-2");
   });
 
   test.each([
@@ -6695,7 +7171,11 @@ describe("executeDispatchTool", () => {
     [
       "unfollow",
       "DELETE",
-      ["/api/v1/asks/5a660655-04ad-4ce0-8a9b-93dd03c412b7/followers/session-7"],
+      // An ask named by a reference is read first, to hold it to the issue the reference names.
+      [
+        "/api/v1/asks/5a660655-04ad-4ce0-8a9b-93dd03c412b7",
+        "/api/v1/asks/5a660655-04ad-4ce0-8a9b-93dd03c412b7/followers/session-7",
+      ],
     ],
   ])("dispatch_follow %s names the calling session in the path and the body", async (action, method, paths) => {
     const askUuid = "5a660655-04ad-4ce0-8a9b-93dd03c412b7";
@@ -6748,7 +7228,7 @@ describe("executeDispatchTool", () => {
     } else {
       expect(result.text).toBe(`Unfollowed ask ${askUuid}.`);
       expect(result.details).toEqual({ ask: askUuid });
-      expect(dispatchFollowNotice(result.details)).toBeNull();
+      expect(followedAsk(result.details)).toBeNull();
     }
   });
 
@@ -6870,7 +7350,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/comments/cccccccc-0000-4000-8000-000000000042",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
@@ -6989,6 +7469,7 @@ describe("executeDispatchTool", () => {
         "Options:",
         "- none",
         "State: open",
+        "Ask id: aaaaaaaa-0000-4000-8000-000000000042",
         "Answer:",
         "- none",
         "Replies:",
@@ -7142,7 +7623,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42/messages/message-42",
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fmessage%2Fmessage-42",
@@ -7484,7 +7965,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.details).toEqual({ issue: "DSP-42" });
-    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(followedAsk(result.details)).toBeNull();
     expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
     expect(result.text).toContain("Labels: frontend, urgent");
     expect(result.text).toContain("Priority: P1");
@@ -8049,6 +8530,7 @@ describe("executeDispatchTool", () => {
         return response({
           ask: {
             id: full,
+            issue_key: "DSP-42",
             question: releaseQuestion,
             options: [],
             state: "open",
@@ -8105,6 +8587,91 @@ describe("executeDispatchTool", () => {
     expect(ambiguous.problems).toEqual([
       "ask id 7430fab3 matches 2 asks on DSP-42; use the full id",
     ]);
+  });
+
+  test("finds an ask in the issue's spec by its own id or its block's id, whole or as a unique prefix", async () => {
+    // A spec's ask block carries an id of its own, uuid-shaped or a slug, beside the ask's.
+    const specAsk = "1c40147f-0d7e-4d43-80c8-bfebbf44d7b2";
+    const uuidBlock = "9f692e5d-91e5-4f0d-9eb5-ee4555bffe26";
+    const slugAsk = "2a2a2a2a-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+    const ownAsk = "3b3b3b3b-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+    const questions: Record<string, string> = {
+      [specAsk]: releaseQuestion,
+      [slugAsk]: "Which rule stays?",
+      [ownAsk]: "Ship it?",
+    };
+    const requested: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requested.push(target.pathname);
+      if (target.pathname === "/api/v1/issues/DSP-42/asks") {
+        return response([
+          { id: specAsk, block_id: uuidBlock, question: releaseQuestion },
+          { id: slugAsk, block_id: "rule-dollar-costs", question: "Which rule stays?" },
+          { id: ownAsk, block_id: null, question: "Ship it?" },
+        ]);
+      }
+      if (target.pathname.startsWith("/api/v1/asks/")) {
+        const id = target.pathname.slice("/api/v1/asks/".length);
+        const question = questions[id];
+        if (question === undefined) return response({ code: "NOT_FOUND", error: "not found" }, 404);
+        return response({
+          ask: { id, issue_key: "DSP-42", question, options: [], state: "answered", answer: null },
+          replies: [],
+          edits: [],
+          answers: [],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+    const read = (id: string) =>
+      executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: `dispatch://DSP-42/ask/${id}` },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    for (const [id, ask] of [
+      [uuidBlock, specAsk],
+      [uuidBlock.slice(0, 8), specAsk],
+      [uuidBlock.toUpperCase(), specAsk],
+      [specAsk, specAsk],
+      [specAsk.slice(0, 8), specAsk],
+      ["rule-dollar-costs", slugAsk],
+      [ownAsk.slice(0, 8), ownAsk],
+    ] as const) {
+      requested.length = 0;
+      const result = await read(id);
+      expect([id, result.text.split("\n")[0]]).toEqual([id, `Question: ${questions[ask]}`]);
+      // The writes to an ask take its own id, which the read prints whatever id it was given.
+      expect([id, result.text.split("\n").includes(`Ask id: ${ask}`)]).toEqual([id, true]);
+      expect(requested.filter((path) => path.startsWith("/api/v1/asks/"))).toContain(
+        `/api/v1/asks/${ask}`
+      );
+    }
+    // An ask's own full id is read directly, with no list.
+    requested.length = 0;
+    await read(specAsk);
+    expect(requested).not.toContain("/api/v1/issues/DSP-42/asks");
+
+    const refusal = (id: string) =>
+      read(id).then(
+        () => undefined,
+        (error: unknown) => (error instanceof Error ? error.message : String(error))
+      );
+    expect(await refusal("deadbeef")).toContain(
+      "ask id deadbeef matches none of the asks on DSP-42; use the full id"
+    );
+    expect(await refusal("rule-nobody-wrote")).toContain(
+      "ask id rule-nobody-wrote must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on DSP-42"
+    );
+    expect(await refusal("deadbeef-0000-4000-8000-000000000000")).toContain("not found");
   });
 
   test("reads the children listing from a Dispatch children reference", async () => {
@@ -8274,6 +8841,9 @@ test("resolves a review comment as the calling session from a dispatch:// commen
       pathname,
       body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
     });
+    if (pathname === `/api/v1/comments/${commentUuid}`) {
+      return response({ comment: { id: commentUuid, issue_key: "DSP-42" }, replies: [] });
+    }
     if (pathname !== `/api/v1/comments/${commentUuid}/resolve`) {
       throw new Error(`unexpected request: ${pathname}`);
     }
@@ -8313,6 +8883,8 @@ test("resolves a review comment as the calling session from a dispatch:// commen
     details: { issue: "DSP-42", comment: commentUuid },
   });
   expect(requests).toEqual([
+    // A comment named by a reference is read first, to hold it to the issue the reference names.
+    { method: "GET", pathname: `/api/v1/comments/${commentUuid}`, body: undefined },
     {
       method: "POST",
       pathname: `/api/v1/comments/${commentUuid}/resolve`,
@@ -8406,6 +8978,16 @@ test("resolving a comment through a project-document reference resolves a short 
     if (pathname === "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3/comments") {
       return response([{ id: commentUuid }, { id: "dddddddd-0000-4000-8000-000000000001" }]);
     }
+    if (pathname === `/api/v1/comments/${commentUuid}`) {
+      return response({
+        comment: {
+          id: commentUuid,
+          issue_key: null,
+          artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        },
+        replies: [],
+      });
+    }
     if (pathname === `/api/v1/comments/${commentUuid}/resolve`) {
       return response({
         id: commentUuid,
@@ -8483,17 +9065,18 @@ test("edits an open ask with the calling session identity", async () => {
     requests.push({
       method: init?.method ?? "GET",
       pathname,
-      body: JSON.parse(String(init?.body)),
+      body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
     });
     if (pathname !== "/api/v1/asks/a5c42000-0000-4000-8000-000000000042") {
       throw new Error(`unexpected request: ${pathname}`);
     }
-    return response({
+    const ask = {
       id: "a5c42000-0000-4000-8000-000000000042",
       issue_key: "DSP-42",
       question: revisedPlanQuestion,
       state: "open",
-    });
+    };
+    return response((init?.method ?? "GET") === "GET" ? { ask, replies: [], answers: [] } : ask);
   };
 
   const result = await executeDispatchTool({
@@ -8521,6 +9104,12 @@ test("edits an open ask with the calling session identity", async () => {
     details: { issue: "DSP-42", ask: "a5c42000-0000-4000-8000-000000000042" },
   });
   expect(requests).toEqual([
+    // An ask named by a reference is read first, to hold it to the issue the reference names.
+    {
+      method: "GET",
+      pathname: "/api/v1/asks/a5c42000-0000-4000-8000-000000000042",
+      body: undefined,
+    },
     {
       method: "PATCH",
       pathname: "/api/v1/asks/a5c42000-0000-4000-8000-000000000042",

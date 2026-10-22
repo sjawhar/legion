@@ -1115,7 +1115,7 @@ f=$(claim_session_file "$root1" merger)
 cap_refusals "$f" >"$evidence/ready-cap-merger-refusals-$root1.json"
 posted_len=$(jq -j '.[0].body' "$evidence/ready-messages-$root1.json" | utf16_len)
 note "the merger's own over-cap attempt: $(jq length "$evidence/ready-cap-merger-refusals-$root1.json") READY_PACKET_TOO_LONG refusal(s) ($(jq -r '[.[].text | .[0:150]] | join(" | ")' "$evidence/ready-cap-merger-refusals-$root1.json")); the posted packet is $posted_len UTF-16 units"
-[ "$posted_len" -le 1956 ] || soft "$root1's posted READY is $posted_len units, over record.MessagePostLimit (1956)"
+[ "$posted_len" -le 31956 ] || soft "$root1's posted READY is $posted_len units, over record.MessagePostLimit (31956)"
 # The tool's path through the READY cap, as measured: the census's claim that both completion
 # callers met the refusal live rests on this count, so it is a file, not only a log line.
 jq -n --arg issue "$root1" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root1.json")" --argjson posted "$posted_len" \
@@ -1175,7 +1175,7 @@ merger_self_posted "$root3" >"$evidence/merger-self-posts-$root3.json"
 [ "$(jq length "$evidence/merger-self-posts-$root3.json")" = 0 ] || soft "$root3's merger posted or published READY itself"
 note "approval advanced $root3 to awaiting_merge and the daemon posted the stored packet: '$(head -1 <<<"$packet3")'; then: '$(jq -r '.[0].body' "$evidence/no-holder-messages-$root3.json")'"
 posted_len3=$(jq -j '.[0].body' "$evidence/ready-messages-$root3.json" | utf16_len)
-[ "$posted_len3" -le 1956 ] || soft "$root3's posted READY is $posted_len3 units, over record.MessagePostLimit (1956)"
+[ "$posted_len3" -le 31956 ] || soft "$root3's posted READY is $posted_len3 units, over record.MessagePostLimit (31956)"
 cap_refusals "$(claim_session_file "$root3" merger)" >"$evidence/ready-cap-merger-refusals-$root3.json"
 jq -n --arg issue "$root3" --argjson refusals "$(jq length "$evidence/ready-cap-merger-refusals-$root3.json")" --argjson posted "$posted_len3" \
   '{issue: $issue, tool_refusals: $refusals, posted_utf16: $posted}' >"$evidence/ready-cap-tool-path-$root3.json"

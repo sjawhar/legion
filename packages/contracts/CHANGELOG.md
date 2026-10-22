@@ -106,6 +106,13 @@
 
 ### Changed
 
+- `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
+  broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
+  `POST /api/v1/.../comments` and `POST /api/v1/broadcasts` accept, generated into Go as
+  `contracts.DispatchBodyMax` for the Dispatch server and as `dispatch.MessageBodyLimit` for the
+  Legion daemon, whose derived `record.MessagePostLimit` moves from 1,956 to 31,956; the
+  dashboard's composer takes it as its `maxLength`, and every `dispatch` command field that
+  carries a body takes it as its schema maximum (INFRA-45).
 - **Breaking:** `DeliverySettings` and `DeliverySettingsInput` replace
   `production_job_name` with `production_job_names` and `production_apply_step_name`. A run's
   production result can be `skipped` when its configured apply step did not succeed, and

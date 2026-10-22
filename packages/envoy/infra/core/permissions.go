@@ -35,8 +35,10 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 
 // ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
 // names. Publish, in this order:
-//   - the notification stream's subjects (bus.StreamSubjects), the role lanes and every exception
-//     lane;
+//   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
+//     lanes, every exception lane, and any other topic a caller of /v1/messages/publish names,
+//     which the listener publishes over core NATS (an ad-hoc topic such as
+//     notifications.team.deploy-squad);
 //   - the stream's info, create and update, its durable's (bus.ListenerDurable) info and create,
 //     the durable's acknowledgements, and JetStream's account info;
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
@@ -47,34 +49,78 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
 func ListenerPermissions(machineID string) Permissions {
 	durable := bus.ListenerDurable(machineID)
-	publish := append(bus.StreamSubjects(),
-		contracts.RoleTopicPrefix+">",
-		bus.ExceptionTopicPrefix+bus.NotificationTopicPrefix+">",
-		jsAPI+"STREAM.INFO."+bus.Stream,
-		jsAPI+"STREAM.CREATE."+bus.Stream,
-		jsAPI+"STREAM.UPDATE."+bus.Stream,
-		jsAPI+"CONSUMER.INFO."+bus.Stream+"."+durable,
-		jsAPI+"CONSUMER.CREATE."+bus.Stream+"."+durable,
-		jsAck+bus.Stream+"."+durable+".>",
-		jsAPI+"INFO",
-	)
+	publish := []string{
+		bus.NotificationTopicPrefix + ">",
+		jsAPI + "STREAM.INFO." + bus.Stream,
+		jsAPI + "STREAM.CREATE." + bus.Stream,
+		jsAPI + "STREAM.UPDATE." + bus.Stream,
+		jsAPI + "CONSUMER.INFO." + bus.Stream + "." + durable,
+		jsAPI + "CONSUMER.CREATE." + bus.Stream + "." + durable,
+		jsAck + bus.Stream + "." + durable + ".>",
+		jsAPI + "INFO",
+	}
 	for _, bucket := range listenerBuckets {
-		stream := kvStream + bucket
-		publish = append(publish,
-			jsAPI+"STREAM.INFO."+stream,
-			jsAPI+"STREAM.CREATE."+stream,
-			jsAPI+"DIRECT.GET."+stream+".>",
-			jsAPI+"STREAM.MSG.GET."+stream,
-			kvSubjects+bucket+".>",
-			jsAPI+"CONSUMER.CREATE."+stream+".>",
-			jsAPI+"CONSUMER.DELETE."+stream+".>",
-			jsFlow+stream+".>",
-		)
+		publish = append(publish, bucketPermissions(bucket)...)
 	}
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
 		Publish:   Rules{Allow: publish},
 		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID)}},
+	}
+}
+
+// bucketPermissions are the calls nats.go's KV makes on one bucket, in the order the grants list
+// them: ListenerPermissions lists them for each of listenerBuckets, DispatchPermissions for the
+// redelivery bucket.
+func bucketPermissions(bucket string) []string {
+	stream := kvStream + bucket
+	return []string{
+		jsAPI + "STREAM.INFO." + stream,
+		jsAPI + "STREAM.CREATE." + stream,
+		jsAPI + "DIRECT.GET." + stream + ".>",
+		jsAPI + "STREAM.MSG.GET." + stream,
+		kvSubjects + bucket + ".>",
+		jsAPI + "CONSUMER.CREATE." + stream + ".>",
+		jsAPI + "CONSUMER.DELETE." + stream + ".>",
+		jsFlow + stream + ".>",
+	}
+}
+
+// DispatchDurables are the fixed durable consumers of the stream that Dispatch's grant lets it
+// bind, beside the listener durable of its machine id. Two users holding DispatchPermissions would
+// bind the same ones.
+func DispatchDurables() []string {
+	return []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable}
+}
+
+// DispatchPermissions is the grant of Dispatch's one NATS user, which envoy-dispatch and the
+// envoy-listener beside it share: ListenerPermissions(machineID), the listener's machine id, then
+// what Dispatch itself needs. No session connects as this user, so it holds none of
+// SessionPermissions: it is a direct publish to a session's frames, or a subscription to its
+// control subject, that is refused. The seed's reach is the whole server even so: its _INBOX.>
+// subscription receives every reply any client gets, other listeners' durable push deliveries
+// included; the filtered create on delivery-events lets it create that durable on any filter, so
+// it can read any retained notification; and a consumer it creates can deliver any payload onto a
+// session's frames, since NATS checks no push consumer's deliver subject. Publish, in this
+// order: the stream calls and acknowledgements of each durable Dispatch binds, the KV calls for its
+// webhook-redelivery bucket, and every session's agent stream control subject. Subscribe: every
+// session's agent stream frames.
+func DispatchPermissions(machineID string) Permissions {
+	listener := ListenerPermissions(machineID)
+	publish := listener.Publish.Allow
+	for _, durable := range DispatchDurables() {
+		publish = append(publish,
+			jsAPI+"CONSUMER.INFO."+bus.Stream+"."+durable,
+			jsAPI+"CONSUMER.CREATE."+bus.Stream+"."+durable+".>",
+			jsAPI+"CONSUMER.DELETE."+bus.Stream+"."+durable,
+			jsAck+bus.Stream+"."+durable+".>",
+		)
+	}
+	publish = append(publish, bucketPermissions(bus.WebhookRedeliveryBucket)...)
+	publish = append(publish, contracts.AgentStreamControlSubject("*"))
+	return Permissions{
+		Publish:   Rules{Allow: publish},
+		Subscribe: Rules{Allow: append(listener.Subscribe.Allow, contracts.AgentStreamFramesSubject("*"))},
 	}
 }
 

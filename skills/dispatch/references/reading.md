@@ -4,7 +4,7 @@ Read this to catch up after a restart, read a node, trace what cites it, or writ
 
 ## What comes back
 
-- After a restart, catch up with `dispatch read --issue <KEY>` (or `--project` with `--artifact`, or `--ref`). It prints the issue's summary, open asks, references and recent events, or an ask's, comment's or message's thread. Reads do not subscribe. Use `dispatch doc-read` for document text.
+- After a restart, catch up with `dispatch read --issue <KEY>` (or `--artifact` with `--issue` or `--project`, or `--ref`). It prints the issue's summary, open asks, references and recent events, a document's summary (its issue, reference, versions and approval), or an ask's, comment's or message's thread. Reads do not subscribe. Use `dispatch doc-read` for document text.
 - An anchored comment or ask prints `Position:`, where its quote's block stands. `unavailable (DOC_SERVICE_UNAVAILABLE)` means try again shortly. `unavailable (DOC_SCHEMA)` means the document needs repair.
 - The API gives the same facts as `anchor_block` (or `anchor_block_error`) on `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}`. `GET /api/v1/artifacts/{id}/blocks/{block_id}` gives them for any block.
 - Each read ends with `Referenced by:` (what cites the node) and `Links:` (what it cites), across projects. "What led to this decision" is one read on the ask.
@@ -28,3 +28,4 @@ dispatch://PROJECT/artifact/<document-ref>/comment/<id>
 - A reference renders as a link titled by its target. A body that is only a reference gets an unfurl card.
 - A bare UUID or `KEY#seq` is not a reference. `dispatch read` also takes a dashboard URL, also on the public dashboard when `DISPATCH_PUBLIC_URL` names one. An issue read prints its `Link:`: hand that to a person.
 - An ask or comment id can be a unique 8+ hex prefix. A message id is always the full UUID.
+- An ask or comment on an issue's document is `dispatch://KEY/ask/<id>` or `dispatch://KEY/comment/<id>`, never written through its document.

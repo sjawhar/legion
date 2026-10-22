@@ -411,6 +411,25 @@
 
 ### Changed
 
+- A comment, comment edit, message or broadcast body is at most 32,000 characters
+  (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
+  `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is
+  generated from `DISPATCH_BODY_MAX` in `packages/contracts`, which also generates the Legion
+  daemon's `dispatch.MessageBodyLimit`, so that daemon's derived `record.MessagePostLimit` moves
+  from 1,956 to 31,956. A comment anchored to a document is also projected into that document's
+  margin, whose budgets are in bytes and do not move with this change: 256 KiB of text per margin
+  record — a thread's comment, its replies and its suggestion's replacement — and 1 MiB per
+  document margin, refused `413 CAP_EXCEEDED`. A body at the new cap is 32,000 bytes of ASCII and
+  up to 96,000 bytes of three-byte text, so one thread record now holds roughly eight full-length
+  comments and fewer in CJK, and a document keeps every comment it has had, so one whose margin is
+  full takes more once it is split.
+  **Rollout:** deploy this Dispatch server before any client that writes a
+  longer body, and in particular before a Legion daemon of this release. A server still on 2,000
+  refuses a body a new client sends, and both skews are real. An over-long `dispatch_message`
+  outbox row is not marked permanently refused: it retries forever at a backoff capped at 64 s,
+  costing one retrying logged row per over-long post and blocking nothing else. Symmetrically, a
+  new `dispatch` CLI, plugin bundle or worker image against an old Dispatch lets an agent compose
+  up to 32,000 characters and take a `400 CAP_EXCEEDED` from the server. No code gates the order.
 - **Breaking:** deploy `0113` with no server of the earlier release running, and never start one
   again after it applies. Stop it, or scale it to zero, before this release boots (a Recreate
   rollout, never a rolling one), and recover a failed deploy forward rather than by rolling the
@@ -900,6 +919,31 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A publish to an ad-hoc topic (`envoy_publish` to a `notifications.` topic no stream subject
+  captures, such as `notifications.team.deploy-squad`) reaches its subscribers again, and is
+  answered at once. The listener sends such a topic over core NATS, confirmed as a role lane is
+  (`bus.usesCoreTransport`), where it went to JetStream, which never answers a subject no stream
+  captures while a core subscriber holds it: the publish waited out its five-second
+  acknowledgement deadline and answered 500 `context deadline exceeded`. The listener's NATS grant
+  (`ListenerPermissions`, and so `HostPermissions`) publishes on `notifications.>`, where it
+  listed only the stream's subjects, the role lanes and the exception lanes, so a hub that renders
+  the grant lets the listener make that publish; its rendered authorization changes, which
+  replaces a GCP hub's VM on its next update. `POST /v1/messages/publish` now answers
+  `400 {"error":"topic must begin with notifications.","expected":["topic"]}` for a topic outside
+  `notifications.` and publishes nothing, which closes the raw-subject route: before it, a caller
+  holding the listener's bearer could publish to any subject the listener's own NATS user may
+  publish — measured on a production-shaped rig at main, a publish to
+  `$KV.envoy_roles.example-role` answered 200 and the role-claim bucket went from zero messages to
+  one — and could reach `$JS.API.*` the same way. It closes that route alone: the listener's own
+  role-claim endpoint still serves any holder of the token, by design, and is not changed here.
+
+- The listener's `GET /v1/interests/<session_id>` answers 404 only for a session the registry
+  holds no record of (`nats.ErrKeyNotFound`), and 503 for a read NATS did not serve (a dropped
+  connection, a timeout, a record that does not decode). It used to answer 404 for every failure,
+  so a caller took a NATS failure for a session subscribed to nothing: the `dispatch` command
+  printed "not subscribed", and Dispatch's subscriber removal could complete while the interest
+  was still stored.
 
 - A bare URL next to punctuation in a Dispatch document links as the browser editor links it, so
   reading a table row with `dispatch doc-read` and writing it back with `dispatch doc-edit` no

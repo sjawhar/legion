@@ -131,15 +131,16 @@ type NatsHubArgs struct {
 	SessionUser *SessionUserArgs `pulumi:"sessionUser,optional"`
 }
 
-// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, daemon, and permissions
-// selects the user's grant. nkey is named as aws:User names it, so a consumer running both clouds
-// spells a user alike.
+// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, dispatchMachineId, daemon,
+// and permissions selects the user's grant. nkey is named as aws:User names it, so a consumer
+// running both clouds spells a user alike.
 type NATSUserArgs struct {
-	Name        string           `pulumi:"name"`
-	NKey        string           `pulumi:"nkey"`                 // the user's public key; never its seed
-	MachineID   *string          `pulumi:"machineId,optional"`   // permissions = core.HostPermissions(machineId)
-	Daemon      bool             `pulumi:"daemon,optional"`      // permissions = core.DaemonPermissions()
-	Permissions *PermissionsArgs `pulumi:"permissions,optional"` // explicit
+	Name              string           `pulumi:"name"`
+	NKey              string           `pulumi:"nkey"`                       // the user's public key; never its seed
+	MachineID         *string          `pulumi:"machineId,optional"`         // permissions = core.HostPermissions(machineId)
+	DispatchMachineID *string          `pulumi:"dispatchMachineId,optional"` // permissions = core.DispatchPermissions(dispatchMachineId): Dispatch's user; the id is the listener's beside it
+	Daemon            bool             `pulumi:"daemon,optional"`            // permissions = core.DaemonPermissions()
+	Permissions       *PermissionsArgs `pulumi:"permissions,optional"`       // explicit
 }
 
 // Annotate names the type gcp:NatsUser in the schema: generated SDKs append Args to an object
@@ -349,8 +350,10 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 		fields = append(fields, field{"diskType", *args.DiskType})
 	}
 	for i, u := range args.Users {
-		if u.MachineID != nil {
-			fields = append(fields, field{fmt.Sprintf("users[%d].machineId", i), *u.MachineID})
+		for _, kind := range userKinds(u) {
+			if kind.id != nil {
+				fields = append(fields, field{fmt.Sprintf("users[%d].%s", i, kind.input), *kind.id})
+			}
 		}
 	}
 	if args.Listener != nil {
@@ -393,18 +396,70 @@ func refuseSeedInSecret(value pulumi.StringInput, hub, input string) pulumi.Stri
 	})).(pulumi.StringOutput)
 }
 
+// userKind is one way a hub user names its grant. input is the schema input selecting the kind;
+// id is that input's machine id for a machine kind and nil for daemon and permissions; set says
+// whether the user selected it; fixed names the durables a machine kind binds beside its
+// listener-<id> one; and grant builds its permissions from the machine id, or ignores the empty
+// string passed to a non-machine kind.
+type userKind struct {
+	input string
+	id    *string
+	set   bool
+	fixed []string
+	grant func(string) core.Permissions
+}
+
+// userKinds is the one table of every kind of hub user. The machine-id entries also drive the
+// hub's seed scan, shared machine-id check, and duplicate-durable check.
+func userKinds(u NATSUserArgs) [4]userKind {
+	return [4]userKind{
+		{input: "machineId", id: u.MachineID, set: u.MachineID != nil, grant: core.HostPermissions},
+		{input: "dispatchMachineId", id: u.DispatchMachineID, set: u.DispatchMachineID != nil, fixed: core.DispatchDurables(), grant: core.DispatchPermissions},
+		{input: "daemon", set: u.Daemon, grant: func(string) core.Permissions { return core.DaemonPermissions() }},
+		{input: "permissions", set: u.Permissions != nil, grant: func(string) core.Permissions {
+			return core.Permissions{Publish: *u.Permissions.Publish.Core(), Subscribe: *u.Permissions.Subscribe.Core()}
+		}},
+	}
+}
+
+// selectedUserKind returns the one kind the user at where names.
+func selectedUserKind(where string, u NATSUserArgs) (userKind, error) {
+	var selected userKind
+	for _, kind := range userKinds(u) {
+		if !kind.set {
+			continue
+		}
+		if selected.set {
+			return userKind{}, fmt.Errorf("%s: %s and %s are both set; name one", where, selected.input, kind.input)
+		}
+		selected = kind
+	}
+	if !selected.set {
+		return userKind{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
+	}
+	return selected, nil
+}
+
 // authorization maps the hub's users onto core's. Each of users is a keyed user with a seed, whose
-// permissions are its host's set when it names a machine id, the daemon's set when daemon is true,
-// and its own when it names permissions. The listener's user follows them, named hostname, with the
-// listener's set for that machine and a seed; the session user comes last, with the session's set
-// and no seed, as the authorization's noAuthUser. A hub needs users or a listener: with the session
-// user alone, no client could hold more than a session's grant, and no listener could run. core
-// validates the rest when it renders, a seed in a name or a rule entry first. The hub's own refusals
-// name a user by its index alone: they come before core has read the names, so quoting one could
-// quote a seed.
+// permissions are its host's set when it names a machine id, Dispatch's set when it names a
+// Dispatch machine id, the daemon's set when daemon is true, and its own when it names
+// permissions. The listener's user follows them, named hostname, with the listener's set for
+// that machine and a seed; the session user comes last, with the session's set and no seed, as
+// the authorization's noAuthUser. A hub needs users or a listener: with the session user alone,
+// no client could hold more than a session's grant, and no listener could run. core validates the
+// rest when it renders, a seed in a name or a rule entry first. Each machine id, of either kind,
+// passes core's shared machine-id rule and names a listener durable and queue group. An id whose
+// durable repeats another user's, of either kind, or the hub's own listener's
+// (bus.ListenerDurable turns a space into a hyphen, so "a b" and "a-b" collide) is refused as a
+// core.InputError naming the later input. The hub's own refusals name a user by its index alone:
+// they come before core has read the names, so quoting one could quote a seed.
 func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, session *SessionUserArgs) (core.Authorization, error) {
 	if len(users) == 0 && l == nil {
 		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")
+	}
+	durables := map[string]string{}
+	if l != nil {
+		durables[bus.ListenerDurable(hostname)] = "the hub's own listener"
 	}
 	auth := core.Authorization{Users: make([]core.User, 0, len(users)+2)}
 	for i, u := range users {
@@ -412,29 +467,25 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		if u.NKey == "" {
 			return core.Authorization{}, fmt.Errorf("%s: nkey is required", where)
 		}
-		var perms core.Permissions
-		switch {
-		case u.MachineID != nil && u.Permissions != nil:
-			return core.Authorization{}, fmt.Errorf("%s: machineId and permissions are both set; name one", where)
-		case u.MachineID != nil && u.Daemon:
-			return core.Authorization{}, fmt.Errorf("%s: machineId and daemon are both set; name one", where)
-		case u.Daemon && u.Permissions != nil:
-			return core.Authorization{}, fmt.Errorf("%s: daemon and permissions are both set; name one", where)
-		case u.MachineID != nil:
-			if *u.MachineID == "" {
-				return core.Authorization{}, fmt.Errorf("%s: machineId is empty", where)
-			}
-			perms = core.HostPermissions(*u.MachineID)
-		case u.Daemon:
-			perms = core.DaemonPermissions()
-		case u.Permissions != nil:
-			perms = core.Permissions{
-				Publish:   core.Rules{Allow: u.Permissions.Publish.Allow, Deny: u.Permissions.Publish.Deny},
-				Subscribe: core.Rules{Allow: u.Permissions.Subscribe.Allow, Deny: u.Permissions.Subscribe.Deny},
-			}
-		default:
-			return core.Authorization{}, fmt.Errorf("%s: name machineId, daemon, or permissions", where)
+		kind, err := selectedUserKind(where, u)
+		if err != nil {
+			return core.Authorization{}, err
 		}
+		id := ""
+		if kind.id != nil {
+			id = *kind.id
+			input := where + "." + kind.input
+			if err := core.CheckMachineID(input, id); err != nil {
+				return core.Authorization{}, err
+			}
+			for _, durable := range append([]string{bus.ListenerDurable(id)}, kind.fixed...) {
+				if prior, ok := durables[durable]; ok {
+					return core.Authorization{}, core.InputErrorf(input, "%s: %s gives the same durable name as %s", where, kind.input, prior)
+				}
+				durables[durable] = input
+			}
+		}
+		perms := kind.grant(id)
 		auth.Users = append(auth.Users, core.User{
 			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
 		})

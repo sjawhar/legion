@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -138,8 +139,8 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
-	if length := len16(input.Body); length > maxCommentBody16 {
-		capExceeded(w, "body", length, maxCommentBody16)
+	if length := len16(input.Body); length > contracts.DispatchBodyMax {
+		capExceeded(w, "body", length, contracts.DispatchBodyMax)
 		return
 	}
 	tx, err := s.begin(r.Context())

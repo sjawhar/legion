@@ -33,8 +33,11 @@ type JobIntake struct {
 	pool   *store.Pool
 	github *githubapp.Client
 	clock  jobClock
-	// leases is the pool bind takes the delivery-consumers lease on, so that one process at a
-	// time reconciles this durable's configuration (bindDurableConsumer).
+	// leases is the pool bind takes this durable's consumer lease on (consumerLease), so that one
+	// process at a time reconciles this durable's configuration (bindDurableConsumer). It is the
+	// delivery intake's lease pool, but not its lease: a lease name per durable, so that a
+	// reconciliation stuck on the other intake's durable does not keep this one from creating its
+	// own.
 	leases duty.Leases
 	// throttle is this intake's own bind-poll state: how recently it reconciled its durable and
 	// how recently it said it was standing by for it (bindThrottle).
@@ -70,7 +73,6 @@ type pendingRun struct {
 }
 
 const (
-	jobConsumerName  = "delivery-jobs"
 	jobSubject       = "notifications.github.*.*.job.>"
 	jobQuiet         = 2 * time.Second
 	jobMaxWait       = 10 * time.Second
@@ -140,7 +142,7 @@ func (j *JobIntake) Run(ctx context.Context) {
 // the run's end event and the reconcile do not.
 func jobConsumerConfig() natsgo.ConsumerConfig {
 	return natsgo.ConsumerConfig{
-		Durable:        jobConsumerName,
+		Durable:        bus.DispatchJobDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubject:  jobSubject,
 		DeliverPolicy:  natsgo.DeliverNewPolicy,

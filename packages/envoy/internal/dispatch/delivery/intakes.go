@@ -35,10 +35,12 @@ const (
 // The intakes cannot share a client: a bus.Client holds one JetStream subscription, and refuses the
 // second intake's bind with bus.ErrSubscriptionHeld.
 //
-// Both intakes reconcile their durable's configuration under one lease (deliveryConsumerLease),
-// taken on the pool's lease connections, so that two envoy-dispatch processes never reconcile one
-// durable against each other. A pool that cannot open those connections is returned as the error,
-// with neither intake started: an intake that could not take the lease would reconcile nothing.
+// Each intake reconciles its durable's configuration under a lease of that durable's own
+// (consumerLease), taken on the pool's lease connections, so that two envoy-dispatch processes
+// never reconcile one durable against each other -- and so that neither intake's reconciliation
+// can block the other's, which one lease over both durables did (the measurement is on
+// consumerLease). A pool that cannot open those connections is returned as the error, with
+// neither intake started: an intake that could not take its lease would reconcile nothing.
 func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client, broker *events.Broker) (stop func(), err error) {
 	if github == nil {
 		slog.Info("dispatch delivery: no GitHub App key — the intakes are idle")

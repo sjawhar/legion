@@ -129,12 +129,39 @@ jq '{name, version, legion}' "$root/packages/pi-legion/package.json" >"$plugins/
 jq '{name, version}' "$root/packages/pi-envoy/package.json" >"$plugins/pi-envoy/package.json"
 pane_home=(env -u OMP_PROFILE -u PI_PROFILE HOME="$work/home")
 
+# Beyond what boot needs, the file plants what the state's `settings` must show and must not
+# (LEGION-791): a max_fix_attempts the default would not answer, a github_apps block whose
+# inline PEM fixture is the App key the state must never print, and an envoy_url carrying userinfo
+# at the default host and port, the credential the settings must mask. The loader takes github_apps
+# as the workflow configured and then wants projects too (resolveStage3: `projects must declare at
+# least one project`, `github_apps is required`), so the two come together; a project's
+# repositories are Dispatch's mapping, so its entry is empty. The one project is not this daemon's
+# own, so boot resolves no host git, jj or clone credential for it (readTmux reads tools only for
+# cfg.Projects[cfg.Project]), and with no dispatch_url there is no workflow and no App token mint
+# (openWorkflow): the proof still launches nothing and needs nothing new.
 cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port
 postgres_dsn: $LEGION_E2E_PG_DSN
 state_dir: $work/state
 operator_token_file: $work/operator-token
+max_fix_attempts: 5
+envoy_url: http://legion:fixture-envoy-password@127.0.0.1:9020
+projects:
+  FIXTURE: {}
+github_apps:
+  implement:
+    app_id: "1001"
+    private_key: |
+      -----BEGIN PRIVATE KEY-----
+      fixture
+      -----END PRIVATE KEY-----
+  review:
+    app_id: "1002"
+    private_key: |
+      -----BEGIN PRIVATE KEY-----
+      fixture
+      -----END PRIVATE KEY-----
 EOF
 
 # 1. refuses without Postgres, naming the host and never the password. The bad DSN carries its
@@ -191,6 +218,22 @@ jq -e '(.capabilities | length) == 20
     and .name != "secrets" and .name != "model-fallback") and has("source"))) | length) == 0' \
   "$work/state1.json" || {
   echo "the state does not carry the 20-row capability report with resource-limits and pool-capacity's source under tmux"
+  exit 1
+}
+# The daemon's resolved settings ride the same document (LEGION-791, contract 35): the value the
+# fixture set over its default, a default the fixture left alone, the runtime, the envoy_url with
+# its userinfo masked, and none of what the fixture planted as a credential, a credential file or an
+# App key — the App rides as its id and installations alone, and nothing anywhere in the document
+# reads as a PEM, a DSN, the planted password or a `user:password@` of any URL.
+jq -e '.settings.max_fix_attempts == 5
+  and .settings.worker_boot_timeout_seconds == 120
+  and .settings.runtime.name == "tmux"
+  and .settings.envoy_url == "http://xxxxx@127.0.0.1:9020"
+  and ((.settings | has("postgres_dsn") or has("operator_token_file")) | not)
+  and ([.. | strings | select(test("BEGIN|PRIVATE KEY|postgres://|fixture-envoy-password|://[^/@ ]+:[^/@ ]+@"))] | length) == 0
+  and (.settings.github_apps.implement | keys) == ["app_id", "installations"]' \
+  "$work/state1.json" || {
+  echo "the state does not carry the resolved settings with the fixture's max_fix_attempts, the masked envoy_url and no credential, credential file or App key"
   exit 1
 }
 "$work/legion" legions --json |

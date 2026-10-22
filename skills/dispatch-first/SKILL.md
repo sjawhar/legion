@@ -18,7 +18,7 @@ dispatch search --query 'reviewer threads OR review comments'
 ```
 
 - No hits: drop a word before you add one. Try two or three wordings (the component's name, the symptom, the fix) before you conclude that nothing exists.
-- Open each hit that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`). The parent's children and the `Components:` line show where the rest of the work is.
+- Open each hit that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`; a document hit names its issue on `Issue:`). The parent's children and the `Components:` line show where the rest of the work is.
 
 ## What to do with what you find
 
@@ -32,7 +32,7 @@ dispatch search --query 'reviewer threads OR review comments'
 ## Design in the spec
 
 - A design conversation with a person, or the plan that follows it, uses `skill://dispatch-brainstorming`. Read it before your first design question, the spec, or the plan. It replaces superpowers' `brainstorming` and `writing-plans` here, also when the user names one of them.
-- Before a spec's first version and each approval request, get a fresh read-only subagent to check it. On Oh My Pi, use `task(agent="scout")`. Elsewhere, use the host's read-only agent. It checks the spec against the code, the human's words and the command output that its claims rest on. Resolve what it flags.
+- Before a spec's first version and each approval request, get a fresh read-only subagent to check it. On Oh My Pi, use `task(agent="scout")`. Elsewhere, use the host's read-only agent. It checks the spec against the code, the human's words and the command output that its claims rest on. Scout has no shell: save that Dispatch, gh and git output to files first and give it their paths. Resolve what it flags.
 - A Legion architect's own issue spec follows `skill://legion-architect`. Its fresh reader in that Legion session is the Legion plugin's `plan-gap-analyst` agent.
 
 ## Load the full skill before you write

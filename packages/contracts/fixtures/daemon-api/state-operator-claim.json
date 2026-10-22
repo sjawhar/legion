@@ -43,5 +43,45 @@
     "mapped": [],
     "refused": [],
     "caches": []
+  },
+  "settings": {
+    "project": "DEMO",
+    "port": 13370,
+    "bind": "127.0.0.1",
+    "state_dir": "/var/lib/legion",
+    "runtime": {
+      "name": "tmux"
+    },
+    "admission_cap": 4,
+    "daemon_url": "http://127.0.0.1:13370",
+    "worker_stream_port": 13371,
+    "omp_launch_prefix": [],
+    "provider_keys": [],
+    "worker_boot_timeout_seconds": 120,
+    "worker_rpc_timeout_seconds": 5,
+    "worker_stop_timeout_seconds": 10,
+    "tree_stop_timeout_seconds": 60,
+    "slow_command_timeout_seconds": 300,
+    "probe_interval_seconds": 30,
+    "controller_wake_interval_seconds": 3600,
+    "worker_boot_registration_deadline_intervals": 3,
+    "launch_failure_limit": 3,
+    "prompt_failure_limit": 3,
+    "prompt_retire_limit": 2,
+    "envoy_url": "http://127.0.0.1:9020",
+    "nats_urls": [],
+    "projects": {},
+    "gates": {
+      "design": "root-issues"
+    },
+    "linger_hours": 72,
+    "production_check_hours": 336,
+    "review_round_cap": 3,
+    "max_fix_attempts": 3,
+    "controller": "operator",
+    "capabilities": {
+      "decided": {}
+    },
+    "worker_backends": {}
   }
 }

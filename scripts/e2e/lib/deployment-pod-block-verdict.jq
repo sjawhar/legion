@@ -14,9 +14,11 @@
 #              on a tie), or null when no process holds one;
 #   missing    what the block names and the pod lacks: a volume, a projected source, a mount in a
 #              role container, an env name on that process;
-#   wrong      what the pod carries differently: its ServiceAccount, a volume's kind or object, a
-#              projected token's audience, expiry or path, a mount's sub_path or read_only, an env
-#              value. A value is never printed, only its name, so a verdict never carries an env value.
+#   wrong      what the pod carries differently: its ServiceAccount, a volume's kind or object (a
+#              Secret, ConfigMap or PersistentVolumeClaim by name, an NFS export by server and
+#              path), a projected token's audience, expiry or path, a mount's sub_path or read_only,
+#              an env value. A value is never printed, only its name, so a verdict never carries an
+#              env value.
 # Every container of the pod but its init containers is a role container, and each must carry every
 # mount. A projected token with no expiration_seconds expires in 3600 s (the API server's default),
 # and a mount with no read_only is read-only (Legion's loader). A Secret or ConfigMap volume is
@@ -38,8 +40,8 @@
    else ($procs | map(select(.env | length > 0)) | sort_by([-(.env | length), .pid]) | first) end) as $process
 | def source_kind: if .service_account_token then "service_account_token" elif .secret then "secret" elif .config_map then "config_map" else "unknown" end;
   def pod_source_kind: if .serviceAccountToken then "service_account_token" elif .secret then "secret" elif .configMap then "config_map" else "unknown" end;
-  def volume_kind: if .projected then "projected" elif .secret then "secret" elif .config_map then "config_map" else "unknown" end;
-  def pod_volume_kind: if .projected then "projected" elif .secret then "secret" elif .configMap then "config_map" else "unknown" end;
+  def volume_kind: if .projected then "projected" elif .secret then "secret" elif .config_map then "config_map" elif .persistent_volume_claim then "persistent_volume_claim" elif .nfs then "nfs" else "unknown" end;
+  def pod_volume_kind: if .projected then "projected" elif .secret then "secret" elif .configMap then "config_map" elif .persistentVolumeClaim then "persistent_volume_claim" elif .nfs then "nfs" else "unknown" end;
   # source_findings(want; got; where): a projected source of the block against the pod's.
   def source_findings($want; $got; $where):
     ($want | source_kind) as $k
@@ -67,6 +69,9 @@
        elif ($pv | pod_volume_kind) != $k then {wrong: "volume \($v.name) is \($pv | pod_volume_kind), not \($k)"}
        elif $k == "secret" then (if $pv.secret.secretName != $v.secret.name then {wrong: "volume \($v.name) is Secret \($pv.secret.secretName), not \($v.secret.name)"} else empty end)
        elif $k == "config_map" then (if $pv.configMap.name != $v.config_map.name then {wrong: "volume \($v.name) is ConfigMap \($pv.configMap.name), not \($v.config_map.name)"} else empty end)
+       elif $k == "persistent_volume_claim" then (if $pv.persistentVolumeClaim.claimName != $v.persistent_volume_claim.name then {wrong: "volume \($v.name) is PersistentVolumeClaim \($pv.persistentVolumeClaim.claimName), not \($v.persistent_volume_claim.name)"} else empty end)
+       elif $k == "nfs" then (if $pv.nfs.server != $v.nfs.server or $pv.nfs.path != $v.nfs.path then {wrong: "volume \($v.name) is NFS export \($pv.nfs.server):\($pv.nfs.path), not \($v.nfs.server):\($v.nfs.path)"} else empty end)
+       elif $k == "unknown" then {wrong: "volume \($v.name) is of a kind this verdict does not read"}
        else
          ($v.projected.sources | to_entries[]) as $s
          | source_findings($s.value; $pv.projected.sources[$s.key]; "volume \($v.name) source \($s.key)")[]

@@ -56,7 +56,7 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 		t.Fatalf("StartIntakes connected as %q, want %q", names, want)
 	}
 
-	durables := []string{deliveryConsumerName, jobConsumerName}
+	durables := []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable}
 	consumers := func() string {
 		var states []string
 		for _, durable := range durables {
@@ -75,7 +75,7 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 		return err == nil && info.PushBound
 	}
 	waitFor(t, 20*time.Second, func() bool {
-		return pushBound(deliveryConsumerName) && pushBound(jobConsumerName)
+		return pushBound(bus.DispatchDeliveryDurable) && pushBound(bus.DispatchJobDurable)
 	}, func() string {
 		return "the intakes' durables are not both push-bound: " + consumers()
 	})
@@ -163,7 +163,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	})
 	awaitBoundDurable(t, publisher)
 	consumer := func() string {
-		info, err := publisher.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		if err != nil {
 			return err.Error()
 		}
@@ -182,7 +182,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	cancel()
 	// Run has returned once the durable loses its subscriber: Run unsubscribes as it ends.
 	waitFor(t, 20*time.Second, func() bool {
-		info, err := publisher.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		return err == nil && !info.PushBound
 	}, func() string {
 		return "the intake's durable kept its subscriber after ctx was cancelled: " + consumer()
@@ -199,7 +199,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 		return failed
 	}
 	waitFor(t, 20*time.Second, func() bool {
-		info, err := publisher.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		return err == nil && info.Delivered.Consumer == 1 && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
 	}, func() string {
 		return fmt.Sprintf("the message in its handler at shutdown was never acknowledged: %s; failed acknowledgements: %v",
@@ -257,7 +257,7 @@ func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
 	if first == nil || !first.Conn.IsClosed() {
 		t.Fatal("the intake's client was left open when the job intake's connect failed")
 	}
-	for _, durable := range []string{deliveryConsumerName, jobConsumerName} {
+	for _, durable := range []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable} {
 		if _, err := publisher.JS().ConsumerInfo(bus.Stream, durable); !errors.Is(err, natsgo.ErrConsumerNotFound) {
 			t.Errorf("%s after a failed start: %v, want no such durable", durable, err)
 		}
@@ -289,7 +289,7 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 		stopJobs()
 		<-jobsDone
 	})
-	waitFor(t, 20*time.Second, func() bool { return pushBound(jobConsumerName) }, func() string {
+	waitFor(t, 20*time.Second, func() bool { return pushBound(bus.DispatchJobDurable) }, func() string {
 		return "the job intake never bound its durable"
 	})
 
@@ -299,7 +299,7 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 	waitFor(t, 20*time.Second, func() bool {
 		for _, record := range logs() {
 			message, _ := record["error"].(string)
-			if record["msg"] == "dispatch delivery: bind NATS consumer" && record["name"] == deliveryConsumerName &&
+			if record["msg"] == "dispatch delivery: bind NATS consumer" && record["name"] == bus.DispatchDeliveryDurable &&
 				strings.Contains(message, bus.ErrSubscriptionHeld.Error()) {
 				refusal = record
 				return true
@@ -308,15 +308,15 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 		return false
 	}, func() string {
 		return fmt.Sprintf("the delivery intake's bind on the job intake's client was not refused with %q; %s=%t %s=%t",
-			bus.ErrSubscriptionHeld, jobConsumerName, pushBound(jobConsumerName), deliveryConsumerName, pushBound(deliveryConsumerName))
+			bus.ErrSubscriptionHeld, bus.DispatchJobDurable, pushBound(bus.DispatchJobDurable), bus.DispatchDeliveryDurable, pushBound(bus.DispatchDeliveryDurable))
 	})
 	if refusal["level"] != "ERROR" {
 		t.Fatalf("the refused bind was logged at %v, want ERROR: %v", refusal["level"], refusal)
 	}
-	if !pushBound(jobConsumerName) {
+	if !pushBound(bus.DispatchJobDurable) {
 		t.Fatal("the job intake's durable lost its subscriber to the refused bind")
 	}
-	if pushBound(deliveryConsumerName) {
+	if pushBound(bus.DispatchDeliveryDurable) {
 		t.Fatal("the delivery intake's durable is bound on a client that holds the job intake's")
 	}
 }

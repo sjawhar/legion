@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
@@ -16,6 +16,7 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
+  DISPATCH_BODY_MAX,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   SEARCH_KIND_DEPTH,
@@ -43,7 +44,6 @@ type Schema = {
   additionalProperties?: boolean;
 };
 
-const out = resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go");
 const envelopeFile = resolve(import.meta.dir, "../schemas/envelope.schema.json");
 
 const map = {
@@ -159,6 +159,11 @@ const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
 // PATCH /api/v1/issues/{key} accept. Generated from ISSUE_TITLE_MAX in packages/contracts so the
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = ${ISSUE_TITLE_MAX}
+
+// DispatchBodyMax is the longest comment, comment-edit, message and broadcast body the server
+// accepts, in UTF-16 units. Generated from DISPATCH_BODY_MAX in packages/contracts so the server's
+// refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
+const DispatchBodyMax = ${DISPATCH_BODY_MAX}
 
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
@@ -416,45 +421,79 @@ ${keep}
 `;
 }
 
+function renderDaemonDispatch() {
+  return `package dispatch
+
+// MessageBodyLimit is the longest body Dispatch accepts on a message, in UTF-16 code units as
+// Dispatch counts them. Generated from DISPATCH_BODY_MAX in packages/contracts;
+// record.MessagePostLimit subtracts the outbox marker the runner appends from it.
+const MessageBodyLimit = ${DISPATCH_BODY_MAX}
+`;
+}
+
 const envelope = (await Bun.file(envelopeFile).json()) as Schema;
-const rendered = renderContracts(envelope);
+
+// Every generated Go file this script owns. The daemon carries its own copy of the body cap
+// rather than importing the envoy package: its production build imports nothing from
+// github.com/sjawhar/envoy.
+const outputs = [
+  {
+    path: resolve(import.meta.dir, "../../envoy/internal/contracts/generated.go"),
+    rendered: renderContracts(envelope),
+  },
+  {
+    path: resolve(import.meta.dir, "../../daemon/internal/dispatch/generated.go"),
+    rendered: renderDaemonDispatch(),
+  },
+];
 const fmt = Bun.which("gofmt");
 
-// `--check` pipes the render through gofmt and compares it with the committed file, writing
+// `--check` pipes each render through gofmt and compares it with the committed file, writing
 // nothing, so CI fails on a generated.go that no longer matches the TypeScript it comes from.
 if (process.argv.includes("--check")) {
   if (fmt === null) {
-    throw new Error("gen-go --check needs gofmt: the committed file is gofmt-formatted");
+    throw new Error("gen-go --check needs gofmt: the committed files are gofmt-formatted");
   }
-  const gofmt = Bun.spawnSync({
-    cmd: [fmt],
-    stdin: new TextEncoder().encode(rendered),
-    stderr: "inherit",
-  });
-  if (gofmt.exitCode !== 0) {
-    throw new Error("gofmt failed");
-  }
-  if (gofmt.stdout.toString() !== (await Bun.file(out).text())) {
-    Bun.spawnSync({
-      cmd: ["diff", "-u", out, "-"],
-      stdin: gofmt.stdout,
+  // GEN_GO_CHECK_ROOT points the comparison at copies of the outputs under another root, laid out
+  // by their repository-relative paths, so a test can check a copy instead of a tracked file.
+  // Unset, `--check` compares the committed files.
+  const checkRoot = process.env.GEN_GO_CHECK_ROOT;
+  const repoRoot = resolve(import.meta.dir, "../../..");
+  for (const { path: output, rendered } of outputs) {
+    const path = checkRoot ? resolve(checkRoot, relative(repoRoot, output)) : output;
+    const gofmt = Bun.spawnSync({
+      cmd: [fmt],
+      stdin: new TextEncoder().encode(rendered),
       stderr: "inherit",
-      stdout: "inherit",
     });
-    console.error(
-      `${out} is stale: run \`bun run gen:go\` in packages/contracts and commit the result.`
-    );
-    process.exit(1);
+    if (gofmt.exitCode !== 0) {
+      throw new Error("gofmt failed");
+    }
+    if (gofmt.stdout.toString() !== (await Bun.file(path).text())) {
+      Bun.spawnSync({
+        cmd: ["diff", "-u", path, "-"],
+        stdin: gofmt.stdout,
+        stderr: "inherit",
+        stdout: "inherit",
+      });
+      console.error(
+        `${path} is stale: run \`bun run gen:go\` in packages/contracts and commit the result.`
+      );
+      process.exit(1);
+    }
   }
   process.exit(0);
 }
 
-mkdirSync(dirname(out), { recursive: true });
-await Bun.write(out, rendered);
+for (const { path, rendered } of outputs) {
+  mkdirSync(dirname(path), { recursive: true });
+  await Bun.write(path, rendered);
+}
 
+// One gofmt for every file written, rather than one spawn per output.
 if (fmt) {
   const gofmt = Bun.spawnSync({
-    cmd: [fmt, "-w", out],
+    cmd: [fmt, "-w", ...outputs.map(({ path }) => path)],
     stderr: "inherit",
     stdout: "inherit",
   });

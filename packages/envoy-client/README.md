@@ -233,9 +233,10 @@ token. `dispatch-execute.ts` validates a call against its shared spec, derives
 the caller's session origin and Legion issue reference, executes the operation,
 and returns its text and typed details. No result carries a subscription topic:
 `dispatch ask` and an ask reply through `dispatch comment` return
-`details.follows = { ask }` (the session follows that ask server-side), and every
-write's text names the `envoy_subscribe notifications.dispatch.issue.<KEY>.>`
-line an agent passes to subscribe to the whole issue itself.
+`details.follows = { ask }` (the session follows that ask server-side). A write's text names the
+`envoy_subscribe notifications.dispatch.issue.<KEY>.>` line an agent passes to subscribe to the
+whole issue itself only when none of the session's subscriptions, as the Envoy listener records
+them, covers the issue; with Envoy off or no answer from the listener it names none.
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.

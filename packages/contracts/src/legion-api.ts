@@ -326,6 +326,15 @@ const legionCapabilityState = z.strictObject({
   source: z.enum(["configuration", "boot"]).optional(),
 });
 
+/** `api.Settings` — the daemon's resolved legion.yaml with every credential, credential source and
+ * credential file path left out (contract 35). Its keys are legion.yaml's own; the two the spec
+ * names are typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
+ * contract change. */
+const legionSettings = z.looseObject({
+  max_fix_attempts: z.number().int().positive(),
+  worker_boot_timeout_seconds: z.number().int().positive(),
+});
+
 /** `api.CacheView` — a repository cache as the Kubernetes runtime shows it: its repository and
  * Sandbox, its `state` (`failing` with the kubelet's `reason`, `refused` with its Service's),
  * whether its pod is Ready behind its own Service and its address then, from its last health read
@@ -372,7 +381,9 @@ const legionRepositories = z.strictObject({
  * claim nothing will wake, by issue and then role, never null (contract 23); `heldOutboxRows` is
  * every due lifecycle outbox row held behind its issue's running one, by when it came due and then
  * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
- * serves it (contract 31). */
+ * serves it (contract 31); `settings` is the daemon's resolved legion.yaml with no credential,
+ * credential source or credential file path, required, and loose like `payload` above so a
+ * legion.yaml key added later changes no strictly parsed shape (contract 35). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -384,6 +395,7 @@ export const LegionStateResponse = z.strictObject({
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),
   repositories: legionRepositories,
+  settings: legionSettings,
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;

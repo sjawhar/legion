@@ -288,4 +288,13 @@ package api
 // hold the daemon and the plugin to the same list. (This branch took 33; main then landed
 // LEGION-781 at 33 and released pi-legion v10.16.0 declaring it, without these shapes, so this
 // branch takes the number above it, as the collision note says.)
-const DaemonAPIVersion = 34
+//
+// 35: LEGION-791 -- api.State gains `settings`, the daemon's resolved legion.yaml with every
+// credential, credential source and credential file path left out and a URL's userinfo masked as
+// `xxxxx@`, keyed as the file is. Required, so a plugin built before it refuses the state and the
+// bump is why the two never meet; the plugin parses it loosely (two typed keys, the rest unknown),
+// so a later legion.yaml key changes no strictly parsed shape and bumps nothing. (This branch took
+// 30; main then landed sjawhar/legion#1986 at 30, 31 and 32, LEGION-781 at 33 and INFRA-31 at 34,
+// each released without this shape, so this branch takes the number above them, as the collision
+// note says.)
+const DaemonAPIVersion = 35

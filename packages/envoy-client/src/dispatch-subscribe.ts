@@ -3,15 +3,13 @@ import { commandLine } from "./dispatch-command";
 import { documentTopicOf, issueTopic, type OwnerTopic } from "./dispatch-owner";
 
 /**
- * The follow notice the `dispatch` command prints once per ask after a result whose
- * `details.follows.ask` says the calling session now follows that ask (it opened it,
- * replied to it, or asked to follow it). No result subscribes the session to the
- * owner; the notice names the `envoy_subscribe` line for whoever wants every event.
- * Returns null for any other result: reads, unfollows and errors.
+ * The ask a result's `details.follows.ask` says the calling session now follows (it opened it,
+ * replied to it, or asked to follow it), with its owner; null for any other result: reads,
+ * unfollows and errors. The `dispatch` command prints `followNoticeText` once per such ask.
  */
-export function dispatchFollowNotice(
+export function followedAsk(
   details: unknown
-): { readonly ask: string; readonly text: string } | null {
+): { readonly ask: string; readonly owner: OwnerTopic } | null {
   if (typeof details !== "object" || details === null) return null;
   const { follows, issue, document } = details as {
     follows?: unknown;
@@ -21,20 +19,52 @@ export function dispatchFollowNotice(
   if (typeof follows !== "object" || follows === null) return null;
   const { ask } = follows as { ask?: unknown };
   if (typeof ask !== "string" || ask === "") return null;
-  let owner: OwnerTopic;
-  if (typeof issue === "string" && issue !== "") {
-    owner = issueTopic(issue);
-  } else if (typeof document === "string") {
-    const [project, slug] = document.split("/", 2);
-    if (!project || !slug) return null;
-    owner = { label: document, topic: documentTopicOf(project, slug).topic };
-  } else {
-    return null;
+  if (typeof issue === "string" && issue !== "") return { ask, owner: issueTopic(issue) };
+  if (typeof document !== "string") return null;
+  const [project, slug] = document.split("/", 2);
+  if (!project || !slug) return null;
+  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
+}
+
+/**
+ * The follow notice for `followed`. No result subscribes the session to the owner; the notice
+ * names the `envoy_subscribe` line for whoever wants every event when `topics`, the session's
+ * subscriptions, hold none that covers the owner (`ownerSubscribeLine`).
+ */
+export function followNoticeText(
+  { ask, owner }: { readonly ask: string; readonly owner: OwnerTopic },
+  topics: readonly string[] | null
+): string {
+  const subscribe = ownerSubscribeLine(owner, topics);
+  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
+}
+
+/**
+ * `For every event on <owner>: envoy_subscribe <topic>`, the line that subscribes a session to
+ * every event on `owner`, when `topics`, the session's subscriptions, hold none that covers it.
+ * Null when one does, and when `topics` is null: nothing then says what the session receives.
+ */
+export function ownerSubscribeLine(
+  owner: OwnerTopic,
+  topics: readonly string[] | null | undefined
+): string | null {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner))) return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+
+/**
+ * Whether a subscription to `topic` receives every event on `owner`, under the listener's
+ * wildcard rule (`routing.Match`): its tokens match the owner's subject token for token (`*`
+ * matching any one), then end in `>`. An event type can span tokens (`ask.answered`), so a
+ * topic that names a token past the owner's subject, `*` included, receives only some of them.
+ */
+export function subscriptionCovers(topic: string, owner: OwnerTopic): boolean {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">") return true;
+    if (index >= base.length || (part !== "*" && part !== base[index])) return false;
   }
-  return {
-    ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`,
-  };
+  return false;
 }
 
 /**

@@ -46,7 +46,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 
 	// The durable an earlier release left: its filter subjects, and the server's own flow control.
 	legacy := natsgo.ConsumerConfig{
-		Durable:        deliveryConsumerName,
+		Durable:        bus.DispatchDeliveryDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubjects: []string{
 			"notifications.github.*.*.pr.*",
@@ -72,7 +72,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 	// yet", not a failure.
 	var info *natsgo.ConsumerInfo
 	waitFor(t, 20*time.Second, func() bool {
-		read, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		read, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		if errors.Is(err, natsgo.ErrConsumerNotFound) {
 			return false
 		}
@@ -83,7 +83,7 @@ func TestIntakeStampsItsFlowControlOnADurableAnEarlierReleaseLeft(t *testing.T) 
 		return info.Config.MaxAckPending == intakeMaxAckPending && info.Config.AckWait == intakeAckWait()
 	}, func() string {
 		if info == nil {
-			return fmt.Sprintf("no durable named %s after %s", deliveryConsumerName, 20*time.Second)
+			return fmt.Sprintf("no durable named %s after %s", bus.DispatchDeliveryDurable, 20*time.Second)
 		}
 		return fmt.Sprintf("durable ack_wait/max_ack_pending = %s/%d after %s, want %s/%d (bind must correct an earlier release's flow control)",
 			info.Config.AckWait, info.Config.MaxAckPending, 20*time.Second, intakeAckWait(), intakeMaxAckPending)
@@ -362,7 +362,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	// floor whichever plural set the durable carries. The first messages are acknowledged through
 	// a pull fetch, which reaches them in stream order, so the ack floor sits at the last of them.
 	if _, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
-		Durable: deliveryConsumerName,
+		Durable: bus.DispatchDeliveryDurable,
 		FilterSubjects: []string{
 			contracts.GithubWorkflowSubject("acme", "widgets", pathBaseForTest(settings.DeployWorkflowPath), ">"),
 			contracts.GithubWorkflowSubject("acme", "widgets", pathBaseForTest(settings.PRChecksWorkflowPath), ">"),
@@ -375,7 +375,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the jetstream API: %v", err)
 	}
-	legacy, err := js.Consumer(ctx, bus.Stream, deliveryConsumerName)
+	legacy, err := js.Consumer(ctx, bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("look up the plural-filter durable: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	if err := batch.Error(); err != nil || got != acknowledged {
 		t.Fatalf("fetch the first %d messages: got %d, err %v", acknowledged, got, err)
 	}
-	before, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	before, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("read the plural-filter durable: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	t.Log(intakeStateReport(t, natsClient))
 
-	after, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	after, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("read the replacement durable: %v", err)
 	}
@@ -489,7 +489,7 @@ func TestIntakeKeepsUpWithABurstOfDeliveryEvents(t *testing.T) {
 	// A redelivery, which flow control that did not fit the handler would cause, arrives within
 	// the ack wait; give one time to land before reading the consumer's state.
 	time.Sleep(2 * time.Second)
-	info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+	info, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 	if err != nil {
 		t.Fatalf("read consumer info: %v", err)
 	}
@@ -576,7 +576,7 @@ func TestASecondProcessStandsByForADurableAnotherHolds(t *testing.T) {
 			t.Fatalf("standing by for a durable another process holds was logged as an error: %v", record)
 		}
 		if record["msg"] == "dispatch delivery: NATS consumer held by another process; standing by" &&
-			record["name"] == deliveryConsumerName {
+			record["name"] == bus.DispatchDeliveryDurable {
 			stoodBy = true
 		}
 	}
@@ -621,7 +621,7 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 	// (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor), as a push consumer so a process can
 	// be bound to it.
 	legacy := natsgo.ConsumerConfig{
-		Durable:        deliveryConsumerName,
+		Durable:        bus.DispatchDeliveryDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubjects: []string{
 			"notifications.github.*.*.pr.*",
@@ -633,7 +633,7 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pre-create the durable an earlier release left: %v", err)
 	}
-	held, err := holder.Subscribe(legacy.FilterSubjects[0], func(*natsgo.Msg) {}, natsgo.Bind(bus.Stream, deliveryConsumerName), natsgo.ManualAck())
+	held, err := holder.Subscribe(legacy.FilterSubjects[0], func(*natsgo.Msg) {}, natsgo.Bind(bus.Stream, bus.DispatchDeliveryDurable), natsgo.ManualAck())
 	if err != nil {
 		t.Fatalf("bind the other process to the durable: %v", err)
 	}
@@ -664,7 +664,7 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 			t.Fatalf("leaving a bound consumer alone was logged as an error: %v", record)
 		}
 		if record["msg"] == "dispatch delivery: another process is bound to the NATS consumer; leaving its configuration alone" &&
-			record["name"] == deliveryConsumerName {
+			record["name"] == bus.DispatchDeliveryDurable {
 			leftAlone = true
 		}
 	}
@@ -674,10 +674,13 @@ func TestAConsumerAnotherProcessIsBoundToIsLeftAlone(t *testing.T) {
 }
 
 // TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing: the configuration reconciliation runs under
-// the delivery-consumers lease, so that two processes never reconcile one durable against each
-// other. With the lease held by another caller, a bind touches the durable's configuration in no
-// way -- no create, no update, no delete, however far the durable is from what this release wants
-// -- and still binds it: the process holding the lease is doing that work.
+// the durable's own consumer lease (consumerLease), so that two processes never reconcile one
+// durable against each other. With that durable's lease held by another caller, a bind touches the
+// durable's configuration in no way -- no create, no update, no delete, however far the durable is
+// from what this release wants -- and still binds it: the process holding the lease is doing that
+// work. The lease taken here is the one the bind below takes, bus.DispatchDeliveryDurable's: a
+// test holding any other durable's lease would leave this bind free to reconcile and prove
+// nothing.
 func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	logs := captureLogs(t)
 	pool, ctx := deliveryTestPool(t)
@@ -687,7 +690,7 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	// A durable this release would correct in place: the right filter subject, the server's own
 	// flow control rather than this package's.
 	before, err := natsClient.JS().AddConsumer(bus.Stream, &natsgo.ConsumerConfig{
-		Durable:        deliveryConsumerName,
+		Durable:        bus.DispatchDeliveryDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubject:  githubIntakeSubject,
 		AckPolicy:      natsgo.AckExplicitPolicy,
@@ -706,7 +709,7 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	taken, release := make(chan struct{}), make(chan struct{})
 	ran := make(chan bool, 1)
 	go func() {
-		ran <- duty.Exclusive(ctx, leases, deliveryConsumerLease, 0, func(context.Context) {
+		ran <- duty.Exclusive(ctx, leases, consumerLease(bus.DispatchDeliveryDurable), 0, func(context.Context) {
 			close(taken)
 			<-release
 		})
@@ -714,13 +717,13 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	select {
 	case <-taken:
 	case <-time.After(20 * time.Second):
-		t.Fatal("the other caller never took the delivery-consumers lease")
+		t.Fatalf("the other caller never took the %s lease", consumerLease(bus.DispatchDeliveryDurable))
 	}
 
 	sub, outcome := bindDurableConsumer(ctx, natsClient, leases, &bindThrottle{}, deliveryConsumerConfig(), func(*natsgo.Msg) {})
 	close(release)
 	if held := <-ran; !held {
-		t.Fatal("the other caller never held the delivery-consumers lease, so the bind was free to reconcile")
+		t.Fatalf("the other caller never held the %s lease, so the bind was free to reconcile", consumerLease(bus.DispatchDeliveryDurable))
 	}
 	if outcome != bindBound || sub == nil {
 		t.Fatalf("the bind under a lease held elsewhere = %v (subscription returned: %t), want bindBound", outcome, sub != nil)
@@ -740,12 +743,12 @@ func TestABindWhoseLeaseIsHeldElsewhereReconcilesNothing(t *testing.T) {
 	}
 	var skipped bool
 	for _, record := range logs() {
-		if record["msg"] == "dispatch duty: leased pass skipped" && record["lease"] == deliveryConsumerLease {
+		if record["msg"] == "dispatch duty: leased pass skipped" && record["lease"] == consumerLease(bus.DispatchDeliveryDurable) {
 			skipped = true
 		}
 	}
 	if !skipped {
-		t.Fatalf("the bind never reported skipping the %s lease: %v", deliveryConsumerLease, logs())
+		t.Fatalf("the bind never reported skipping the %s lease: %v", consumerLease(bus.DispatchDeliveryDurable), logs())
 	}
 }
 
@@ -759,7 +762,7 @@ func awaitPushBound(t *testing.T, client *bus.Client, failure string) *natsgo.Co
 	var info *natsgo.ConsumerInfo
 	var err error
 	waitFor(t, 20*time.Second, func() bool {
-		info, err = client.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err = client.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		return err == nil && info.PushBound
 	}, func() string {
 		return fmt.Sprintf("%s: %+v, %v", failure, info, err)

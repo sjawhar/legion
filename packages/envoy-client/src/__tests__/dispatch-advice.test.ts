@@ -212,6 +212,8 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
     env: {},
     exec: repoExec(),
     fetchImpl: fetchImpl as typeof fetch,
+    // A session the listener records with no topics: every write names its owner.
+    subscriptions: async () => [],
   });
 }
 

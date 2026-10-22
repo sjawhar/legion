@@ -1,36 +1,93 @@
 import { describe, expect, test } from "bun:test";
-import { dispatchFollowNotice, subscriptionRemovedTopics } from "../dispatch-subscribe";
+import { documentTopicOf, issueTopic } from "../dispatch-owner";
+import {
+  followedAsk,
+  followNoticeText,
+  subscriptionCovers,
+  subscriptionRemovedTopics,
+} from "../dispatch-subscribe";
 
-describe("dispatchFollowNotice", () => {
-  test("names the ask, its issue, and the opt-in subscribe line for a result that follows an ask", () => {
-    expect(
-      dispatchFollowNotice({ issue: "DSP-42", ask: "ask-1", follows: { ask: "ask-1" } })
-    ).toEqual({
-      ask: "ask-1",
-      text: "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.",
-    });
+/** The follow notice for `details`, which must follow an ask, given the session's `topics`. */
+function notice(details: unknown, topics: readonly string[] | null): string {
+  const followed = followedAsk(details);
+  if (followed === null) throw new Error("details follow no ask");
+  return followNoticeText(followed, topics);
+}
+
+describe("subscriptionCovers", () => {
+  test("a topic covers an owner when it receives every event on it, as the listener matches", () => {
+    const issue = issueTopic("DSP-42");
+    for (const topic of [
+      "notifications.dispatch.issue.DSP-42.>",
+      "notifications.dispatch.issue.*.>",
+      "notifications.dispatch.issue.>",
+      "notifications.dispatch.>",
+      "notifications.>",
+      ">",
+    ]) {
+      expect([topic, subscriptionCovers(topic, issue)]).toEqual([topic, true]);
+    }
+    for (const topic of [
+      "notifications.dispatch.issue.DSP-42",
+      // An event type can span tokens (`ask.answered`), which `*` stops short of.
+      "notifications.dispatch.issue.DSP-42.*",
+      "notifications.dispatch.issue.DSP-42.ask.>",
+      "notifications.dispatch.issue.DSP-4.>",
+      "notifications.dispatch.issue.DSP-420.>",
+      "notifications.dispatch.issue.DSP-42.comment.created",
+      "notifications.dispatch.document.DSP.spec.>",
+      "notifications.agent.ses-1",
+      "notifications.role.reviewer",
+    ]) {
+      expect([topic, subscriptionCovers(topic, issue)]).toEqual([topic, false]);
+    }
+    const document = documentTopicOf("CORE", "runbook-md");
+    expect(subscriptionCovers("notifications.dispatch.document.CORE.runbook-md.>", document)).toBe(
+      true
+    );
+    expect(subscriptionCovers("notifications.dispatch.document.CORE.*.>", document)).toBe(true);
+    expect(subscriptionCovers("notifications.dispatch.issue.>", document)).toBe(false);
+  });
+});
+
+describe("the follow notice", () => {
+  test("names the ask, its issue, and the subscribe line only when no subscription covers the issue", () => {
+    const details = { issue: "DSP-42", ask: "ask-1", follows: { ask: "ask-1" } };
+    const follows =
+      "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop).";
+    const subscribe =
+      " For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.";
+    expect(followedAsk(details)).toEqual({ ask: "ask-1", owner: issueTopic("DSP-42") });
+    expect(notice(details, ["notifications.agent.ses-1"])).toBe(`${follows}${subscribe}`);
+    expect(notice(details, [])).toBe(`${follows}${subscribe}`);
+    expect(notice(details, ["notifications.dispatch.issue.DSP-42.>"])).toBe(follows);
+    expect(notice(details, ["notifications.dispatch.>"])).toBe(follows);
+    // Subscriptions that could not be read say nothing about what the session receives.
+    expect(notice(details, null)).toBe(follows);
   });
 
   test("names a project document by project/slug with the document topic", () => {
-    expect(
-      dispatchFollowNotice({
-        project: "CORE",
-        document: "CORE/design-notes",
-        artifact: "artifact-1",
-        ask: "ask-1",
-        follows: { ask: "ask-1" },
-      })?.text
-    ).toBe(
+    const details = {
+      project: "CORE",
+      document: "CORE/design-notes",
+      artifact: "artifact-1",
+      ask: "ask-1",
+      follows: { ask: "ask-1" },
+    };
+    expect(notice(details, [])).toBe(
       "Following ask ask-1 on CORE/design-notes: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on CORE/design-notes: envoy_subscribe notifications.dispatch.document.CORE.design-notes.>."
+    );
+    expect(notice(details, ["notifications.dispatch.document.CORE.design-notes.>"])).not.toContain(
+      "envoy_subscribe"
     );
   });
 
   test("returns null for reads, unfollows, and results without an owner", () => {
-    expect(dispatchFollowNotice(undefined)).toBeNull();
-    expect(dispatchFollowNotice({ issue: "DSP-42" })).toBeNull();
-    expect(dispatchFollowNotice({ ask: "ask-1" })).toBeNull();
-    expect(dispatchFollowNotice({ follows: { ask: "ask-1" } })).toBeNull();
-    expect(dispatchFollowNotice({ follows: { ask: 7 }, issue: "DSP-42" })).toBeNull();
+    expect(followedAsk(undefined)).toBeNull();
+    expect(followedAsk({ issue: "DSP-42" })).toBeNull();
+    expect(followedAsk({ ask: "ask-1" })).toBeNull();
+    expect(followedAsk({ follows: { ask: "ask-1" } })).toBeNull();
+    expect(followedAsk({ follows: { ask: 7 }, issue: "DSP-42" })).toBeNull();
   });
 });
 

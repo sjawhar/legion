@@ -356,5 +356,204 @@
         "retainedUntil": "2026-10-23T09:00:00Z"
       }
     ]
+  },
+  "settings": {
+    "project": "LEGION",
+    "port": 13370,
+    "bind": "0.0.0.0",
+    "advertise_host": "legion-daemon.internal.example",
+    "state_dir": "/var/lib/legion",
+    "runtime": {
+      "name": "kubernetes",
+      "kubernetes": {
+        "namespace": "legion",
+        "image": "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "storage_class": "gp3",
+        "issue_volume": "30Gi",
+        "scheduling": {
+          "node_selector": {
+            "node.kubernetes.io/instance-type": "m7i.xlarge"
+          },
+          "tolerations": [
+            {
+              "key": "dedicated",
+              "operator": "Equal",
+              "value": "legion",
+              "effect": "NoSchedule"
+            },
+            {
+              "key": "spot",
+              "operator": "Exists",
+              "effect": "NoExecute"
+            }
+          ],
+          "priority_class": "legion-workers"
+        },
+        "resources": {
+          "architect": {
+            "cpu": "250m",
+            "cpu_request": "250m",
+            "memory": "1Gi",
+            "memory_request": "1Gi",
+            "ephemeral_storage": "10Gi",
+            "ephemeral_storage_request": "1Gi"
+          },
+          "controller": {
+            "cpu": "2",
+            "cpu_request": "1",
+            "memory": "6Gi",
+            "memory_request": "4Gi",
+            "ephemeral_storage": "10Gi",
+            "ephemeral_storage_request": "1Gi"
+          },
+          "implementer": {
+            "cpu": "1500m",
+            "cpu_request": "1500m",
+            "memory": "8Gi",
+            "memory_request": "8Gi",
+            "ephemeral_storage": "20Gi",
+            "ephemeral_storage_request": "1Gi"
+          },
+          "merger": {
+            "cpu": "250m",
+            "cpu_request": "250m",
+            "memory": "1Gi",
+            "memory_request": "1Gi",
+            "ephemeral_storage": "10Gi",
+            "ephemeral_storage_request": "1Gi"
+          },
+          "planner": {
+            "cpu": "250m",
+            "cpu_request": "250m",
+            "memory": "1Gi",
+            "memory_request": "1Gi",
+            "ephemeral_storage": "10Gi",
+            "ephemeral_storage_request": "1Gi"
+          },
+          "reviewer": {
+            "cpu": "750m",
+            "cpu_request": "750m",
+            "memory": "4Gi",
+            "memory_request": "4Gi",
+            "ephemeral_storage": "10Gi",
+            "ephemeral_storage_request": "1Gi"
+          },
+          "tester": {
+            "cpu": "750m",
+            "cpu_request": "750m",
+            "memory": "6Gi",
+            "memory_request": "6Gi",
+            "ephemeral_storage": "20Gi",
+            "ephemeral_storage_request": "1Gi"
+          }
+        },
+        "session_store": "postgres",
+        "agent_secrets": {
+          "url": "https://agent-secrets.internal.example",
+          "audience": "fixture-broker-audience",
+          "token_expiry_seconds": 1800
+        },
+        "plugins": {
+          "pi_legion": "10.4.0",
+          "pi_envoy": "https://xxxxx@plugins.internal.example/pi-envoy-10.4.0.tgz"
+        },
+        "setup": [
+          "/bin/sh",
+          "-c",
+          "echo fixture-setup"
+        ],
+        "repository_cache": {
+          "volume": "40Gi",
+          "refresh_minutes": 15,
+          "retain_hours": 48,
+          "resources": {
+            "cpu": "500m",
+            "cpu_request": "500m",
+            "memory": "1Gi",
+            "memory_request": "1Gi",
+            "ephemeral_storage": "2Gi",
+            "ephemeral_storage_request": "1Gi"
+          }
+        }
+      }
+    },
+    "admission_cap": 4,
+    "daemon_url": "http://legion-daemon.internal.example:13370",
+    "worker_stream_port": 13371,
+    "omp_launch_prefix": [],
+    "provider_keys": [
+      "ANTHROPIC_API_KEY",
+      "GEMINI_API_KEY"
+    ],
+    "instructions": "/etc/legion/deployment-instructions.md",
+    "worker_boot_timeout_seconds": 180,
+    "worker_rpc_timeout_seconds": 8,
+    "worker_stop_timeout_seconds": 30,
+    "tree_stop_timeout_seconds": 90,
+    "slow_command_timeout_seconds": 600,
+    "probe_interval_seconds": 20,
+    "controller_wake_interval_seconds": 1800,
+    "worker_boot_registration_deadline_intervals": 2,
+    "launch_failure_limit": 4,
+    "prompt_failure_limit": 5,
+    "prompt_retire_limit": 3,
+    "envoy_url": "http://xxxxx@envoy-listener.internal.example:9020",
+    "nats_urls": [
+      "nats://xxxxx@nats.internal.example:4222",
+      "nats://nats-2.internal.example:4222"
+    ],
+    "dispatch_url": "https://dispatch.internal.example",
+    "projects": {
+      "LEGION": {
+        "merge": {
+          "by_hand": []
+        },
+        "slack_channels": [
+          "C0123ABCD",
+          "C0123ABCE"
+        ]
+      },
+      "WIDGETS": {
+        "merge_queue_role": "merge-queue",
+        "merge": {
+          "by_hand": [
+            "^deploy/",
+            "\\.sql$"
+          ]
+        },
+        "slack_channels": []
+      }
+    },
+    "gates": {
+      "design": "root-issues"
+    },
+    "github_apps": {
+      "implement": {
+        "app_id": "1001",
+        "installations": {
+          "acme": "2002",
+          "sjawhar": "2001"
+        }
+      },
+      "review": {
+        "app_id": "1002",
+        "installations": {
+          "sjawhar": "2003"
+        }
+      }
+    },
+    "linger_hours": 1.5,
+    "production_check_hours": 240,
+    "review_round_cap": 4,
+    "max_fix_attempts": 5,
+    "controller": "daemon",
+    "capabilities": {
+      "decided": {
+        "pool-capacity": "the pool is sized by hand for the admission cap"
+      }
+    },
+    "worker_backends": {
+      "tester": "omp"
+    }
   }
 }

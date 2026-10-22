@@ -62,6 +62,9 @@ export type EnvoyClientConfig = {
   readonly baseUrl: string;
   readonly fetch: EnvoyFetch;
   readonly timeoutMs?: number;
+  /** Whether a request a network error or a 5xx failed is sent once more, after 250 ms. Default
+   * true; false for a best-effort read that must not hold its caller past one timeout. */
+  readonly retry?: boolean;
   /** The listener's bearer (`envoySettings`), sent on every call; none sends no `Authorization`
    * header, for a loopback listener that asks for none. */
   readonly token?: string | undefined;
@@ -248,7 +251,8 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
 
   const request = async (path: string, init: RequestInit): Promise<string> => {
     const url = `${baseUrl}${path}`;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const attempts = config.retry === false ? 1 : 2;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       let response: Response;
       try {
         const headers = new Headers(init.headers);
@@ -259,7 +263,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
           signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (error) {
-        if (attempt === 0) {
+        if (attempt + 1 < attempts) {
           await waitForRetry();
           continue;
         }
@@ -274,7 +278,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         status: response.status,
         responseBody,
       });
-      if (response.status >= 500 && attempt === 0) {
+      if (response.status >= 500 && attempt + 1 < attempts) {
         await waitForRetry();
         continue;
       }

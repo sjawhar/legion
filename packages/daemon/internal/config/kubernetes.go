@@ -204,8 +204,8 @@ func DefaultResources() map[claim.Role]RoleResources {
 
 // PodConfig is `runtime.kubernetes.pod`, what the operator adds to every pod Legion runs, the image
 // probe's included, in the API's own types: variables and volume mounts for the agent's container,
-// the volumes they mount (each a Secret, a ConfigMap, or a projection of ServiceAccount tokens,
-// Secrets, and ConfigMaps), and the ServiceAccount the pods run as. It passes through as written:
+// the volumes they mount (each a Secret, a ConfigMap, a projection of ServiceAccount tokens,
+// Secrets, and ConfigMaps, a PersistentVolumeClaim, or an NFS export), and the ServiceAccount the pods run as. It passes through as written:
 // the loader refuses a shape no pod could carry, the Sandbox runtime a name or path of Legion's own
 // or the worker image's (sandbox.CheckPod), and the API server the rest when it creates the
 // image probe's pod, which carries it, at boot.
@@ -600,6 +600,7 @@ func readPod(value *yaml.Node) (PodConfig, error) {
 	if pod.VolumeMounts, err = readPodMounts(fields["volume_mounts"], pod.Volumes); err != nil {
 		return PodConfig{}, err
 	}
+	readOnlyShares(pod.Volumes, pod.VolumeMounts)
 	if pod.ServiceAccount, err = optionalString(fields["service_account"], podKey+".service_account"); err != nil {
 		return PodConfig{}, err
 	}
@@ -641,6 +642,27 @@ func readPodEnv(value *yaml.Node) (map[string]string, error) {
 	return env, nil
 }
 
+// readOnlyShares marks a share's own source read-only when no volume_mounts entry mounts it
+// writable. A read-only container mount alone leaves the volume writable to the kubelet, which, for
+// a claim whose CSI driver's fsGroupPolicy is File, changes the group and mode of every file on the
+// share to the pods' fsGroup at each mount (pkg/volume/csi/csi_mounter.go, supportsFSGroup, which
+// only the source's readOnly turns off); the source's readOnly also mounts an NFS export `-o ro` on
+// the node, and lets a ReadOnlyMany claim attach. A share any mount writes keeps a writable source.
+func readOnlyShares(volumes []corev1.Volume, mounts []corev1.VolumeMount) {
+	for i := range volumes {
+		v := &volumes[i]
+		if v.PersistentVolumeClaim == nil && v.NFS == nil {
+			continue
+		}
+		writable := slices.ContainsFunc(mounts, func(m corev1.VolumeMount) bool { return m.Name == v.Name && !m.ReadOnly })
+		if v.PersistentVolumeClaim != nil {
+			v.PersistentVolumeClaim.ReadOnly = !writable
+		} else {
+			v.NFS.ReadOnly = !writable
+		}
+	}
+}
+
 // readPodVolumes is `pod.volumes`: each named once, with exactly one source.
 func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 	const key = podKey + ".volumes"
@@ -657,7 +679,7 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 		if entry.Kind != yaml.MappingNode {
 			return nil, fmt.Errorf("%s must be a mapping", field)
 		}
-		fields, err := members(entry, field, "name", "secret", "config_map", "projected")
+		fields, err := members(entry, field, append([]string{"name"}, volumeSources...)...)
 		if err != nil {
 			return nil, err
 		}
@@ -668,8 +690,8 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 		switch {
 		case named[volume.Name]:
 			return nil, fmt.Errorf("%s names %s twice", key, volume.Name)
-		case setCount(fields, "secret", "config_map", "projected") != 1:
-			return nil, fmt.Errorf("%s must set exactly one of secret, config_map, projected", field)
+		case setCount(fields, volumeSources...) != 1:
+			return nil, fmt.Errorf("%s must set exactly one of %s", field, strings.Join(volumeSources, ", "))
 		}
 		named[volume.Name] = true
 		var name string
@@ -683,15 +705,104 @@ func readPodVolumes(value *yaml.Node) ([]corev1.Volume, error) {
 			if name, items, err = readObjectSource(fields["config_map"], field+".config_map"); err == nil {
 				volume.ConfigMap = &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}, Items: items}
 			}
-		default:
+		case fields["projected"] != nil:
 			volume.Projected, err = readProjected(fields["projected"], field+".projected")
+		case fields["persistent_volume_claim"] != nil:
+			volume.PersistentVolumeClaim, err = readClaimSource(fields["persistent_volume_claim"], field+".persistent_volume_claim")
+		default:
+			volume.NFS, err = readNFSSource(fields["nfs"], field+".nfs")
 		}
 		if err != nil {
 			return nil, err
 		}
+		if claim := volume.PersistentVolumeClaim; claim != nil {
+			if other := slices.IndexFunc(volumes, func(v corev1.Volume) bool {
+				return v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim.ClaimName
+			}); other >= 0 {
+				// The kubelet mounts a PersistentVolume once per pod, from whichever of the two volume
+				// specs it reads last, so one volume's read_only would silently decide the other's.
+				return nil, fmt.Errorf("%s.persistent_volume_claim.name %s is the claim of %s[%d] too: mount the one volume at each path (volume_mounts takes sub_path) instead of naming the claim twice", field, claim.ClaimName, key, other)
+			}
+		}
 		volumes = append(volumes, volume)
 	}
 	return volumes, nil
+}
+
+// volumeSources are the sources a `pod.volumes` entry may name, exactly one each: an object of the
+// daemon's namespace (secret, config_map, projected), or an existing share — a
+// PersistentVolumeClaim of the namespace, or an NFS export the nodes reach.
+var volumeSources = []string{"secret", "config_map", "projected", "persistent_volume_claim", "nfs"}
+
+// readClaimSource is a PersistentVolumeClaim source: the name of a claim the operator made in the
+// daemon's namespace, a DNS-1123 subdomain as the API server requires of a claim's name. Whether a
+// pod mounts it read-only is its `volume_mounts` entry's (read_only); the source sets nothing of
+// its own.
+func readClaimSource(value *yaml.Node, key string) (*corev1.PersistentVolumeClaimVolumeSource, error) {
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "name")
+	if err != nil {
+		return nil, err
+	}
+	name, err := requiredString(fields["name"], key+".name", "")
+	if err != nil {
+		return nil, err
+	}
+	if len(validation.IsDNS1123Subdomain(name)) != 0 {
+		return nil, fmt.Errorf("%s.name %q is no PersistentVolumeClaim's name: a claim is named with lowercase letters, digits, '-' and '.', starting and ending with a letter or digit, in at most 253 characters", key, name)
+	}
+	return &corev1.PersistentVolumeClaimVolumeSource{ClaimName: name}, nil
+}
+
+// readNFSSource is an NFS source: the server, an IP address or a DNS name the nodes resolve, with no
+// scheme, port, path or brackets (the kubelet mounts `<server>:<path>` and brackets an IPv6
+// address itself), never an IPv4 address in IPv6 form (`::ffff:a.b.c.d`, which the kubelet reads as
+// IPv4 and leaves unbracketed), and the export's clean absolute path. Whether a pod mounts it read-only is its
+// `volume_mounts` entry's (read_only).
+func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error) {
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "server", "path")
+	if err != nil {
+		return nil, err
+	}
+	server, err := requiredString(fields["server"], key+".server", "")
+	if err != nil {
+		return nil, err
+	}
+	if net.ParseIP(server) == nil && (len(validation.IsDNS1123Subdomain(strings.ToLower(server))) != 0 || numericLastLabel(server)) {
+		return nil, fmt.Errorf("%s.server %q must be an IP address or a DNS name, with no scheme, port, path or brackets", key, server)
+	}
+	if ip := net.ParseIP(server); ip != nil && ip.To4() != nil && strings.Contains(server, ":") {
+		return nil, fmt.Errorf("%s.server %q is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write %s", key, server, ip.To4())
+	}
+	if isLoopbackHost(server) || isUnspecifiedHost(server) {
+		return nil, fmt.Errorf("%s.server %s is the node itself or no address: the node's kubelet mounts the share, so name the server's own address", key, server)
+	}
+	exportPath, err := requiredString(fields["path"], key+".path", "")
+	if err != nil {
+		return nil, err
+	}
+	if !path.IsAbs(exportPath) || path.Clean(exportPath) != exportPath {
+		return nil, fmt.Errorf("%s.path %s must be a clean absolute path", key, exportPath)
+	}
+	return &corev1.NFSVolumeSource{Server: server, Path: exportPath}, nil
+}
+
+// numericLastLabel reports whether host, not an IP address in Go's strict form, still ends in an
+// all-digit label or a 0x one: glibc's resolver reads `010.0.0.2`, `1.2.3` and `0x0a000002` as IPv4
+// addresses (inet_aton's octal, short and hexadecimal forms), so the node would mount another
+// address than the one written. No DNS name a server is reached by ends so.
+func numericLastLabel(host string) bool {
+	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
+	last := strings.ToLower(labels[len(labels)-1])
+	if strings.HasPrefix(last, "0x") {
+		return true
+	}
+	return last != "" && strings.Trim(last, "0123456789") == ""
 }
 
 // setCount is how many of names fields sets.

@@ -594,6 +594,10 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "message is required", "message")
 			return
 		}
+		if !strings.HasPrefix(request.Topic, bus.NotificationTopicPrefix) {
+			writeJSONError(w, http.StatusBadRequest, "topic must begin with "+bus.NotificationTopicPrefix, "topic")
+			return
+		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
 			writeJSONError(w, http.StatusBadRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
@@ -724,8 +728,14 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			item, err := registry.Get(sessionID)
+			// Only a session the registry holds no key for is unknown; a read NATS did not
+			// serve is the listener's failure, which a caller must not take for "no topics".
+			if errors.Is(err, nats.ErrKeyNotFound) {
+				writeJSONError(w, http.StatusNotFound, err.Error())
+				return
+			}
 			if err != nil {
-				writeNATSError(w, err, http.StatusNotFound, err.Error())
+				writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
 				return
 			}
 			writeJSON(w, http.StatusOK, item)

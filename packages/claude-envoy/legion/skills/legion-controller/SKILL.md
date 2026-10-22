@@ -24,12 +24,13 @@ the owner a command names (`-R owner/repo`, `repos/owner/repo` in `gh api`, a Gi
 the first owner's (`GH_CONFIG_DIR`) otherwise, so name the repository. Against a daemon with no
 GitHub App, `legion controller start` says so when it starts (`[legion] the daemon has no GitHub
 App to act as; the controller's gh acts as nobody`), and `gh` acts as nobody. The controller reads
-Dispatch and the daemon's state, and applies its controller
-capability, through the `legion` tool alone: `op: "read_state"` returns the daemon's whole state
-(`issues.<KEY>.phase`, `issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `admission.cap`,
-`admission.active`, `admission.waiting`, `capabilities[]`, `daemon.project`), and `op: "set_status"`
-with `issue` and `status` (`todo`, `backlog` or `icebox`) moves an issue. It runs no `legion` from
-bash. Any pull-request comment or review the controller posts ends with
+Dispatch and the daemon's state, and applies its controller capability, through the `legion` tool
+alone: `op: "read_state"` returns the daemon's whole state (`issues.<KEY>.phase`,
+`issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `admission.cap`, `admission.active`,
+`admission.waiting`, `capabilities[]`, `daemon.project`, and `settings`, how the daemon is tuned:
+its resolved `legion.yaml`, `max_fix_attempts` and the rest, with no credential in it, LEGION-791),
+and `op: "set_status"` with `issue` and `status` (`todo`, `backlog` or `icebox`) moves an issue. It
+runs no `legion` from bash. Any pull-request comment or review the controller posts ends with
 `<!-- legion: {"session":"<session-id>","phase":"controller"} -->`, the footer every Legion role
 appends: the daemon reads the session to tell a controller's review from the reviewer's verdict. A
 review the controller submits without that footer still decides nothing for Legion's own workflow
@@ -339,8 +340,8 @@ While you are registered, the daemon's `tick` gives you a turn at least every
 `dispatch read`, and post when its `Events:` show no `message.created` from today.
 
 **What.** One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters,
-written as `skill://dispatch`'s "Writing for the human" says: every issue by its key and title,
-every pull request by its URL.
+since it is a report rather than a log of the day, written as `skill://dispatch`'s "Writing for
+the human" says: every issue by its key and title, every pull request by its URL.
 
 - **Finished.** `dispatch issues --project <PROJECT> --status done --updated-since <the
   previous report's time, or 24 hours ago> --limit 250`, read every page, and keep the issues
@@ -495,4 +496,3 @@ controller never opens a gate and there is no operator command for it; a project
 want the gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the
 authoritative owning architect role and route the verified context with `envoy_publish`. Do not
 route raw event traffic or invent a role token from a partial issue reference.
-

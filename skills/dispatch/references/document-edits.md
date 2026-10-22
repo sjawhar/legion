@@ -34,7 +34,7 @@ EOF
 - `delete` of a block's whole text deletes the block. A partial match keeps it. A bullet with a nested list hoists the list. A bullet with other content needs `delete {block:"<item id>"}`.
 - Dispatch refuses a `delete` or `retype` that takes out an open ask's block, delete-then-insert included. Reword with `replace`, relocate with `move`, or use `dispatch edit-ask`. Moving an open block out of a container and deleting the container takes two calls.
 - `retype` turns a paragraph or typed block into a typed block in place, keeping its id. Use it when a paragraph is the question that should become a decision.
-- An ask block has two ids. The block id (`:::ask{#<id> …}`) goes bare in `block` for `move` / `delete` (`block:<id>` only in `before` / `after`). The ask id goes to `dispatch open-asks`, `dispatch read` and `--reply-to-ask`. `dispatch://KEY/ask/<block-id>` answers `not found`.
+- An ask block has two ids. The block id (`:::ask{#<id> …}`) goes bare in `block` for `move` / `delete` (`block:<id>` only in `before` / `after`). `dispatch read --ref dispatch://KEY/ask/<id>` takes either id, whole or as a unique prefix of 8 or more hex characters, and prints the ask id as `Ask id:`. `dispatch open-asks` lists ask ids. `edit-ask`, `resolve-ask`, `follow` and `--reply-to-ask` take only the ask id.
 
 ## Tables
 

@@ -4,6 +4,30 @@
 
 ### Fixed
 
+- The `dispatch` command (`dist/dispatch.js`) reads an issue's document as a document summary,
+  including the links `dispatch search` returns, where it printed the issue's summary; refuses
+  owner arguments that disagree or that a command would drop (a document `comment` posts past
+  without `--quote`, `ask` without `--anchor`, `--issue` beside another issue's ref, and the
+  rest), naming the spelling that does each; and refuses
+  `dispatch://KEY/artifact/<slug>/comment/<id>` with one problem naming
+  `dispatch://KEY/comment/<id>`. An ask or comment a reference names is held to the issue or
+  document it names by `read`, `resolve-comment`, `resolve-ask`, `edit-ask` and `follow`, and
+  `dispatch ask` beside `--issue` or `--project` may cite any other issue or document.
+- The `dispatch` skill: `dispatch read` of a document prints its summary, and a document hit
+  names its issue on `Issue:`.
+- The `dispatch-first` skill: scout, the spec checker it names, has no shell, so the Dispatch, gh
+  and git output a spec's claims rest on is saved to files and handed to it.
+- The `dispatch` command (`dist/dispatch.js`) ends a write with `(not subscribed to KEY; …)` only
+  when none of the session's Envoy subscriptions, as the listener records them, receives every
+  event on the issue or document; it used to end every write that way. An ask or an ask reply
+  names its `envoy_subscribe` line under the same rule.
+- The `dispatch` command (`dist/dispatch.js`) finds an ask in a spec by its `:::ask{#<id>}` block
+  id in `dispatch read --ref dispatch://KEY/ask/<id>`, whole or as a unique 8+ hex prefix, and
+  prints the ask's own id (`Ask id:`).
+- The `dispatch` skill: a typed answer that disagrees with the selected option is the answer; a
+  changed decision on an answered ask is a new ask, since an answered ask cannot be retracted;
+  repeated measurements go in one artifact edited in place; and `dispatch read` takes an ask
+  block's id, while the writes to an ask take the ask's own.
 - A session whose deliveries are channel notifications Claude Code did not load registers with no
   delivery mode instead of `aside` (a Legion pane, whose deliveries go to the bridge's inbox, is
   unaffected). Claude Code drops a notification from a channel it did not load without telling the
@@ -26,6 +50,13 @@
 
 ### Changed
 
+- The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
+  carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
+  `message` bodies and `issue-update`'s closing `reason` accept that many characters, and their
+  descriptions say so. Nothing gates the skew: a bundle of this release against a Dispatch server
+  still on 2,000 lets an agent compose a longer body and take a `400 CAP_EXCEEDED` from the
+  server, so install it after that server is deployed (`packages/envoy/CHANGELOG.md` has the
+  rollout order).
 - The generated `legion/` plugin carries the new `thermonuclear-deep-review` and
   `thermonuclear-code-quality` rubrics (see `packages/pi-legion/CHANGELOG.md`), and the README no
   longer says the dotfiles plugin ships a copy.
@@ -46,7 +77,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 34, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 35, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -66,6 +97,11 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
+  (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
+  every credential, credential source and credential file path left out and a URL's userinfo masked
+  as `xxxxx@`, required, so the MCP server's strict state reader admits the field and nothing this
+  plugin reads or writes moved; a session of it registers with a daemon at 35.
 - The plugin declares daemon API contract 34 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-31): under the Kubernetes runtime the roles of an issue now share one scratch on the
   issue's volume, and the daemon tells every role container of a pod the same temporary directory,

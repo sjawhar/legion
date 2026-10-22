@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "labels": {
+      "app": "example-dispatch-listener"
+    }
+  },
+  "spec": {
+    "containers": [
+      {
+        "env": [
+          {
+            "name": "PORT",
+            "value": "9020"
+          },
+          {
+            "name": "ENVOY_LISTEN_HOST",
+            "value": "0.0.0.0"
+          },
+          {
+            "name": "ENVOY_MACHINE_ID",
+            "value": "example-dispatch"
+          },
+          {
+            "name": "NATS_URLS",
+            "value": "nats://example-hub.example-tailnet.ts.net:4222"
+          },
+          {
+            "name": "ENVOY_ALLOW_REMOTE_NATS",
+            "value": "1"
+          },
+          {
+            "name": "ENVOY_NATS_SOCKS5_PROXY",
+            "value": "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
+          },
+          {
+            "name": "NATS_NKEY_SEED_FILE",
+            "value": "/var/run/secrets/envoy/nats-seed"
+          },
+          {
+            "name": "ENVOY_API_TOKEN",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "ENVOY_API_TOKEN",
+                "name": "example-dispatch-listener"
+              }
+            }
+          }
+        ],
+        "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "name": "envoy-listener",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-fsS",
+              "http://127.0.0.1:9020/healthz"
+            ]
+          }
+        },
+        "resources": {
+          "limits": {
+            "cpu": "200m",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "200m",
+            "memory": "512Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/run/secrets/envoy",
+            "name": "nats-seed",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "enableServiceLinks": false,
+    "serviceAccountName": "example-dispatch",
+    "volumes": [
+      {
+        "csi": {
+          "driver": "secrets-store-gke.csi.k8s.io",
+          "readOnly": true,
+          "volumeAttributes": {
+            "secretProviderClass": "example-dispatch-nats-seed"
+          }
+        },
+        "name": "nats-seed"
+      }
+    ]
+  }
+}

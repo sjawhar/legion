@@ -120,6 +120,7 @@ side.
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every subscribed session that holds its own NATS connection, the publisher included, and is not retained. A session the listener delivers to over a serve port, such as an OpenCode agent, receives nothing on such a topic and is told nothing: `dispatch://INFRA-122`. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
@@ -137,6 +138,9 @@ per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.i
 notices to roles and to the controller through the listener's HTTP API, not over NATS.
 
 So the NATS user the daemon connects as needs these permissions:
+
+When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
+`core.DaemonPermissions()` instead of a host's or an explicit user's grant.
 
 | Publish | Subscribe |
 | --- | --- |
@@ -203,7 +207,10 @@ Keep the API private: only `/webhook/...` needs to be reachable from GitHub and 
 
 The `envoy-infra` Pulumi plugin runs the listener on a Docker host from a Pulumi program in any
 language, as the component `envoy-infra:host:Listener`, and a NATS server for it on Google Cloud,
-as `envoy-infra:gcp:NatsHub`. Its
+as `envoy-infra:gcp:NatsHub`. It also deploys Dispatch on Google Cloud as
+`envoy-infra:gcp:Dispatch`, which creates an Autopilot cluster, private Cloud SQL, and the
+tailnet-served Dispatch workloads. A hub user with `dispatchMachineId` renders the NATS user
+`envoy-dispatch` shares with its listener. Its
 [README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
 install it, what each component deploys and which settings it sets.
 

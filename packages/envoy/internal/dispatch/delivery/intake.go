@@ -49,8 +49,8 @@ type Intake struct {
 	pool   *store.Pool
 	github *githubapp.Client
 	events *events.Broker
-	// leases is the pool bind takes the delivery-consumers lease on, so that one process at a
-	// time reconciles this durable's configuration (bindDurableConsumer).
+	// leases is the pool bind takes this durable's consumer lease on (consumerLease), so that one
+	// process at a time reconciles this durable's configuration (bindDurableConsumer).
 	leases duty.Leases
 	// throttle is this intake's own bind-poll state: how recently it reconciled its durable and
 	// how recently it said it was standing by for it (bindThrottle).
@@ -264,12 +264,6 @@ func flatPayload(fields map[string]json.RawMessage) (map[string]string, error) {
 	return payload, nil
 }
 
-// deliveryConsumerName is the durable this package's events are read through: one push consumer
-// over githubIntakeSubject, with the flow control below. The server holds a backlog undelivered
-// until a subscriber attaches, so a restart with events waiting loses none of them and none of
-// them count against MaxAckPending in the meantime.
-const deliveryConsumerName = "delivery-events"
-
 // githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The
 // handler decides what to do with each (route), and fetches nothing for the ones this slice does
 // not want, which costs one decode of the payload per envelope.
@@ -313,11 +307,14 @@ func intakeAckWait() time.Duration {
 	return time.Duration(intakeMaxAckPending)*intakeMessageTimeout + time.Minute
 }
 
-// deliveryConsumerConfig is the policy bind stamps on the durable, whether it creates it or
-// finds one an earlier release left with another filter or the server's own flow control.
+// deliveryConsumerConfig is the policy bind stamps on the durable (bus.DispatchDeliveryDurable,
+// one push consumer over githubIntakeSubject), whether it creates it or finds one an earlier
+// release left with another filter or the server's own flow control. The server holds a backlog
+// undelivered until a subscriber attaches, so a restart with events waiting loses none of them
+// and none of them count against MaxAckPending in the meantime.
 func deliveryConsumerConfig() natsgo.ConsumerConfig {
 	return natsgo.ConsumerConfig{
-		Durable:        deliveryConsumerName,
+		Durable:        bus.DispatchDeliveryDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubject:  githubIntakeSubject,
 		AckPolicy:      natsgo.AckExplicitPolicy,
@@ -345,11 +342,33 @@ const durableBindInterval = 2 * time.Second
 // unthrottled line would be 1,800 an hour per durable, each saying exactly what the first said.
 const standbyLogEvery = 30 * time.Second
 
-// deliveryConsumerLease names the lease the consumer reconciliation runs under: one process at a
-// time reads a durable's configuration and corrects it. Two processes -- two builds during a
+// consumerLease names the lease one durable's consumer reconciliation runs under: one process at
+// a time reads that durable's configuration and corrects it. Two processes -- two builds during a
 // rolling update, each re-running the reconciliation on every bind poll -- would otherwise
 // reconcile one durable against each other, the second undoing what the first had just done.
-const deliveryConsumerLease = "delivery-consumers"
+//
+// The name carries the durable because that, and only that, is what the exclusion is about: two
+// processes over one durable. One name over both delivery durables coupled two independent
+// reconciliations, and INFRA-66 measured what that cost against a real nats-server and the real
+// envoy-dispatch binary, with the Dispatch user denied exactly
+// $JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.> (envoy-infra's live row "without
+// the delivery consumer create Dispatch leaves only that intake unbound"). A denied AddConsumer
+// draws no reply at all, so the create blocks for the client's whole JetStream MaxWait -- 10 s
+// (internal/bus/nats.go, nats.MaxWait) -- and the lease is held for every second of it. A pass
+// that failed is deliberately left unthrottled (bindDurableConsumer records no pass then), so the
+// events intake took the lease again on its next durableBindInterval poll and held it for another
+// 10 s, round after round:
+//
+//	17:57:16.232 ERROR dispatch delivery: create NATS consumer name=delivery-events error="context deadline exceeded"
+//	17:57:16.232 INFO  dispatch duty: leased pass ran  lease=delivery-consumers
+//	17:57:26.235 ERROR dispatch delivery: create NATS consumer name=delivery-events error="context deadline exceeded"
+//	17:57:26.236 INFO  dispatch duty: leased pass ran  lease=delivery-consumers
+//
+// Under that one name the job intake, whose own durable is created by a pass under the same lease,
+// could only get in during the milliseconds between those holds: in CI's run of that row it never
+// did, and the row failed with "consumer delivery-jobs was not push-bound within 20s". A lease per
+// durable keeps a stuck reconciliation to the durable it is stuck on.
+func consumerLease(durable string) string { return "delivery-consumer-" + durable }
 
 // bindOutcome is what one attempt at a durable did, which is three things rather than two: a
 // durable another process holds, or has not created yet, is neither a bind nor a fault.
@@ -403,10 +422,10 @@ type bindThrottle struct {
 //
 // Throttled because the reconciliation runs on every bind poll, and a standby polls every
 // durableBindInterval (2 s) for the life of the process: each poll of each durable would
-// otherwise take the deliveryConsumerLease -- two Postgres round trips -- and write a
-// "dispatch duty: leased pass ran" line, 1,800 of each an hour per durable, for a configuration
-// that changes only with a release. settingsPollInterval is the window because it is how often
-// the loop this bind poll replaced reconciled at all; the poll itself stays at
+// otherwise take that durable's consumer lease (consumerLease) -- two Postgres round trips --
+// and write a "dispatch duty: leased pass ran" line, 1,800 of each an hour per durable, for a
+// configuration that changes only with a release. settingsPollInterval is the window because it
+// is how often the loop this bind poll replaced reconciled at all; the poll itself stays at
 // durableBindInterval, which is what makes a hand-over from a dead holder fast.
 func (t *bindThrottle) reconcileDue() bool {
 	t.mu.Lock()
@@ -448,13 +467,14 @@ func (in *Intake) bind(ctx context.Context, handle func(context.Context, string)
 // (bindStandby), or the attempt failed (bindFailed).
 //
 // The configuration reconciliation -- the ConsumerInfo lookup and every create, update and delete
-// it leads to -- runs under the deliveryConsumerLease (reconcileDurableConsumer), so one process
-// at a time reconciles a durable. A process that does not take the lease skips the reconciliation
-// altogether and goes straight to the subscribe: the process holding the lease is doing that
-// work, and this one's job is only to bind the durable or stand by for it. So does a process that
-// reconciled this durable within the last settingsPollInterval (throttle, the caller's own
-// bindThrottle), which is what keeps a two-second bind poll from leasing and logging a pass it
-// has just made.
+// it leads to -- runs under this durable's own consumer lease (consumerLease,
+// reconcileDurableConsumer), so one process at a time reconciles a durable -- and a durable whose
+// reconciliation is stuck blocks no other durable's. A process that does not take the lease skips
+// the reconciliation altogether and goes straight to the subscribe: the process holding the lease
+// is doing that work, and this one's job is only to bind the durable or stand by for it. So does
+// a process that reconciled this durable within the last settingsPollInterval (throttle, the
+// caller's own bindThrottle), which is what keeps a two-second bind poll from leasing and logging
+// a pass it has just made.
 //
 // The durable admits one subscriber, which is how exactly one process does this durable's work
 // and how that process dying hands the work on: NATS refuses a second binder with "consumer is
@@ -481,7 +501,7 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		// own and deliberately so -- a durable each process binds for itself. So the lease is
 		// asked for mutual exclusion and nothing else.
 		reconciled := true
-		ran := duty.Exclusive(ctx, leases, deliveryConsumerLease, 0, func(context.Context) {
+		ran := duty.Exclusive(ctx, leases, consumerLease(wanted.Durable), 0, func(context.Context) {
 			reconciled = reconcileDurableConsumer(client.JS(), wanted)
 		})
 		if !reconciled {
@@ -489,12 +509,15 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 		}
 		// Recorded for a pass that ran and succeeded alone: one the lease refused reconciled
 		// nothing, and the window is how long this durable's configuration is taken as settled.
-		// Recording a skip would hold the two intakes of one process, which share the lease, for
-		// settingsPollInterval before either could create the durable the other's pass did not
-		// (TestBothIntakesKeepTheirSubscriptions), and a pass that ran and failed is made again
-		// on the next poll rather than skipped for the window. A pass shutdown cut short reports
-		// false too (duty.Exclusive), so the window does not start then either: this is the one
-		// caller that reads that answer, and at shutdown the process is going anyway.
+		// Recording a skip would hold this process off a durable for settingsPollInterval after a
+		// pass it never made: the process that did not take the lease would wait out that window
+		// before it could create a durable the holder's pass did not create -- a pass of the
+		// holder's that failed, or a holder that stopped between taking the lease and creating it
+		// -- standing by meanwhile for a durable nobody is making. A pass that ran and failed is
+		// made again on the next poll rather than skipped for the window. A pass shutdown cut
+		// short reports false too (duty.Exclusive), so the window does not start then either:
+		// this is the one caller that reads that answer, and at shutdown the process is going
+		// anyway.
 		if ran {
 			throttle.recordReconcile()
 		}
@@ -528,7 +551,8 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 // freshly generated one on every restart would try to change a durable's config out from under
 // itself rather than resuming its cursor.
 //
-// Its caller runs it under the deliveryConsumerLease, so one process at a time is in here.
+// Its caller runs it under that durable's consumer lease (consumerLease), so one process at a
+// time is in here for one durable.
 func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.ConsumerConfig) bool {
 	name, subject := wanted.Durable, wanted.FilterSubject
 	info, err := js.ConsumerInfo(bus.Stream, name)

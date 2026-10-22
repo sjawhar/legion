@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
+  DISPATCH_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
@@ -516,10 +517,15 @@ describe("dispatchToolSpecs", () => {
       ).toEqual([ISSUE_UPDATE_RULES]);
     }
     expect(
-      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(2001) }).success
+      schema.safeParse({
+        issue: "DSP-1",
+        status: "done",
+        reason: "x".repeat(DISPATCH_BODY_MAX + 1),
+      }).success
     ).toBe(false);
     expect(
-      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(2000) }).success
+      schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(DISPATCH_BODY_MAX) })
+        .success
     ).toBe(true);
   });
 

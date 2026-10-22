@@ -36681,7 +36681,7 @@ function imagesArgument(z2, owner, cap) {
 }
 var ASK_URGENCIES = ["low", "med", "high", "blocking"];
 var ASK_QUESTION_MAX = 800;
-var DISPATCH_BODY_MAX = 2000;
+var DISPATCH_BODY_MAX = 32000;
 var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
@@ -36739,7 +36739,7 @@ var dispatchToolSpecs = [
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       status: z2.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
-      reason: z2.string({ max: 2000 }).describe("Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes.").optional(),
+      reason: z2.string({ max: DISPATCH_BODY_MAX }).describe(`Required with status done, and only with it: why the issue is closing, at most ${DISPATCH_BODY_MAX} characters. Posted on the issue as a message before it closes.`).optional(),
       title: z2.string({ min: 1, max: ISSUE_TITLE_MAX }).describe("Replacement title, at most 1,000 characters.").optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
@@ -36879,7 +36879,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36887,11 +36887,11 @@ var dispatchToolSpecs = [
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z2.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z2.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
-      body: z2.string({ max: DISPATCH_BODY_MAX }).describe("Review comment, at most 2,000 characters."),
+      body: z2.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
       reply_to: z2.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
       reply_to_ask: z2.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
       turn: z2.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
-      images: imagesArgument(z2, "the issue (or the project document's project)", "the 2,000-character body limit")
+      images: imagesArgument(z2, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: commentValidation
   },
@@ -36903,7 +36903,7 @@ var dispatchToolSpecs = [
       quote: "old wording",
       replace_with: "new wording"
     },
-    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
+    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most ${DISPATCH_BODY_MAX} characters. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36911,7 +36911,7 @@ var dispatchToolSpecs = [
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z2.string().describe("Exact document text to replace."),
       replace_with: z2.string().describe("Replacement text; a CR LF or a lone carriage return in it is written as a line feed."),
-      body: z2.string({ max: 2000 }).describe("Optional rationale, at most 2,000 characters.").optional(),
+      body: z2.string({ max: DISPATCH_BODY_MAX }).describe(`Optional rationale, at most ${DISPATCH_BODY_MAX} characters.`).optional(),
       occurrence: z2.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional()
     }),
     validation: documentOwnerValidation(true, true)
@@ -36919,12 +36919,12 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. Every other message names its issue. " + `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
-      body: z2.string({ max: DISPATCH_BODY_MAX }).describe("Update text, at most 2,000 characters."),
+      body: z2.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
       in_reply_to: z2.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
-      images: imagesArgument(z2, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", "the 2,000-character body limit")
+      images: imagesArgument(z2, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: messageValidation
   },
@@ -37016,11 +37016,11 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "issue plus artifact (one of its documents), or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). A document summary names its issue, reference, versions and approval. " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
-      artifact: z2.string().describe("Project document artifact id, slug, or filename.").optional(),
+      artifact: z2.string().describe("Document artifact id, slug, or filename: one of the issue's, or a project document.").optional(),
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
       message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional()
     }),
@@ -38269,6 +38269,8 @@ function parseDispatchRef(ref) {
         ...version3 === undefined ? {} : { version: Number(version3) }
       };
     }
+    if (version3 !== undefined)
+      return null;
     if (targetID === undefined || targetKind !== "ask" && targetKind !== "comment")
       return null;
     return {
@@ -39973,6 +39975,71 @@ async function readPictures(client, addresses, shown) {
   return { lines, images, shown: showing };
 }
 
+// ../envoy-client/src/dispatch-subscribe.ts
+function followedAsk(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue: issue2, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  if (typeof issue2 === "string" && issue2 !== "")
+    return { ask, owner: issueTopic(issue2) };
+  if (typeof document !== "string")
+    return null;
+  const [project, slug] = document.split("/", 2);
+  if (!project || !slug)
+    return null;
+  return { ask, owner: { label: document, topic: documentTopicOf(project, slug).topic } };
+}
+function followNoticeText({ ask, owner }, topics) {
+  const subscribe = ownerSubscribeLine(owner, topics);
+  return `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop).${subscribe === null ? "" : ` ${subscribe}.`}`;
+}
+function ownerSubscribeLine(owner, topics) {
+  if (topics == null || topics.some((topic) => subscriptionCovers(topic, owner)))
+    return null;
+  return `For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+function subscriptionCovers(topic, owner) {
+  const base = owner.topic.slice(0, -".>".length).split(".");
+  for (const [index, part] of topic.split(".").entries()) {
+    if (part === ">")
+      return true;
+    if (index >= base.length || part !== "*" && part !== base[index])
+      return false;
+  }
+  return false;
+}
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope2;
+  try {
+    envelope2 = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope2 !== "object" || envelope2 === null)
+    return;
+  const { source, payload } = envelope2;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
+
 // ../envoy-client/src/search-answer.ts
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
@@ -40059,11 +40126,14 @@ function resolvedTopic(resolved) {
     throw new Error("issue document is missing its issue");
   return issueTopic(resolved.issue.key);
 }
-function notSubscribed(owner) {
-  return `(not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
+async function notSubscribed(owner, subscriptions) {
+  if (ownerSubscribeLine(owner, await subscriptions?.()) === null)
+    return "";
+  return ` (not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
 }
-function followsAsk(owner) {
-  return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+async function followsAsk(owner, subscriptions) {
+  const subscribe = ownerSubscribeLine(owner, await subscriptions?.());
+  return `You follow this ask: its answer and replies reach you directly.${subscribe === null ? "" : ` ${subscribe}`}`;
 }
 var triageAdviceShown = new Set;
 function adviceMemory() {
@@ -40320,7 +40390,27 @@ function messageIdOf(value) {
 }
 var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 function refOwnerName(ref) {
-  return ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
+  return ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact ?? ref.id}`;
+}
+async function refuseItemOffRef(tool, kind, ref, refText, item, documentId) {
+  if (ref.owner.kind === "issue") {
+    if (item.issue_key === ref.owner.issue)
+      return;
+  } else if (item.issue_key === null) {
+    const id = await documentId();
+    if ([
+      item.artifact_id,
+      item.anchor?.artifact_id,
+      item.block_artifact?.id,
+      item.approval?.artifact_id
+    ].includes(id)) {
+      return;
+    }
+  }
+  const where = item.issue_key === null ? "another document" : `${item.issue_key}; name it dispatch://${item.issue_key}/${kind}/${item.id}`;
+  throw new ToolInputError(tool, [
+    `${refText} names ${kind} ${item.id} on ${refOwnerName(ref)}, but it is on ${where}`
+  ]);
 }
 async function resolveIdPrefix(tool, kind, id, ownerName, list) {
   const fullID = normalizeUUID(id);
@@ -40340,6 +40430,37 @@ async function resolveIdPrefix(tool, kind, id, ownerName, list) {
   ]);
 }
 var askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
+async function readAskRef(tool, id, ownerName, client, list) {
+  const fullID = normalizeUUID(id);
+  if (fullID !== undefined) {
+    try {
+      return await client.getAsk(fullID);
+    } catch (error48) {
+      if (!(error48 instanceof DispatchServiceError) || error48.status !== 404)
+        throw error48;
+      const blocks = (await list()).filter((ask) => ask.block_id?.toLowerCase() === fullID);
+      if (blocks.length !== 1 || blocks[0] === undefined)
+        throw error48;
+      return client.getAsk(blocks[0].id);
+    }
+  }
+  const asks = await list();
+  let matches = asks.filter((ask) => ask.block_id === id);
+  if (matches.length === 0) {
+    if (!idPrefixPattern.test(id)) {
+      throw new ToolInputError(tool, [
+        `ask id ${id} must be a full uuid, a prefix of at least 8 hex characters, or the id of an :::ask block on ${ownerName}`
+      ]);
+    }
+    const prefix = id.toLowerCase();
+    matches = asks.filter((ask) => ask.id.toLowerCase().startsWith(prefix) || (ask.block_id?.toLowerCase().startsWith(prefix) ?? false));
+  }
+  if (matches.length === 1 && matches[0] !== undefined)
+    return client.getAsk(matches[0].id);
+  throw new ToolInputError(tool, [
+    matches.length === 0 ? `ask id ${id} matches none of the asks on ${ownerName}; use the full id` : `ask id ${id} matches ${matches.length} asks on ${ownerName}; use the full id`
+  ]);
+}
 async function sessionOpenAsks(client, sessionId) {
   const session = sessionId?.trim();
   if (!session)
@@ -40362,7 +40483,17 @@ async function resolveAskArgument(tool, args, client, sessionId) {
       asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`
     ]);
   }
-  return resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
+  const resolved = await resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
+  const reference = stringArg(args, "ask");
+  const ref = reference.startsWith("dispatch://") ? parseDispatchRef(reference) : null;
+  if (ref === null)
+    return { id: resolved };
+  const read = await client.getAsk(resolved);
+  await refuseItemOffRef(tool, "ask", ref, reference, read.ask, async () => {
+    const document = await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true });
+    return document.artifact.id;
+  });
+  return { id: resolved, read };
 }
 function messageInReplyTo(args) {
   const inReplyTo = optionalString(args, "in_reply_to");
@@ -40386,14 +40517,14 @@ function argumentProblems(tool, args) {
     case "dispatch_follow": {
       const ask = optionalString(args, "ask");
       if (ask?.startsWith("dispatch://") && parseDispatchRef(ask)?.kind !== "ask") {
-        problems.push(askIdProblem);
+        problems.push(itemRefProblem(ask) ?? askIdProblem);
       }
       break;
     }
     case "dispatch_resolve_comment": {
       const comment = optionalString(args, "comment");
       if (comment?.startsWith("dispatch://") && parseDispatchRef(comment)?.kind !== "comment") {
-        problems.push(commentIdProblem);
+        problems.push(itemRefProblem(comment) ?? commentIdProblem);
       }
       break;
     }
@@ -40483,25 +40614,95 @@ function dispatchRefFromUrl(value, serverUrl) {
   if (!documentPage)
     return;
   const [, project, slug] = documentPage;
-  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}${versionOf("version")}`;
+  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}`;
   const item = itemFromSearch(url2.search);
   if (item === null)
     return;
-  return item === undefined ? document : `${document}/${item.kind}/${item.id}`;
+  return item === undefined ? `${document}${versionOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
 var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
-  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message")
+  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children") {
     return;
+  }
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
   const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : `a ${ref.kind}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
+}
+var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
+var versionedProjectItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)@v\d+\/(ask|comment)\/([^/]+)$/;
+function itemRefProblem(value) {
+  const throughDocument = value.match(documentItemPattern);
+  if (throughDocument !== null) {
+    const [, issue2, kind, id] = throughDocument;
+    return `${value} names ${kind === "ask" ? "an ask" : "a comment"} through its document, which Dispatch does not address; name it dispatch://${issue2}/${kind}/${id}`;
+  }
+  const versioned = value.match(versionedProjectItemPattern);
+  if (versioned !== null) {
+    const [, project, slug, kind, id] = versioned;
+    const item = kind === "ask" ? "an ask" : "a comment";
+    return `${value} names ${item} at a document version, which ${item} does not have; name it dispatch://${project}/artifact/${slug}/${kind}/${id}`;
+  }
+  return;
+}
+function ownerConflictProblems(tool, args, parsedRef, refText) {
+  const problems = [];
+  const command = `dispatch ${commandName(tool)}`;
+  const issue2 = optionalString(args, "issue");
+  const project = optionalString(args, "project");
+  const artifact = optionalString(args, "artifact");
+  const version2 = optionalNumber(args, "version");
+  const ref = tool === "dispatch_ask" && (issue2 !== undefined || project !== undefined) ? null : parsedRef;
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" ? ref.id : undefined;
+  if (ref !== null && refText !== undefined) {
+    const refOwner = refOwnerName(ref);
+    if (issue2 !== undefined && (ref.owner.kind !== "issue" || nativeIssueKeyPattern.test(issue2) && issue2 !== ref.owner.issue)) {
+      problems.push(`issue ${issue2} and ref ${refText} name two owners; --ref ${refText} alone acts on ${refOwner}, and --issue ${issue2} alone acts on ${issue2}`);
+    }
+    if (project !== undefined && ref.owner.kind === "issue") {
+      problems.push(`project ${project} and ref ${refText} name two owners; --ref ${refText} alone acts on ${refOwner}, and --project ${project}${artifact === undefined ? "" : ` --artifact ${artifact}`} alone acts on that project document`);
+    }
+    if (tool !== "dispatch_ask" && project === undefined && artifact !== undefined && refDocument !== undefined && artifact !== refDocument) {
+      const owner = ref.owner.kind === "issue" ? `--issue ${ref.owner.issue}` : `--project ${ref.owner.project}`;
+      problems.push(`artifact ${artifact} and ref ${refText} name two documents; --ref ${refText} alone names ${refDocument}, and ${owner} --artifact ${artifact} names ${artifact}`);
+    }
+    if (tool === "dispatch_read" && project === undefined && artifact !== undefined && ref.owner.kind === "issue" && ref.kind !== "issue" && refDocument === undefined) {
+      problems.push(`ref ${refText} names no document, so dispatch read would read it and drop artifact ${artifact}: drop --artifact to read the ref, or read the document with --issue ${ref.owner.issue} --artifact ${artifact}`);
+    }
+    if (version2 !== undefined && ref.version !== undefined && version2 !== ref.version) {
+      problems.push(`version ${version2} and ref ${refText} name two versions; name the version once`);
+    }
+    if (ref.version !== undefined && (tool === "dispatch_comment" || tool === "dispatch_suggest" || tool === "dispatch_doc_edit")) {
+      problems.push(`${command} acts on the live document, so the version ref ${refText} names would be dropped: drop its @v${ref.version}`);
+    }
+    if (ref.version !== undefined && tool === "dispatch_read") {
+      problems.push(`dispatch read prints the live document's summary, so the version ref ${refText} names would be dropped: read that version with dispatch doc-read --ref ${refText}`);
+    }
+  }
+  const projectOwned = project !== undefined || ref?.owner.kind === "project";
+  if (tool === "dispatch_comment" && !projectOwned && optionalString(args, "quote") === undefined) {
+    const document = artifact ?? refDocument;
+    if (document !== undefined) {
+      problems.push(`${command} posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`);
+    }
+  }
+  if (tool === "dispatch_ask") {
+    const anchor = asObject(args.anchor);
+    const anchorArtifact = anchor === null ? undefined : optionalString(anchor, "artifact");
+    if (!projectOwned && artifact !== undefined && anchor === null) {
+      problems.push(`${command} opens the ask on the issue unless anchor quotes a document, so artifact ${artifact} would be dropped: add --anchor-json '${JSON.stringify({ artifact, quote: "<exact text>" })}' to ask about a passage of it, or drop --artifact`);
+    }
+    if (artifact !== undefined && anchorArtifact !== undefined && anchorArtifact !== artifact) {
+      problems.push(`artifact ${artifact} and anchor.artifact ${anchorArtifact} name two documents; name the document once`);
+    }
+  }
+  return problems;
 }
 var toolSchemas = new Map;
 function toolSchema(tool) {
@@ -40537,7 +40738,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
     }
     ref = parseDispatchRef(refText);
     if (ref === null) {
-      problems.push(tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem);
+      problems.push(itemRefProblem(refText) ?? (tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem));
     } else {
       const inner = innerRefProblem(tool, ref, refText);
       if (inner !== undefined)
@@ -40547,7 +40748,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
   const issueArgument = args.issue;
   const projectArgument = args.project;
   const artifactArgument = args.artifact;
-  const versionArgument = args.version;
+  const versionFromRef = tool === "dispatch_doc_read" && args.version === undefined ? ref?.version : undefined;
+  const refVersion = versionFromRef === undefined ? {} : { version: versionFromRef };
+  const ownerRef = tool === "dispatch_ask" && (issueArgument !== undefined || projectArgument !== undefined) ? null : ref;
   if (issueArgument !== undefined && projectArgument !== undefined) {
     problems.push("exactly one of issue and project is required");
   }
@@ -40555,45 +40758,47 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
     if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
       problems.push(`project is not a project key: ${PROJECT_KEY_RULE}`);
     }
-    const refDocument = ref?.owner.kind === "project" ? ref.artifact ?? ref.id : undefined;
-    if (ref?.owner.kind === "project" && (ref.owner.project !== projectArgument || artifactArgument !== undefined && artifactArgument !== refDocument)) {
+    const refDocument = ownerRef?.owner.kind === "project" ? ownerRef.artifact ?? ownerRef.id : undefined;
+    if (ownerRef?.owner.kind === "project" && (ownerRef.owner.project !== projectArgument || artifactArgument !== undefined && artifactArgument !== refDocument)) {
       problems.push("project and ref must name the same document");
     }
     return {
       args: {
         ...args,
         ...artifactArgument === undefined && refDocument !== undefined ? { artifact: refDocument } : {},
-        ...versionArgument === undefined && ref?.version !== undefined ? { version: ref.version } : {}
+        ...refVersion
       },
       ref,
       owner: { kind: "project", project: projectArgument }
     };
   }
-  if (ref?.owner.kind === "project") {
+  if (ownerRef?.owner.kind === "project") {
     return {
       args: {
         ...args,
-        project: ref.owner.project,
-        ...artifactArgument === undefined ? { artifact: ref.artifact ?? ref.id } : {},
-        ...versionArgument === undefined && ref.version !== undefined ? { version: ref.version } : {}
+        project: ownerRef.owner.project,
+        ...artifactArgument === undefined ? { artifact: ownerRef.artifact ?? ownerRef.id } : {},
+        ...refVersion
       },
       ref,
-      owner: ref.owner
+      owner: ownerRef.owner
     };
   }
-  if (issueArgument !== undefined || ref !== null) {
+  if (issueArgument !== undefined || ownerRef !== null) {
     const issue3 = typeof issueArgument === "string" ? canonicalExternalIssueRef(issueArgument) : ref?.owner.kind === "issue" ? ref.owner.issue : undefined;
     return {
       args: {
         ...args,
         ...issue3 === undefined ? {} : { issue: issue3 },
-        ...artifactArgument === undefined && (ref?.kind === "spec" || ref?.kind === "artifact") ? { artifact: ref.id } : {},
-        ...versionArgument === undefined && ref?.version !== undefined ? { version: ref.version } : {}
+        ...artifactArgument === undefined && tool !== "dispatch_ask" && (ref?.kind === "spec" || ref?.kind === "artifact") ? { artifact: ref.id } : {},
+        ...refVersion
       },
       ref,
       owner: issue3 === undefined ? null : { kind: "issue", issue: issue3 }
     };
   }
+  if (typeof args.ref === "string")
+    return { args, ref, owner: null };
   const replyTarget = args.in_reply_to;
   if (tool === "dispatch_message" && typeof replyTarget === "string" && !replyTarget.startsWith("dispatch://")) {
     return { args, ref, owner: null };
@@ -40962,6 +41167,7 @@ function askSummary({ ask, replies, answers }, graph) {
     "Options:",
     ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
     `State: ${ask.state}`,
+    `Ask id: ${ask.id}`,
     "Answer:",
     ...answer === null ? ["- none"] : [
       `- By: ${answer.user}`,
@@ -41313,7 +41519,9 @@ async function executeDispatchTool(input) {
   const exec = input.exec ?? defaultExec;
   const problems = [];
   const ownerArguments = await resolveOwnerArguments(input.tool, input.args, input.cwd, env, exec, input.config.publicUrl === undefined ? [configUrl] : [configUrl, input.config.publicUrl], problems);
-  const ownerMissing = issueFreeTools[input.tool] !== true && ownerArguments.owner === null;
+  const conflicts = issueFreeTools[input.tool] === true ? [] : ownerConflictProblems(input.tool, input.args, ownerArguments.ref, optionalString(ownerArguments.args, "ref"));
+  problems.push(...conflicts);
+  const ownerMissing = issueFreeTools[input.tool] !== true && (ownerArguments.owner === null || conflicts.length > 0);
   const schema = toolSchema(input.tool);
   const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
   if (!parsed.success) {
@@ -41363,6 +41571,13 @@ async function executeDispatchTool(input) {
     kind: "issue",
     issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
   } : ownerArguments.owner;
+  const issueArgument = optionalString(input.args, "issue");
+  const refText = optionalString(ownerArguments.args, "ref");
+  if (input.tool !== "dispatch_ask" && owner?.kind === "issue" && issueArgument !== undefined && refText !== undefined && ownerArguments.ref?.owner.kind === "issue" && owner.issue !== ownerArguments.ref.owner.issue) {
+    throw new ToolInputError(input.tool, [
+      `issue ${issueArgument} and ref ${refText} name two owners; --ref ${refText} alone acts on ${ownerArguments.ref.owner.issue}, and --issue ${issueArgument} alone acts on ${owner.issue}`
+    ]);
+  }
   const issue2 = () => {
     if (owner?.kind !== "issue")
       throw new Error("issue is required");
@@ -41427,7 +41642,7 @@ async function executeDispatchTool(input) {
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
             ...adviceLines
           ].join(`
 `),
@@ -41544,7 +41759,7 @@ async function executeDispatchTool(input) {
       });
       return {
         text: [
-          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          `${after.key}: ${changes.join("; ")}${await notSubscribed(issueTopic(after.key), input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -41577,8 +41792,7 @@ async function executeDispatchTool(input) {
         text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
-        text: [text, notSubscribed(issueTopic(issueKey))].join(`
-`),
+        text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
         details: { issue: issueKey, status: after.status, claim: held }
       };
     }
@@ -41691,7 +41905,7 @@ async function executeDispatchTool(input) {
     }
     case "dispatch_resolve_ask": {
       const kind = stringArg(args, "kind");
-      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
+      const { id } = await resolveAskArgument(input.tool, args, client, input.sessionId);
       const ask = await client.resolveAsk(id, {
         kind,
         reason: stringArg(args, "reason"),
@@ -41716,6 +41930,10 @@ async function executeDispatchTool(input) {
         const artifact = (await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })).artifact;
         document = artifact;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getArtifactComments(artifact.id));
+      }
+      if (ref !== null) {
+        const read = await client.getComment(id);
+        await refuseItemOffRef(input.tool, "comment", ref, reference, read.comment, async () => document === undefined ? "" : document.id);
       }
       const comment = await client.resolveComment(id, actor);
       const { label, details } = await commentOwnerResult(client, comment, document);
@@ -41754,7 +41972,7 @@ async function executeDispatchTool(input) {
       return {
         text: [
           `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${followsAsk(askOwner)}`,
+${await followsAsk(askOwner, input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -41769,7 +41987,7 @@ ${followsAsk(askOwner)}`,
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
-      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
+      const { id } = await resolveAskArgument(input.tool, args, client, input.sessionId);
       const ask = await client.editAsk(id, {
         ...question === undefined ? {} : { question },
         ...Array.isArray(options) ? { options } : {},
@@ -41820,7 +42038,7 @@ ${followsAsk(askOwner)}`,
         const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
         return {
           text: [
-            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
+            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${await followsAsk(commentOwner2, input.subscriptions)}`,
             ...adviceLines
           ].join(`
 `),
@@ -41834,7 +42052,10 @@ ${followsAsk(askOwner)}`,
         };
       }
       return {
-        text: [`Posted comment ${comment.id} ${notSubscribed(commentOwner2)}`, ...adviceLines].join(`
+        text: [
+          `Posted comment ${comment.id}${await notSubscribed(commentOwner2, input.subscriptions)}`,
+          ...adviceLines
+        ].join(`
 `),
         details: {
           ...commentDetails,
@@ -41856,7 +42077,7 @@ ${followsAsk(askOwner)}`,
       };
       const comment = resolved.owner.kind === "project" ? await client.artifactSuggest(resolved.artifact.id, suggestionInput) : await client.suggest(issue2(), suggestionInput);
       return {
-        text: `Posted suggestion ${comment.id} ${notSubscribed(resolvedTopic(resolved))}`,
+        text: `Posted suggestion ${comment.id}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
         details: writeResultDetails(resolved, { comment: comment.id })
       };
     }
@@ -41914,7 +42135,7 @@ ${followsAsk(askOwner)}`,
       const adviceLines = renderAdvice(input.tool, issueKey, message.advice, {});
       return {
         text: [
-          `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
+          `Posted message ${message.id} (${messageRef})${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -41952,7 +42173,7 @@ ${followsAsk(askOwner)}`,
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
-          `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
+          `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
           ...tokenTrailer,
           ...adviceLines
         ].join(`
@@ -42075,7 +42296,7 @@ ${trailer.join(`
       });
       return {
         text: [
-          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
+          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef})${await notSubscribed(uploadOwner, input.subscriptions)}`,
           ...adviceLines
         ].join(`
 `),
@@ -42095,13 +42316,13 @@ ${trailer.join(`
       const sessionId = input.sessionId?.trim();
       if (!sessionId)
         throw new Error("host session id is required for dispatch follow");
-      const ask = await resolveAskArgument(input.tool, args, client, sessionId);
+      const { id: ask, read: refRead } = await resolveAskArgument(input.tool, args, client, sessionId);
       const action = stringArg(args, "action");
       if (action === "unfollow") {
         await client.unfollowAsk(ask, sessionId, actor);
         return { text: `Unfollowed ask ${ask}.`, details: { ask } };
       }
-      const read = await client.getAsk(ask);
+      const read = refRead ?? await client.getAsk(ask);
       await client.followAsk(ask, sessionId, actor);
       return {
         text: `Following ask ${ask}: its answer and replies reach this session directly.`,
@@ -42135,11 +42356,16 @@ ${trailer.join(`
           ...showImages(pictures3)
         };
       }
+      let refDocumentId;
+      const documentIdOf = (ref) => {
+        refDocumentId ??= resolveDocument(ref.owner, ref.artifact).then((resolved) => resolved.artifact.id);
+        return refDocumentId;
+      };
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
-        const askRead = await client.getAsk(id);
-        const askRef = refTarget(ref, "ask", id);
+        const askRead = await readAskRef(input.tool, ref.id, refOwnerName(ref), client, async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks(await documentIdOf(ref), "all"));
+        await refuseItemOffRef(input.tool, "ask", ref, stringArg(args, "ref"), askRead.ask, () => documentIdOf(ref));
+        const askRef = refTarget(ref, "ask", askRead.ask.id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(askTexts(askRead)),
           graphSections(client, askRef)
@@ -42152,8 +42378,9 @@ ${trailer.join(`
       }
       if (ownerArguments.ref?.kind === "comment") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveDocument(ref.owner, ref.artifact)).artifact.id));
+        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments(await documentIdOf(ref)));
         const comment = await client.getComment(id);
+        await refuseItemOffRef(input.tool, "comment", ref, stringArg(args, "ref"), comment.comment, () => documentIdOf(ref));
         const commentRef = refTarget(ref, "comment", id);
         const [pictures3, graph2] = await Promise.all([
           picturesOf(datedBodies([comment.comment, ...comment.replies])),
@@ -42181,21 +42408,28 @@ ${trailer.join(`
           ...showImages(pictures3)
         };
       }
-      if (documentOwner().kind === "project") {
-        const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
-        const documentRef = dispatchDocumentRef(resolved.artifact.project, resolved.artifact.slug);
+      const documentReference = optionalString(args, "artifact");
+      if (documentOwner().kind === "project" || documentReference !== undefined) {
+        const resolved = await resolveDocument(documentOwner(), documentReference);
+        const { artifact } = resolved;
+        const ownerKey = resolved.issue?.key ?? artifact.project;
+        const documentRef = dispatchDocumentRef(ownerKey, artifact.slug);
+        const approval = approvalLine(artifact);
         return {
           text: [
-            `Document: ${resolved.artifact.project} / ${resolved.artifact.name}`,
+            `Document: ${ownerKey} / ${artifact.name}`,
+            ...resolved.issue === undefined ? [] : [
+              `Issue: ${resolved.issue.key} [${resolved.issue.status}] ${resolved.issue.title}`
+            ],
             `Reference: ${documentRef}`,
-            `Versions: ${resolved.artifact.versions.length}`,
-            ...approvalLine(resolved.artifact) === undefined ? [] : [approvalLine(resolved.artifact)],
+            `Versions: ${artifact.versions.length}`,
+            ...approval === undefined ? [] : [approval],
             ...await graphSections(client, documentRef)
           ].join(`
 `),
           details: {
-            project: resolved.artifact.project,
-            document: documentLabel(resolved.artifact.project, resolved.artifact.slug)
+            ...resolved.issue === undefined ? { project: artifact.project } : { issue: resolved.issue.key },
+            document: documentLabel(ownerKey, artifact.slug)
           }
         };
       }
@@ -42397,59 +42631,6 @@ function pruneSessions(root, now) {
   }
   ensureDirectory(root);
   writeFileSync(stamp, "", { mode: PRIVATE_FILE });
-}
-
-// ../envoy-client/src/dispatch-subscribe.ts
-function dispatchFollowNotice(details) {
-  if (typeof details !== "object" || details === null)
-    return null;
-  const { follows, issue: issue2, document } = details;
-  if (typeof follows !== "object" || follows === null)
-    return null;
-  const { ask } = follows;
-  if (typeof ask !== "string" || ask === "")
-    return null;
-  let owner;
-  if (typeof issue2 === "string" && issue2 !== "") {
-    owner = issueTopic(issue2);
-  } else if (typeof document === "string") {
-    const [project, slug] = document.split("/", 2);
-    if (!project || !slug)
-      return null;
-    owner = { label: document, topic: documentTopicOf(project, slug).topic };
-  } else {
-    return null;
-  }
-  return {
-    ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
-  };
-}
-function subscriptionRemovedTopics(raw, sessionID) {
-  let envelope2;
-  try {
-    envelope2 = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof envelope2 !== "object" || envelope2 === null)
-    return;
-  const { source, payload } = envelope2;
-  if (source !== "dispatch" || typeof payload !== "string")
-    return;
-  let event;
-  try {
-    event = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const parsedEvent = DispatchEventSchema.safeParse(event);
-  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
-    return;
-  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
-  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
-    return;
-  return parsedPayload.data.topics ?? [];
 }
 
 // ../envoy-client/src/nats-auth.ts
@@ -43189,6 +43370,11 @@ function sessionDispatchSettings(file2, env, options) {
     missing: config2.kind === "read" ? config2.missing : null
   };
 }
+function sessionEnvoySettings(file2, env, options) {
+  if (file2.path === null)
+    return offWithError(file2.error);
+  return envoySettings(env, readEnvoyConfig(file2.path, env, options), { nats: options.nats });
+}
 
 // ../envoy-client/src/slack-post.ts
 import { BlockList, isIP } from "net";
@@ -43555,7 +43741,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to any topic. ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every subscribed session that holds its own NATS connection, yours included, and is not retained. A session the listener delivers to over a serve port, such as an OpenCode agent, receives nothing on such a topic and is told nothing (dispatch://INFRA-122). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -43697,7 +43883,8 @@ function createEnvoyClient(config2) {
   const apiToken = config2.token;
   const request = async (path2, init) => {
     const url2 = `${baseUrl}${path2}`;
-    for (let attempt = 0;attempt < 2; attempt += 1) {
+    const attempts = config2.retry === false ? 1 : 2;
+    for (let attempt = 0;attempt < attempts; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -43709,7 +43896,7 @@ function createEnvoyClient(config2) {
           signal: AbortSignal.timeout(timeoutMs)
         });
       } catch (error49) {
-        if (attempt === 0) {
+        if (attempt + 1 < attempts) {
           await waitForRetry();
           continue;
         }
@@ -43724,7 +43911,7 @@ function createEnvoyClient(config2) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt === 0) {
+      if (response.status >= 500 && attempt + 1 < attempts) {
         await waitForRetry();
         continue;
       }
@@ -44025,6 +44212,10 @@ var legionCapabilityState = exports_external.strictObject({
   configLine: nonEmptyString.optional(),
   source: exports_external.enum(["configuration", "boot"]).optional()
 });
+var legionSettings = exports_external.looseObject({
+  max_fix_attempts: exports_external.number().int().positive(),
+  worker_boot_timeout_seconds: exports_external.number().int().positive()
+});
 var legionCacheView = exports_external.strictObject({
   repo: nonEmptyString,
   sandbox: nonEmptyString,
@@ -44058,7 +44249,8 @@ var LegionStateResponse = exports_external.strictObject({
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: exports_external.array(legionCapabilityState),
-  repositories: legionRepositories
+  repositories: legionRepositories,
+  settings: legionSettings
 });
 var LegionRegisterResponse = exports_external.strictObject({
   claimToken: nonEmptyString,
@@ -46820,7 +47012,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 34
+  daemonApiVersion: 35
 };
 
 // src/channel-forwarder.ts

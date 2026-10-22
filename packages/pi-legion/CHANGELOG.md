@@ -7,6 +7,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
+  `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
+  credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
+  `worker_boot_timeout_seconds`, `admission_cap`, `linger_hours`, the runtime block, the projects,
+  the GitHub Apps' ids and installations, …), keyed as the file is and parsed loosely, so a later
+  `legion.yaml` key is no contract change. Required, so a plugin built before it refuses the state.
+  Install this release with a `legion` built from the same commit.
 - Daemon API contract 29 and plugin interface version 3 (sjawhar/legion#1998): the daemon-launched
   controller is told the project's Slack channels as `LEGION_SLACK_CHANNELS`, always set (empty for
   none), and the plugin subscribes to each channel's mention topic while the session holds the

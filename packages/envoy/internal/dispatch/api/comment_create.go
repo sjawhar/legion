@@ -11,14 +11,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
-
-const maxCommentBody16 = 2000
 
 type commentInput struct {
 	Body     string             `json:"body"`
@@ -347,8 +346,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
-	if length := len16(input.Body); length > maxCommentBody16 {
-		capExceeded(w, "body", length, maxCommentBody16)
+	if length := len16(input.Body); length > contracts.DispatchBodyMax {
+		capExceeded(w, "body", length, contracts.DispatchBodyMax)
 		return
 	}
 	delivery, mentionTargets, err := validateCommentMentions(input)

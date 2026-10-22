@@ -62,6 +62,10 @@ type State struct {
 	// leaves out with why (a GitHub App not installed on it), and the caches of repositories the
 	// mapping no longer names. Never null: a daemon with no workflow serves none.
 	Repositories RepositoriesView `json:"repositories"`
+	// Settings is the daemon's resolved legion.yaml with every credential, credential source and
+	// credential file path left out, keyed as the file is (SettingsOf). Required, never null
+	// inside: every collection in it is emitted non-nil (contract 35).
+	Settings Settings `json:"settings"`
 }
 
 // RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
