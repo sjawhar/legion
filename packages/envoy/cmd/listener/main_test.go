@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -417,6 +418,69 @@ func TestPublishHandlerDeliversAnAdHocTopicToItsSubscriber(t *testing.T) {
 	}
 	if _, err := received.NextMsg(500 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("a second copy reached the subscriber (err %v): the publish went out twice", err)
+	}
+}
+
+// The publish API takes only notification topics: a subject outside notifications., such as a KV
+// key's or a JetStream API request's, is a 400 naming the prefix and reaches nothing, while an ad-hoc
+// notification topic beside it is still published.
+func TestPublishHandlerRefusesATopicOutsideNotifications(t *testing.T) {
+	const adhoc = "notifications.lxspec.probe.all"
+	refused := []string{"$KV.envoy_roles.x", "$JS.API.STREAM.INFO.x", "team.deploy-squad.all"}
+	harness := newListenerDeliveryHarness(t, nil)
+	client := harness.client
+	received := make(chan *natsgo.Msg, 16)
+	for _, subject := range append(slices.Clone(refused), adhoc) {
+		subscription, err := client.Conn.ChanSubscribe(subject, received)
+		if err != nil {
+			t.Fatalf("subscribe %s: %v", subject, err)
+		}
+		t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the subscriptions: %v", err)
+	}
+	state := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions}
+	publish := func(topic string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello"}`))
+		request.Header.Set("Content-Type", "application/json")
+		publishHandler(state).ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	for _, topic := range refused {
+		recorder := publish(topic)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("publish to %q: status %d, want 400; body %s", topic, recorder.Code, recorder.Body.String())
+		}
+		var refusal struct {
+			Error    string   `json:"error"`
+			Expected []string `json:"expected"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+			t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+		}
+		if refusal.Error != "topic must begin with notifications." || len(refusal.Expected) != 1 || refusal.Expected[0] != "topic" {
+			t.Fatalf("publish to %q: refusal %+v, want one naming notifications. and the topic field", topic, refusal)
+		}
+	}
+	select {
+	case msg := <-received:
+		t.Fatalf("a refused publish reached NATS on %q", msg.Subject)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if recorder := publish(adhoc); recorder.Code != http.StatusOK {
+		t.Fatalf("publish to %q: status %d, want 200; body %s", adhoc, recorder.Code, recorder.Body.String())
+	}
+	select {
+	case msg := <-received:
+		if msg.Subject != adhoc {
+			t.Fatalf("received subject %q, want %q", msg.Subject, adhoc)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ad-hoc publish reached nobody")
 	}
 }
 

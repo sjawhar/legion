@@ -594,6 +594,10 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "message is required", "message")
 			return
 		}
+		if !strings.HasPrefix(request.Topic, bus.NotificationTopicPrefix) {
+			writeJSONError(w, http.StatusBadRequest, "topic must begin with "+bus.NotificationTopicPrefix, "topic")
+			return
+		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
 			writeJSONError(w, http.StatusBadRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
