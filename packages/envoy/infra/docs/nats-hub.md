@@ -510,7 +510,14 @@ it before it creates the next (`RECREATE`, no surge, at most one unavailable). N
 the old VM's stop until the new one's `nats` unit starts, and its clients reconnect then. The new
 VM gets the same data disk, so it keeps the stream and rejoins the tailnet as the same node. Its
 boot disk comes from the `cos-stable` family as it is then, so a new template also brings
-whichever COS release the family names at that moment.
+whichever COS release the family names at that moment. Once the new VM is up, check what its
+listener serves, which the replacement itself does not prove: its `listener API hosts:` boot line
+(`docker logs envoy-listener` on the VM, or the serial output) must name `<h>.<tailnetDnsName>` as
+the clients dial it, or a `/v1` route at `http://<h>.<tailnetDnsName>:9020` must answer 200 from a
+device on the tailnet. The group's autohealing check reads NATS's `/healthz` on 8222 and nothing
+dials 9020, so a `tailnetDnsName` that passes the shape rule without being this tailnet's name, or
+a MagicDNS collision that gave the node `<h>-1` rather than `<h>`, leaves a healthy group whose
+listener answers 421 to every client.
 
 Three inputs work otherwise:
 
