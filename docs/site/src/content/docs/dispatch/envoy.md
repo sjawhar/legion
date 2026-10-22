@@ -120,6 +120,7 @@ side.
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every subscribed session that holds its own NATS connection, the publisher included, and is not retained. A session the listener delivers to over a serve port, such as an OpenCode agent, receives nothing on such a topic and is told nothing: `dispatch://INFRA-122`. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull

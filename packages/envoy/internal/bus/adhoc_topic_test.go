@@ -12,9 +12,13 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
+const grantedTopic = "notifications.team.granted"
+
 // Which transport each kind of topic takes: the role lanes and their exception lanes, and every
 // notification topic the stream does not capture, over core NATS; every topic the stream captures,
 // its exception lane included, and every subject outside notifications., through JetStream.
+// An exception lane follows the same rule as any other topic: the stream captures the lane of an
+// agent subject and no other lane, so the lane of a captured non-agent topic takes core NATS.
 func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCapture(t *testing.T) {
 	for _, tc := range []struct {
 		topic string
@@ -25,6 +29,7 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 		{"notifications.team.deploy-squad", true},
 		{"notifications.team.deploy-squad.all", true},
 		{ExceptionTopicPrefix + "notifications.team.deploy-squad", true},
+		{ExceptionTopicPrefix + "notifications.github.acme.widgets.pr.1.comment", true},
 		{"notifications.githubx.acme", true},
 		{"notifications.github", true},
 		{contracts.AgentTopicPrefix + "ses_a", false},
@@ -158,5 +163,3 @@ func TestAnAdHocPublishNATSDeniesReturnsTheDenial(t *testing.T) {
 		t.Fatalf("granted ad-hoc publish after a denial: %v", err)
 	}
 }
-
-const grantedTopic = "notifications.team.granted"

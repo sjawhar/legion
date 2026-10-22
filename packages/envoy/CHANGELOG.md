@@ -920,6 +920,24 @@
 
 ### Fixed
 
+- A publish to an ad-hoc topic (`envoy_publish` to a `notifications.` topic no stream subject
+  captures, such as `notifications.team.deploy-squad`) reaches its subscribers again, and is
+  answered at once. The listener sends such a topic over core NATS, confirmed as a role lane is
+  (`bus.usesCoreTransport`), where it went to JetStream, which never answers a subject no stream
+  captures while a core subscriber holds it: the publish waited out its five-second
+  acknowledgement deadline and answered 500 `context deadline exceeded`. The listener's NATS grant
+  (`ListenerPermissions`, and so `HostPermissions`) publishes on `notifications.>`, where it
+  listed only the stream's subjects, the role lanes and the exception lanes, so a hub that renders
+  the grant lets the listener make that publish; its rendered authorization changes, which
+  replaces a GCP hub's VM on its next update. `POST /v1/messages/publish` now answers
+  `400 {"error":"topic must begin with notifications.","expected":["topic"]}` for a topic outside
+  `notifications.` and publishes nothing, which closes the raw-subject route: before it, a caller
+  holding the listener's bearer could publish to any subject the listener's own NATS user may
+  publish — measured on a production-shaped rig at main, a publish to
+  `$KV.envoy_roles.example-role` answered 200 and the role-claim bucket went from zero messages to
+  one — and could reach `$JS.API.*` the same way. It closes that route alone: the listener's own
+  role-claim endpoint still serves any holder of the token, by design, and is not changed here.
+
 - The listener's `GET /v1/interests/<session_id>` answers 404 only for a session the registry
   holds no record of (`nats.ErrKeyNotFound`), and 503 for a read NATS did not serve (a dropped
   connection, a timeout, a record that does not decode). It used to answer 404 for every failure,

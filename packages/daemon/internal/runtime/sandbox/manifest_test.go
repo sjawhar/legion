@@ -1433,7 +1433,8 @@ func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
 
 // operatorPod is an operator's runtime.kubernetes.pod: a variable, a Secret volume, a ConfigMap
 // volume mounted by sub_path into the profile's agent directory, a projected ServiceAccount token
-// alone in its volume, and the account the pods run as.
+// alone in its volume, an existing share by its PersistentVolumeClaim mounted read-only, an NFS
+// export mounted writable, and the account the pods run as.
 func operatorPod() Pod {
 	expiry := int64(3600)
 	return Pod{
@@ -1447,11 +1448,15 @@ func operatorPod() Pod {
 			{Name: "operator-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{{
 				ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "operator-audience", ExpirationSeconds: &expiry, Path: "token"},
 			}}}}},
+			{Name: "operator-share", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}},
+			{Name: "operator-nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "nas.internal.example", Path: "/exports/builds"}}},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: "operator-creds", MountPath: "/etc/legion-operator/creds", ReadOnly: true},
 			{Name: "operator-config", MountPath: ompAgentDir + "/models.yml", SubPath: "models.yml", ReadOnly: true},
 			{Name: "operator-token", MountPath: "/var/run/operator", ReadOnly: true},
+			{Name: "operator-share", MountPath: "/mnt/team", ReadOnly: true},
+			{Name: "operator-nas", MountPath: "/mnt/nas"},
 		},
 		ServiceAccount: "operator-worker",
 	}
