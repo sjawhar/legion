@@ -276,6 +276,9 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	if err != nil || !u.IsAbs() || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return nil, fmt.Errorf("%s.url must be an absolute URL with no path, query, fragment or user; got %q", agentSecretsKey, block.URL)
 	}
+	if err := refuseNonASCIIHost(agentSecretsKey+".url host", u.Hostname()); err != nil {
+		return nil, err
+	}
 	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
 		return nil, fmt.Errorf("%s.url must use https unless the host is a loopback address; got %q", agentSecretsKey, block.URL)
 	}
@@ -369,11 +372,9 @@ func readPluginSource(value *yaml.Node, key string) (string, error) {
 	return source, nil
 }
 
-// isLoopbackHost is localhost in ASCII, with or without the root's trailing dot, or a loopback IP
-// address. strings.EqualFold alone would also match `localhoſt` (U+017F, the long s, folds to `s`),
-// a name no resolver takes for localhost.
+// isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
 func isLoopbackHost(host string) bool {
-	if name := strings.TrimSuffix(host, "."); isASCII(name) && strings.EqualFold(name, "localhost") {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
@@ -391,12 +392,13 @@ func isASCII(s string) bool {
 }
 
 // refuseNonASCIIHost refuses a host with any rune above unicode.MaxASCII. It runs before a host is
-// lower-cased for validation.IsDNS1123Subdomain: strings.ToLower folds `İ` (U+0130) to `i` and the
-// Kelvin sign (U+212A) to `k`, so the lower-cased name would pass while the value kept, as written,
-// is one no node's resolver resolves.
+// lower-cased for validation.IsDNS1123Subdomain or compared against loopback: strings.ToLower folds
+// `İ` (U+0130) to `i` and the Kelvin sign (U+212A) to `k`, so the lower-cased name would pass while
+// the value kept, as written, is one no node's resolver resolves; and an HTTP client maps `ſ`
+// (U+017F) or a full-width `ｌｏｃａｌｈｏｓｔ` to localhost (UTS-46) where no ASCII comparison does.
 func refuseNonASCIIHost(key, host string) error {
 	if !isASCII(host) {
-		return fmt.Errorf("%s must be an ASCII host, an IP address or an ASCII DNS name; got %+q", key, host)
+		return fmt.Errorf("%s must be an IP address or an ASCII DNS name; got %+q", key, host)
 	}
 	return nil
 }
@@ -1383,6 +1385,9 @@ func checkKubernetesKeys(file fileConfig) error {
 // all.
 func checkPodReachable(cfg Config) error {
 	key, host, why := "bind", cfg.Bind, "bind the daemon host's own address when runtime is kubernetes"
+	if err := refuseNonASCIIHost("bind", cfg.Bind); err != nil {
+		return err
+	}
 	if cfg.AdvertiseHost != "" {
 		if isLoopbackHost(cfg.Bind) {
 			return fmt.Errorf("bind %s is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes", cfg.Bind)
@@ -1405,6 +1410,9 @@ func checkPodReachable(cfg Config) error {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
 		host := parsed.Hostname()
+		if err := refuseNonASCIIHost(address.key+" host", host); err != nil {
+			return err
+		}
 		var why string
 		switch {
 		case isLoopbackHost(host):

@@ -1259,8 +1259,8 @@ func TestAdvertiseHostMustBeABareHost(t *testing.T) {
 		{"a space", `"legion daemon"`, refused + " (legion daemon)"},
 		{"a space inside a DNS name", `"legion daemon.legion.svc"`, refused + " (legion daemon.legion.svc)"},
 		{"a zoned IPv6 address", `"fe80::1%eth0"`, refused + " (fe80::1%eth0)"},
-		{"a dotted capital I", "nas.\u0130nternal.example", `advertise_host must be an ASCII host, an IP address or an ASCII DNS name; got "nas.\u0130nternal.example"`},
-		{"a Kelvin sign", "\u212Aube.example", `advertise_host must be an ASCII host, an IP address or an ASCII DNS name; got "\u212aube.example"`},
+		{"a dotted capital I", "nas.\u0130nternal.example", `advertise_host must be an IP address or an ASCII DNS name; got "nas.\u0130nternal.example"`},
+		{"a Kelvin sign", "\u212Aube.example", `advertise_host must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
 		{"blank", `""`, "advertise_host must not be empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

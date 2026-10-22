@@ -1054,17 +1054,12 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "an NFS server with a dotted capital I",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"nas.\u0130nternal.example\", path: /share}}]\n",
-			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an ASCII host, an IP address or an ASCII DNS name; got "nas.\u0130nternal.example"`,
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an IP address or an ASCII DNS name; got "nas.\u0130nternal.example"`,
 		},
 		{
 			name: "an NFS server with a Kelvin sign",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"\u212Aube.example\", path: /share}}]\n",
-			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an ASCII host, an IP address or an ASCII DNS name; got "\u212aube.example"`,
-		},
-		{
-			name: "an NFS server named localhost with a long s",
-			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"localho\u017Ft\", path: /share}}]\n",
-			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an ASCII host, an IP address or an ASCII DNS name; got "localho\u017ft"`,
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an IP address or an ASCII DNS name; got "\u212aube.example"`,
 		},
 		{
 			name: "an NFS server as an IPv4-mapped IPv6 address",
@@ -1418,11 +1413,31 @@ func TestNFSServerMayBeMixedCaseASCII(t *testing.T) {
 	}
 }
 
-// A broker URL whose host only Unicode case folding makes localhost is no loopback host.
-func TestBrokerNamedLocalhostWithALongSIsNotLoopback(t *testing.T) {
-	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: http://localho\u017Ft:13380\n"+agentSecretsTokenFile), noEnv)
-	if err == nil || !strings.Contains(err.Error(), "must use https unless the host is a loopback address") {
-		t.Fatalf("err %v, want the https refusal", err)
+// A URL a pod is handed whose host is not ASCII is refused: an HTTP client maps `ſ` (U+017F) or a
+// full-width name to localhost (UTS-46), so the loopback refusal could not see it.
+func TestPodURLHostMustBeASCII(t *testing.T) {
+	for name, tc := range map[string]struct{ body, want string }{
+		"daemon_url with a long s": {kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localho\u017Ft:13370"),
+			`daemon_url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+		"envoy_url full-width": {kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: http://\uFF4C\uFF4F\uFF43\uFF41\uFF4C\uFF48\uFF4F\uFF53\uFF54:9020"),
+			`envoy_url host must be an IP address or an ASCII DNS name; got "\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54"`},
+		"nats_urls with a Kelvin sign": {kubernetesWith("nats_urls: [nats://nats.internal.example:4222]", "nats_urls: [\"nats://\u212Aube.example:4222\"]"),
+			`nats_urls host must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
+		"dispatch_url with a long s": {kubernetesWith("dispatch_url: https://dispatch.internal.example", "dispatch_url: https://localho\u017Ft"),
+			`dispatch_url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+		"bind with a long s": {kubernetesWith("bind: 10.0.0.5", "bind: \"localho\u017Ft\""),
+			`bind must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+		"bind with a long s beside advertise_host": {kubernetesWith("bind: 10.0.0.5", "bind: \"localho\u017Ft\"\nadvertise_host: legion-daemon.legion.svc"),
+			`bind must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+		"agent_secrets.url with a long s": {kubernetesFile + "    agent_secrets:\n      url: http://localho\u017Ft:13380\n" + agentSecretsTokenFile,
+			`runtime.kubernetes.agent_secrets.url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("LoadForValidation error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
