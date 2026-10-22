@@ -2,17 +2,21 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -624,6 +628,117 @@ func TestARoomLoadingWhileThisProcessesWriteCommitsStandsAtTheHead(t *testing.T)
 			t.Fatalf("the stored document = %q, want it to hold %q", stored, want)
 		}
 	}
+}
+
+// A room that loads while a repair of this process's commits is the opposite case, and it is not
+// born at the head. A repair - the block-id backfill's stamp here, settlement's on the same
+// shape - is written into one room instance before it is appended (applySuppressed), and nothing
+// replays it into a room that loaded since: the replacement reads the store, which did not hold
+// the repair when it read. So that room genuinely does not hold the appended version, it stands
+// behind the head, and the gate has to refuse its next durable write - were it credited with the
+// version (tookResidentVersion, which a live write's commit does call because its publish then
+// applies the update to the room it reaches), this process would version text it never saw.
+// Standing behind is not where it ends: the refusal fails the room and the reload reads the
+// repair from the store, which is the recovery TestARoomBehindTheHeadIsReloadedAndWritesAgain
+// pins for the two-process case.
+//
+// The window is the backfill's alone: it holds no room and no document lock between the stamp
+// and the append that stores it, so a failure of that room there evicts it and the document
+// reloads under the append. A settlement cannot reach this window - its transaction holds the
+// document's advisory lock from before it reads the room until it commits, so a failed room's
+// eviction, which compacts under that lock, cannot finish, and allowInject holds every loader
+// behind that eviction.
+func TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	// failingBrowserAppendStore fails nothing here; it is the hook that runs just before the
+	// backfill's append, while the backfill holds no lock of its own.
+	appends := &failingBrowserAppendStore{VersionedStore: NewPgVersioned(database)}
+	service := New(Deps{Store: database, Persistence: appends, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	alignLatestVersionWithUpdates(t, service, artifactID)
+
+	// The reload is held where the window is: ygo's LoadDoc has read the store and the head it
+	// stands at, and the hook that starts the room's instance has not run. Only the reload the
+	// backfill's own window arms is held - the backfill loads the room itself to stamp it.
+	entered, release := make(chan struct{}), make(chan struct{})
+	var holding sync.Once
+	var hold atomic.Bool
+	loadDocument := service.srv.OnLoadDocument
+	service.srv.OnLoadDocument = func(ctx context.Context, room string, doc *crdt.Doc) error {
+		if room == artifactID && hold.Load() {
+			holding.Do(func() {
+				close(entered)
+				<-release
+			})
+		}
+		return loadDocument(ctx, room, doc)
+	}
+
+	var read int64
+	reloaded := make(chan error, 1)
+	reload := func() {
+		read = storedHead(t, service.store, artifactID)
+		hold.Store(true)
+		service.failRoom(artifactID, errors.New("test: the stamped room failed under the backfill"))
+		if err := service.awaitRoomRecovery(context.Background(), artifactID); err != nil {
+			t.Errorf("evict the room the backfill stamped: %v", err)
+			return
+		}
+		go func() { reloaded <- service.warmLiveDocument(context.Background(), artifactID) }()
+		select {
+		case <-entered:
+		case err := <-reloaded:
+			t.Errorf("the reload returned without reaching the load window: %v", err)
+		case <-time.After(roomWait(t)):
+			t.Error("the reload never reached the window it is held in")
+		}
+	}
+	appends.beforeTx.Store(&reload)
+	reports, err := service.BackfillBlockIDs(context.Background())
+	if err != nil {
+		t.Fatalf("backfill the document's block ids: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Err != nil || reports[0].Stamped != 1 {
+		t.Fatalf("backfill reports = %#v, want the one document, stamping one block", reports)
+	}
+	close(release)
+	if err := <-reloaded; err != nil {
+		t.Fatalf("reload the room while the stamp committed: %v", err)
+	}
+	head := storedHead(t, service.store, artifactID)
+	if head != read+1 {
+		t.Fatalf("the document's head is %d after the stamp, want %d: the load read %d", head, read+1, read)
+	}
+
+	// What makes standing behind the head right here: the room that loaded has none of the stamp.
+	if repairs := pmdoc.BlockIDRepairCount(liveTree(t, service, artifactID)); repairs == 0 {
+		t.Fatal("the room that loaded while the stamp committed holds the stamp, so nothing here is tested")
+	}
+	live := service.srv.GetDoc(artifactID)
+	if at := service.cursorOf(live).heldThrough(); at != read {
+		t.Fatalf("the room that loaded while the stamp committed holds the document through update %d, want the head it read, %d", at, read)
+	}
+
+	// And the recovery that ends it: the browser's edit is refused, which fails the room; the
+	// reload reads the stamp from the store and the resent edit lands on it.
+	editAsBrowserPeer(t, service, artifactID, 1, model.Actor{Kind: "user", ID: "alice"},
+		appendBlocks(t, "Alice types on the room that loaded without the stamp.\n"))
+	if behind := roomBehind(t, service, artifactID); behind {
+		t.Fatal("the room that replaced the one behind the head stands behind it too")
+	}
+	if repairs := pmdoc.BlockIDRepairCount(liveTree(t, service, artifactID)); repairs != 0 {
+		t.Fatalf("the reloaded room holds %d unstamped block(s), want the stamp the backfill stored", repairs)
+	}
+	if stored := storedMarkdown(t, service.store, artifactID); !strings.Contains(stored, "Alice types on the room that loaded without the stamp.") {
+		t.Fatalf("the stored document = %q, want it to hold the edit the room resent", stored)
+	}
+	requireRoomStillWrites(t, service, artifactID, 2)
 }
 
 // A room that does stand behind the head - the other process appended what this one's room never

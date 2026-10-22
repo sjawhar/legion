@@ -336,6 +336,23 @@ type roomCursor struct {
 //   - settlement's own repair append, its superseded path included (settleRoomWithin);
 //   - the block-id backfill's stamp (backfillBlockIDs).
 //
+// Only one of them records its version on a second instance as well: a live write's commit,
+// which follows this call with Service.tookResidentVersion so the room its publish is about to
+// reach - a room still loading, or one that replaced the write's fork - takes the version in
+// (Ledger.takeRoomCursors). That is sound there because the publish then applies the update to
+// that very room (publishLiveUpdate): the instance credited with the version ends up holding it.
+//
+// The repair appends - settlement's two and the backfill's - are the opposite case, and none of
+// them calls tookResidentVersion. Their update is written into one room instance before it is
+// stored (applySuppressed), and nothing replays it into a room that loaded since: a room that
+// read the store before the repair committed does not hold the repair, so this advance must
+// reach the instance the repair was written into and no other. Crediting a room load in flight
+// with the version would say a document holds an update it does not, and the first durable
+// write rendered from it would be written over text this process never saw - the whole point of
+// the gate (refuseRoomBehindHead). Such a room is behind the head and has to be: the refusal
+// fails it, and the reload reads the repair from the store
+// (TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads).
+//
 // A nil cursor is a document no room instance holds, whose writes no cursor gates.
 func advanceRoomCursor(cursor *roomCursor, version persistence.Version) {
 	if cursor == nil {
