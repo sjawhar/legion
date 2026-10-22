@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-117",
+  "completed": "2026-10-22T06:38:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "skills/envoy/SKILL.md, packages/envoy-client/src/tool-contract.ts",
+      "description": "The text the fix makes false is not on this branch's diff: skills/envoy/SKILL.md:136-140 still says a publish to a topic the publisher subscribes to is 'delivered to nobody' (core NATS does not skip the sender, so an ad-hoc topic now echoes to the publisher), and tool-contract.ts:180 still advertises envoy_publish as 'to any topic' though api.go:598 now answers 400 outside notifications. Not this issue's: dispatch://INFRA-113's approved spec (v12) names that text as its own deliverable ('the Envoy skill and the description of the envoy_publish tool say so'; #2101 'also changes the text that the fix made false'), and INFRA-117's spec delivers three code changes and says to adopt #2102's commit as it stands. Carrying the text here would also collide with INFRA-113's identical edits when dispatch://INFRA-120 merges this branch into main, where those files are untouched by this diff and main's copies win. Reported to the architect so the gap keeps its owner."
+    },
+    {
+      "severity": "minor",
+      "file": "pull request body, 'Caller census on this branch (D7)'",
+      "description": "Census re-run at the head found two hits the table does not list: packages/envoy/scripts/e2e-local.sh:315,329 (publishes notifications.role.<role> only, unaffected; CI job envoy-e2e-local is green at 7424e75a, which is live proof) and docs/superpowers/plans/2026-04-11-enable-tsnet-listener.md:167,189,199 (a historical plan whose manual probes name test.security/test.health, which would now answer 400 instead of reaching NATS). Neither changes the census's finding: no production caller on this branch publishes outside notifications. The census also carries no explicit rollout line; the rollout is an immediate refusal, and the vulnerability it closes is named in dispatch://INFRA-113's approved spec (a token holder could publish to $KV.envoy_roles.<key> and rewrite which session holds a role)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/api.go:597",
+      "description": "The prefix check admits a topic whose tokens are literal NATS wildcards (notifications.> or notifications.*); under the widened grant both answer 200. The tester measured the effect: delivered only to a subscriber whose own pattern matches the literal token, never fanned out to subscribers of concrete topics, so it is amplification at most and not escalation (the same caller may publish each topic one by one). Hardening, and it belongs to the main-line fix if it is taken at all."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/bus/nats.go:811, packages/envoy/internal/bus/stream.go:100",
+      "description": "Both thermonuclear passes propose the same two simplifications: usesCoreTransport's first two clauses are now decided by the third (every role lane is a notifications. topic the stream never captures, pinned by TestStreamConfigExcludesRoleLanes), and streamCaptures hand-rolls a second, weaker subject matcher beside stream.go's subjectsOverlap, needing TestEveryStreamSubjectIsALiteralPrefixAndWildcard to hold its shape assumption up. Neither changes behaviour. The implementer's ce-simplify-code pass reached both and skipped both on the stated criterion of this issue, equivalence with the main-line fix; the hunks are byte-identical to #2101's, so applying them only here would diverge the branch it exists to mirror. They belong to dispatch://INFRA-113, mirrored back."
+    }
+  ],
+  "ciRead": {
+    "base": "envoy-infra-integration",
+    "requiredChecks": "none: gh api repos/sjawhar/legion/rules/branches/envoy-infra-integration returned no required_status_checks rule and the branch carries no protection.required_status_checks, so the daemon enforces no CI verdict on this pull request and the jobs below are read by hand",
+    "ciHead": "7424e75ad6a16beadd5eef7d119d2936f40d0c4d",
+    "compareToPullRequestHead": "gh api repos/sjawhar/legion/compare/7424e75a...1987f4a4 -> ahead, files .legion/INFRA-117/implement.json and .legion/INFRA-117/test.json only, all(startswith('.legion/')) = true",
+    "checkRuns": "at 7424e75a: build, changes, dispatch-memory, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, lint, pr-title, test, typecheck all completed/success; claude-envoy, contracts, deploy, envoy-client, envoy-plugin, pi-envoy, pi-legion, pi-shared skipped; dispatch failure",
+    "dispatchRed": "pre-existing on this branch line, verified at the forge rather than from the body: job 119658599066 at 7424e75a fails at step 13 'Test dispatch dashboard', and job 119082906542 at the plan's baseline c00fcb28eab9a3b4831007e2cd0996ef1f044021 (#2089's merged head) fails at the same job and the same step 13. This diff touches no file under packages/dispatch."
+  },
+  "thermonuclear": {
+    "head": "1987f4a436b5e744941803df75f8646bb8f49fbd",
+    "deepReview": "Verdict: CHANGES at 1987f4a4 - one Medium (the stale agent-facing text, finding 1 above) and two Minors (silence for listener-delivered sessions, which INFRA-113's approved spec settles; the duplicate verdict lost for a stream subject only a newer build compiles, empty today since main compiles the same eight subjects). Its Security line is quoted in the review body.",
+    "codeQuality": "Verdict: CHANGES at 1987f4a4 - the two simplifications and the test-duplication finding above, all three byte-identical to #2101's hunks and so owned by the main line, plus the same stale-text finding."
+  },
+  "threads": "gh api graphql at 2026-10-22T06:30Z: the pull request has 0 review threads and 0 prior reviews, so none of mine and no bot's awaited an answer.",
+  "evidenceVerified": {
+    "implementerProof": "E2E (implementer) line present in the body at head 7424e75a with its negative controls (pre-change grant -> permissions violation; pre-change binary -> 500 after 5.003 s).",
+    "testerProof": "E2E (tester) line present with an independently driven rig and implementerProof: verified."
+  }
+}
