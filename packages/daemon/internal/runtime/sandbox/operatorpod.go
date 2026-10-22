@@ -118,7 +118,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	// stop every agent's Dispatch writes. Both sides hold to
 	// packages/contracts/fixtures/dispatch-public-url.json.
 	if value, set := pod.Env["DISPATCH_PUBLIC_URL"]; set && !dashboardURL(value) {
-		return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
+		return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %+q, which is not an http or https URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
 	}
 	volumes := legionVolumeNames()
 	for i, volume := range pod.Volumes {
@@ -198,7 +198,7 @@ func legionClaim(claim string) bool {
 // the URL standard's parser the agents' dispatch command reads the value with (envoy-client's
 // dispatchSettings), so boot accepts only values the agents accept, and refuses some they would
 // take (userinfo, a trailing dot, IPv4 shorthand, an internationalized name). It is http or https
-// with no userinfo; a plain host, which is a DNS name of letters, digits and hyphens (no label
+// with no userinfo; a plain host, which is a DNS name of ASCII letters, digits and hyphens (no label
 // empty, longer than 63 or starting `xn--`, and a last label neither all digits nor `0x`, which
 // the agents read as an IPv4 address), a four-octet dotted IPv4 address, or a bracketed IPv6
 // address with no zone; and, when it names one, a port from 1 to 65535.
