@@ -715,11 +715,15 @@ func eventCount(event corev1.Event) int32 {
 }
 
 // csiFailure reports whether a share's failed mount is a CSI driver's gRPC error. An in-tree NFS
-// `mount failed` is refused on its first event: it already stands for mount.nfs's own retries,
-// about two minutes of them, and the kubelet's next try comes later than a probe attempt's budget
-// lasts (each attempt is a new pod, whose events count afresh). A CSI driver answers at once, and a
-// final code may be the driver's moment (a Filestore maintenance blip), so a CSI failure is refused
-// only once the kubelet's retry, seconds later, has met it again.
+// `mount failed` is refused on its first event. For a server that never answers or refuses the
+// connection, that event already stands for about two minutes of mount.nfs's own retries
+// (ECONNREFUSED, ETIMEDOUT, EHOSTUNREACH, EAGAIN), and the kubelet's next try spends those two
+// minutes again, so its report would arrive after a probe attempt's budget (each attempt is a new
+// pod, whose events count afresh). Other mount.nfs errors (an export denied or absent) exit at once
+// and are refused on that one try as well, since the export is the operator's to fix. A CSI final
+// code may be the driver's moment (a Filestore maintenance blip), so a CSI failure is refused only
+// once the kubelet's retry, about half a second later, has met it again; a CSI driver's own
+// two-minute deadline (`DeadlineExceeded`) is not final and is left to the budget.
 func csiFailure(message string) bool {
 	return strings.Contains(message, `" : rpc error: code = `) && !strings.Contains(message, `" : mount failed: `)
 }

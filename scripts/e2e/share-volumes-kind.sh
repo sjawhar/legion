@@ -309,5 +309,9 @@ begin probe-silent-server
 # after its own two minutes of retries, and the probe refuses that first failure within one attempt.
 probe silent-server 'cannot mount volume "scratch", which runtime.kubernetes.pod.volumes gives it from NFS export 192.0.2.10:/scratch' \
   'mount failed: '
-note "silent-server: probe-boot exit 1 in $((SECONDS - check_started))s: $(grep -m1 'cannot mount' <<<"$probed" | cut -c1-300)"
+elapsed=$((SECONDS - check_started))
+# One attempt is a pod under the probe's default 300 s budget; a refusal later than that came from
+# a second attempt, which is the regression round 4 introduced.
+[ "$elapsed" -lt 300 ] || fail "silent-server: refused only after ${elapsed}s, past one 300 s attempt"
+note "silent-server: probe-boot exit 1 in ${elapsed}s: $(grep -m1 'cannot mount' <<<"$probed" | cut -c1-300)"
 pass

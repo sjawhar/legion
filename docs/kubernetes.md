@@ -3541,10 +3541,11 @@ would let one's `read_only` decide the other's; mount the one volume at each pat
 the pods cannot mount refuses the boot in the image probe, naming the volume and the share: a claim
 the scheduler cannot find, is deleting or has lost its volume (`persistentvolumeclaim "<name>" not
 found`, `… is being deleted`, `… bound to non-existent persistentvolume …`, at once, never counted as
-a capacity wait), a mount the node ran and that failed (`… : mount failed: …`, a server that never
-answers or has no such export, refused on the kubelet's first report, which already stands for
-mount.nfs's own retries of about two minutes; or a CSI driver's `… : rpc error: code = …`, refused
-once the kubelet's retry, seconds later, has met it again), and a share mounted but unreadable,
+a capacity wait), a mount the node ran and that failed (`… : mount failed: …`, refused on the
+kubelet's first report: for a server that never answers or refuses the connection that report
+already stands for about two minutes of mount.nfs's own retries, and an export the server denies or
+lacks fails at once, so its first report is its one try; or a CSI driver's `… : rpc error: code = …`,
+refused once the kubelet's retry, about half a second later, has met it again), and a share mounted but unreadable,
 which gVisor reports as the container's failed start (`reading mounts file: …`). With two or more
 claims in the block, a claim's failure names its PersistentVolume and every claim it may be bound
 to, since the daemon reads no claim to tell which. A CSI failure whose gRPC code says the operation
