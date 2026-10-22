@@ -172,6 +172,19 @@ func DefaultSocket(getenv func(string) string) string {
 	return filepath.Join(dir, "agent-secrets", "helper.sock")
 }
 
+// UnitName is the helper's systemd user unit.
+const UnitName = "agent-secrets-helper.service"
+
+// UnitPath is where `agent-secrets-helper install` writes the helper's user unit: under
+// $XDG_CONFIG_HOME, default $HOME/.config. Its presence says the helper is installed here.
+func UnitPath(getenv func(string) string) string {
+	dir := getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		dir = filepath.Join(getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "systemd", "user", UnitName)
+}
+
 // Call sends one request and reads one reply, all within timeout, the dial included (the dial
 // alone also gives up after 2 s). A register with wait_seconds needs that much plus slack.
 func Call(sock string, req Request, timeout time.Duration) (Response, error) {

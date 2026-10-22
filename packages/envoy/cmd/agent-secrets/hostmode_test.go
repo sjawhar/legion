@@ -579,6 +579,13 @@ func TestIdentity(t *testing.T) {
 		}},
 		{name: "nothing listening", setup: func(t *testing.T, p paths) { staleSocketAt(t, p.sock) }, exit: 1, stderr: unreachable},
 		{name: "unit installed, no socket", setup: func(t *testing.T, p paths) { installHelperUnit(t, p.home) }, exit: 1, stderr: unreachable},
+		{name: "unit under XDG_CONFIG_HOME, no socket", setup: func(t *testing.T, p paths) {
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(p.home, "xdg"))
+			installHelperUnit(t, p.home)
+			if _, err := os.Stat(filepath.Join(p.home, "xdg", "systemd", "user", "agent-secrets-helper.service")); err != nil {
+				t.Fatal(err)
+			}
+		}, exit: 1, stderr: unreachable},
 		{name: "helper never answers", setup: func(t *testing.T, p paths) { silentHelperAt(t, p.sock) }, exit: 1, stderr: unreachable, slow: true},
 		{name: "nothing", setup: func(t *testing.T, p paths) {}, exit: 1, stderr: namedOnly},
 	}
@@ -588,6 +595,7 @@ func TestIdentity(t *testing.T) {
 				runtime := t.TempDir()
 				p := paths{home: t.TempDir()}
 				t.Setenv("HOME", p.home)
+				t.Setenv("XDG_CONFIG_HOME", "")
 				t.Setenv("XDG_RUNTIME_DIR", runtime)
 				if mode == "named" {
 					p.keyDir = filepath.Join(t.TempDir(), "keys")
@@ -686,11 +694,13 @@ func silentHelperAt(t *testing.T, sock string) {
 	})
 }
 
-// installHelperUnit writes the helper's user unit under home, the file whose presence says the
-// helper is installed on this machine.
+// installHelperUnit writes the helper's user unit where install writes it under home (the test
+// clears XDG_CONFIG_HOME), the file whose presence says the helper is installed on this machine.
 func installHelperUnit(t *testing.T, home string) {
 	t.Helper()
-	unit := filepath.Join(home, ".config", "systemd", "user", "agent-secrets-helper.service")
+	unit := helper.UnitPath(func(k string) string {
+		return map[string]string{"HOME": home, "XDG_CONFIG_HOME": os.Getenv("XDG_CONFIG_HOME")}[k]
+	})
 	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {
 		t.Fatal(err)
 	}

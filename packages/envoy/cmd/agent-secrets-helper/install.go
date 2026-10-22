@@ -17,8 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
 
-const unitName = "agent-secrets-helper.service"
-
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved) and
 // the broker URL from --url or AGENT_SECRETS_URL. When the unit's bytes are unchanged it does
 // nothing more. Otherwise it writes the unit, runs `systemctl --user daemon-reload` and
@@ -62,11 +60,7 @@ RestartSec=10
 WantedBy=default.target
 `)
 
-	configHome := getenv("XDG_CONFIG_HOME")
-	if configHome == "" {
-		configHome = filepath.Join(getenv("HOME"), ".config")
-	}
-	path := filepath.Join(configHome, "systemd", "user", unitName)
+	path := helper.UnitPath(getenv)
 	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, unit) {
 		return nil
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -78,7 +72,7 @@ WantedBy=default.target
 	if err := systemctl("daemon-reload"); err != nil {
 		return err
 	}
-	if err := systemctl("enable", "--now", unitName); err != nil {
+	if err := systemctl("enable", "--now", helper.UnitName); err != nil {
 		return err
 	}
 
@@ -98,7 +92,7 @@ WantedBy=default.target
 		fmt.Fprintf(stdout, "not restarted: %d sessions are registered; a restart ends their grants. Re-run with --restart-with-sessions.\n", n)
 		return nil
 	}
-	return systemctl("restart", unitName)
+	return systemctl("restart", helper.UnitName)
 }
 
 func writeFileAtomic(path string, data []byte) error {

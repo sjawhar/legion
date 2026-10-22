@@ -143,8 +143,7 @@ func awaitEnrollment(dir string, wait time.Duration) (gaveUp bool) {
 // Its socket being absent then means the helper is stopped (a clean stop removes the socket),
 // not that this machine has none.
 func helperInstalled() bool {
-	home, err := os.UserHomeDir()
-	return err == nil && exists(filepath.Join(home, ".config", "systemd", "user", "agent-secrets-helper.service"))
+	return exists(helper.UnitPath(os.Getenv))
 }
 
 // cmdIdentity implements "identity": exit 0 when this process has a broker identity, 1 when it
