@@ -779,6 +779,9 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 	if ip := net.ParseIP(server); ip != nil && ip.To4() != nil && strings.Contains(server, ":") {
 		return nil, fmt.Errorf("%s.server %q is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write %s", key, server, ip.To4())
 	}
+	if ip := net.ParseIP(server); ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
+		return nil, fmt.Errorf("%s.server %s is the node itself or no address: the node's kubelet mounts the share, so name the server's own address", key, server)
+	}
 	exportPath, err := requiredString(fields["path"], key+".path", "")
 	if err != nil {
 		return nil, err

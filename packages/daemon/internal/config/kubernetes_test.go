@@ -1032,6 +1032,16 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "0x0a000002" must be an IP address or a DNS name, with no scheme, port, path or brackets`,
 		},
 		{
+			name: "an NFS server on the node's loopback",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: 127.0.0.1, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server 127.0.0.1 is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server of no address",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::', path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server :: is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
 			name: "an NFS server as an IPv4-mapped IPv6 address",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::ffff:10.0.0.2', path: /share}}]\n",
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "::ffff:10.0.0.2" is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write 10.0.0.2`,

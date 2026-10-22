@@ -27,13 +27,14 @@ import (
 // bound to a PersistentVolume of its NFS server's `/team` export.
 const shareLiveClaim = "team-share"
 
-// shareLiveCases are the proof's three deployments, each one `runtime.kubernetes.pod` block over
+// shareLiveCases are the proof's four deployments, each one `runtime.kubernetes.pod` block over
 // the script's NFS server at server: `shares`, whose issue pod the driver launches, mounting the
 // operator's claim read-only at /mnt/team and the server's `/scratch` export writable at
-// /mnt/scratch; and two the script runs `legion probe-boot` on, each with one share no pod can
-// mount — a claim that does not exist, and an export the server does not have.
+// /mnt/scratch; and three the script runs `legion probe-boot` on, each with one share no pod can
+// mount — a claim that does not exist, an export the server does not have, and an export of
+// shareLiveSilentServer, an address no server answers.
 func shareLiveCases(server string) []struct{ name, project, pod string } {
-	block := func(claimName, exportPath string) string {
+	block := func(claimName, server, exportPath string) string {
 		return fmt.Sprintf(`    pod:
       volumes:
         - name: team
@@ -46,11 +47,16 @@ func shareLiveCases(server string) []struct{ name, project, pod string } {
 `, claimName, server, exportPath)
 	}
 	return []struct{ name, project, pod string }{
-		{"shares", "SHARE", block(shareLiveClaim, "/scratch")},
-		{"missing-claim", "NOCLAIM", block("absent-share", "/scratch")},
-		{"missing-export", "NOEXPORT", block(shareLiveClaim, "/absent")},
+		{"shares", "SHARE", block(shareLiveClaim, server, "/scratch")},
+		{"missing-claim", "NOCLAIM", block("absent-share", server, "/scratch")},
+		{"missing-export", "NOEXPORT", block(shareLiveClaim, server, "/absent")},
+		{"silent-server", "SILENT", block(shareLiveClaim, shareLiveSilentServer, "/scratch")},
 	}
 }
+
+// shareLiveSilentServer is an address of RFC 5737's documentation range, which no host answers,
+// so the node's mount.nfs times out on it as on a server whose packets are dropped.
+const shareLiveSilentServer = "192.0.2.10"
 
 // shareLivePod is the pod block each case's file must load to: the claim and the export as the
 // case names them, the claim mounted read-only — its source read-only too, since no mount writes
@@ -81,6 +87,7 @@ func TestTheShareKindProofBuildsItsRuntimesFromItsConfigurations(t *testing.T) {
 		"shares":         shareLivePod(shareLiveClaim, "10.96.0.20", "/scratch"),
 		"missing-claim":  shareLivePod("absent-share", "10.96.0.20", "/scratch"),
 		"missing-export": shareLivePod(shareLiveClaim, "10.96.0.20", "/absent"),
+		"silent-server":  shareLivePod(shareLiveClaim, shareLiveSilentServer, "/scratch"),
 	}
 	for _, tc := range shareLiveCases("10.96.0.20") {
 		t.Run(tc.name, func(t *testing.T) {

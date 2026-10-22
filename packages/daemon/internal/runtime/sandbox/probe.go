@@ -667,7 +667,8 @@ func (r *Runtime) shareRefusal(pod *corev1.Pod, name string, events []corev1.Eve
 	var newest *corev1.Event
 	for i := range events {
 		event := &events[i]
-		if event.Reason != "FailedMount" || !shareMountFailed(event.Message) || !eventTime(*event).After(mounted) || eventCount(*event) < 2 {
+		if event.Reason != "FailedMount" || !shareMountFailed(event.Message) || !eventTime(*event).After(mounted) ||
+			(csiFailure(event.Message) && eventCount(*event) < 2) {
 			continue
 		}
 		named := mountedVolume.FindStringSubmatch(event.Message)
@@ -705,14 +706,22 @@ func sharesMountedSince(events []corev1.Event) time.Time {
 }
 
 // eventCount is how many times the kubelet recorded event: it folds a repeat of the same message
-// into one event and counts it (Count, or the series' count). A share failure seen once may be
-// the network's moment — a server failing over, a maintenance blip — and the kubelet retries
-// it with backoff, so shareRefusal refuses only one the kubelet's retry met again.
+// into one event and counts it (Count, or the series' count).
 func eventCount(event corev1.Event) int32 {
 	if event.Series != nil && event.Series.Count > event.Count {
 		return event.Series.Count
 	}
 	return event.Count
+}
+
+// csiFailure reports whether a share's failed mount is a CSI driver's gRPC error. An in-tree NFS
+// `mount failed` is refused on its first event: it already stands for mount.nfs's own retries,
+// about two minutes of them, and the kubelet's next try comes later than a probe attempt's budget
+// lasts (each attempt is a new pod, whose events count afresh). A CSI driver answers at once, and a
+// final code may be the driver's moment (a Filestore maintenance blip), so a CSI failure is refused
+// only once the kubelet's retry, seconds later, has met it again.
+func csiFailure(message string) bool {
+	return strings.Contains(message, `" : rpc error: code = `) && !strings.Contains(message, `" : mount failed: `)
 }
 
 // eventTime is when event last happened: the series' last observation, else its last timestamp,

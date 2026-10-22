@@ -902,11 +902,13 @@ func TestProbeImageRefusesAContainerTheKubeletCannotConfigure(t *testing.T) {
 // failure in a pod block naming no share at all. The messages are the kubelet's own, read from
 // gVisor pods on a kind node and from a gVisor pod on GKE Autopilot.
 func TestProbeImageRefusesAShareThePodCannotMount(t *testing.T) {
+	// retried is the event's count: 1 for a failure the kubelet has met once, else 2, the least
+	// the probe refuses a CSI failure at.
 	retried := func(once bool) int32 {
 		if once {
 			return 1
 		}
-		return 3
+		return 2
 	}
 	nfs := corev1.Volume{Name: "nas", VolumeSource: corev1.VolumeSource{NFS: &corev1.NFSVolumeSource{Server: "10.0.0.2", Path: "/share"}}}
 	claim := func(volume, name string) corev1.Volume {
@@ -958,7 +960,9 @@ Output: mount.nfs: Connection timed out for ` + export + ` on /var/lib/kubelet/p
 		{"a share failure a later try cleared", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), false, nil, true, false},
 		{"a claim's CSI Secret missing, named by its PersistentVolume", []corev1.Volume{route, claim("team", "team-share")}, secretMissing, true,
 			[]string{`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share"`}, false, false},
-		{"a share failure the kubelet has not yet retried", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), false, nil, false, true},
+		{"an NFS export that never answers, on its first event", []corev1.Volume{nfs}, timedOut("nas", "10.0.0.2:/share"), true,
+			[]string{`cannot mount volume "nas", which runtime.kubernetes.pod.volumes gives it from NFS export 10.0.0.2:/share`}, false, true},
+		{"a CSI failure the kubelet has not yet retried", []corev1.Volume{claim("team", "team-share")}, csi, false, nil, false, true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var mounts []corev1.VolumeMount
@@ -1062,6 +1066,49 @@ func TestProbeImageRefusesAClaimThatIsNotThere(t *testing.T) {
 			if strings.Contains(testCase.message, unboundClaims) && strings.Contains(logged.String(), "waiting on capacity") {
 				t.Errorf("an unbound claim was read as a capacity wait:\n%s", logged.String())
 			}
+		})
+	}
+}
+
+// A CSI driver's final failure the kubelet has met twice is refused, whether the event records the
+// repeat in its Count or, as an events.k8s.io/v1 recorder does, in its Series alone; a CSI failure
+// met once is left to the budget.
+func TestProbeImageCountsACSIFailureBySeries(t *testing.T) {
+	message := `MountVolume.MountDevice failed for volume "pvc-1b2c" : rpc error: code = Internal desc = mount failed: exit status 32`
+	for _, testCase := range []struct {
+		name    string
+		count   int32
+		series  *corev1.EventSeries
+		refused bool
+	}{
+		{"met twice, by Count", 2, nil, true},
+		{"met twice, by Series alone", 1, &corev1.EventSeries{Count: 2, LastObservedTime: metav1.NewMicroTime(rigNow.Add(-time.Minute))}, true},
+		{"met once", 1, nil, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Pod.Volumes = []corev1.Volume{{Name: "team", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "team-share"}}}}
+				o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: "team", MountPath: "/mnt/team", ReadOnly: true}}
+			}))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message,
+				LastTimestamp: metav1.NewTime(rigNow.Add(-time.Minute)), Count: testCase.count, Series: testCase.series,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, `cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "team-share": `+message)
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
 		})
 	}
 }

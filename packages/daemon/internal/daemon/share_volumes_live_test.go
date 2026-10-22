@@ -52,6 +52,7 @@ func TestShareVolumesMountInAnIssuePodLive(t *testing.T) {
 		"shares":         shareLivePod(shareLiveClaim, server, "/scratch"),
 		"missing-claim":  shareLivePod("absent-share", server, "/scratch"),
 		"missing-export": shareLivePod(shareLiveClaim, server, "/absent"),
+		"silent-server":  shareLivePod(shareLiveClaim, shareLiveSilentServer, "/scratch"),
 	}
 	var results []string
 	for _, tc := range shareLiveCases(server) {
