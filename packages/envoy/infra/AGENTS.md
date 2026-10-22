@@ -264,11 +264,12 @@ on a real server: its users connect, a client with no credential is refused, the
 `seed/seed_live_test.go` (a generated seed connects, and a client without it is refused) and
 `core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
 root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions`, a session as the
-same user receives, and the server refuses nothing the set allows; without the durable's consumer
-create, the listener never reaches `"status":"healthy"`; and, as a hub with a listener renders its
-users, the listener reaches `"status":"healthy"` as a user holding `ListenerPermissions` while a
-session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
-receives a send and a role message, and is refused a publish to another session's subject; and a
+same user receives a send, a role message and a publish to an ad-hoc topic, and the server refuses
+nothing the set allows; without the durable's consumer create, the listener never reaches
+`"status":"healthy"`; and, as a hub with a listener renders its users, the listener reaches
+`"status":"healthy"` as a user holding `ListenerPermissions` while a session with no credential,
+the server's `no_auth_user` holding `SessionPermissions`, registers, receives a send, a role
+message and a publish to an ad-hoc topic, and is refused a publish to another session's subject; and a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
 The
 `envoy-infra-go` job in

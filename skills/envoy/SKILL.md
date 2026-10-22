@@ -133,11 +133,13 @@ top-level sessions are running). Then your messages carry no sender either, so s
 in the message body. An empty address is deliberate — being handed an unrelated live session
 would send your peers to an agent that never spawned you.
 
-Your own `envoy_publish` never reaches the agent that spawned you. The listener delivers nothing
-to the session a message names as its source, and inside a subagent that source is your parent,
-so a publish to a role it holds — or to any topic it subscribes to — is accepted and delivered to
-nobody. Use a `write` to its `agent://` address for that one hop. `envoy_send` to any other
-session, including a reply, is unaffected.
+Your own `envoy_publish` to a role or to a built-in topic never reaches the agent that spawned
+you. The listener delivers nothing to the session a message names as its source, and inside a
+subagent that source is your parent, so a publish to a role it holds, or to a GitHub, Dispatch,
+Slack or other built-in topic it subscribes to, is accepted and delivered to nobody. Use a `write`
+to its `agent://` address for that one hop. A team topic (below) is the exception: it travels
+live over NATS, which has no such skip, so it reaches your parent, and your own session too when
+it subscribes. `envoy_send` to any other session, including a reply, is unaffected.
 
 ### Delivery capabilities
 
@@ -179,6 +181,16 @@ relying on a wakeup. A topic that spells a repository name with its dot, followe
 a warning naming the spelling Envoy publishes (`acme.site_io` for `acme/site.io`); subscribe to
 that one instead. A token after the repository that is not a GitHub topic kind (`checks` in
 `acme.widgets.checks.>`) draws a warning naming the kinds.
+
+## Team topics
+
+Any `notifications.` topic that no built-in source owns is yours to name: a group of sessions
+subscribes to `notifications.team.deploy-squad.>`, and any of them publishes there with
+`envoy_publish(topic="notifications.team.deploy-squad.all", message=...)`. Such a topic travels
+live, as a role does: it reaches the sessions subscribed when it is published, the publisher
+itself included when it subscribes, it is not retained, and a session that subscribes later does
+not receive earlier messages. A topic outside `notifications.` is refused. Use a role for one
+owner, and `envoy_send` for one session.
 
 ## Roles
 
