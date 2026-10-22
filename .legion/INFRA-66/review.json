@@ -2,60 +2,61 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-66",
-  "completed": "2026-10-22T15:34:00Z",
-  "round": 1,
+  "completed": "2026-10-23T00:00:00Z",
+  "round": 2,
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
+  "important": 1,
   "minor": 4,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/events.go:190",
-      "description": "The new `if event.ID <= since { continue }` in the live loop silences a reconnecting reader for good after an event-log reset. `since` is the client's own Last-Event-ID / ?since= (events.go:82-93) and is never clamped to the log head; the browser only ever raises it (packages/dispatch/web/src/api/sse.ts:832-834,857). eventStreamRelay.resetCursor answers a `truncate events restart identity` by closing every subscription (event_stream_relay.go:241-257) on the stated ground that each browser's reconnect 'resolves its position against the log as it now stands' - it does not: catch-up (readEventsAfterID) returns nothing for a since above the new head, and every live event of the new log is then dropped by this filter. The connection stays open and heartbeats, so nothing logs or errors. Regression against main, whose live loop made no id comparison at all and whose comment forbade one (pre-image of events.go:153-158). It also contradicts the PR body's `Change:` bullet 'recovers when the event log is reset beneath it'. Fix: resolve the head for every connection, not only a cold one, and clamp since = min(since, head) before the catch-up loop. Found by the thermonuclear deep-review pair (finding 1) and verified against the diff and the client by the reviewer."
-    },
-    {
-      "severity": "important",
-      "file": "pull request body",
-      "description": "No `## Contract change census`. This PR adds a refusal that reaches an HTTP client - docs.ErrRoomBehindHead wraps docs.ErrServiceUnavailable (docs/pending_authors.go:372), which api/server.go:430 maps to 503 - adds the delivery bind refusal classes (delivery/intake.go:360-379), and changes five exported signatures at package boundaries (api.RunSuggestionOutcomeSweep, docs.Service.RunReferenceExcerptReconciliation, architecture.Run, redeliver.Sweeper.Run, delivery.Reconcile.Run, plus outbox.Deps.Leases). The census must carry its search commands, every hit with a disposition, and a rollout line: here an immediate refusal naming what it closes (a document version, settlement or ask retraction written from a room behind the stored history), since a warn-first rollout would be the silent fork the gate exists to stop."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/stale_room.go:189-201",
-      "description": "documentChanged runs the locked confirmation (roomBehindDurableHead: BEGIN + pg_advisory_xact_lock + read, stale_room.go:224-238) before e.allow(artifactID), so the interval cannot make it rare in the case it was written for. staleRoomEvictInterval's own comment (:52-61) names that case - 'one person typing on the other process notifies several times a second' - and in it the room here is behind, the cheap compare at :187 passes it through, and every notification takes the document's blocking advisory lock. pglisten calls OnNotify inline on the one listener goroutine (pglisten/listener.go:106-110), so that wait stalls eviction for every other room this process holds. The evictor's own type comment (:64-68) says the decision is 'a map lookup and one indexed read of max(version)', which the code no longer carries. Fix: check the interval before the locked confirmation and record the eviction after Evict succeeds. Found by the thermonuclear code-quality pair (blocking 1), verified by the reviewer."
+      "file": "packages/envoy/internal/dispatch/docs/stale_room.go:180",
+      "description": "A notification the eviction interval refuses is dropped and nothing re-examines that room: there is no timer, no pending set, and recordEviction runs only after a successful Evict. So the trailing writes of a burst on the other process leave a connected reader holding text older than the stored head until that document is written again. staleRoomEvictInterval's own comment (:59-61) and run's (:122-124) both name roomIdleTimeout as the fallback, but service.go:44-47 defines it as the time a room stays resident after its last peer leaves - a room with a browser in it never goes idle, which the PR's own test note says in as many words (stale_room_eviction_test.go:95-96). The same hole covers every notification sent while the evictor's listener is redialling, since pglisten's OnConnected catch-up hook is nil in production for this evictor (stale_room.go:133, :97-100) and RedialBackoff reaches 30 s. No corruption: a write from such a room is refused and the room reloads; the damage is read-only staleness. It contradicts the PR body's bullet ('a write elsewhere closes that room within a notification round trip and the browser re-syncs') and the user documentation this PR adds (docs/site/src/content/docs/dispatch/running-dispatch.md:246-250: 'their browser reconnects, re-syncs and shows the current text'). Two acceptable answers: re-examine a refused room once the window elapses (a pending set plus one timer on the listener goroutine, which stays inside the interval's own rule of at most one eviction per room per interval), and give the evictor an OnConnected that re-examines its resident rooms; or, if the architect judges the gap acceptable, correct both code comments, the body bullet and running-dispatch.md to say a reader can hold text older than the stored head until that document is written again. Not caused by round 1's ordering fix: the refusal dropped the notification the same way when the interval was checked last."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:46-56",
-      "description": "'What the claim gives: two healthy processes no longer publish one event twice' holds only for a batch that finishes inside claimWindow (60 s). claimPendingEvents pushes next_attempt_at out and commits (publisher.go:217-232); scanBatch then publishes up to batchSize (100) events outside any transaction, re-checking nothing, and the terminal `update ... where id = $1 and published_at is null` discards RowsAffected. A slow batch lets the other process re-claim and republish rows this one is still publishing. The duplicate sits inside the at-least-once envelope the same comment already states (role lanes carry no nats.MsgId and their receivers drop the repeat by dedupe key), so this is the claim's wording or a per-row re-check, not a design defect. The PR body's `Change:` bullet says 'never', which has the same gap."
+      "file": "packages/envoy/internal/dispatch/delivery/intake.go:568-590",
+      "description": "reconcileDurableConsumer reads info.PushBound and then deletes and re-creates the durable in two separate round trips. A process that skipped the reconciliation - the lease is held elsewhere, or its throttle refused it - goes straight to client.Subscribe, and a Subscribe landing between the holder's ConsumerInfo and its DeleteConsumer binds a durable that is then deleted. Intake.Run has already called binds.Stop() once bound (intake.go:141), so nothing rebinds: that process's intake is idle for the life of the process with 'NATS consumer bound' as its last word. No message loss, since the deleting process creates the replacement and binds it, but the standby is silently gone. Narrow window and only on the one upgrade that meets a plural-filter durable from an earlier release; the PushBound guard is this diff's own, so the window is too. Re-read ConsumerInfo immediately before the delete, or restart the bind poll when a bound subscription reports its consumer deleted."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/service.go:1393,1442,1805",
-      "description": "settleRoomWithin's repair and backfillBlockIDs advance only the instance cursor they already hold; only Ledger.takeRoomCursors (ledger.go:213) routes through tookResidentVersion, which is what folds a version into a room load still in flight (pending_authors.go:220-256). A repair that commits inside a concurrent room load leaves the fresh instance one version behind the head, after which refuseRoomBehindHead refuses its next durable write until it reloads. Self-healing (the refusal fails the room, which evicts and reloads at the head) and no edit is lost, but advanceRoomCursor's doc comment (pending_authors.go:339-352) lists these sites as covered, which overstates what is wired."
+      "file": "packages/envoy/internal/dispatch/outbox/publisher.go:296-310",
+      "description": "The claim pushes next_attempt_at out by claimWindow (60 s) for all 100 ids before any row is read, so when a row fails to scan and pgx kills the cursor, the claimed ids the batch never reached wait out the whole window. Before the claim they were re-selected on the next scan tick (retryInterval, 5 s). The comment states it deliberately; it is still a 12x latency regression on a path whose purpose is promptness, and claimWindow is sized for a healthy batch rather than for this case. Resetting next_attempt_at to null for the claimed ids this batch did not reach would close it."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/duty/exclusive.go:213,238-239,247-251",
-      "description": "recordPassOn's Exec and freeLeaseOn's unlock and Close run on a bare context.Background(). On a half-open connection they block without bound: that loop's goroutine is wedged for the life of the process and the Hijack/Close that was meant to destroy the connection holding the session lease never runs. pglisten.Listener bounds exactly this case with PingTimeout (pglisten/listener.go:148-152). A context.WithTimeout on each is the whole fix."
+      "file": "packages/envoy/internal/dispatch/store/pool.go:252-262",
+      "description": "The corrected lease-pool comment overshoots in one sentence: 'the next leased loop added here makes a ninth caller that waits for a connection rather than failing - the wait a standby's two-second bind poll takes anyway'. The same paragraph says a lease is held for the whole pass, minutes for the compaction, and that is what a ninth Acquire queues behind, not two seconds. Also left behind by this round: Listener's doc (pool.go:233) still names the delivery hub as the one holder, where three subsystems now dial through it (the hub, api/event_stream_relay.go, docs/stale_room.go), as pglisten/listener.go's own header already says."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/store/pool.go:248-256",
-      "description": "'INFRA-66 leases seven ... Eight leaves one spare' is not what the code permits: duty.Exclusive acquires a connection before it learns the lease is held (exclusive.go:124-137), and both delivery intakes take deliveryConsumerLease on connections of their own (delivery/intake.go, intakes.go), so eight callers can be inside leases.Acquire at once on an eight-connection pool. Headroom is zero, not one."
+      "file": "packages/envoy/internal/dispatch/duty/exclusive_test.go:217",
+      "description": "Names the merge deleted, still in test prose: exclusive_test.go:217 pins const name = \"delivery-consumers\", a lease name that no longer exists now that consumerLease carries the durable, and its surrounding comment still describes one lease for 'the delivery consumers' reconciliation', which is now two; delivery/intake_test.go:67-68 names deliveryConsumerLease, an identifier commit 12183d35 removed. The quoted log lines in intake.go:363-365 keep the old name correctly, since they are a measurement."
     }
   ],
+  "roundTwoVerification": {
+    "roundOneFindingsAnswered": [
+      "api/events.go: fixed in 49074582 - the head is read for every connection after the subscription and since is clamped to it; verified at the head and accepted on the thread",
+      "docs/stale_room.go ordering: fixed in 6a2dd868 - mayEvict first, recordEviction only after a successful Evict; accepted, and the new finding above is a different defect in the same file",
+      "duty/exclusive.go: fixed in 90c8bb87 - teardownTimeout bounds the record, the unlock and the post-hijack Close; accepted",
+      "outbox/publisher.go and store/pool.go comment facts: fixed in acff081c; accepted, with one overshooting sentence raised as minor",
+      "docs/service.go cursor routing: declined with a measurement, and the decline is right - a repair's update is written into one instance by applySuppressed and never replayed into a room that loaded since, so crediting that load would assert it holds an update it does not; accepted, with the new comment and TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads as the pin",
+      "the missing contract census: added to the PR body; its search commands re-run at this head reproduce exactly the three withRoomCursor appends and the two refuseRoomBehindHead call sites it lists, and its rollout line is an immediate refusal naming what it closes"
+    ],
+    "mergeResolution": "12183d35 merged main@origin and resolved delivery/{intake.go,intakes.go,jobs.go}, store/pool.go and intake_consumer_test.go. Main's change was the move of the durable names into bus (bus.DispatchDeliveryDurable/DispatchJobDurable); it survives everywhere and no use of the deleted deliveryConsumerName/jobConsumerName remains. The branch's standby logic is intact. The merge also carries a behaviour change of its own - one deliveryConsumerLease becomes consumerLease(durable), so a reconciliation stuck for the client's 10 s MaxWait on one durable no longer blocks the other's creation - evidenced in intake.go:344-370 against a real nats-server, with pool.go, intakes.go and jobs.go updated to match. Right change, but it is a behaviour change landed inside a merge commit."
+  },
   "ciReadAtTheCodeHead": {
-    "codeHead": "915a20c338af1007cc8eec07031dc1d57ff155f3",
+    "codeHead": "12183d3592cf094c6e972984bd14041293b6adac",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "requiredSetSource": "rulesets on main; branch protection reports no required status checks for this role's read",
+    "requiredSetSource": "rulesets on main, re-read at this head; branch protection reports no required status checks for this role's read",
     "observed": "every required name present, completed, success; dispatch-multiprocess, envoy-go, envoy-go-race, dispatch, dispatch-memory, envoy-e2e-local, envoy-smoke, envoy-infra-go, build, changes, pi-legion also success",
-    "aboveTheCodeHead": "compare 915a20c3...c236a36b is ahead and touches only .legion/INFRA-66/implement.json and .legion/INFRA-66/test.json"
+    "aboveTheCodeHead": "compare 12183d35...51403a92 is ahead and touches only .legion/INFRA-66/implement.json and .legion/INFRA-66/test.json"
   },
   "thermonuclear": {
-    "head": "c236a36ba919e67204b054bc6397c6ededbe881f",
-    "deepReview": "CHANGES - 1 medium (the SSE reset silence, adopted as important finding 1), 2 low (adopted as minor findings), 2 ranked hardening items (one adopted)",
-    "codeQuality": "CHANGES - 3 blocking (the evictor's lock order adopted as important finding 3; the pending_authors.go file growth and the roomCursor nil-receiver trap judged fast-follow), 8 fast-follow"
+    "head": "51403a92666ab2dd372035c12793c95dd27f6362",
+    "deepReview": "CHANGES - 1 medium (the stale-room staleness, adopted as the important finding), 3 low (two adopted as minor, one on the 0113 migration prose rejected after reading the section, which keeps the instruction and the repair), 2 ranked hardening items",
+    "codeQuality": "CHANGES - 2 blocking (both repeats of round 1's fast-follow judgement: the room-cursor model's home and the documentCursor nil-receiver trap), 3 fast-follow (two adopted as minor); it confirms the merge resolution correct and the declined finding rightly declined"
   },
-  "threads": "none open on the pull request at this head; no bot threads to adjudicate (gh api graphql reviewThreads: 0 nodes)"
+  "threads": "the seven threads of round 1 were all answered by the implementer and resolved by it as the pull request's author; I read each answer, verified it at the head and replied on each (six accepted as fixed, one decline accepted). No bot thread exists on this pull request, so none was adjudicated and none was named to the implementer to resolve. This round opens five new threads."
 }
