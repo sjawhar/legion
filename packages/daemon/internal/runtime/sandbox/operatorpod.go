@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -229,6 +230,13 @@ func dashboardURL(value string) bool {
 func dashboardDNSName(host string) bool {
 	if host == "" || len(host) > 253 {
 		return false
+	}
+	// Lower-case only an ASCII host: strings.ToLower folds `İ` (U+0130) to `i` and the Kelvin sign
+	// (U+212A) to `k`, which would let a name through that the agents read as another host.
+	for _, r := range host {
+		if r > unicode.MaxASCII {
+			return false
+		}
 	}
 	labels := strings.Split(strings.ToLower(host), ".")
 	for _, label := range labels {

@@ -1413,8 +1413,8 @@ func TestNFSServerMayBeMixedCaseASCII(t *testing.T) {
 	}
 }
 
-// A URL a pod is handed whose host is not ASCII is refused: an HTTP client maps `ſ` (U+017F) or a
-// full-width name to localhost (UTS-46), so the loopback refusal could not see it.
+// A URL a pod is handed, and bind, are refused unless their host is ASCII: a pod's HTTP client maps
+// a full-width name to localhost (UTS-46), past the loopback refusal.
 func TestPodURLHostMustBeASCII(t *testing.T) {
 	for name, tc := range map[string]struct{ body, want string }{
 		"daemon_url with a long s": {kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localho\u017Ft:13370"),
@@ -1425,10 +1425,10 @@ func TestPodURLHostMustBeASCII(t *testing.T) {
 			`nats_urls host must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
 		"dispatch_url with a long s": {kubernetesWith("dispatch_url: https://dispatch.internal.example", "dispatch_url: https://localho\u017Ft"),
 			`dispatch_url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
-		"bind with a long s": {kubernetesWith("bind: 10.0.0.5", "bind: \"localho\u017Ft\""),
-			`bind must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
-		"bind with a long s beside advertise_host": {kubernetesWith("bind: 10.0.0.5", "bind: \"localho\u017Ft\"\nadvertise_host: legion-daemon.legion.svc"),
-			`bind must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+		"bind with a Kelvin sign": {kubernetesWith("bind: 10.0.0.5", "bind: \"\u212Aube.example\""),
+			`bind must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
+		"bind with a Kelvin sign beside advertise_host": {kubernetesWith("bind: 10.0.0.5", "bind: \"\u212Aube.example\"\nadvertise_host: legion-daemon.legion.svc"),
+			`bind must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
 		"agent_secrets.url with a long s": {kubernetesFile + "    agent_secrets:\n      url: http://localho\u017Ft:13380\n" + agentSecretsTokenFile,
 			`runtime.kubernetes.agent_secrets.url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
 	} {

@@ -1436,7 +1436,9 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 Code (`worker_backends.<role> is claude, which runs only under runtime: tmux`). Every
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
-worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
+worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise. `bind`
+and the host of each of those URLs and of `agent_secrets.url` must be ASCII: write an
+internationalized name in its `xn--` form.
 `envoy_url` and each `nats_urls` entry are endpoints, not request URLs: they refuse a query string
 or fragment. This is a breaking configuration change for a file that has either; put credentials in
 URL userinfo or in a Secret, never in a query.
@@ -3333,7 +3335,7 @@ issue's pod (every role container of it alike) and the image probe's.
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address), and `token_file` (required, absolute) is where the daemon's own pod mounts its projected
+  address; an ASCII host), and `token_file` (required, absolute) is where the daemon's own pod mounts its projected
   ServiceAccount token for the broker's audience, `agent-secrets`, with an `expirationSeconds` of
   at most 3600: the broker refuses a token that lives longer than an hour from its issue
   (`TOKEN_TOO_LONG_LIVED`). The daemon logs in with that token at boot, on a background context,

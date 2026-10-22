@@ -1382,7 +1382,8 @@ func checkKubernetesKeys(file fileConfig) error {
 // unspecified address, but not loopback, where no pod reaches the listener at all. Every Legion URL
 // a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must name
 // neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host at
-// all.
+// all. Bind and every one of those hosts must also be ASCII (refuseNonASCIIHost): a pod's HTTP
+// client maps a full-width `ｌｏｃａｌｈｏｓｔ` to localhost, which no check here would see.
 func checkPodReachable(cfg Config) error {
 	key, host, why := "bind", cfg.Bind, "bind the daemon host's own address when runtime is kubernetes"
 	if err := refuseNonASCIIHost("bind", cfg.Bind); err != nil {

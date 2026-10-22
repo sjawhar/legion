@@ -47,6 +47,8 @@
     "https://010.0.0.1",
     "https://0x7f.1",
     "https://dispatch.example.org\\issues",
-    "https://bücher.example"
+    "https://bücher.example",
+    "https://\u212Aube.example",
+    "https://nas.\u0130nternal.example"
   ]
 }
