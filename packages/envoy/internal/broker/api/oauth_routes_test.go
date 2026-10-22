@@ -59,6 +59,15 @@ func postForm(t *testing.T, target string, form url.Values) (int, http.Header, m
 
 var deviceForm = url.Values{"client_id": {oauthstore.ClientID}, "scope": {"machine"}}
 
+// signedDeviceForm is deviceForm carrying a person's fresh signed login request for ts, which the
+// route verifies to spend that person's bucket before the device login runs.
+func signedDeviceForm(t *testing.T, ts *testServer) url.Values {
+	t.Helper()
+	form := url.Values{"client_id": {oauthstore.ClientID}, "scope": {"machine"}}
+	form.Set("request", signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", ""))
+	return form
+}
+
 func TestTheOAuthRoutesNeedTheProvider(t *testing.T) {
 	ts := newTestServer(t)
 	for _, path := range []string{"/v1/oauth/device_authorization", "/v1/oauth/token"} {
@@ -77,10 +86,10 @@ func TestADeviceAuthorizationSpendsItsAddressesLauncherBucket(t *testing.T) {
 			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 100},
 		}
 	})
-	if status, _, body := postForm(t, ts.URL+"/v1/oauth/device_authorization", deviceForm); status != http.StatusOK {
+	if status, _, body := postForm(t, ts.URL+"/v1/oauth/device_authorization", signedDeviceForm(t, ts)); status != http.StatusOK {
 		t.Fatalf("first device authorization = %d %v, want 200", status, body)
 	}
-	status, header, body := postForm(t, ts.URL+"/v1/oauth/device_authorization", deviceForm)
+	status, header, body := postForm(t, ts.URL+"/v1/oauth/device_authorization", signedDeviceForm(t, ts))
 	desc, _ := body["error_description"].(string)
 	if status != http.StatusTooManyRequests || header.Get("Retry-After") != "2" || body["error"] != "invalid_request" || !strings.HasPrefix(desc, "RATE_LIMITED: ") {
 		t.Fatalf("second device authorization = %d Retry-After=%q %v, want 429 invalid_request RATE_LIMITED with Retry-After 2", status, header.Get("Retry-After"), body)
@@ -97,7 +106,7 @@ func TestADeviceLoginsRefusalNamesItsBrokerCode(t *testing.T) {
 		{machine.ErrServiceLogsInWithToken, http.StatusBadRequest, "SERVICE_LOGS_IN_WITH_TOKEN"},
 	} {
 		ts := newTestServerWith(t, withOAuth(t, func(context.Context, url.Values, string) error { return c.err }))
-		status, _, body := postForm(t, ts.URL+"/v1/oauth/device_authorization", deviceForm)
+		status, _, body := postForm(t, ts.URL+"/v1/oauth/device_authorization", signedDeviceForm(t, ts))
 		if want := c.code + ": " + c.err.Error(); status != c.status || body["error"] != "invalid_request" || body["error_description"] != want {
 			t.Errorf("refused with %v = %d %v, want %d invalid_request %q", c.err, status, body, c.status, want)
 		}

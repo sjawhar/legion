@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
@@ -13,11 +14,13 @@ import (
 
 // deviceAuthorization is POST /v1/oauth/device_authorization: a machine login's device
 // authorization request (RFC 8628), public. It spends its source address's launcher bucket before
-// the provider does any work, as the token login does (refuseAddress); a refused request is 429
-// with Retry-After. Deps.DeviceLogin then opens the login in the provider's transaction, and its
+// the provider does any work, as the token login does (refuseAddress); then, as POST
+// /v1/launcher-credentials does, it verifies the request object to read the person its login_hint
+// names and spends that person's bucket (launcherLoginKey). A refused request is 429 with
+// Retry-After. Deps.DeviceLogin then opens the login in the provider's transaction, and its
 // refusals are OAuth errors (invalid_request) whose description names the broker's code: a request
-// object that does not verify or repeats a jti REQUEST_INVALID, one naming a service
-// SERVICE_LOGS_IN_WITH_TOKEN.
+// object that does not verify, repeats a jti or names another key than dpop_jkt REQUEST_INVALID,
+// one naming a service SERVICE_LOGS_IN_WITH_TOKEN.
 func (s *server) deviceAuthorization(w http.ResponseWriter, r *http.Request) {
 	if !s.launcherLimiter.addressAllows(r) {
 		oauth.WriteRefusal(w, &oauth.Refusal{
@@ -28,8 +31,32 @@ func (s *server) deviceAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.OAuth.DeviceAuthorize(w, r, func(ctx context.Context, form url.Values, userCode string) error {
+		if err := s.spendDeviceLoginBucket(form); err != nil {
+			return deviceLoginRefusal(err)
+		}
 		return deviceLoginRefusal(s.deps.DeviceLogin(ctx, form, userCode))
 	})
+}
+
+// spendDeviceLoginBucket verifies form's request object, refusing one naming a service before it
+// reaches the limiter, and spends one request of the person:<login> bucket it names: a
+// RATE_LIMITED refusal when that bucket is empty.
+func (s *server) spendDeviceLoginBucket(form url.Values) error {
+	obj, err := record.VerifyRequestObject(form.Get("request"), s.deps.MachineLogin.Audience, s.deps.MachineLogin.Skew, time.Now())
+	if err != nil {
+		return err
+	}
+	if obj.Service() != "" {
+		return machine.ErrServiceLogsInWithToken
+	}
+	if !s.launcherLimiter.perLogin.AllowAt(launcherLoginKey(obj), time.Now()) {
+		return &oauth.Refusal{
+			Status: http.StatusTooManyRequests, Code: "RATE_LIMITED",
+			Message:    "too many launcher credential requests; try again later",
+			RetryAfter: retryAfterSeconds(s.launcherLimiter.perLogin.Every()),
+		}
+	}
+	return nil
 }
 
 // deviceLoginRefusal is the OAuth refusal a device login's error answers with the status and code

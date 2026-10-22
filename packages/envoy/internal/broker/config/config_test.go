@@ -96,7 +96,7 @@ func TestLoadReadsUITokenFileAheadOfValue(t *testing.T) {
 		t.Fatalf("token file must win: got %d-byte token, want the %d-byte file value", len(cfg.UIToken), len("tok-from-file"))
 	}
 	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 ||
-		cfg.LauncherCredentialSeconds != 604800 || cfg.SweepSeconds != 5 {
+		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 {
 		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
 			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
 	}

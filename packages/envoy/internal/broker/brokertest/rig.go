@@ -22,6 +22,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -121,15 +123,17 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
+	provider := newOAuthProvider(t, st, srv.URL)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay,
+		OAuth: provider, Replay: enr.Replay,
 	}
 
 	api.Register(mux, api.Deps{
 		PublicURL: srv.URL, UIToken: uiToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
@@ -146,6 +150,25 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		podIssuer: issuer, podKey: podKey,
 		serviceLogins: serviceLogins,
 	}
+}
+
+// newOAuthProvider builds the machine login's OAuth provider on st's database as
+// cmd/broker/main.go does: device codes live as long as a pending machine login, refresh tokens
+// as long as a launcher credential.
+func newOAuthProvider(t *testing.T, st *store.Store, publicURL string) *oauth.Provider {
+	t.Helper()
+	oauthStore := oauthstore.New(st.Pool)
+	secret, err := oauthStore.Secret(context.Background())
+	if err != nil {
+		t.Fatalf("OAuth secret: %v", err)
+	}
+	provider, err := oauth.New(oauth.Config{
+		Secret: secret, DeviceLifetime: 15 * time.Minute, RefreshLifetime: 7 * 24 * time.Hour, VerificationURL: publicURL,
+	}, oauthStore)
+	if err != nil {
+		t.Fatalf("oauth.New: %v", err)
+	}
+	return provider
 }
 
 // Req issues method against path on the real broker with an optional body (marshaled to JSON)

@@ -31,6 +31,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
@@ -183,11 +185,22 @@ func main() {
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
 	reqMachine.MintToken = mintToken
+	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
+	oauthStore := oauthstore.New(st.Pool)
+	oauthSecret, err := oauthStore.Secret(ctx)
+	fatal(err)
+	// The person types the code on Dispatch's machine-login page, whose address the broker does not
+	// know; the helper builds that link itself, so verification_uri names the broker.
+	provider, err := oauth.New(oauth.Config{
+		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, RefreshLifetime: credentialLifetime,
+		VerificationURL: cfg.PublicURL,
+	}, oauthStore)
+	fatal(err)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
-		PendingTTL: machineLoginPendingTTL, CredentialLifetime: time.Duration(cfg.LauncherCredentialSeconds) * time.Second,
-		Replay: enr.Replay,
+		PendingTTL: machineLoginPendingTTL, CredentialLifetime: credentialLifetime,
+		OAuth: provider, Replay: enr.Replay,
 	}
 
 	var waker func(context.Context, string, string, string)
@@ -218,6 +231,7 @@ func main() {
 	}
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,
 		SecretsKMSKey:      cfg.SecretsKMSKey,

@@ -135,8 +135,9 @@ type Config struct {
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
 	ProofSkewSeconds int
-	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once
-	// approved; past it the machine logs in again, with a new key, a new code and a new approval.
+	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login lasts without a refresh. An
+	// approval mints its credential for this long, and each refresh moves its expiry to this long
+	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
@@ -450,7 +451,7 @@ func Load(getenv func(string) string) (Config, error) {
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
-		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 1, 2592000},
+		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 	}
 	for _, i := range ints {

@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -854,6 +855,10 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, id); err != nil {
+		return err
+	}
+	// A device login's tokens name the credential, so its next refresh is refused too.
+	if err := oauthstore.New(s.Store.Pool).EndCredential(ctx, tx, id); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and revoked_at is null order by id for update`, id)
