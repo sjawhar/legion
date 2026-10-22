@@ -44,15 +44,22 @@ const (
 	// legitimately overwrites the claim with the retry's own (usually shorter) wait;
 	// published_at, not this, is what marks an event done.
 	//
-	// What the claim gives: two healthy processes no longer publish one event twice, and each
-	// events row still reaches published_at exactly once. What it does not: a process that
-	// dies between a successful publish and its published_at write leaves the row claimed but
-	// unmarked, and the other process republishes it once the window lapses. That is
-	// at-least-once on the role lanes (notifications.role.*), which go over core NATS with no
-	// nats.MsgId on the envelope (internal/bus/nats.go) and so carry no deduplication of their
-	// own; their receivers already drop the repeat by its dedupe key
-	// (internal/contracts/dedupe.go). A JetStream destination suppresses the repeat inside the
-	// stream's duplicate window. Neither is fixed here.
+	// What the claim gives, for a batch that finishes inside the window: two healthy processes
+	// no longer publish one event twice, and each events row still reaches published_at exactly
+	// once - the terminal write is guarded on published_at is null, so a second one changes no
+	// row. A batch that overruns the window gets no such guarantee: claimPendingEvents commits
+	// the claim, and scanBatch then publishes up to batchSize events outside any transaction,
+	// re-checking nothing, so once the window lapses the other process claims the rows this one
+	// has not reached yet - legitimately, by the same statement, their next_attempt_at being due
+	// again - and publishes them a second time; the guarded write discards RowsAffected, so
+	// neither process notices. Nor does the claim cover a process that dies between a successful
+	// publish and its published_at write: it leaves the row claimed but unmarked, and the other
+	// process republishes it once the window lapses. Either repeat is the same at-least-once on
+	// the role lanes (notifications.role.*), which go over core NATS with no nats.MsgId on the
+	// envelope (internal/bus/nats.go) and so carry no deduplication of their own; their receivers
+	// already drop the repeat by its dedupe key (internal/contracts/dedupe.go). A JetStream
+	// destination suppresses the repeat inside the stream's duplicate window. Neither is fixed
+	// here.
 	claimWindow = time.Minute
 	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
 	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the

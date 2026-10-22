@@ -246,13 +246,19 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 }
 
 // leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
-// (duty.Exclusive). One connection per leased loop that can be inside a pass at the same moment is
-// the whole requirement, and INFRA-66 leases seven: the document compaction, the
-// suggestion-outcome sweep, the reference-excerpt reconciliation, the GitHub webhook redelivery
-// sweep, the architecture import, the delivery reconcile and the delivery consumers'
-// reconciliation. Eight leaves one spare for the next one. They cannot come from the shared pool:
-// a lease is held for the whole pass, which is minutes for the compaction, and sharedPoolSize's
-// sixteen are what every request reads through.
+// (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
+// the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
+// connection before it learns whether the lease is held, so a pass that skips because the other
+// process holds the lease holds a connection for that round trip too. INFRA-66 leases seven loops
+// - the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
+// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile and the
+// delivery consumers' reconciliation - and the last of those is taken by both delivery intakes,
+// each from a bind poll of its own, so eight callers can be inside Exclusive at once. Eight
+// connections are exactly those eight: the headroom is zero, not one, and the next leased loop
+// added here makes a ninth caller that waits for a connection rather than failing - the wait a
+// standby's two-second bind poll takes anyway. They cannot come from the shared pool: a lease is
+// held for the whole pass, which is minutes for the compaction, and sharedPoolSize's sixteen are
+// what every request reads through.
 const leasePoolSize = 8
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
