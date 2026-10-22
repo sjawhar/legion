@@ -150,9 +150,12 @@ two listeners on one durable and queue group, so the later one is refused, as
 `users[2]: dispatchMachineId gives the same durable name as users[0].machineId` or
 `… as the hub's own listener`. Every `dispatchMachineId` user also binds Dispatch's fixed durables
 `delivery-events` and `delivery-jobs`, so a second one is refused the same way, as
-`users[3]: dispatchMachineId gives the same durable name as users[2].dispatchMachineId`. Rotating
-a machine's credential replaces the `nkey` of its single entry, never adds a second entry for the
-same machine. It is refused too for each of the
+`users[3]: dispatchMachineId gives the same durable name as users[2].dispatchMachineId`. So a
+machine's credential is rotated in its single entry, never beside it: `envoy-infra seed generate`
+writes the new seed into a new secret (it refuses a secret that already holds a version), the
+entry's `nkey` becomes the key it printed, and the client is pointed at the new secret and
+restarted. Between the hub's update and the client's restart the client is refused, and a change
+to the hub's users rewrites its user data, which replaces the VM. It is refused too for each of the
 authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
