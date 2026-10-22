@@ -203,6 +203,68 @@ func TestABurstOnTheOtherProcessEvictsARoomOnceWithinTheInterval(t *testing.T) {
 	}
 }
 
+// A notification the interval refuses takes no document lock. The interval is there for a burst
+// on the other process - one person typing there notifies several times a second - and every one
+// of those notifications is for a room that really is behind, so the unlocked head read passes it
+// through to the confirmation under the document's advisory lock (roomBehindDurableHead), which
+// waits behind the very append that announced the change. pglisten calls OnNotify inline on its
+// one listener goroutine, so each of those waits stalls every other room's notification with it.
+// This test holds the document's lock in a transaction of its own and requires a notification
+// inside the interval to be decided while that lock is still held: a decision that reaches the
+// lock cannot be, so a prompt refusal is the proof that the lock is never taken. With the
+// interval asked after the locked confirmation, the call below waits for this test's own
+// transaction instead, and the test fails on its bounded wait.
+func TestANotificationRefusedByTheIntervalTakesNoDocumentLock(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	now := time.Now()
+	evictor.now = func() time.Time { return now }
+	ctx := context.Background()
+	bob := model.Actor{Kind: "user", ID: "bob"}
+
+	pair.leaveTaskABehind(t, 2, bob, "Bob types once.\n")
+	if !evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatal("the first write on the other process evicted nothing, so the interval holds no eviction to refuse the next notification by")
+	}
+	// Task A's room back and behind the head again, as the next update of a burst leaves it: the
+	// notification below is one the evictor would confirm under the lock if the interval let it.
+	pair.leaveTaskABehind(t, 3, bob, "Bob types again inside the interval.\n")
+
+	held, err := pair.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that holds the document's lock: %v", err)
+	}
+	defer held.Rollback(context.Background())
+	if err := lockDocumentRoom(ctx, held, pair.artifactID); err != nil {
+		t.Fatalf("hold the document's lock: %v", err)
+	}
+
+	decided := make(chan bool, 1)
+	go func() { decided <- evictor.documentChanged(ctx, pair.artifactID) }()
+	select {
+	case evicted := <-decided:
+		if evicted {
+			t.Fatalf("a second write within %s evicted the room again, under its readers", staleRoomEvictInterval)
+		}
+	case <-time.After(roomWait(t)):
+		t.Fatalf("the notification the interval refuses is waiting on the document's lock: the interval is asked after the locked confirmation, so every update of a burst on the other process stalls this listener goroutine behind that process's append")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) == nil {
+		t.Fatal("the room the interval refused to evict is gone")
+	}
+
+	// And what refused it was the interval and nothing else: the same room, with the lock
+	// released and the clock moved past the interval, is evicted.
+	if err := held.Rollback(ctx); err != nil {
+		t.Fatalf("release the document's lock: %v", err)
+	}
+	now = now.Add(staleRoomEvictInterval)
+	if !evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatalf("the room was not evicted %s after its eviction, so what refused the notification above was not the interval", staleRoomEvictInterval)
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
 // A room this process is in the middle of a durable write on is not evicted under it: each of
 // these writers is about to advance that room's own cursor, and a room closed first loses the
 // write's publish with it. The guard is the service's own in-flight state (hasWriteInFlight), and

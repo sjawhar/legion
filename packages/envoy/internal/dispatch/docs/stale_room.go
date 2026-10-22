@@ -63,8 +63,21 @@ const staleRoomEvictInterval = 2 * time.Second
 
 // staleRoomEvictor closes the rooms this process holds for documents another process has written.
 // It holds one LISTEN connection on documentChangedChannel and does its whole decision on that
-// connection's goroutine: the checks are a map lookup and one indexed read of max(version), and
-// the eviction itself is a room close, which is rare (staleRoomEvictInterval) and is work the
+// connection's goroutine, and that decision is two reads of max(version), not one: an unlocked
+// read through the pool, which holds nothing, and - for a room that read finds behind - a second
+// read under the document's advisory xact lock (roomBehindDurableHead), which waits for whatever
+// writer holds that lock, the other process's append among them. pglisten calls OnNotify inline
+// on its one listener goroutine, so one such wait is every other room's notification waiting too.
+//
+// This comment used to call the whole decision "a map lookup and one indexed read of max(version)",
+// and that cheapness is what justifies deciding on the listener goroutine at all. The comment was
+// the wrong one of the two: the locked confirmation is real and it stays, because without it a
+// write of this process's own, between its commit and its own cursor advance, reads as another
+// process's and a healthy room is closed mid-write (documentChanged). What the code had wrong was
+// the order - it took that lock before it asked the interval (staleRoomEvictInterval), so a burst
+// on the other process paid for one locked confirmation per notification only to be refused
+// afterwards. The interval is asked first now, so the notifications that reach the lock are the
+// ones an eviction can follow; the eviction itself is a room close, which is rare and is work the
 // close must do anyway.
 type staleRoomEvictor struct {
 	service *Service
@@ -157,6 +170,16 @@ func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactI
 // the head, and a room resident across one stands ahead of a history the store no longer has,
 // which is as stale as standing behind it.
 func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID string) bool {
+	// The interval first, ahead of the room lookup, the unlocked head read, and the locked
+	// confirmation behind that: a room the interval refuses evicts nothing whatever those reads
+	// find, so asking it here gives every notification the same answer - and the same handled
+	// note - as asking it last did. What it saves is the waiting. A burst on the other process
+	// is several notifications a second for a room that really is behind, so the unlocked read
+	// passes each of them through to the confirmation under the document's lock, behind the
+	// append that is writing it, only for the interval to refuse them.
+	if !e.mayEvict(artifactID) {
+		return false
+	}
 	service := e.service
 	live := service.srv.GetDoc(artifactID)
 	if live == nil {
@@ -197,9 +220,6 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	if through == head {
 		return false
 	}
-	if !e.allow(artifactID) {
-		return false
-	}
 	// Evict is the service's own forced reload: it closes the room, flushing what the room still
 	// owes the store, and drops the resident state, so the next access loads the durable
 	// document. The room's browsers are closed with it and reconnect to the reloaded room.
@@ -207,6 +227,7 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		slog.Warn("dispatch: close a document room another process's write left behind", "room", artifactID, "error", err)
 		return false
 	}
+	e.recordEviction(artifactID)
 	slog.Info("dispatch: closed a document room another process's write left behind",
 		"room", artifactID, "room_through", through, "head", head)
 	return true
@@ -237,20 +258,35 @@ func (s *Service) roomBehindDurableHead(ctx context.Context, room string, cursor
 	return cursor.heldThrough(), head, nil
 }
 
-// allow is the interval: it reports whether artifactID may be evicted now, recording the eviction
-// when it may, and drops every room whose last eviction is past the interval as it goes.
-func (e *staleRoomEvictor) allow(artifactID string) bool {
+// mayEvict is the interval's check: it reports whether artifactID may be evicted now, and records
+// nothing. One map lookup, which is what lets documentChanged ask it before it reads the database
+// at all.
+func (e *staleRoomEvictor) mayEvict(artifactID string) bool {
 	now := e.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if last, evicted := e.evicted[artifactID]; evicted && now.Sub(last) < staleRoomEvictInterval {
-		return false
-	}
+	last, evicted := e.evicted[artifactID]
+	return !evicted || now.Sub(last) >= staleRoomEvictInterval
+}
+
+// recordEviction stamps artifactID's eviction, and drops every room whose last eviction is past
+// the interval as it goes. The pruning is here rather than in mayEvict because this is the only
+// method that adds an entry: every call leaves behind only the entries inside the interval, so
+// the map holds at most the rooms this process evicted within one staleRoomEvictInterval, and
+// once the evictions stop it stops growing with them. It also keeps mayEvict to its one lookup,
+// which is the point of asking it first.
+//
+// Only an eviction that happened is stamped (service.Evict returned no error): a close that
+// failed left the stale room resident, and the room is retried on its next notification rather
+// than refused for the rest of the interval over an eviction this process never made.
+func (e *staleRoomEvictor) recordEviction(artifactID string) {
+	now := e.now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for room, at := range e.evicted {
 		if now.Sub(at) >= staleRoomEvictInterval {
 			delete(e.evicted, room)
 		}
 	}
 	e.evicted[artifactID] = now
-	return true
 }
