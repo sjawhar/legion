@@ -1442,9 +1442,10 @@ configuration change for a file that names a host in Unicode; write it in its `x
 `envoy_url` and each `nats_urls` entry are endpoints, not request URLs: they refuse a query string
 or fragment. This is a breaking configuration change for a file that has either; put credentials in
 URL userinfo or in a Secret, never in a query.
-`advertise_host` is an IP address or an ASCII DNS name, the host alone, and only `runtime: kubernetes`
-accepts it. A pod's own IP changes on every restart, so a daemon running inside the cluster binds
-`0.0.0.0` and lets `advertise_host` name the Service DNS name that reaches whichever pod is live.
+`advertise_host` is an IP address or an ASCII DNS name, the host alone, and only
+`runtime: kubernetes` accepts it. A pod's own IP changes on every restart, so a daemon running
+inside the cluster binds `0.0.0.0` and lets `advertise_host` name the Service DNS name that
+reaches whichever pod is live.
 Pods dial it at the port the worker stream listens on, so the Service exposes `worker_stream_port`
 as that same port number. A daemon on a fixed host (a devbox or a VM) leaves `advertise_host` unset
 and binds that host's own address, which pods then dial. A loopback `bind` is refused either way: a
