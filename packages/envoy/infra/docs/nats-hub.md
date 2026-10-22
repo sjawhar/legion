@@ -150,7 +150,9 @@ two listeners on one durable and queue group, so the later one is refused, as
 `users[2]: dispatchMachineId gives the same durable name as users[0].machineId` or
 `… as the hub's own listener`. Every `dispatchMachineId` user also binds Dispatch's fixed durables
 `delivery-events` and `delivery-jobs`, so a second one is refused the same way, as
-`users[3]: dispatchMachineId gives the same durable name as users[2].dispatchMachineId`. It is refused too for each of the
+`users[3]: dispatchMachineId gives the same durable name as users[2].dispatchMachineId`. Rotating
+a machine's credential replaces the `nkey` of its single entry, never adds a second entry for the
+same machine. It is refused too for each of the
 authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
