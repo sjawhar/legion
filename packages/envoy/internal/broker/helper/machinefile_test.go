@@ -95,6 +95,8 @@ func TestAMachineFileThatDoesNotParseIsAnErrorNamingIt(t *testing.T) {
 	}
 	for name, body := range map[string]string{
 		"not JSON":                 "{",
+		"trailing garbage":         string(data) + "garbage",
+		"a second object":          string(data) + "\n{}",
 		"an unknown field":         strings.Replace(string(data), `"credential_id"`, `"surprise":1,"credential_id"`, 1),
 		"no refresh token":         strings.Replace(string(data), `"refresh-1"`, `""`, 1),
 		"no credential id":         strings.Replace(string(data), `"cred-1"`, `""`, 1),

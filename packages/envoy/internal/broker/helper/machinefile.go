@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -36,8 +37,9 @@ type machineFileJSON struct {
 }
 
 // LoadMachineFile reads the machine login at path. A file that is not there is an error matching
-// os.ErrNotExist; one that is there but is not a whole machine login (unreadable JSON, an unknown
-// field, a missing value, a key that is not a P-256 PKCS#8 key) is an error naming path.
+// os.ErrNotExist; one that is there but is not exactly one whole machine login (unreadable JSON,
+// anything after the object, an unknown field, a missing value, a key that is not a P-256 PKCS#8
+// key) is an error naming path.
 func LoadMachineFile(path string) (*MachineFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -48,6 +50,9 @@ func LoadMachineFile(path string) (*MachineFile, error) {
 	var raw machineFileJSON
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("machine file %s: %w", path, err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("machine file %s: data after its one JSON object", path)
 	}
 	if raw.CredentialID == "" || raw.RefreshToken == "" || raw.ExpiresAt.IsZero() {
 		return nil, fmt.Errorf("machine file %s: credential_id, expires_at and refresh_token are all required", path)

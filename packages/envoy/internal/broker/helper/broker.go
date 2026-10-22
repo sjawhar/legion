@@ -119,8 +119,10 @@ type Broker struct {
 	stateMu sync.Mutex
 	dropped string // why drop cleared cred (dropRefused, dropRefreshRefused, dropExpired); "" once a login is recorded since; guarded by stateMu
 	// testClearHook, when set, runs in drop between clearing the credential and recording why.
-	// It exists only so a test can read login-status there; no production caller sets it.
-	testClearHook func()
+	// testBeforeDrop, when set, runs in dropOutsideRefresh before it waits for credMu. They exist
+	// only so a test can read login-status there, or know a drop is waiting on a refresh; no
+	// production caller sets them.
+	testClearHook, testBeforeDrop func()
 	// expiryWarning is how long before the credential's expiry the helper warns that no refresh
 	// has moved it; zero means a day. Only tests shorten it.
 	expiryWarning time.Duration
@@ -541,9 +543,23 @@ func (b *Broker) watchExpiry(cred *machineCredential) {
 	}
 	select {
 	case <-time.After(time.Until(cred.expiresAt)):
-		b.drop(cred, dropExpired, "expires_at", cred.expiresAt.Format(time.RFC3339))
+		b.dropOutsideRefresh(cred, dropExpired, "expires_at", cred.expiresAt.Format(time.RFC3339))
 	case <-cred.gone:
 	}
+}
+
+// dropOutsideRefresh is drop for a caller that does not hold credMu (watchExpiry, clearOnInvalid):
+// it waits for a refresh in flight to finish, so a refresh that succeeds always ends with the
+// helper holding the refreshed credential. A drop of the credential that refresh replaced then
+// finds it gone and drops nothing. It reports whether it dropped cred and whether the helper holds
+// a credential afterwards.
+func (b *Broker) dropOutsideRefresh(cred *machineCredential, why string, attrs ...any) (dropped, held bool) {
+	if b.testBeforeDrop != nil {
+		b.testBeforeDrop()
+	}
+	b.credMu.Lock()
+	defer b.credMu.Unlock()
+	return b.drop(cred, why, attrs...), b.HasCredential()
 }
 
 // expiresSoonMsg is the WARN watchExpiry logs a day before the held credential lapses.
@@ -582,15 +598,16 @@ func (b *Broker) launcherProof(method, url string) (string, *machineCredential, 
 // rejects: an expired or revoked credential, and also a proof it cannot verify, such as one
 // signed outside its clock-skew window or for a URL other than its own (an AGENT_SECRETS_URL that
 // does not match the broker's public URL). It never auto-relogins. cred is the credential the
-// refused call was signed with, and only that one is dropped. A refusal of a credential a newer
-// login has already replaced drops nothing and is returned as it came: the helper holds a
-// credential, and the caller's retry, which that login woke, uses it at once.
+// refused call was signed with, and only that one is dropped, after any refresh in flight
+// (dropOutsideRefresh). A refusal of a credential a newer login or a refresh has already replaced
+// drops nothing and is returned as it came: the helper holds a credential, and the caller's retry
+// uses it.
 func (b *Broker) clearOnInvalid(cred *machineCredential, err error) error {
 	var be *BrokerError
 	if !errors.As(err, &be) || be.Status != http.StatusUnauthorized || be.Code != "LAUNCHER_INVALID" {
 		return err
 	}
-	if !b.drop(cred, dropRefused, "code", be.Code) && b.HasCredential() {
+	if dropped, held := b.dropOutsideRefresh(cred, dropRefused, "code", be.Code); !dropped && held {
 		return err
 	}
 	return errNoCredential

@@ -110,6 +110,11 @@ type fakeBroker struct {
 	refreshOutcome string            // what the refresh grant answers: "" (rotate), "invalid_grant", or "unavailable"
 	refreshes      int               // refresh grants answered
 	tokens         int               // tokens minted, for unique values
+	// refreshGate, when set, holds every refresh grant until the test closes it, and
+	// refreshArrivals counts every refresh grant on arrival, before the gate, so a test can hold a
+	// refresh in flight for exactly as long as it needs.
+	refreshGate     chan struct{}
+	refreshArrivals int
 
 	// refuseRenewNext answers the next N renews 401. renewRefusalCode defaults to
 	// ENROLLMENT_NOT_LIVE, the current broker's terminal renewal verdict; a test names
@@ -333,9 +338,20 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		writeJSON(w, 200, map[string]any{"device_code": f.deviceCode, "user_code": f.pendingCode, "verification_uri": f.srv.URL, "expires_in": 900, "interval": 1})
 	})
 	mux.HandleFunc("POST /v1/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		f.mu.Lock()
+		gate := f.refreshGate
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			f.refreshArrivals++
+		} else {
+			gate = nil
+		}
+		f.mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		_ = r.ParseForm()
 		oauthError := func(status int, code string) { writeJSON(w, status, map[string]string{"error": code}) }
 		if r.PostForm.Get("client_id") != oauthClientID {
 			oauthError(401, "invalid_client")

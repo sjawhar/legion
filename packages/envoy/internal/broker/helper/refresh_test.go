@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -176,5 +177,107 @@ func TestAMachineFileThatDoesNotParseStopsTheStart(t *testing.T) {
 	b := &Broker{URL: "http://127.0.0.1:1", MachineFile: path}
 	if err := b.Start(context.Background()); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Start on an unreadable machine file: %v; want an error naming it", err)
+	}
+}
+
+// heldRefresh starts b.refresh with the fake holding its refresh grant at a gate, and returns once
+// the grant has reached the fake (refresh then holds credMu), with the function that releases the
+// grant and waits for refresh's answer.
+func heldRefresh(t *testing.T, f *fakeBroker, b *Broker) (release func() error) {
+	t.Helper()
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.refreshGate = gate
+	f.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- b.refresh(context.Background()) }()
+	waitFor(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.refreshArrivals == 1
+	})
+	return func() error {
+		close(gate)
+		return <-done
+	}
+}
+
+// TestAnExpiryDuringARefreshNeverUndoesIt: the held credential reaches its stored expiry while a
+// refresh of it is in flight, after the broker has rotated its tokens and before the helper swaps
+// the result in. The expiry's drop waits for the refresh, then finds the credential refreshed and
+// drops nothing: the helper holds the refreshed credential, its machine file names it, and no
+// expiry is logged.
+func TestAnExpiryDuringARefreshNeverUndoesIt(t *testing.T) {
+	var out syncBuffer
+	f := newFakeBroker(t)
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
+		Log: slog.New(slog.NewJSONHandler(&out, nil))}
+	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
+	// The held credential, as one whose stored expiry has just passed; its watch is started below,
+	// once the refresh is in flight, so the order of the two is the test's, not the timer's.
+	login := b.cred.Load()
+	lapsing := &machineCredential{key: login.key, id: login.id, expiresAt: time.Now().Add(-time.Second), refreshToken: login.refreshToken, gone: make(chan struct{})}
+	b.stateMu.Lock()
+	b.cred.Store(lapsing)
+	b.stateMu.Unlock()
+	close(login.gone)
+
+	release := heldRefresh(t, f, b)
+	waiting := make(chan struct{})
+	b.testBeforeDrop = func() { close(waiting) }
+	watched := make(chan struct{})
+	go func() { b.watchExpiry(lapsing); close(watched) }()
+	<-waiting // the expiry's drop has been reached, while the refresh holds credMu
+	if err := release(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	<-watched
+
+	held := b.cred.Load()
+	if held == nil || held == lapsing || held.id != login.id || time.Until(held.expiresAt) < 6*24*time.Hour {
+		t.Fatalf("after an expiry that raced a refresh the helper holds %+v; want the refreshed %s, a week out", held, login.id)
+	}
+	if ls := b.LoginStatus(); ls.State != "issued" || ls.Refused || !ls.CredentialHeld {
+		t.Fatalf("login-status: %+v; want issued and held", ls)
+	}
+	if kept, err := LoadMachineFile(b.MachineFile); err != nil || kept.RefreshToken != held.refreshToken {
+		t.Fatalf("machine file %+v (%v); want the refreshed login", kept, err)
+	}
+	for _, rec := range logRecords(t, &out) {
+		if rec["msg"] == expiredMsg {
+			t.Fatalf("an expiry dropped the credential a refresh had just renewed: %v", rec)
+		}
+	}
+}
+
+// TestARefusalDuringARefreshNeverUndoesIt: a launcher call signed with the credential being
+// refreshed is refused 401 LAUNCHER_INVALID while the refresh is in flight. The refusal's drop
+// waits for the refresh, then finds the credential refreshed: it drops nothing and hands the
+// caller the broker's refusal to retry, not errNoCredential.
+func TestARefusalDuringARefreshNeverUndoesIt(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "ada@example.com")
+	signed := b.cred.Load()
+	release := heldRefresh(t, f, b)
+	waiting := make(chan struct{})
+	b.testBeforeDrop = func() { close(waiting) }
+	rejected := &BrokerError{Status: http.StatusUnauthorized, Code: "LAUNCHER_INVALID", Message: "the launcher credential is not valid"}
+	refused := make(chan error, 1)
+	go func() { refused <- b.clearOnInvalid(signed, rejected) }()
+	<-waiting
+	if err := release(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if err := <-refused; err != rejected {
+		t.Fatalf("a refusal of the credential a refresh replaced reached its caller as %v; want the broker's refusal as it came", err)
+	}
+	if held := b.cred.Load(); held == nil || held == signed || held.id != signed.id {
+		t.Fatalf("after a refusal that raced a refresh the helper holds %+v; want the refreshed %s", held, signed.id)
+	}
+	if ls := b.LoginStatus(); ls.State != "issued" || ls.Refused {
+		t.Fatalf("login-status: %+v; want issued, not refused", ls)
 	}
 }
