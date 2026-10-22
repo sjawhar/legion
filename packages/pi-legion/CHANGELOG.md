@@ -470,6 +470,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- The Kubernetes daemon's image probe refuses a worker image the registry does not have on the
+  first failed pull, naming the image and quoting the kubelet (`… failed its probe: the registry
+  does not have image <image>: …`). It retried such a pull as transient across the probe's six
+  attempts, each waited out to its budget (about 40 minutes on a deployment with a six-minute
+  budget) before a booting daemon refused. Only containerd's answer that the registry has no
+  manifest for the reference (`rpc error: code = NotFound … failed to resolve reference "<ref>":
+  <ref>: not found`) is refused; a pull refused for credentials, a network failure, a rate limit,
+  a server error or any other not-found is still retried.
 - A reviewer no longer passes a `verdict` to `handoff_complete`, which the daemon refuses from
   every role but the tester (`VERDICT_ROLE_FORBIDDEN`). The reviewer's task names the tester's
   result as `Tester's verdict: pass` rather than `Handoff verdict: pass`; the `legion` tool's

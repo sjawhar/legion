@@ -116,17 +116,54 @@ func (g *probeRig) finishes(finish func(*corev1.Pod)) *probeRig {
 }
 
 // waits leaves the probe's container waiting for reason.
-func (g *probeRig) waits(reason string) *probeRig {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.finish = func(p *corev1.Pod) {
-		p.Spec.NodeName = "ip-192-0-2-7"
+func (g *probeRig) waits(reason string) *probeRig { return g.waitsSaying(reason, "") }
+
+// waitsSaying leaves the probe's container waiting for reason, the kubelet's message message.
+func (g *probeRig) waitsSaying(reason, message string) *probeRig {
+	return g.finishes(func(p *corev1.Pod) {
 		p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
-			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
+			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: message}},
 		}}}
-	}
-	return g
+	})
 }
+
+// pullFails leaves the probe's container waiting for reason, ErrImagePull or ImagePullBackOff,
+// with the kubelet's message for a pull that failed with code and cause (pullFailure).
+func (g *probeRig) pullFails(reason, code, cause string) *probeRig {
+	return g.waitsSaying(reason, pullFailure(reason, code, cause))
+}
+
+// pullFailure is the kubelet's waiting message for a pull of testImage that failed with cause,
+// containerd's error after its `failed to pull and unpack image "<ref>": `, prefixed by the gRPC
+// code code when the message carries one ("" when it carries none): as ErrImagePull, the error
+// itself; as ImagePullBackOff, the error after the back-off's own words
+// (pkg/kubelet/images/image_manager.go). Each case's code and cause are containerd 2.0.2's own,
+// read off a kind node's pods with the registry's host and repository swapped for testImage's. Any
+// other reason panics: a misspelt one would leave the container waiting for a reason no pull has,
+// and a row expecting the probe to retry would pass without reading the message.
+func pullFailure(reason, code, cause string) string {
+	failed := `failed to pull and unpack image "` + testImage + `": ` + cause
+	if code != "" {
+		failed = "rpc error: code = " + code + " desc = " + failed
+	}
+	switch reason {
+	case "ErrImagePull":
+		return failed
+	case "ImagePullBackOff":
+		return `Back-off pulling image "` + testImage + `": ErrImagePull: ` + failed
+	default:
+		panic("pullFailure: " + reason + " is not a pull's waiting reason")
+	}
+}
+
+// resolving is containerd's error for a pull that failed resolving testImage's manifest, for
+// cause.
+func resolving(cause string) string {
+	return `failed to resolve reference "` + testImage + `": ` + cause
+}
+
+// testManifest is testImage's manifest URL, as containerd quotes it.
+const testManifest = "https://ghcr.io/v2/sjawhar/legion-worker/manifests/sha256:" + testDigestHex
 
 func (g *probeRig) containerAndCollector() {
 	tick := time.NewTicker(5 * time.Millisecond)
@@ -357,6 +394,14 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 			[]string{"container probe waiting: InvalidImageName"}},
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
 			[]string{"container probe waiting: ErrImageNeverPull"}},
+		// The registry answered 404 for the reference: no retry of the pull finds the image, on the
+		// first pull or the back-off after it.
+		{"an image the registry does not have", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found"))
+		}, []string{"worker image sha256:" + testDigestHex + " failed its probe: the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack image", ": " + testImage + ": not found"}},
+		{"an image the registry does not have, in back-off", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "NotFound", resolving(testImage+": not found"))
+		}, []string{"the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ImagePullBackOff: Back-off pulling image"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			g := newProbeRig(t, nil)
@@ -427,6 +472,51 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 	}{
 		{"an image still being pulled", func(g *probeRig) { g.waits("ImagePullBackOff") },
 			[]string{"probe pod " + probeSandboxName + " still Pending after 300ms (container probe waiting: ImagePullBackOff)"}},
+		// A pull that failed for any reason but the registry not having the image says nothing
+		// about the image: credentials, the network and a rate limit may all change by the next
+		// attempt.
+		{"the kubelet's image-pull QPS is exceeded", func(g *probeRig) {
+			g.waitsSaying("ErrImagePull", "pull QPS exceeded")
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull the registry refused credentials for", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "", resolving("pull access denied, repository does not exist or may require authorization: authorization failed: no basic auth credentials"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull the registry forbade", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", resolving("unexpected status from HEAD request to "+testManifest+": 403 Forbidden"))
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		{"a pull that timed out", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "DeadlineExceeded", resolving(`failed to do request: Head "`+testManifest+`": dial tcp 192.0.2.10:443: i/o timeout`))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull whose connection was reset", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", resolving(`failed to do request: Head "`+testManifest+`": read tcp 192.0.2.7:46192->192.0.2.10:443: read: connection reset by peer`))
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		{"a pull the registry rate-limited", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "", resolving("unexpected status from HEAD request to "+testManifest+": 429 Too Many Requests"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a pull the registry rate-limited fetching the manifest", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", "failed to copy: httpReadSeeker: failed open: unexpected status code "+testManifest+": 429 Too Many Requests - Server message: toomanyrequests: You have reached your pull rate limit.")
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		{"a pull the registry answered with a server error", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "", resolving("unexpected status from HEAD request to "+testManifest+": 500 Internal Server Error"))
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		// The manifest resolved and its fetch then answered 404: NotFound past resolution, which is
+		// not the registry saying it lacks the reference.
+		{"a manifest the registry lost after resolving it", func(g *probeRig) {
+			g.pullFails("ImagePullBackOff", "NotFound", "failed to copy: httpReadSeeker: failed open: content at "+testManifest+" not found: not found")
+		}, []string{"(container probe waiting: ImagePullBackOff)"}},
+		// The resolver's other ErrNotFound answers are the node's registry configuration and
+		// containerd's manifest size limit, not the registry's contents (containerd's
+		// core/remotes/docker/resolver.go, Resolve).
+		{"a node with no host to resolve the reference on", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "NotFound", resolving("no resolve hosts: not found"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		{"a manifest past containerd's size limit", func(g *probeRig) {
+			g.pullFails("ErrImagePull", "NotFound", resolving("rejecting 8388609 byte manifest for "+testImage+": not found"))
+		}, []string{"(container probe waiting: ErrImagePull)"}},
+		// A not-found message under another waiting reason is not a pull's, so it is not read.
+		{"a not-found message on a container that is not pulling", func(g *probeRig) {
+			g.waitsSaying("ContainerCreating", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found")))
+		}, []string{"(container probe waiting: ContainerCreating)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
 			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
 		// A pod whose probe outlasts the attempt: what it logged so far is quoted.
@@ -860,11 +950,7 @@ func TestProbeImageRefusesAContainerTheKubeletCannotConfigure(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			g := newProbeRig(t, nil)
-			g.finishes(func(p *corev1.Pod) {
-				p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
-					Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError", Message: testCase.message}},
-				}}}
-			})
+			g.waitsSaying("CreateContainerConfigError", testCase.message)
 			p := probeOptions(t)
 			p.Budget = unfinishedBudget
 
@@ -1572,5 +1658,47 @@ func TestProbeImagePassesOnALongLogWithTheOKLineLast(t *testing.T) {
 
 	if _, err := g.r.ProbeImage(g.ctx, probeOptions(t)); err != nil {
 		t.Fatalf("ProbeImage = %v, want a pass: the OK line was there to read", err)
+	}
+}
+
+// TestRegistryHasNoImage accepts only containerd's whole manifest-404 grammar, naming one
+// reference throughout, and leaves the kubelet's pull throttle and any other wording to the retry
+// (pkg/kubelet/images/image_manager.go, EnsureImageExists).
+func TestRegistryHasNoImage(t *testing.T) {
+	manifestNotFound := func(image string) string {
+		return `rpc error: code = NotFound desc = failed to pull and unpack image "` + image +
+			`": failed to resolve reference "` + image + `": ` + image + `: not found`
+	}
+	const portImage = "registry.example:5000/legion-worker@sha256:" + testDigestHex
+	for _, testCase := range []struct {
+		name, reason, message string
+		want                  bool
+	}{
+		{"a missing manifest", "ErrImagePull", manifestNotFound(testImage), true},
+		{"a missing manifest with text after it", "ErrImagePull", manifestNotFound(testImage) + "\n", false},
+		{"a missing manifest whose reference names a registry port", "ErrImagePull", manifestNotFound(portImage), true},
+		{"a NotFound whose terminal reference differs", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
+				`": failed to resolve reference "` + testImage + `": ` + portImage + `: not found`, false},
+		{"a NotFound resolving another reference", "ErrImagePull",
+			`rpc error: code = NotFound desc = failed to pull and unpack image "` + testImage +
+				`": failed to resolve reference "` + portImage + `": ` + portImage + `: not found`, false},
+		{"a missing manifest in the kubelet's back-off message", "ImagePullBackOff",
+			`Back-off pulling image "` + testImage + `": ErrImagePull: ` + manifestNotFound(testImage), true},
+		{"a leading whitespace prefix", "ErrImagePull", " " + manifestNotFound(testImage), false},
+		{"a quoted reference", "ErrImagePull",
+			manifestNotFound(`registry.example/"legion-worker@sha256:` + testDigestHex), false},
+		{"the kubelet's image-pull throttle", "ErrImagePull", "pull QPS exceeded", false},
+		{"a throttle prefix before an old manifest error", "ImagePullBackOff",
+			"pull QPS exceeded: " + manifestNotFound(testImage), false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := registryHasNoImage(&corev1.ContainerStateWaiting{
+				Reason: testCase.reason, Message: testCase.message,
+			})
+			if got != testCase.want {
+				t.Errorf("registryHasNoImage(%q, %q) = %t, want %t", testCase.reason, testCase.message, got, testCase.want)
+			}
+		})
 	}
 }

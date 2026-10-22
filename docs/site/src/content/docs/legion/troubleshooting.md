@@ -73,6 +73,12 @@ cluster and the image:
   `legion-probe-<project>-<digest prefix>`, and quotes the probe's log. The causes it names:
   - the image's plugin speaks another daemon contract than this binary: run the `legion` binary
     from the same commit as the image ([Upgrade](/legion/legion/running-legion/#upgrade));
+  - the registry does not have the image (`… failed its probe: the registry does not have image
+    <image>: …`, quoting the kubelet's `rpc error: code = NotFound … not found`): the configured
+    digest was never pushed, or was pushed to another repository. Point the daemon at a digest the
+    registry holds (`docker manifest inspect <image>` answers for one it has); if it does, and your
+    nodes pull through a mirror, the mirror lacks it. The probe refuses this on the first failed
+    pull; a pull refused for credentials, a network failure or a rate limit is retried instead;
   - an agent's model does not resolve (`task agent <name> … role <role> is not configured`), or its
     key does not work: name the role in your overlay's `modelRoles`, re-run `apply.sh`, and check
     the credential your `models.yml` reads;

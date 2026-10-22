@@ -1866,6 +1866,7 @@ The kind node's own `mount.nfs` mounts the share, as a GKE node's does.
 | `probe-mounts-shares` | `legion probe-boot` on the `shares` file: the probe pod mounts both shares and its container runs, so the refusal, exit 1, is the image's own verdict on the run's agents' models, which have no route here, and names no share (`failed its probe: pod <name> Failed`, never `cannot mount` or `over its mounts`) |
 | `probe-silent-server` | `legion probe-boot` refuses, exit 1, within its first attempt, the file whose export's server is `192.0.2.10` (RFC 5737's documentation range, where nothing answers): `… gives it from NFS export 192.0.2.10:/scratch: MountVolume.SetUp failed … mount failed: … Connection timed out …`, the kubelet's first report, which already stands for mount.nfs's own two minutes of retries |
 | `probe-missing-claim`, `probe-missing-export` | `legion probe-boot`, in a container on the kind network, refuses, exit 1, the file naming a claim that does not exist (`cannot mount volume "team", which runtime.kubernetes.pod.volumes gives it from PersistentVolumeClaim "absent-share": … persistentvolumeclaim "absent-share" not found`) and the file naming an export the server lacks (`… gives it from NFS export <server>:/absent: MountVolume.SetUp failed … mount failed: …`) |
+| `probe-missing-image` | `legion probe-boot` refuses, exit 1, within its first attempt and with no transient retry logged, the `shares` file with its image's digest swapped for an all-zero one the repository does not have: `worker image sha256:0…0 failed its probe: the registry does not have image <repository>@sha256:0…0: … rpc error: code = NotFound desc = failed to pull and unpack image … : not found`, the kubelet's first failed pull |
 
 What the proof stands in for lies outside the volume path, as `burstable-kind.sh`'s does: the
 agents are sleep stubs, the store answers for an issue's first launch, the repository is public,
@@ -1874,7 +1875,8 @@ Sandbox's pod, gVisor, the node's NFS client and the NFS server are the real one
 `share_volumes_kind_test.go`, untagged, builds all four files through the loader and each runtime
 through `sandboxOptions` and `sandbox.New` on every `go test`. `SHARE_VOLUMES_EVIDENCE_DIR`
 (default a fresh `/tmp` directory, kept and printed) keeps the transcript, the four `legion.yaml`
-files, the issue pod's manifest and each `probe-boot`'s output.
+files and the missing-image copy of the `shares` one, the issue pod's manifest and each
+`probe-boot`'s output.
 
 ## lib/free-port.sh
 

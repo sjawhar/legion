@@ -204,7 +204,23 @@ is refused naming that (`Succeeded without checking the capability list (its leg
 check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
-pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). A volume of the operator's pod block
+pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). An image the kubelet cannot use refuses
+the boot at once, from the probe pod's status: a container waiting `InvalidImageName` or
+`ErrImageNeverPull`, or a pull the registry refused because it does not have the image — a container
+waiting `ErrImagePull` or `ImagePullBackOff` whose whole message, after the back-off's `Back-off
+pulling image "<ref>": ErrImagePull: ` when it carries one, is containerd's answer that the
+registry had no manifest for the reference, naming that one reference throughout (`rpc error: code =
+NotFound desc = failed to pull and unpack image "<ref>": failed to resolve reference "<ref>": <ref>:
+not found`), refused as `worker image sha256:<digest> failed its probe: the registry does not have
+image <image>: …` quoting the kubelet. Every other failed pull — credentials the registry refused
+(`pull access denied`, `401`, `403`; Docker Hub answers a repository it does not have this way), a
+registry the node cannot reach (`i/o timeout`, `connection refused`, `connection reset by peer`), a
+rate limit (`429`, `toomanyrequests`), a server error, and containerd's other not-found answers (`no
+resolve hosts`, a manifest past its size limit, a manifest or layer the registry named and then did
+not serve) — may pass on a later attempt, and stays under the six-attempt budget. One exception
+follows from containerd reporting a host's 404 over another host's network failure: on a node whose
+containerd tries a mirror before the registry (`hosts.toml`), a mirror without the image while the
+registry is unreachable is refused as a missing image. A volume of the operator's pod block
 (`runtime.kubernetes.pod.volumes`) that a `volume_mounts` entry mounts, naming a ConfigMap or Secret
 that does not exist in the daemon's namespace, or asking a key it lacks, leaves the probe pod
 `Pending` with the kubelet's `FailedMount` (`configmap "<name>" not found` or `configmaps "<name>" not

@@ -68,8 +68,55 @@ const (
 )
 
 // definitiveWaiting are the container waiting reasons no retry changes: the image reference itself
-// is unusable (DEFINITIVE_WAITING_REASONS, worker-image-probe.ts:60-64).
+// is unusable.
 var definitiveWaiting = map[string]bool{"InvalidImageName": true, "ErrImageNeverPull": true}
+
+// pullWaiting are the waiting reasons of a pull that failed (ErrImagePull) and of the back-off
+// after it (ImagePullBackOff), whose message carries the failed pull's error after `Back-off
+// pulling image "<image>": ErrImagePull: ` (pkg/kubelet/images/image_manager.go, EnsureImageExists,
+// prevPullErrMsg). Either reason alone also covers a registry that refused the node's credentials,
+// one the node could not reach, and one that rate-limited it, so only the message decides
+// (registryHasNoImage).
+var pullWaiting = map[string]bool{"ErrImagePull": true, "ImagePullBackOff": true}
+
+// imageNotFound is containerd's answer to a pull whose reference the registry does not have: its
+// CRI image service wraps the pull's error as `failed to pull and unpack image "<ref>": …`
+// (internal/cri/server/images/image_pull.go at v2, pkg/cri/server/image_pull.go at v1.7), the pull
+// wraps a resolution's as `failed to resolve reference "<ref>": …` (client/pull.go at v2, pull.go
+// at v1.7), and the failure reaches the kubelet as gRPC NotFound only when it is
+// errdefs.ErrNotFound. The resolver's Resolve (core/remotes/docker/resolver.go at v2,
+// remotes/docker/resolver.go at v1.7) answers `<ref>: not found` when the registry answered 404
+// for the manifest, and ranks it below any other HTTP status a host answered, so a 401, 403, 429
+// or 5xx is what the pull reports instead. An unauthorized pull (`pull access denied, …`), a
+// refused, reset or timed-out connection, a rate limit and a server error carry another code or
+// none, and stay retried. The resolver's other ErrNotFound answers say nothing of the registry's
+// contents — `no resolve hosts: not found` (the node's registry configuration) and `rejecting <n>
+// byte manifest for <ref>: not found` (a manifest past containerd's size limit) — nor does a
+// NotFound past resolution, `failed to copy: … not found`, a manifest or layer the registry named
+// and then did not serve; so the whole message must be the one grammar, its three references the
+// same (registryHasNoImage), and anything else stays retried. One case the message cannot tell
+// apart: a node configured with several hosts for one registry (a mirror in containerd's
+// hosts.toml) reports a host's 404 over another's network failure, so a mirror that lacks the image
+// while the registry it mirrors is unreachable is refused as a missing image; the refusal quotes
+// the kubelet, which names the reference, and a mirror that lags its registry is the node's to fix.
+// Measured on kind v1.32.2 with containerd 2.0.2 against a public registry and a stub answering
+// each status: `rpc error: code = NotFound desc = failed to pull and unpack image "<ref>": failed
+// to resolve reference "<ref>": <ref>: not found` for the 404, the wording a GKE node's Failed
+// event quotes for a digest its registry lacks; an ImagePullBackOff's message ends the same way.
+// Docker Hub answers a repository it does not have with 401, read as credentials and retried;
+// another runtime's wording (CRI-O's `manifest unknown`) falls to the retry too.
+var imageNotFound = regexp.MustCompile(`^(?:Back-off pulling image "[^"]+": ErrImagePull: )?rpc error: code = NotFound desc = failed to pull and unpack image "([^"]+)": failed to resolve reference "([^"]+)": (.+): not found$`)
+
+// registryHasNoImage reports whether w, the probe container's waiting state, is a pull the
+// registry refused because it does not have the image: its whole message imageNotFound, after the
+// back-off's words when it carries them, naming one reference throughout.
+func registryHasNoImage(w *corev1.ContainerStateWaiting) bool {
+	if !pullWaiting[w.Reason] {
+		return false
+	}
+	m := imageNotFound.FindStringSubmatch(w.Message)
+	return m != nil && m[1] == m[2] && m[2] == m[3]
+}
 
 // digestHex is a sha256 digest's 64 hex.
 var digestHex = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -424,7 +471,8 @@ const mountRecheck = 15 * time.Second
 
 // stuck is the verdict on a probe pod that has not finished and never will, or nil while waiting
 // can still change it. It stops on an image the kubelet cannot use (definitiveWaiting), the
-// image's own refusal; on a container the kubelet cannot configure, waiting
+// image's own refusal; on an image the registry does not have (registryHasNoImage), which no retry
+// of the pull changes; on a container the kubelet cannot configure, waiting
 // CreateContainerConfigError with a message saying a ConfigMap or Secret the container reads, or a
 // key of one, is missing (missingObject) — the kubelet builds the container's env from those
 // objects at each sync (pkg/kubelet/kubelet_pods.go, makeEnvironmentVariables) and fails the same
@@ -459,6 +507,11 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	if w != nil && definitiveWaiting[w.Reason] {
 		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, w.Reason)
 		return &unusable
+	}
+	if w != nil && registryHasNoImage(w) {
+		missing := imageRefusal(digest, "the registry does not have image %s: pod %s %s, container %s waiting: %s: %s",
+			r.image, name, phaseOf(pod), probeContainer, w.Reason, w.Message)
+		return &missing
 	}
 	if w != nil && w.Reason == "CreateContainerConfigError" && missingObject(w.Message) {
 		refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot configure its container %s (waiting: %s), a ConfigMap or Secret it reads being missing: %s",
@@ -874,7 +927,8 @@ func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, bu
 
 // probeWaiting is the probe container's waiting state, or nil when the pod reports none: its
 // Reason is what stuck and unfinished judge and quote, its Message the kubelet's own words, which
-// only a CreateContainerConfigError is read for (missingObject).
+// only a CreateContainerConfigError (missingObject) and a failed pull (registryHasNoImage) are read
+// for.
 func probeWaiting(pod *corev1.Pod) *corev1.ContainerStateWaiting {
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.Name == probeContainer && status.State.Waiting != nil {
