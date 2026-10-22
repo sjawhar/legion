@@ -95,11 +95,14 @@ func TestARunningSweepWhoseLeaseIsHeldElsewhereListsNothing(t *testing.T) {
 
 	// 0: this caller stands for the other process's sweep while it is inside it, which is all
 	// this row is about, and records no sweep of its own -- so the running sweep below skips for
-	// the lease and for nothing else.
+	// the lease and for nothing else. It holds the lease on a context of its own, not the test's:
+	// the test cancels that one to stop the running sweep, and a pass whose context is cancelled
+	// inside it is one shutdown cut short, which reports false whether or not it held the lease
+	// (duty.Exclusive). The other process this caller stands for is not shutting down.
 	taken, release := make(chan struct{}), make(chan struct{})
 	held := make(chan bool, 1)
 	go func() {
-		held <- duty.Exclusive(ctx, leases, webhookRedeliveryLease, 0, func(context.Context) {
+		held <- duty.Exclusive(context.Background(), leases, webhookRedeliveryLease, 0, func(context.Context) {
 			close(taken)
 			<-release
 		})

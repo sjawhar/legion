@@ -89,7 +89,11 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	}
 
 	// Both runners stop while the lock still holds the first one's pass: whatever each did, it
-	// did before the gate let go, so the counts below are the two tickers' one round.
+	// did before the gate let go, so the counts below are the two tickers' one round. The first
+	// runner's pass is therefore one its own shutdown cut short, which since INFRA-66's third
+	// round reports itself as that rather than as a pass that ran - it serves no period, since
+	// it did not finish its work. What this row is about is unchanged and is counted below: one
+	// of the two tickers got into the pass and the other found the lease held.
 	stopSecond()
 	<-secondDone
 	stopFirst()
@@ -98,8 +102,10 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 		t.Fatalf("release write_suggestions: %v", err)
 	}
 
-	if ran := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease); ran != 1 {
-		t.Fatalf("the two runners ran the pass %d times; want once:\n%s", ran, logs.Lines("lease="))
+	entered := countLeaseLines(logs, "dispatch duty: leased pass ran", suggestionOutcomeLease) +
+		countLeaseLines(logs, "dispatch duty: leased pass cut short by shutdown; its period is left unserved", suggestionOutcomeLease)
+	if entered != 1 {
+		t.Fatalf("the two runners got into the pass %d times; want once:\n%s", entered, logs.Lines("lease="))
 	}
 	if skipped := countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease); skipped == 0 {
 		t.Fatalf("neither runner skipped:\n%s", logs.Lines("lease="))
