@@ -73,11 +73,21 @@ users:
 `, name, endpoint, ca, name, name, name, name, name)
 }
 
-func outputString(value any) string {
-	if value, ok := value.(string); ok {
-		return value
+// outputString is one resolved value of pulumi.All as the string it holds. A GCP output field is
+// a *string, which the provider can leave nil (the cluster's WorkloadPool among them), so a nil
+// or another type is an error rather than a panic inside ApplyT, which would kill the provider
+// process.
+func outputString(value any) (string, error) {
+	switch value := value.(type) {
+	case string:
+		return value, nil
+	case *string:
+		if value == nil {
+			return "", errors.New("resolved to a nil *string")
+		}
+		return *value, nil
 	}
-	return *value.(*string)
+	return "", fmt.Errorf("resolved to a %T, not a string", value)
 }
 
 func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
@@ -157,8 +167,16 @@ func dispatchListenerEnv(hostname, socks5Proxy, listenerSecret, url string) (cor
 
 func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) (*dispatchKubernetes, error) {
 	dispatch := dispatchType + " " + name
-	kubeconfig := pulumi.All(cloud.cluster.Endpoint, cloud.cluster.MasterAuth.ClusterCaCertificate(), cloud.cluster.Name).ApplyT(func(values []interface{}) string {
-		return renderKubeconfig(outputString(values[0]), outputString(values[1]), outputString(values[2]))
+	kubeconfig := pulumi.All(cloud.cluster.Endpoint, cloud.cluster.MasterAuth.ClusterCaCertificate(), cloud.cluster.Name).ApplyT(func(values []interface{}) (string, error) {
+		parts := make([]string, len(values))
+		for i, what := range []string{"the cluster's endpoint", "the cluster's CA certificate", "the cluster's name"} {
+			value, err := outputString(values[i])
+			if err != nil {
+				return "", fmt.Errorf("%s: %s: %w", dispatch, what, err)
+			}
+			parts[i] = value
+		}
+		return renderKubeconfig(parts[0], parts[1], parts[2]), nil
 	}).(pulumi.StringOutput)
 	provider, err := kubernetes.NewProvider(ctx, s.hostname+"-kubernetes", &kubernetes.ProviderArgs{
 		Kubeconfig: kubeconfig, EnableServerSideApply: pulumi.Bool(true),
@@ -240,7 +258,16 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	socks5Proxy := clusterLocal(tailnetName, s.namespace) + ":" + socks5Port
 	listenerURL := "http://" + clusterLocal(listenerName, s.namespace) + ":" + listenerPort
 
-	listenerEnv := args.NatsUrl.ToStringOutput().ApplyT(func(url string) (corev1.EnvVarArray, error) {
+	// natsURL is the one NATS URL once checked: every container reads this output rather than the
+	// raw input, so envoy-dispatch's NATS_URLS is never an unchecked copy beside the listener's
+	// checked environment.
+	natsURL := args.NatsUrl.ToStringOutput().ApplyT(func(url string) (string, error) {
+		if _, err := dispatchListenerEnv(s.hostname, socks5Proxy, listenerName, url); err != nil {
+			return "", fmt.Errorf("%s: %w", dispatch, err)
+		}
+		return url, nil
+	}).(pulumi.StringOutput)
+	listenerEnv := natsURL.ApplyT(func(url string) (corev1.EnvVarArray, error) {
 		env, err := dispatchListenerEnv(s.hostname, socks5Proxy, listenerName, url)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", dispatch, err)
@@ -317,6 +344,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// (packages/envoy/cmd/listener/main.go), so a pod started before the proxy exists never goes
 	// ready and the rollout waits it out.
 	frontDoor := pulumi.DependsOn([]pulumi.Resource{tailnet, tailnetService})
+	// Both also mount the NATS seed, which the pod can read only once its principal holds
+	// roles/secretmanager.secretAccessor on the secret, so each waits for that grant too rather
+	// than racing IAM on the first deployment.
+	seedGrant := pulumi.DependsOn([]pulumi.Resource{cloud.seedAccessor})
 
 	// The listener runs under the app's ServiceAccount, which is what mounts the NATS seed through
 	// Workload Identity.
@@ -326,7 +357,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("200m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + listenerPort + "/healthz")}}}},
 		},
 		Volumes: seedVolume,
-	}, frontDoor); err != nil {
+	}, frontDoor, seedGrant); err != nil {
 		return nil, err
 	}
 	if _, err := service(listenerName, core.DefaultListenerPort); err != nil {
@@ -362,11 +393,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		Containers: corev1.ContainerArray{
 			corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources("1", "4Gi"), Env: corev1.EnvVarArray{
 				valueEnv("HOME", "/home/envoy"), secretEnv("DATABASE_URL", dispatchSecretName, "DATABASE_URL"), secretEnv("DISPATCH_AGENT_TOKEN", dispatchSecretName, "DISPATCH_AGENT_TOKEN"), secretEnv("DISPATCH_SIGNING_KEY", dispatchSecretName, "DISPATCH_SIGNING_KEY"), secretEnv("DISPATCH_SIGNIN_CLIENT_SECRET", dispatchSecretName, "DISPATCH_SIGNIN_CLIENT_SECRET"),
-				valueEnv("DISPATCH_SIGNIN_ISSUER", "https://accounts.google.com"), valueEnv("DISPATCH_SIGNIN_CLIENT_ID", s.signIn.clientID), valueEnv("DISPATCH_SIGNIN_DOMAIN", s.signIn.domain), valueEnv("DISPATCH_SERVER_URL", "https://"+s.hostname+"."+s.tailnetDNSName), valueEnv("DISPATCH_LISTEN_HOST", "0.0.0.0"), corev1.EnvVarArgs{Name: pulumi.String("NATS_URLS"), Value: args.NatsUrl}, valueEnv("ENVOY_ALLOW_REMOTE_NATS", "1"), valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"), valueEnv("ENVOY_NATS_SOCKS5_PROXY", socks5Proxy), valueEnv("ENVOY_URL", listenerURL), secretEnv("ENVOY_TOKEN", listenerName, "ENVOY_API_TOKEN"),
+				valueEnv("DISPATCH_SIGNIN_ISSUER", "https://accounts.google.com"), valueEnv("DISPATCH_SIGNIN_CLIENT_ID", s.signIn.clientID), valueEnv("DISPATCH_SIGNIN_DOMAIN", s.signIn.domain), valueEnv("DISPATCH_SERVER_URL", "https://"+s.hostname+"."+s.tailnetDNSName), valueEnv("DISPATCH_LISTEN_HOST", "0.0.0.0"), corev1.EnvVarArgs{Name: pulumi.String("NATS_URLS"), Value: natsURL}, valueEnv("ENVOY_ALLOW_REMOTE_NATS", "1"), valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"), valueEnv("ENVOY_NATS_SOCKS5_PROXY", socks5Proxy), valueEnv("ENVOY_URL", listenerURL), secretEnv("ENVOY_TOKEN", listenerName, "ENVOY_API_TOKEN"),
 			}, VolumeMounts: seedMount, Lifecycle: appPreStop, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 		},
 		Volumes: seedVolume,
-	}, frontDoor); err != nil {
+	}, frontDoor, seedGrant); err != nil {
 		return nil, err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {

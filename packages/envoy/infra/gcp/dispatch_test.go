@@ -295,6 +295,21 @@ func TestDispatchSeedAccessorWaitsForTheCluster(t *testing.T) {
 		"the principal is built from the cluster's own Workload Identity pool, so it resolves only once the pool exists")
 }
 
+// The app and the listener mount the NATS seed, which the pod can read only once the seed
+// accessor exists, so both Deployments register after it rather than racing IAM on the first
+// deployment. The front door mounts no seed and waits for no grant.
+func TestDispatchSeedMountingDeploymentsWaitForTheSeedAccessor(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	accessorURN := "urn:pulumi:s::p::" + dispatchType + "$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-nats-seed-accessor"
+	for _, deployment := range []string{"example-dispatch", "example-dispatch-listener"} {
+		require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies(), accessorURN,
+			"%s mounts the seed, so it registers after the grant that lets it", deployment)
+	}
+	require.NotContains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(), accessorURN)
+}
+
 // GKE accepts only the project's own pool, named <project id>.svc.id.goog.
 func TestDispatchClusterUsesTheProjectsWorkloadPool(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
