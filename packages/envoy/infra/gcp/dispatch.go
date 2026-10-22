@@ -138,11 +138,6 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 			return fmt.Sprintf("tags[%d]", i), true
 		}
 	}
-	for i, namespace := range args.AllowedNamespaces {
-		if bus.HoldsSeed(namespace) {
-			return fmt.Sprintf("allowedNamespaces[%d]", i), true
-		}
-	}
 	if args.DatabaseVersion != nil && bus.HoldsSeed(*args.DatabaseVersion) {
 		return "databaseVersion", true
 	}

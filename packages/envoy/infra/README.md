@@ -230,8 +230,14 @@ The generated `principal` output is the Kubernetes service account's Workload Id
 built from the cluster's own Workload Identity pool, so it resolves only once the cluster that
 creates the pool exists. The app's Cloud SQL Auth Proxy needs `roles/cloudsql.client` on the
 project for that principal, which the component does not write, since writing a project IAM
-member needs `resourcemanager.projects.setIamPolicy`: the consumer grants it before the first
-apply, from a program whose identity holds that permission. The component itself grants that
+member needs `resourcemanager.projects.setIamPolicy`: the consumer grants it from a program whose
+identity holds that permission, building the member from the principal's known form rather than
+from the `principal` output, which resolves only once every child has registered, the app
+Deployment's readiness wait included, and that wait needs the grant already in place. Whether IAM
+accepts that member before the project's first Workload Identity cluster creates its pool is
+unproven (`docs/plans/2026-10-14-dispatch-gcp-plan.md`, the hardening ledger); if it refuses it,
+the first apply stops at the app's readiness wait, and a grant made then lets the next apply
+finish. The component itself grants that
 principal `roles/secretmanager.secretAccessor` only on the NATS seed secret (and on the broker token
 secret when `agentSecretsTokenSecret` is set), and the app and the listener, which mount the seed,
 wait for that grant to be written, as the app waits for the broker token's. IAM can take minutes to apply
@@ -455,7 +461,8 @@ A component creates its resources only with providers you pass it in its `provid
 option. The listener takes a `docker` provider always, and a `command` provider too when
 `watchdog` is set; the hub takes a `gcp` provider; `gcp:Dispatch` takes `gcp` and `random`
 providers. Their resources use those providers at the version and with the configuration you give
-them. `gcp:Dispatch` creates its Kubernetes provider from the cluster it creates, so no default
+them: a docker provider's `host` decides which Docker daemon the listener runs on, and a gcp
+provider's `project` which project the hub or Dispatch is created in. `gcp:Dispatch` creates its Kubernetes provider from the cluster it creates, so no default
 Kubernetes provider is used. The plugin never falls back to a default provider of its own. Without
 one, the component fails before it registers anything:
 
