@@ -40,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -862,8 +863,15 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 // anything, and its lease exists for exactly that reason ("N processes sweeping is N times those
 // list calls for one result", redeliver/sweep.go). So the GitHub fake's count of those listings
 // is what one sweep window cost the installation's rate limit, whichever process paid it.
+//
+// A period is a bucket of the database's clock (duty.Exclusive, migration 0115), so both
+// processes are started inside one bucket on purpose: a second process whose first tick lands
+// past a bucket boundary is entitled to sweep, and this row is about the one that lands inside
+// the bucket its peer has already served. waitOutABucketBoundary is what keeps which of the two
+// this run gets from being luck.
 func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 	pair := newPair(t)
+	waitOutABucketBoundary(t, pair, redeliver.Interval)
 	fake := startGitHubFake(t)
 	// Nothing is held here: this row is about two passes that never meet, so the first one must
 	// finish and give the lease back before the second process exists.
@@ -899,6 +907,28 @@ func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 		t.Errorf("the two processes listed the webhook's deliveries %d times for one sweep window; the first alone listed them %d times, and the lease is what keeps N processes from being N times those list calls",
 			listed, listedByA)
 	}
+}
+
+// waitOutABucketBoundary returns with enough of period's current bucket left for a row to start
+// both processes and read their first ticks inside it. A period is floor(epoch / period) on the
+// database's clock, so a row that straddles a boundary watches a second process legitimately
+// sweep rather than skip; this waits the boundary out instead, on the same clock the gate reads,
+// and waits at most the margin it needs.
+func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Duration) {
+	t.Helper()
+	// What one run of the row needs inside the bucket: two process starts and their first ticks.
+	const margin = 45 * time.Second
+	var left time.Duration
+	if err := pair.database.Pool.QueryRow(context.Background(),
+		`select make_interval(secs => $1 - mod(extract(epoch from now()), $1))`, period.Seconds(),
+	).Scan(&left); err != nil {
+		t.Fatalf("read how much of the period's bucket is left: %v", err)
+	}
+	if left >= margin {
+		return
+	}
+	t.Logf("waiting %v for the next bucket of the %v period, so both processes tick inside one", left, period)
+	time.Sleep(left + time.Second)
 }
 
 // ───── one signing key across the processes ────────────────────────────────
