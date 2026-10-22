@@ -35,7 +35,9 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
-const uiToken = "brokertest-ui-token-0123456789ab"
+// UIToken is the bearer every Rig's UI routes take (Dispatch's server credential in production),
+// for a test that calls one off its own goroutine, where UI cannot fail the test.
+const UIToken = "brokertest-ui-token-0123456789ab"
 
 // podAudience is the fixed audience every Rig's pod verifier is constructed for, and the value
 // MintPodToken signs pod tokens against — arbitrary, since a Rig both mints and verifies them
@@ -131,7 +133,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 
 	api.Register(mux, api.Deps{
-		PublicURL: srv.URL, UIToken: uiToken,
+		PublicURL: srv.URL, UIToken: UIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
@@ -210,7 +212,7 @@ func (r *Rig) Req(t *testing.T, method, path string, headers map[string]string, 
 // (Dispatch's own server credential in production; this Rig's fixed fixture token here).
 func (r *Rig) UI(t *testing.T, method, path string, body any) (int, []byte) {
 	t.Helper()
-	return r.Req(t, method, path, map[string]string{"Authorization": "Bearer " + uiToken}, body)
+	return r.Req(t, method, path, map[string]string{"Authorization": "Bearer " + UIToken}, body)
 }
 
 // DecideMachineLogin decides the pending machine login whose confirmation code is code, as the

@@ -185,7 +185,11 @@ func (p *Provider) ApproveDevice(ctx context.Context, userCode string, approved 
 
 // Token is the token endpoint: the device code grant and the refresh grant, each with a DPoP proof
 // from the key the device request named. A refresh runs hooks.BeforeRefresh first; every issued
-// pair runs hooks.After, whose fields the answer carries.
+// pair runs hooks.After, whose fields the answer carries. The hooks and the issued tokens share
+// one transaction (their ctx carries it: oauthstore.TxFrom), committed only once the answer is
+// built, so a row BeforeRefresh locks stays locked until the new tokens are stored. Validating the
+// request stays outside it: a reused refresh token's family revocation commits on its own though
+// the request is refused.
 func (p *Provider) Token(w http.ResponseWriter, r *http.Request, hooks TokenHooks) {
 	ctx := r.Context()
 	request, err := p.oauth.NewAccessRequest(ctx, r, &oauth2.DefaultSession{})
@@ -198,22 +202,38 @@ func (p *Provider) Token(w http.ResponseWriter, r *http.Request, hooks TokenHook
 	if session, ok := request.GetSession().(*oauth2.DefaultSession); ok {
 		extra = session.Extra
 	}
-	if grant == "refresh_token" {
-		if err := hooks.BeforeRefresh(ctx, extra); err != nil {
-			p.writeError(ctx, w, request, oauth2.ErrInvalidGrant.WithHint("The machine login has ended.").WithWrap(err).WithDebugError(err))
-			return
-		}
-	}
-	resp, err := p.oauth.NewAccessResponse(ctx, request)
-	if err != nil {
-		p.writeError(ctx, w, request, err)
-		return
-	}
-	fields, err := hooks.After(ctx, grant, extra)
+	txCtx, err := p.store.BeginTX(ctx)
 	if err != nil {
 		p.writeError(ctx, w, request, oauth2.ErrServerError.WithWrap(err).WithDebugError(err))
 		return
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = p.store.Rollback(txCtx)
+		}
+	}()
+	if grant == "refresh_token" {
+		if err := hooks.BeforeRefresh(txCtx, extra); err != nil {
+			p.writeError(ctx, w, request, oauth2.ErrInvalidGrant.WithHint("The machine login has ended.").WithWrap(err).WithDebugError(err))
+			return
+		}
+	}
+	resp, err := p.oauth.NewAccessResponse(txCtx, request)
+	if err != nil {
+		p.writeError(ctx, w, request, err)
+		return
+	}
+	fields, err := hooks.After(txCtx, grant, extra)
+	if err != nil {
+		p.writeError(ctx, w, request, oauth2.ErrServerError.WithWrap(err).WithDebugError(err))
+		return
+	}
+	if err := p.store.Commit(txCtx); err != nil {
+		p.writeError(ctx, w, request, oauth2.ErrServerError.WithWrap(err).WithDebugError(err))
+		return
+	}
+	committed = true
 	for k, v := range fields {
 		resp.SetExtra(k, v)
 	}

@@ -411,10 +411,14 @@ func (s *Service) decideDevice(ctx context.Context, tx pgx.Tx, code string, appr
 
 // Refreshed moves a live launcher credential's expiry to CredentialLifetime from now, as its
 // device login refreshes, and answers the new expiry. A credential revoked or already past its
-// expiry is ErrNotLive and is left as it is.
+// expiry is ErrNotLive and is left as it is. It runs in the transaction ctx carries
+// (oauthstore.TxFrom) when it carries one, and its update holds the credential's row lock until
+// that transaction ends: a revoke (enroll.Service.RevokeCredential locks the same row) either
+// commits first, so the update finds no live row, or waits for the refresh's tokens to commit and
+// then ends them.
 func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time, error) {
 	var expires time.Time
-	err := s.Store.Pool.QueryRow(ctx, `update launcher_credentials set expires_at = now() + make_interval(secs => $2)
+	err := s.db(ctx).QueryRow(ctx, `update launcher_credentials set expires_at = now() + make_interval(secs => $2)
 		where id = $1 and revoked_at is null and expires_at > now() returning expires_at`, credentialID, s.CredentialLifetime.Seconds()).Scan(&expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, ErrNotLive
@@ -422,10 +426,21 @@ func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time
 	return expires, err
 }
 
-// TokenHooks are the device login's token hooks: a refresh moves its credential's expiry first
-// (Refreshed), and is refused when the credential has ended; every answer carries credential_id
-// and credential_expires_at (RFC 3339) as the credential's row holds it once tokens are issued:
-// the minted expiry on the device code grant, the one Refreshed moved it to on a refresh.
+// db is the transaction ctx carries (oauthstore.TxFrom), else the pool.
+func (s *Service) db(ctx context.Context) interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+} {
+	if tx, ok := oauthstore.TxFrom(ctx); ok {
+		return tx
+	}
+	return s.Store.Pool
+}
+
+// TokenHooks are the device login's token hooks, run in the token request's transaction: a
+// refresh moves its credential's expiry first (Refreshed), and is refused when the credential has
+// ended; every answer carries credential_id and credential_expires_at (RFC 3339) as the
+// credential's row holds it in that transaction: the minted expiry on the device code grant, the
+// one Refreshed moved it to on a refresh.
 func (s *Service) TokenHooks() oauth.TokenHooks {
 	var hooks oauth.TokenHooks
 	hooks.BeforeRefresh = func(ctx context.Context, extra map[string]any) error {
@@ -442,7 +457,7 @@ func (s *Service) TokenHooks() oauth.TokenHooks {
 			return nil, err
 		}
 		var expires time.Time
-		if err := s.Store.Pool.QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, id).Scan(&expires); err != nil {
+		if err := s.db(ctx).QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, id).Scan(&expires); err != nil {
 			return nil, err
 		}
 		return map[string]any{"credential_id": id, "credential_expires_at": expires.UTC().Format(time.RFC3339)}, nil
