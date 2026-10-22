@@ -266,16 +266,25 @@ at `/var/run/secrets/envoy/nats-seed`; the seed remains outside Pulumi state. Wi
 read-only, at `/var/run/secrets/dispatch/agent-secrets-token`.
 
 Dispatch reads every value of the `<hostname>-dispatch` Secret, the broker token file and the
-NATS seed once, at boot, as the listener reads the seed, and rotating a secret's value changes only the Secret, never the pod
-template, so no rotation restarts a pod on its own — this holds for every secret the component
-renders, the original four keys as much as the broker token and the App key. After rotating one,
-restart the Deployments that read it so their pods boot on the new value: the app alone for the
-`<hostname>-dispatch` Secret's keys, the broker token and the App key
-(`kubectl -n <namespace> rollout restart deployment/<hostname>`), and both Envoy containers'
-Deployments for the NATS seed, which the app's `envoy-dispatch` and the listener's
-`envoy-listener` each read once, at start
+NATS seed once, at boot, as the listener reads the seed and the listener's bearer, and rotating a
+secret's value changes only the Secret, never the pod template, so no rotation restarts a pod on
+its own — this holds for every secret the component renders, the original four keys as much as
+the broker token, the App key and the listener's bearer. After rotating one, restart the
+Deployments that read it so their pods boot on the new value:
+
+- the `<hostname>-dispatch` Secret's keys, the broker token and the App key: the app alone reads
+  them (`kubectl -n <namespace> rollout restart deployment/<hostname>`). `DISPATCH_AGENT_TOKEN`
+  is also the `agentToken` output, so a consumer that hands it to its agents passes them the new
+  value too;
+- the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
+  at start;
+- the listener's bearer, the `<hostname>-listener` Secret's `ENVOY_API_TOKEN`: the listener
+  serves with it and the app's `envoy-dispatch` sends it as `ENVOY_TOKEN`, so restarting only one
+  leaves the two on different tokens and every call from the app to the listener refused.
+
+For the last two, restart both Envoy Deployments
 (`kubectl -n <namespace> rollout restart deployment/<hostname> deployment/<hostname>-listener`).
-The front door mounts no seed.
+The front door reads none of these.
 
 The Deployments intentionally have no liveness probe for Dispatch because its health endpoint
 reads Cloud SQL. At one replica an input or image update recreates the app's one pod, which is a
