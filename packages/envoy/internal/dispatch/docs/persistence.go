@@ -28,6 +28,11 @@ type PgVersioned struct {
 	// or waits for it and dropped with the last, so it holds only the rooms being written.
 	locksMu sync.Mutex
 	locks   map[string]*roomLock
+	// afterAppendCommit runs between an append's commit and the advance of the room cursor that
+	// takes that version in, inside the document's advisory lock the append holds across both.
+	// Nil outside tests; tests use it to hold a reader of the cursor and the head in that window
+	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
+	afterAppendCommit func(room string, version persistence.Version)
 }
 
 // roomLock is one room's in-process lock and how many callers hold it or wait for it.
@@ -130,6 +135,9 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("commit document update: %w", err)
 		}
 		credit.held(version)
+		if p.afterAppendCommit != nil {
+			p.afterAppendCommit(room, version)
+		}
 		// The room instance's cursor advances here, inside the lock the append holds, rather than
 		// where the caller marked the context with it (StoreUpdateContext): a writer that took the
 		// lock after this commit released it would otherwise read a cursor one version behind the

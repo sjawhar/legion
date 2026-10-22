@@ -30,7 +30,8 @@ import (
 // Locks. A transaction takes a live document's locks in one order and holds each until it
 // commits, the slot until it publishes: the document's owner row (lockArtifactOwner: its
 // issue's row, or a project document's own artifact row), then the writer slot, then the
-// document's advisory lock (lockDocumentRoom; AppendUpdateTx takes it too). A joined read,
+// document's advisory lock (lockDocumentRoom; AppendUpdateTx takes it, and so does a fork whose
+// first read finds its room's cursor away from the head, roomBehindHead). A joined read,
 // which waits for the slot but writes nothing, takes the owner row alone. Postgres cannot see a
 // wait for the slot, which is in memory. Every transaction that waits for or holds it holds the
 // owner row first, so a transaction waiting for the slot waits only for a committed write's
@@ -220,9 +221,11 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // envoy-dispatch process appended what this room never took, so a write made on this room's
 // document would be refused at its append (the gate in appendUpdateTxClass) and the agent's edit
 // would answer 503; the stored document holds every update, so the write is made on that instead
-// and succeeds against the current text. Uploads and conditional edits hold the document's
-// advisory lock from before this read until they commit (ReplaceText, ApplyOps), so for them the
-// head this compares against is the head their append meets.
+// and succeeds against the current text. Which room that is has to be read exactly, under the
+// document's advisory lock (roomBehindHead): a healthy room judged behind is forked from a store
+// that holds less of the document than the room does. Uploads and conditional edits hold that
+// lock from before this read until they commit (ReplaceText, ApplyOps), so for them the head this
+// compares against is the head their append meets from the first read on.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	live := s.srv.GetDoc(write.artifactID)
 	if live == nil {
@@ -246,6 +249,29 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // publishes, so the room's cursor is read with them folded in (liveWrite.withOwnAppends);
 // without that every operation after a transaction's first append would judge its own room
 // behind. A document whose room kept no cursor is not judged behind: nothing says it is.
+//
+// A difference the first read sees is not the answer, for the reason the stale-room evictor reads
+// twice as well (documentChanged): every durable writer of this process advances the room's
+// cursor inside the document's advisory lock, after the commit that raised the head
+// (PgVersioned.appendUpdate, Ledger.takeRoomCursors), so a reader holding no lock lands between a
+// browser append's commit and its cursor advance and reads a healthy room as one another process
+// left behind. The confirmation takes that lock in the caller's own transaction, which holds it
+// until the transaction ends, as an upload and a conditional edit already hold it from before
+// their fork read (ReplaceText, ApplyOps): under it no write of this process sits between its
+// commit and its cursor, and no append lands between the cursor read and the head read beside it.
+// It costs that lock only where the cheap read saw a difference, which a healthy room under its
+// own browsers' writes sees rarely and a room another process left behind sees once and then
+// always.
+//
+// Why the false verdict is worth a lock. It sent the write down the cold path (forkLive), which
+// reads the stored document - and the store of a room still writing is behind the room by
+// whatever its persistence worker has not appended yet, in the order its observers fired rather
+// than the order the room applied them (consumeUpdateClass). A version prefix of that is not a
+// state the document ever held: an update whose deletes landed without the inserts they replaced
+// leaves a tree with no block in it at all, which every write starting from it refuses
+// (ErrDocOutsideSchema). A room confirmed behind the head has no such store: nothing it still
+// owes can become durable, because the gate refuses its every append (refuseRoomBehindHead) until
+// it is reloaded, so the stored document is the whole of what this process can still write from.
 func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *crdt.Doc) (bool, error) {
 	cursor := s.cursorOf(live)
 	tx, joined := txFromContext(ctx)
@@ -254,6 +280,15 @@ func (s *Service) roomBehindHead(ctx context.Context, write *liveWrite, live *cr
 	}
 	head, err := currentUpdateCursor(ctx, tx, write.artifactID)
 	if err != nil {
+		return false, err
+	}
+	if write.withOwnAppends(cursor.heldThrough()) == head {
+		return false, nil
+	}
+	if err := lockDocumentRoom(ctx, tx, write.artifactID); err != nil {
+		return false, err
+	}
+	if head, err = currentUpdateCursor(ctx, tx, write.artifactID); err != nil {
 		return false, err
 	}
 	return write.withOwnAppends(cursor.heldThrough()) != head, nil

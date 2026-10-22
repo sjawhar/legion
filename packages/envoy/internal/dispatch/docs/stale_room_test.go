@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -451,6 +452,98 @@ func TestABrowserAppendQueuedBehindThisProcessesWriteIsNotRefused(t *testing.T) 
 		if !strings.Contains(stored, want) {
 			t.Fatalf("the stored document = %q, want it to hold %q", stored, want)
 		}
+	}
+}
+
+// A browser's append raises the document's head when it commits and takes that version into its
+// room's cursor a moment later, both inside the document's advisory lock
+// (PgVersioned.appendUpdate). A write that reads the cursor and the head without that lock lands
+// between the two and reads a healthy room as one another process left behind, so it forks from
+// the stored document rather than from the room (forkLive). The store of a room still writing
+// holds less than that room - what its persistence worker has not appended yet - and takes what
+// it does hold in the order the room's update observers fired, not the order the room applied
+// them (consumeUpdateClass), so a write that forks it can read a state the document never held:
+// an update whose deletes landed without the inserts they replaced leaves a tree with no block in
+// it at all, which every write starting from it refuses (ErrDocOutsideSchema). That is the
+// intermittent failure of TestTheUpdateObserverNeverRendersAWriteHalfWay. Here the room holds a
+// second browser edit the store has not taken, so a fork of the store is one the write can see is
+// not the whole document.
+func TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	appends, ok := service.persistence.(*PgVersioned)
+	if !ok {
+		t.Fatalf("the service appends through %T, which holds no window between a commit and its cursor", service.persistence)
+	}
+	committed, release := make(chan struct{}), make(chan struct{})
+	var opened, closed sync.Once
+	releaseWindow := func() { closed.Do(func() { close(release) }) }
+	// Before the service's own cleanup, which cannot shut down while an append is held here.
+	t.Cleanup(releaseWindow)
+	appends.afterAppendCommit = func(room string, _ persistence.Version) {
+		held := false
+		if room == artifactID {
+			opened.Do(func() { held = true })
+		}
+		if !held {
+			return
+		}
+		close(committed)
+		<-release
+	}
+
+	// The browser's first edit commits its append and holds the window open from inside it. Its
+	// second reaches the room while that append is still there, so the room holds a paragraph the
+	// store has not taken.
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Alpha paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's first edit: %v", err)
+	}
+	select {
+	case <-committed:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the browser's append never committed, so no window opened")
+	}
+	if err := browserStyleWrite(service, artifactID, appendBlocks(t, "Bravo paragraph.\n"), make(chan struct{})); err != nil {
+		t.Fatalf("the browser's second edit: %v", err)
+	}
+
+	var cold bool
+	var forked string
+	written := make(chan error, 1)
+	go func() {
+		written <- joinedWrite(service, func(ctx context.Context) error {
+			if err := service.ProjectMark(ctx, artifactID, "mark-in-the-window", MarkRecord{
+				Kind: "comment", By: "user:bob", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
+			}, model.Actor{Kind: "user", ID: "bob"}); err != nil {
+				return err
+			}
+			write := joinedLiveWrite(ctx, artifactID)
+			cold = write.cold
+			tree, err := treeOf(write.fork)
+			if err != nil {
+				return err
+			}
+			forked, err = documentMarkdown(tree)
+			return err
+		})
+	}()
+	// The write has made its fork's decision once it waits on the document's advisory lock: for
+	// the confirmation that decision needs, or, having taken it without one, for its own append.
+	waitForLockWait(t, context.Background(), service.store, "%pg_advisory_xact_lock%", written)
+	releaseWindow()
+	if err := <-written; err != nil {
+		t.Fatalf("a mark projection made inside the window: %v", err)
+	}
+	if cold {
+		t.Error("the write forked the stored document while its room held every update the store did")
+	}
+	if !strings.Contains(forked, "Bravo paragraph.") {
+		t.Errorf("the write forked %q, want it to hold the paragraph only its room held", forked)
 	}
 }
 
