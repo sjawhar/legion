@@ -223,7 +223,7 @@ Legion uses GitHub's own review mechanisms rather than labels:
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
   the issue and tells the architect; neither stops a worker. At the round cap the architect decides,
-  in the turn the notice wakes, whether to narrow the next rounds, split work into a child, or let
+  in the turn the notice wakes, whether to narrow the next rounds, split work into an issue of its own, or let
   converging rounds run, and posts that decision on the issue. Every move back to an earlier phase
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
   daemon's own move when CI turns red or the head starts conflicting with its base. Once

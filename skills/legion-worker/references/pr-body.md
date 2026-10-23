@@ -65,7 +65,7 @@ then pushes and completes. It never waits for, watches or polls the pull request
 (`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop.
 Under the Go daemon a check or workflow the base branch requires that settles red on the head,
 before the completion or after it, sends the work back to `implementing` with the failing checks
-named. The one CI result an implementer waits for is a re-run: when its task names a red that
+named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
 failed on its own, it re-runs the failed jobs once (`gh run rerun <run-id> --failed`) and completes once
 the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Waiting for
 CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completion while that red
@@ -117,7 +117,9 @@ and the tester's proof below are both this proof.
   second and the concurrent run, the party it must refuse — judge whether the implementer's tests
   would catch the ways it breaks, writing the red test for one that none would, and
   read CI for everything static: lint, types and the unit and integration suites are CI's, cited
-  from the `CI` line, and no CI lane is rerun as evidence.
+  from the `CI` line, and no CI lane is rerun as evidence. A lane the line shows `queued` or
+  `in progress` is cited as such: the tester never waits for it, since a required red that settles
+  sends the work back from `testing` and the reviewer reads the head's checks before it approves.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
