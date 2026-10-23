@@ -104,11 +104,16 @@ type staleRoomEvictor struct {
 	evicted map[string]time.Time
 	// deferred is when each room waiting to be re-examined may be: a room the interval refused,
 	// at its last eviction plus staleRoomEvictInterval (mayEvict), and a room whose
-	// re-examination reached no verdict, one interval past the attempt that got no answer
+	// re-examination reached no verdict, one backoff past the attempt that got no answer
 	// (armRetry). The wake takes out every room whose window has passed (dueRooms), and only a
 	// re-examination that reached a verdict leaves it out, so this holds at most one entry per
 	// room resident here.
 	deferred map[string]time.Time
+	// attempts is how many re-examinations in a row have reached no verdict for each room: what
+	// armRetry backs that room's next window off by. The first such attempt makes the entry, and
+	// that room's next verdict takes it out (reachedVerdict, recordEviction), so this holds at
+	// most one entry per room in deferred.
+	attempts map[string]int
 }
 
 func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
@@ -118,6 +123,7 @@ func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
 		now:      service.now,
 		evicted:  map[string]time.Time{},
 		deferred: map[string]time.Time{},
+		attempts: map[string]int{},
 	}
 }
 
@@ -187,8 +193,9 @@ func (e *staleRoomEvictor) connected(ctx context.Context) func() {
 // in-flight write, the unlocked read and the locked confirmation - so a room that is no longer
 // behind, no longer resident or no longer this process's evicts nothing and simply leaves the set.
 // A room whose re-examination reaches no verdict - a read that failed, an eviction that did not
-// happen - does not leave it either: dueRooms has spent that room's window, and armRetry gives
-// it the next one, so the next wake tries it again.
+// happen, a write of this process still landing - does not leave it either: dueRooms has spent
+// that room's window, and armRetry gives it another, further out for each attempt in a row, so
+// the next wake tries it again and the listener still gets its idle period back.
 func (e *staleRoomEvictor) woke(ctx context.Context) func() {
 	return func() {
 		for _, room := range e.dueRooms() {
@@ -233,14 +240,15 @@ func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactI
 //
 // Every return from here is either a verdict or an attempt that got no answer, and which of the
 // two it is decides whether a deferred room's window is spent. A verdict - no room here, no
-// cursor, a write of this process in flight, the room at the head, or a room behind the head
-// that Evict closed - says what was to become of the room, so the window that brought it here
-// has done its work. A head read that failed, or an Evict that closed nothing, says nothing
-// about the room, so the room is armed again (armRetry) and the next wake tries it: the
-// notification that brought it here is already spent - the last of a burst is one the interval
-// refuses - and a dropped attempt leaves a connected reader holding text the store replaced,
-// with nothing left to re-examine the room (roomIdleTimeout counts from the last peer leaving,
-// and that reader has not left).
+// cursor, the room at the head, or a room behind the head that Evict closed - says what was to
+// become of the room, so the window that brought it here has done its work, and the run of
+// attempts that got no answer before it, if there was one, ends with it (reachedVerdict). A head
+// read that failed, an Evict that closed nothing, or a write of this process still in flight
+// says nothing about the room, so the room is armed again (armRetry) and the next wake tries it:
+// the notification that brought it here is already spent - the last of a burst is one the
+// interval refuses - and a dropped attempt leaves a connected reader holding text the store
+// replaced, with nothing left to re-examine the room (roomIdleTimeout counts from the last peer
+// leaving, and that reader has not left).
 func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID string) bool {
 	// The interval first, ahead of the room lookup, the unlocked head read, and the locked
 	// confirmation behind that: a room the interval refuses evicts nothing whatever those reads
@@ -257,19 +265,31 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	if live == nil {
 		// No room here for that document: the notification was for a room the other process
 		// holds, or for a document nobody has open.
+		e.reachedVerdict(artifactID)
 		return false
 	}
 	cursor := service.cursorOf(live)
 	if cursor == nil {
 		// A resident document no room load listed (keepInstance): nothing says what it holds,
 		// and a room is not closed on a guess.
+		e.reachedVerdict(artifactID)
 		return false
 	}
 	// A write of this process's own is still landing: it is about to advance this room's cursor,
 	// and a room closed under it would take its publish with it. The lock the confirmation below
 	// takes would wait for a write that holds it, but an open write holds no lock between its
 	// operations, and the room it forked is the room this would close.
+	//
+	// An attempt, not a verdict: the room is left exactly as stale as it was found, and only a
+	// write that appends something comes back for it. Two of the three writers this reports do
+	// come back - a browser append from a room behind the head is refused and fails the room, a
+	// settlement is retried and fails it - but a live write that appends nothing (no changes, a
+	// mutate that failed, an operation rolled back) commits no history and so announces none, and
+	// this is the only reader of hasWriteInFlight. Dropped here, that room is left behind the
+	// head with a connected reader on it and its window spent. Armed, it costs one more
+	// re-examination a window later, by which time the write is finished.
 	if service.hasWriteInFlight(artifactID) {
+		e.armRetry(artifactID)
 		return false
 	}
 	head, err := currentUpdateCursor(ctx, service.store.Pool, artifactID)
@@ -281,6 +301,7 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		return false
 	}
 	if cursor.heldThrough() == head {
+		e.reachedVerdict(artifactID)
 		return false
 	}
 	through, head, err := service.roomBehindDurableHead(ctx, artifactID, cursor)
@@ -292,6 +313,7 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		return false
 	}
 	if through == head {
+		e.reachedVerdict(artifactID)
 		return false
 	}
 	// Evict is the service's own forced reload: it closes the room, flushing what the room still
@@ -416,28 +438,83 @@ func (e *staleRoomEvictor) recordEviction(artifactID string) {
 	}
 	e.evicted[artifactID] = now
 	// The eviction is the re-examination a deferred window for this room was waiting for, so that
-	// window is spent: a write that leaves the reloaded room behind again notifies again, and the
-	// refusal that would follow defers a window of its own.
+	// window is spent, and so is any run of attempts that got no answer before it: a write that
+	// leaves the reloaded room behind again notifies again, the refusal that would follow defers
+	// a window of its own, and the next attempt that gets no answer is armed one
+	// staleRoomEvictInterval out, like the first (armRetry).
 	delete(e.deferred, artifactID)
+	delete(e.attempts, artifactID)
+}
+
+// staleRoomRetryBackoffMax is the ceiling of armRetry's backoff, and it is past
+// pglisten.DefaultListenIdle because that is what hands the wait back to the listener. waitFor
+// takes the sooner of the caller's wake and the idle period, so every wake inside that period is
+// a wait the evictor has taken over; a room whose re-examinations keep reaching no verdict is
+// armed again after each of them with no notification in between, so at a fixed interval it owns
+// every wait the listener makes for the life of the process, and the idle ping never fires. That
+// ping is the only thing that finds a half-open LISTEN connection - WaitForNotification on such a
+// socket returns deadline-exceeded rather than an error, and pgx keeps the connection open - and
+// a listener that hears no notification at all is the failure this whole file acts on, so it
+// cannot be the one thing a retry hides. Past the idle period the wake is the listener's again
+// (wake >= idle in waitFor): it waits its idle period out, pings, and re-examines the room on a
+// later round of the same loop. Twice that period rather than exactly it, so the ceiling is past
+// the boundary whichever way waitFor compares.
+//
+// Nothing needed this before armRetry, which is worth keeping: the deferred set drained whenever
+// the notifications stopped - every window in it was one a notification opened, and a
+// re-examination that reached a verdict took it out - so a wake implied traffic had just
+// arrived, and traffic is a connection proving itself.
+const staleRoomRetryBackoffMax = 2 * pglisten.DefaultListenIdle
+
+// staleRoomRetryBackoff is the wait before the attempt-th re-examination in a row of one room
+// whose attempts keep reaching no verdict (from 1): one staleRoomEvictInterval, doubling to
+// staleRoomRetryBackoffMax. It is pglisten.RedialBackoff's shape written out rather than that
+// function called, because this one starts at the evictor's own interval rather than a second,
+// and adds no jitter: the jitter is there to keep the tasks of a rolling deploy from redialing
+// one database in step, and this is one process re-reading one of its own rooms, which nothing
+// else is in step with.
+func staleRoomRetryBackoff(attempt int) time.Duration {
+	wait := staleRoomEvictInterval
+	for n := 1; n < attempt && wait < staleRoomRetryBackoffMax; n++ {
+		wait *= 2
+	}
+	return min(wait, staleRoomRetryBackoffMax)
 }
 
 // armRetry gives artifactID a window to be re-examined in after an attempt that reached no
-// verdict - a head read that failed, or an Evict that closed nothing (documentChanged). The room
-// is as stale as that attempt found it, the notification that carried the attempt is spent, and
-// a document nobody writes again notifies nobody again, so the wake this window asks for is the
-// only thing that comes back for it (wakeIn, woke).
+// verdict - a head read that failed, an Evict that closed nothing, or a write of this process
+// still in flight (documentChanged). The room is as stale as that attempt found it, the
+// notification that carried the attempt is spent, and a document nobody writes again notifies
+// nobody again, so the wake this window asks for is the only thing that comes back for it
+// (wakeIn, woke).
 //
-// One staleRoomEvictInterval from now, rather than the window that has just passed: wakeIn asks
-// for the shortest wait there is for a window already behind it, so a room re-armed at that
-// moment would have the listener re-run the whole decision as fast as it loops for as long as
-// whatever failed keeps failing. On the interval, a room that goes on failing is retried as
-// often as a burst's notifications are refused and no oftener.
+// The first window is one staleRoomEvictInterval from now, rather than the window that has just
+// passed: wakeIn asks for the shortest wait there is for a window already behind it, so a room
+// re-armed at that moment would have the listener re-run the whole decision as fast as it loops
+// for as long as whatever failed keeps failing. On the interval, a room that goes on failing is
+// retried as often as a burst's notifications are refused and no oftener. Each attempt in a row
+// after the first is further out than the last (staleRoomRetryBackoff), to a ceiling past the
+// listener's idle period, which hands the wait back to the listener so its ping can prove the
+// connection (staleRoomRetryBackoffMax). The count is the room's own and ends at that room's next
+// verdict (reachedVerdict), so the ordinary case - one read that failed, answered at the next
+// window - is armed one interval out every time.
 //
 // Through the evictor's one mutex, on the listener's own goroutine, like every other decision
 // here: nothing is armed from a timer or a goroutine of its own.
 func (e *staleRoomEvictor) armRetry(artifactID string) {
-	at := e.now().Add(staleRoomEvictInterval)
+	now := e.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.deferred[artifactID] = at
+	e.attempts[artifactID]++
+	e.deferred[artifactID] = now.Add(staleRoomRetryBackoff(e.attempts[artifactID]))
+}
+
+// reachedVerdict ends artifactID's run of attempts that reached none, so the next one is armed
+// one staleRoomEvictInterval out again (armRetry): the backoff answers a room whose
+// re-examinations go on getting no answer, and a verdict is an answer - the reads worked, or
+// there is no room left to read for.
+func (e *staleRoomEvictor) reachedVerdict(artifactID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.attempts, artifactID)
 }

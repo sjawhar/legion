@@ -431,6 +431,81 @@ func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }
 
+// A room whose re-examinations keep reaching no verdict is re-armed further out each time, as far
+// as a window past the listener's idle period, so the idle ping fires again. The listener's wait
+// is the sooner of the caller's wake and its idle period (pglisten.Listener.waitFor), so while
+// the evictor asks for a wake inside that period - which a fixed interval does for ever, with no
+// notification arriving to drain the room out of the deferred set - every wait the listener makes
+// ends at a wake and the ping never runs. That ping is the only thing that finds a half-open
+// LISTEN connection: WaitForNotification on such a socket returns deadline-exceeded rather than
+// an error and pgx keeps the connection open, so a listener that hears no notification at all -
+// the very failure this file acts on - would go unnoticed for the life of the process.
+//
+// The reads here get no answer the way TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow
+// arranges it: the head read is made through a context that already holds one of the pool's
+// connections, which the pool refuses (store.ErrNestedAcquire). The first window and the ceiling
+// are what this asserts, not the steps between them: the first is the cadence the ordinary case
+// converges on, and the ceiling is what hands the wait back to the listener.
+func TestARoomThatKeepsGettingNoAnswerBacksOffPastTheListenersIdlePeriod(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	now := time.Now()
+	evictor.now = func() time.Time { return now }
+	ctx := context.Background()
+	bob := model.Actor{Kind: "user", ID: "bob"}
+
+	// The burst's first write, which evicts: the eviction the interval refuses the next one by.
+	pair.leaveTaskABehind(t, 2, bob, "Bob types once.\n")
+	if !evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatal("the first write on the other process evicted nothing, so the interval holds no eviction to defer the next notification by")
+	}
+	// The burst's last write, inside the window: refused, and the window it arms is where the
+	// run of attempts that get no answer begins.
+	pair.leaveTaskABehind(t, 3, bob, "Bob types again inside the window.\n")
+	if evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatalf("a second write within %s evicted the room again, under readers the eviction before it had not finished re-syncing", staleRoomEvictInterval)
+	}
+	wake := evictor.wakeIn()
+	if wake <= 0 {
+		t.Fatalf("the refusal asks for no wake (wakeIn = %s), so the room is already dropped and this row tests nothing", wake)
+	}
+
+	blind, release := store.HoldsConnection(context.Background())
+	defer release()
+	// Two seconds doubling to a minute reaches the ceiling on the sixth attempt; the bound is
+	// what keeps a backoff that never arrives there from running this loop for ever.
+	const attempts = 8
+	var first time.Duration
+	for attempt := 1; attempt <= attempts; attempt++ {
+		now = now.Add(wake)
+		evictor.woke(blind)()
+		wake = evictor.wakeIn()
+		if attempt == 1 {
+			first = wake
+		}
+		if wake >= staleRoomRetryBackoffMax {
+			break
+		}
+	}
+	if first != staleRoomEvictInterval {
+		t.Fatalf("the first re-arm after an attempt that got no answer waits %s, not the %s the ordinary case - one read that failed, answered at the next window - converges on", first, staleRoomEvictInterval)
+	}
+	if wake < pglisten.DefaultListenIdle {
+		t.Fatalf("after %d re-examinations that reached no verdict the room is still re-armed %s out, inside the listener's %s idle period: waitFor returns that wake on every round (0 < wake < idle), so the ping that is the only thing that finds a half-open LISTEN connection never fires", attempts, wake, pglisten.DefaultListenIdle)
+	}
+	if wake != staleRoomRetryBackoffMax {
+		t.Fatalf("the backoff settled at %s rather than its %s ceiling", wake, staleRoomRetryBackoffMax)
+	}
+
+	// Still the room this row is about: behind the head, resident, and waiting on that window.
+	if pair.taskA.srv.GetDoc(pair.artifactID) == nil {
+		t.Fatal("a re-examination that could not read the head closed the room anyway")
+	}
+	if !roomBehind(t, pair.taskA, pair.artifactID) {
+		t.Fatal("task A's room stands at the head, so there is nothing left for the backed-off window to find")
+	}
+}
+
 // A notification sent while the listener has no connection converges on its reconnect. That
 // notification reaches nobody and nothing sends it again, and a redial backs off as far as thirty
 // seconds (pglisten.RedialBackoff), so a room the other process wrote under in that window would
@@ -514,6 +589,62 @@ func TestARoomWithAWriteInFlightIsNotEvictedUnderIt(t *testing.T) {
 	if !evictor.documentChanged(ctx, pair.artifactID) {
 		t.Fatal("the room was not evicted once nothing was in flight on it")
 	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
+// A room re-examined while a write of this process is in flight on it keeps a window of its own:
+// the guard that spares it is an attempt, not a verdict. The wake has already spent the window
+// that brought the room here (dueRooms), and two of the three writers the guard reports do come
+// back for the room - a browser append from a room behind the head is refused and fails the room,
+// a settlement is retried and fails it - but a live write that appends nothing (no changes, a
+// mutate that failed, an operation rolled back) commits no history and so announces none, and
+// nothing else reads hasWriteInFlight. Dropped here, the room is left behind the head with a
+// reader on it and nothing left to look at it again: roomIdleTimeout counts from the last peer
+// leaving, which a room with a tab in it never reaches.
+func TestARoomReExaminedWithAWriteInFlightKeepsItsWindow(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	now := time.Now()
+	evictor.now = func() time.Time { return now }
+	ctx := context.Background()
+	bob := model.Actor{Kind: "user", ID: "bob"}
+
+	// The burst's first write, which evicts: the eviction the interval refuses the next one by.
+	pair.leaveTaskABehind(t, 2, bob, "Bob types once.\n")
+	if !evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatal("the first write on the other process evicted nothing, so the interval holds no eviction to defer the next notification by")
+	}
+	// The burst's last write, inside the window: refused, and the window it arms is all that is
+	// left to close the room.
+	pair.leaveTaskABehind(t, 3, bob, "Bob types again inside the window.\n")
+	if evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatalf("a second write within %s evicted the room again, under readers the eviction before it had not finished re-syncing", staleRoomEvictInterval)
+	}
+
+	// The window ends on a live write of this process that is still open on the room.
+	now = now.Add(staleRoomEvictInterval)
+	state := pair.taskA.lockState(pair.artifactID)
+	state.liveWriter = &liveWrite{}
+	pair.taskA.unlockState(pair.artifactID, state)
+	evictor.woke(ctx)()
+	if pair.taskA.srv.GetDoc(pair.artifactID) == nil {
+		t.Fatal("the room was closed under the write in flight on it, which would take that write's publish with it")
+	}
+	wake := evictor.wakeIn()
+	if wake <= 0 {
+		t.Fatalf("the re-examination that found a write in flight spent the room's window (wakeIn = %s): the room is behind the head with a reader in it and nothing - not even a write that appends nothing - will look at it again", wake)
+	}
+	if wake < staleRoomEvictInterval {
+		t.Fatalf("the room was re-armed %s out, inside the %s interval: the re-examination would run as fast as the listener loops for as long as the write is open", wake, staleRoomEvictInterval)
+	}
+
+	// The write finishes with nothing appended, so nothing notifies this process again: the
+	// window the guard armed is what closes the room.
+	state = pair.taskA.lockState(pair.artifactID)
+	state.liveWriter = nil
+	pair.taskA.unlockState(pair.artifactID, state)
+	now = now.Add(wake)
+	evictor.woke(ctx)()
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }
 
