@@ -167,7 +167,9 @@ advertises.
 Subscribe to `notifications.github.example-org.example-repo.pr.42.>` and end the turn. The single
 `pr.42.checks` event whose `sha` is the current head wakes you when it settles (an earlier
 commit's settlement can arrive first); a `pr.42` `closed` event with
-`merged: true` tells you the PR merged. Do not create `gh` pollers.
+`merged: true` tells you the PR merged. Do not create `gh` pollers. A Legion implementer waits this
+way only on a re-run of a red its task names; otherwise it pushes and completes its phase, and the
+daemon reads CI for it (`skill://legion-worker`).
 Settlement waits for the commit to be quiet for a few seconds, every reported check run to finish,
 and every recorded GitHub check suite to be `completed`. It covers those reported checks and suites
 for that commit, not GitHub's required-checks set; until then, a silent subscription is normal.
