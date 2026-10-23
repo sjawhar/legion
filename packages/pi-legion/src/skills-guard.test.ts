@@ -146,3 +146,51 @@ test("the skip-checks recipe writes two empty lines before the trailer, everywhe
     .map((file) => path.relative(REPO_ROOT, file));
   expect(short).toEqual([]);
 });
+
+// INFRA-83 took the `CI:` line out of the pull request body, and the forward merge of main put the
+// paragraph that defined it back into skills/legion-worker/references/pr-body.md with no conflict
+// for anyone to read: a merge keeps both sides by design, so a deletion is undone in silence. The
+// body carries no such line, and that reference is the file every worker reads before it touches a
+// body, so no staged skill may say what the line holds or tell anyone to write one.
+//
+// The rule fires on the instruction, never on a mention, because an instruction puts the line in a
+// grammatical slot a mention cannot reach: as the subject of a verb that says what it contains
+// ("the `CI` line names the runs"), as the object of a verb that says to write one behind a
+// definite determiner ("writes the `CI` line", "cited from the `CI` line"), or as the template's
+// own field line (`**CI:**` opening a line). A sentence that names the line while saying it is
+// gone cannot take any of those shapes: it puts the negator in the determiner slot ("has no `CI:`
+// line", "carries no `CI:` line"), leaves the verb after the reference and passive ("wherever the
+// CI line is quoted", "no `CI:` line to fill"), or negates the verb ("never writes the `CI`
+// line"). What the rule does not catch is a pronoun — a sentence saying only "the implementer
+// writes it" passes — which is why the anchor is the defining sentence such a paragraph opens
+// with, not its later anaphora.
+test("no staged skill says what a pull request body `CI` line holds, or tells anyone to write one", () => {
+  // `CI` line, `CI:` line, **CI** line, "CI" line, or bare CI line, wrapped across lines or not.
+  const reference = String.raw`(?:\*\*|\`|")?CI:?(?:\*\*|\`|")?\s+line`;
+  const instructions = [
+    // The line as the subject of a verb that says what it contains.
+    new RegExp(
+      String.raw`${reference}\s+(?:names|holds|carries|lists|records|shows|gives)\b`,
+      "gi"
+    ),
+    // The line as the object of a verb that says to write one, behind a definite determiner so
+    // that `no …` and `any …` cannot fill that slot, and not itself negated.
+    new RegExp(
+      String.raw`(?<!\b(?:never|no longer|not)\s)\b(?:re-)?(?:writes?|written|fills?|filled|updates?|cites?|cited|defines?|quotes?|records?)\s+(?:\w+\s+){0,2}(?:the|a|its|this|each)\s+${reference}`,
+      "gi"
+    ),
+    // The template's own field line, which is an instruction to fill it in.
+    /^\*\*CI:?\*\*/gm,
+  ];
+  const instructing = files(staged)
+    .filter((file) => file.endsWith(".md"))
+    .flatMap((file) => {
+      const text = readFileSync(file, "utf8");
+      return instructions
+        .flatMap((instruction) => [...text.matchAll(instruction)])
+        .map(
+          ({ index }) => `${path.relative(staged, file)}:${text.slice(0, index).split("\n").length}`
+        );
+    });
+  expect(instructing).toEqual([]);
+});

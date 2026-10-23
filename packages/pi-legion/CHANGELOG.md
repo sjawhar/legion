@@ -97,6 +97,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   on the issue: narrow the next rounds to named acceptance lines, split the part that cannot settle
   into an issue of its own blocked by this one, or let rounds that each found less than the one before run on. The daemon's cap
   still notifies only.
+
 - **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
   under `--check-config`, a host with any character outside ASCII in `advertise_host`, `bind`, an
   NFS volume's `server`, and the host of `daemon_url`, `envoy_url`, `dispatch_url`, each
