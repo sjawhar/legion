@@ -44,9 +44,9 @@ const (
 	labelProbe     = "legion.dev/probe"
 	probeContainer = "probe"
 	// probeLogLines is how much of the probe pod's log is read and quoted. The capability table
-	// (internal/capabilities) is one line per row, about twenty, printed before the OK line, so
-	// the TypeScript probe's 50 (LOG_TAIL_LINES, worker-image-probe.ts:59) would leave a refused
-	// image's own messages, printed before the table, out of the tail the refusal quotes. The
+	// (internal/capabilities) is one line per row, about twenty, printed before the OK line, so a
+	// 50-line tail would leave a refused image's own messages, printed before the table, out of the
+	// tail the refusal quotes. The
 	// tail probeLog keeps (probeLogBytes) is kept from its end (lastBytes), so the OK line, the
 	// tail's last line, is in reach whatever a line's length: a capability line is its prefix,
 	// the row's own words, and a command's quoted output cut at 300 characters
@@ -63,13 +63,97 @@ const (
 	// line, the tail's last line, out of reach.
 	probeLogBytes = 64 << 10
 	// probeTerminationGrace is the probe pod's terminationGracePeriodSeconds: it holds nothing to
-	// save (worker-image-probe.ts:144).
+	// save.
 	probeTerminationGrace = 5
 )
 
 // definitiveWaiting are the container waiting reasons no retry changes: the image reference itself
-// is unusable (DEFINITIVE_WAITING_REASONS, worker-image-probe.ts:60-64).
+// is unusable.
 var definitiveWaiting = map[string]bool{"InvalidImageName": true, "ErrImageNeverPull": true}
+
+// pullWaiting are the waiting reasons of a pull that failed (ErrImagePull) and of the back-off
+// after it (ImagePullBackOff), whose message carries the failed pull's error after `Back-off
+// pulling image "<image>": ErrImagePull: ` (pkg/kubelet/images/image_manager.go, EnsureImageExists,
+// prevPullErrMsg). Either reason alone also covers a registry that refused the node's credentials,
+// one the node could not reach, and one that rate-limited it, so only the message decides
+// (registryHasNoImage).
+var pullWaiting = map[string]bool{"ErrImagePull": true, "ImagePullBackOff": true}
+
+// imageNotFound is containerd's answer to a pull whose reference the registry does not have: its
+// CRI image service wraps the pull's error as `failed to pull and unpack image "<ref>": …`
+// (internal/cri/server/images/image_pull.go at v2, pkg/cri/server/image_pull.go at v1.7). A local
+// pull wraps a resolution's as `failed to resolve reference "<ref>": …` (client/pull.go at v2,
+// pull.go at v1.7); a pull through containerd's transfer service, the CRI's default from 2.1 unless
+// its configuration asks for something the service lacks (internal/cri/config/config.go,
+// CheckLocalImagePullConfigs), wraps it as `failed to resolve image: …` (core/transfer/local/
+// pull.go). The failure reaches the kubelet as gRPC NotFound only when it is errdefs.ErrNotFound.
+// The resolver's Resolve (core/remotes/docker/resolver.go at v2, remotes/docker/resolver.go at
+// v1.7) answers `<ref>: not found` when the registry answered 404. An unauthorized pull (`pull
+// access denied, …`), a rate limit and a server error carry another code or none. The resolver's
+// other ErrNotFound answers say nothing of the registry's contents — `no resolve hosts: not found`
+// (the node's registry configuration) and `rejecting <n> byte manifest for <ref>: not found` (a
+// manifest past containerd's size limit) — nor does a NotFound past resolution, `failed to copy: …
+// not found`, a manifest or layer the registry named and then did not serve; so the whole message
+// must be the one grammar, every reference in it the same (namesOneReference).
+//
+// One answer is not enough. containerd 2 resolves a digest as a manifest and then as a blob, and
+// ranks a 404 above a request that failed, so a manifest request the network cut followed by the
+// blob request's 404 — which a registry answers for a manifest it holds, GHCR among them — reads as
+// this answer too. The probe therefore refuses only once the kubelet has met it on two pulls
+// (registryHasNoImage): each pull resolves afresh, and the kubelet's second comes about ten seconds
+// after the first (its image back-off's first step). On a node configured with several hosts for
+// one registry (a mirror in containerd's hosts.toml), containerd 2 likewise reports one host's 404
+// over another host's failed request — a refused connection, a timeout, or credentials the host
+// refused (`pull access denied`, `authorization failed`, `failed to authorize`) — so a mirror that
+// lacks the image while the registry behind it stays unreachable or keeps refusing the node's
+// credentials is refused as a missing image; the refusal quotes the kubelet, which names the
+// reference, and a mirror that lags its registry is the node's to fix.
+//
+// Measured on kind with containerd 2.0.2 (Kubernetes v1.32.2), 2.1.3 (v1.34.0) and 2.3.4 (v1.37.0),
+// whose kind configuration (`discard_unpacked_layers`) keeps the local pull, against public
+// registries, and on 2.0.2 against a stub answering each status: `rpc error: code = NotFound desc =
+// failed to pull and unpack image "<ref>": failed to resolve reference "<ref>": <ref>: not found`
+// for the 404 on each, the wording a GKE node's Failed event quotes for a digest its registry
+// lacks; and on 2.3.4 with that setting removed, so the transfer service pulls: `rpc error: code =
+// NotFound desc = failed to pull and unpack image "<ref>": failed to resolve image: <ref>: not
+// found`, while a repository Docker Hub does not have read `… failed to resolve image: pull access
+// denied, …` with no code. Docker Hub answers such a repository with 401, read as credentials and
+// retried; another runtime's wording (CRI-O's `manifest unknown`) falls to the retry too.
+const imageNotFound = `rpc error: code = NotFound desc = failed to pull and unpack image "([^"]+)": (?:failed to resolve reference "([^"]+)"|failed to resolve image): (.+): not found$`
+
+// pullNotFound matches imageNotFound as a pull's waiting message, alone or after the back-off's
+// `Back-off pulling image "<ref>": ErrImagePull: ` (pkg/kubelet/images/image_manager.go,
+// EnsureImageExists, prevPullErrMsg); pullFailedNotFound matches it as the kubelet's Failed event
+// for the pull, `Failed to pull image "<ref>": <error>` (the same function's FailedToPullImage).
+var (
+	pullNotFound       = regexp.MustCompile(`^(?:Back-off pulling image "[^"]+": ErrImagePull: )?` + imageNotFound)
+	pullFailedNotFound = regexp.MustCompile(`^Failed to pull image "[^"]+": ` + imageNotFound)
+)
+
+// namesOneReference reports whether message matches pattern with every reference imageNotFound
+// captures the same: the image's, the resolved reference's on a local pull (none on the transfer
+// service's), and the one the resolver says it did not find.
+func namesOneReference(pattern *regexp.Regexp, message string) bool {
+	m := pattern.FindStringSubmatch(message)
+	return m != nil && m[1] == m[3] && (m[2] == "" || m[2] == m[1])
+}
+
+// registryHasNoImage reports whether the probe container's waiting state w is a pull the registry
+// refused because it does not have the image (pullNotFound), and the pod's events show the kubelet
+// met that answer on two pulls or more: the Failed events whose message is it, counted as the
+// kubelet folds a repeat (eventCount). The first answer alone is no proof (imageNotFound).
+func registryHasNoImage(w *corev1.ContainerStateWaiting, events []corev1.Event) bool {
+	if w == nil || !pullWaiting[w.Reason] || !namesOneReference(pullNotFound, w.Message) {
+		return false
+	}
+	var pulls int32
+	for _, event := range events {
+		if event.Reason == "Failed" && namesOneReference(pullFailedNotFound, event.Message) {
+			pulls += eventCount(event)
+		}
+	}
+	return pulls >= 2
+}
 
 // digestHex is a sha256 digest's 64 hex.
 var digestHex = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -115,8 +199,8 @@ type ImageProbe struct {
 // or its container cannot be configured for — or waiting: a pod the pool has no room for (stuck),
 // which counts against no attempt budget, since a full pool says nothing about the image and the
 // daemon must stay up until it has room — or transient: anything else, a pod the kubelet itself
-// failed included, retried under p.Retry (worker-image-probe.ts:318-338, 470-508). The report
-// counts the attempts that waited on capacity and keeps the last one's reason, for the
+// failed included, retried under p.Retry. The report counts the attempts that waited on capacity
+// and keeps the last one's reason, for the
 // pool-capacity row of the capability report.
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
@@ -161,8 +245,7 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.Image
 // probing one image in a namespace never contend for one Sandbox. A Prober sets a run of its own
 // (newProber), so its Sandbox is never a booting daemon's or another probe-boot's, and neither
 // takes the other's for a leftover (createProbe); a probe-boot leftover ends at its shutdownTime.
-// The project is slugged to fit a DNS label (probePodName, worker-image-probe.ts:108-116), shorter
-// by what the run takes.
+// The project is slugged to fit a DNS label (probePodName), shorter by what the run takes.
 func probeName(project, hex, run string) string {
 	prefix, suffix := "legion-probe-", "-"+hex[:12]
 	if run != "" {
@@ -337,7 +420,7 @@ func imageRefusal(digest, format string, args ...any) bootprobe.Outcome {
 
 // apiOutcome is an API failure's verdict: the API server refusing what was sent (400, 401, 403,
 // 422, or a 404 on a create: the namespace or the CRD is missing) refuses it again, so it is
-// definitive; anything else is the cluster's moment, retried (worker-image-probe.ts:318-336).
+// definitive; anything else is the cluster's moment, retried.
 func apiOutcome(digest string, err error, doing string, creating bool) bootprobe.Outcome {
 	if apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) || apierrors.IsInvalid(err) ||
 		(creating && apierrors.IsNotFound(err)) {
@@ -358,9 +441,9 @@ func unlessStopped(ctx context.Context, err error, detail string) bootprobe.Outc
 // createProbe creates the probe Sandbox and answers its uid. A Sandbox already holding the name is
 // a leftover of this runtime's own probe only when it carries this project's label — the name is
 // project-scoped, so anything else is another deployment's object, not this runtime's to delete —
-// in which case it is deleted, its pod waited out, and the create repeated
-// (worker-image-probe.ts:369-408). The name is the daemon's for every boot of the project and image,
-// and a Prober's for its run alone (probeName), so neither ever meets the other's Sandbox here.
+// in which case it is deleted, its pod waited out, and the create repeated. The name is the
+// daemon's for every boot of the project and image, and a Prober's for its run alone (probeName),
+// so neither ever meets the other's Sandbox here.
 func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest func() (*unstructured.Unstructured, error), budget time.Duration) (types.UID, bootprobe.Outcome, bool) {
 	create := func() (types.UID, error) {
 		object, err := manifest()
@@ -424,7 +507,9 @@ const mountRecheck = 15 * time.Second
 
 // stuck is the verdict on a probe pod that has not finished and never will, or nil while waiting
 // can still change it. It stops on an image the kubelet cannot use (definitiveWaiting), the
-// image's own refusal; on a container the kubelet cannot configure, waiting
+// image's own refusal; on an image the registry does not have, from the pod's status and events
+// (registryHasNoImage), which no retry of the pull changes; on a container the kubelet cannot
+// configure, waiting
 // CreateContainerConfigError with a message saying a ConfigMap or Secret the container reads, or a
 // key of one, is missing (missingObject) — the kubelet builds the container's env from those
 // objects at each sync (pkg/kubelet/kubelet_pods.go, makeEnvironmentVariables) and fails the same
@@ -445,10 +530,11 @@ const mountRecheck = 15 * time.Second
 // only a pod bound to it, so an unscheduled pod has no FailedMount to find, and the capacity stop,
 // whose pod holds no node, costs no read. They are read for every scheduled Pending probe pod at
 // most every mountRecheck — mountRead holds when they last were — one podEvents call per read
-// feeding the providers matcher first, when the pod mounts the providers Secret, then the general
-// matcher over the same list. A FailedMount of any other form (the kubelet's ConfigMap or Secret
-// watch not yet synced, the object not yet registered with its manager, the pod's volumes not all
-// mounted yet) is one the kubelet retries, and is left to the budget.
+// feeding the missing-image rule first (a pull's Failed events), then the providers matcher, when
+// the pod mounts the providers Secret, then the general matcher over the same list. A FailedMount
+// of any other form (the kubelet's ConfigMap or Secret watch not yet synced, the object not yet
+// registered with its manager, the pod's volumes not all mounted yet) is one the kubelet retries,
+// and is left to the budget.
 //
 // Ending the attempt on an Unschedulable pod deletes its Sandbox (probeAttempt's deferred delete)
 // and the next attempt, after the retry's longest wait, creates it again: a probe pod that could
@@ -499,6 +585,11 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	events, err := r.podEvents(ctx, pod)
 	if err != nil {
 		return nil
+	}
+	if registryHasNoImage(w, events) {
+		missing := imageRefusal(digest, "the registry does not have image %s: pod %s %s, container %s waiting: %s: %s",
+			r.image, name, phaseOf(pod), probeContainer, w.Reason, w.Message)
+		return &missing
 	}
 	if r.mountsProviders() {
 		secret := ProvidersSecretName(r.project)
@@ -874,7 +965,8 @@ func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, bu
 
 // probeWaiting is the probe container's waiting state, or nil when the pod reports none: its
 // Reason is what stuck and unfinished judge and quote, its Message the kubelet's own words, which
-// only a CreateContainerConfigError is read for (missingObject).
+// only a CreateContainerConfigError (missingObject) and a failed pull (registryHasNoImage) are read
+// for.
 func probeWaiting(pod *corev1.Pod) *corev1.ContainerStateWaiting {
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.Name == probeContainer && status.State.Waiting != nil {
@@ -937,8 +1029,8 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 
 // judge is the verdict on a finished probe pod and its log, logErr when the log could not be read
-// (judgeProbeLog, worker-image-probe.ts:470-508), in this order, carrying on a pass what the OK
-// line reported of the image, in Outcome.Report. A pod the kubelet failed for
+// (judgeProbeLog), in this order, carrying on a pass what the OK line reported of the image, in
+// Outcome.Report. A pod the kubelet failed for
 // reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
 // unread log is judged by the read's error. A Failed pod past those is one whose probe container
 // exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an

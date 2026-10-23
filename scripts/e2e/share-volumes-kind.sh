@@ -5,7 +5,8 @@
 # refused a write there (its mount is read-only by default), and writes a file to the export it
 # mounts with `read_only: false` that the NFS server then holds. `legion probe-boot` mounts both
 # shares, and refuses a claim that does not exist, an export the server does not have and a server
-# that never answers, each naming the volume and its share.
+# that never answers, each naming the volume and its share, and an image digest the registry does
+# not have, naming the image.
 # The pod is built by Legion's own code: the daemon's loader reads the legion.yaml, its
 # sandboxOptions builds the Agent Sandbox runtime, which launches the issue's root through Agent
 # Sandbox v1.0.3's controller (internal/daemon/share_volumes_live_test.go). The share is an
@@ -314,4 +315,24 @@ elapsed=$((SECONDS - check_started))
 # a second attempt, which is the regression round 4 introduced.
 [ "$elapsed" -lt 300 ] || fail "silent-server: refused only after ${elapsed}s, past one 300 s attempt"
 note "silent-server: probe-boot exit 1 in ${elapsed}s: $(grep -m1 'cannot mount' <<<"$probed" | cut -c1-300)"
+pass
+
+begin probe-missing-image
+# The shares file with its image's digest swapped for one its repository does not have: the
+# registry answers the probe pod's pulls 404, and probe-boot refuses once the kubelet has met that
+# answer on two pulls, within its first attempt, naming the image, rather than retrying it as a pull
+# that may yet succeed.
+shares_config=$(awk '$1 == "shares" {print $3}' "$result")
+missing_config=${shares_config%.yaml}-missing-image.yaml
+missing_image=${image%@sha256:*}@sha256:0000000000000000000000000000000000000000000000000000000000000000
+sed "s|^    image: .*|    image: $missing_image|" "$shares_config" >"$missing_config"
+grep -qx "    image: $missing_image" "$missing_config" || fail "the missing-image file names no image $missing_image"
+cp "$missing_config" "$evidence/missing-image-legion.yaml"
+printf 'missing-image - %s\n' "$missing_config" >>"$result"
+probe missing-image "worker image sha256:0000000000000000000000000000000000000000000000000000000000000000 failed its probe: the registry does not have image $missing_image" \
+  'rpc error: code = NotFound desc = failed to pull and unpack image ' ': not found'
+elapsed=$((SECONDS - check_started))
+[ "$elapsed" -lt 300 ] || fail "missing-image: refused only after ${elapsed}s, past one 300 s attempt"
+[[ $probed != *"failed transiently"* ]] || fail "missing-image: probe-boot retried the pull before refusing: $(grep -m1 'failed transiently' <<<"$probed" | cut -c1-300)"
+note "missing-image: probe-boot exit 1 in ${elapsed}s: $(grep -m1 -o 'the registry does not have image [^ ]*' <<<"$probed")"
 pass

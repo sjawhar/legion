@@ -204,7 +204,35 @@ is refused naming that (`Succeeded without checking the capability list (its leg
 check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
-pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). A volume of the operator's pod block
+pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). An image the kubelet cannot use refuses
+the boot at once, from the probe pod's status: a container waiting `InvalidImageName` or
+`ErrImageNeverPull`. A pull the registry refused because it does not have the image refuses it once
+the kubelet has met that answer on two pulls: a container waiting `ErrImagePull` or
+`ImagePullBackOff` whose whole message, after the back-off's `Back-off pulling image "<ref>":
+ErrImagePull: ` when it carries one, is containerd's answer that the registry had no manifest for
+the reference, naming that one reference throughout (`rpc error: code = NotFound desc = failed to
+pull and unpack image "<ref>": failed to resolve reference "<ref>": <ref>: not found` on a local
+pull, or `… failed to resolve image: <ref>: not found` through containerd's transfer service, the
+default pull from containerd 2.1), with the pod's `Failed` events (`Failed to pull image "<ref>":
+<that answer>`) counting two pulls or more.
+One answer is no proof: containerd 2 resolves a digest as a manifest and then as a blob, and
+reports the blob request's 404 — which a registry such as GHCR answers for a manifest it holds —
+over a manifest request the network cut. The kubelet pulls again about ten seconds after the first
+failure, and the daemon reads the events at most every 15 s, so the refusal comes within about half
+a minute of the first pull (on kubelet 1.32 and later, whose `ImagePullBackOff` message carries the
+failed pull's error; an older kubelet's carries none, so the refusal waits for a read that finds the
+container waiting `ErrImagePull`, later but within the attempt): `worker image sha256:<digest>
+failed its probe: the registry does not have image <image>: …`, quoting the kubelet. Every other
+failed pull — credentials the registry
+refused (`pull access denied`, `401`, `403`; Docker Hub answers a repository it does not have this
+way), a registry the node cannot reach (`i/o timeout`, `connection refused`, `connection reset by
+peer`), a rate limit (`429`, `toomanyrequests`), a server error, containerd's other not-found
+answers (`no resolve hosts`, a manifest past its size limit, a manifest or layer the registry named
+and then did not serve), and a manifest-404 met on one pull — may pass on a later attempt, and
+stays under the six-attempt budget. One exception follows from containerd 2 reporting a 404 over a
+failed request: on a node whose containerd tries a mirror before the registry (`hosts.toml`), a
+mirror without the image is refused as a missing image while the registry behind it stays
+unreachable or keeps refusing the node's credentials. A volume of the operator's pod block
 (`runtime.kubernetes.pod.volumes`) that a `volume_mounts` entry mounts, naming a ConfigMap or Secret
 that does not exist in the daemon's namespace, or asking a key it lacks, leaves the probe pod
 `Pending` with the kubelet's `FailedMount` (`configmap "<name>" not found` or `configmaps "<name>" not
