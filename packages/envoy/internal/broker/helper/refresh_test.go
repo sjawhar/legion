@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -429,6 +430,87 @@ func TestALauncherRefusalTheBrokerStillRefreshesKeepsTheFile(t *testing.T) {
 	if b.HasCredential() {
 		t.Fatal("the helper holds a credential the broker refused")
 	}
+}
+
+// unwritable makes the directory holding path refuse new files until the returned restore runs
+// (also at cleanup), so a machine-file save fails the way a full or read-only disk fails it.
+func unwritable(t *testing.T, path string) (restore func()) {
+	t.Helper()
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	restore = func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(restore)
+	return restore
+}
+
+// fileHoldsTheHeldLogin reports whether b holds a credential other than the one whose refresh
+// token is old, and its machine file names that credential's refresh token.
+func fileHoldsTheHeldLogin(b *Broker, old string) bool {
+	b.credMu.Lock()
+	defer b.credMu.Unlock()
+	held := b.cred.Load()
+	now, err := LoadMachineFile(b.MachineFile)
+	return err == nil && held != nil && now.RefreshToken == held.refreshToken && now.RefreshToken != old
+}
+
+// TestAStartWhoseSaveFailsRetriesWithinTheRetryInterval: Start's refresh succeeds but its save
+// fails, so the disk still names the refresh token the broker just rotated. The helper holds the
+// rotated login and retries at the retry interval, not at the next day's refresh, so the file
+// holds a current refresh token soon after the disk takes writes again.
+func TestAStartWhoseSaveFailsRetriesWithinTheRetryInterval(t *testing.T) {
+	f := newFakeBroker(t)
+	path, kept := keptLogin(t, f)
+	restore := unwritable(t, path)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: path, HTTP: f.srv.Client(), refreshRetry: 50 * time.Millisecond}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if now, err := LoadMachineFile(path); err != nil || now.RefreshToken != kept.RefreshToken {
+		t.Fatalf("the machine file after the failed save: %+v %v; want the kept login unchanged", now, err)
+	}
+	if !b.HasCredential() {
+		t.Fatal("the helper must hold the rotated login whose save failed")
+	}
+	restore()
+	waitFor(t, func() bool { return fileHoldsTheHeldLogin(b, kept.RefreshToken) })
+}
+
+// TestALauncherRefusalWhoseSettlementSaveFailsIsRetried: the settlement refresh a 401
+// LAUNCHER_INVALID wakes succeeds, but the rotated login cannot be saved. The helper holds the
+// rotated credential, so it keeps working, and retries at the retry interval until the file holds
+// the login it holds.
+func TestALauncherRefusalWhoseSettlementSaveFailsIsRetried(t *testing.T) {
+	f := newFakeBroker(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(), refreshRetry: 50 * time.Millisecond}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Login(ctx, "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
+	original := b.cred.Load().refreshToken
+	restore := unwritable(t, b.MachineFile)
+	f.mu.Lock()
+	f.enrollUnauthorizedNext = 1
+	f.mu.Unlock()
+	if _, _, err := b.EnrollSessionKey(ctx, "rt", "tp", nil); !errors.Is(err, errNoCredential) {
+		t.Fatalf("an enroll the broker refused: %v; want errNoCredential", err)
+	}
+	waitFor(t, b.HasCredential)
+	time.Sleep(200 * time.Millisecond) // several retries against the unwritable directory
+	restore()
+	waitFor(t, func() bool { return fileHoldsTheHeldLogin(b, original) })
 }
 
 // TestTheFirstRetryLandsInsideTheRotationGrace: the broker keeps a rotated refresh token

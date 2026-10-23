@@ -464,8 +464,9 @@ func (b *Broker) Start(ctx context.Context) error {
 		first = b.refreshRetryOrDefault()
 	default:
 		if err := next.Save(b.MachineFile); err != nil {
-			b.logger().Error("the helper could not keep the machine login's refresh on disk; a restart before the next refresh loses the login",
+			b.logger().Error("the helper could not keep the machine login's refresh on disk; retrying",
 				"credential_id", next.CredentialID, "machine_file", b.MachineFile, "error", err)
+			first = b.refreshRetryOrDefault()
 		}
 		f = next
 		b.installCredential(next.credential(), &loginState{State: "issued"})
@@ -575,8 +576,16 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
 		}
 		var err error
 		if settle != nil {
-			if err = b.settleRefused(ctx, settle); err == nil {
+			err = b.settleRefused(ctx, settle)
+			if err == nil || b.HasCredential() {
+				// Settled, or settled in memory with its save failed: the held login is then
+				// refreshed and saved like any other, at the retry below.
 				settle = nil
+			}
+			// settleRefused's install asked for a reschedule the retry below replaces.
+			select {
+			case <-sig.reschedule:
+			default:
 			}
 		} else {
 			err = b.refresh(ctx)
@@ -666,9 +675,11 @@ func (b *Broker) refresh(ctx context.Context) error {
 // launcher call 401 LAUNCHER_INVALID, so its machine file follows the broker within seconds: a
 // refresh the broker refuses (invalid_grant) deletes the file; one it answers keeps the rotated
 // login in the file, since a 401 can also be a proof the broker could not verify (clock skew, an
-// AGENT_SECRETS_URL mismatch), and a restart resumes it. The helper still holds no credential
-// either way. Once a newer login holds the file it does nothing; an error is the refresh's whose
-// outcome it did not learn, for the loop to retry.
+// AGENT_SECRETS_URL mismatch), and a restart resumes it. The helper then still holds no
+// credential, unless that save fails: the rotated login is then installed, so the helper keeps
+// working and the refresh loop retries its save, and the save's error is returned. Once a newer
+// login holds the file it does nothing; any other error is the refresh's whose outcome it did not
+// learn, for the loop to retry.
 func (b *Broker) settleRefused(ctx context.Context, cred *machineCredential) error {
 	b.credMu.Lock()
 	defer b.credMu.Unlock()
@@ -685,8 +696,10 @@ func (b *Broker) settleRefused(ctx context.Context, cred *machineCredential) err
 		return err
 	}
 	if err := f.Save(b.MachineFile); err != nil {
-		b.logger().Error("the helper could not keep the machine login's refresh on disk; a restart before the next refresh loses the login",
+		b.logger().Error("the helper could not keep the machine login's refresh on disk; holding it and retrying",
 			"credential_id", f.CredentialID, "machine_file", b.MachineFile, "error", err)
+		b.installCredential(f.credential(), &loginState{State: "issued"})
+		return err
 	}
 	return nil
 }
