@@ -54,9 +54,6 @@ func LoadMachineFile(path string) (*MachineFile, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("machine file %s: data after its one JSON object", path)
 	}
-	if raw.CredentialID == "" || raw.RefreshToken == "" || raw.ExpiresAt.IsZero() {
-		return nil, fmt.Errorf("machine file %s: credential_id, expires_at and refresh_token are all required", path)
-	}
 	der, err := base64.StdEncoding.DecodeString(raw.Key)
 	if err != nil {
 		return nil, fmt.Errorf("machine file %s: key: %w", path, err)
@@ -65,22 +62,42 @@ func LoadMachineFile(path string) (*MachineFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("machine file %s: key: %w", path, err)
 	}
-	key, ok := parsed.(*ecdsa.PrivateKey)
-	if !ok || key.Curve.Params().Name != "P-256" {
-		return nil, fmt.Errorf("machine file %s: key is not a P-256 ECDSA key", path)
+	key, _ := parsed.(*ecdsa.PrivateKey)
+	f := &MachineFile{Key: key, CredentialID: raw.CredentialID, ExpiresAt: raw.ExpiresAt, RefreshToken: raw.RefreshToken}
+	if err := f.validate(); err != nil {
+		return nil, fmt.Errorf("machine file %s: %w", path, err)
 	}
-	return &MachineFile{Key: key, CredentialID: raw.CredentialID, ExpiresAt: raw.ExpiresAt, RefreshToken: raw.RefreshToken}, nil
+	return f, nil
 }
 
-// Save writes f to path, mode 0600, creating its directory 0700 if it is absent. It writes
-// path.tmp, syncs it, renames it over path and syncs the directory, so path is always either the
-// old login or the new one, never part of either.
+// validate checks f is a whole machine login: a P-256 ECDSA key, and a credential id, an expiry
+// and a refresh token. LoadMachineFile and Save both check it, so the helper never writes a file
+// its next start would refuse.
+func (f *MachineFile) validate() error {
+	if f.CredentialID == "" || f.RefreshToken == "" || f.ExpiresAt.IsZero() {
+		return errors.New("credential_id, expires_at and refresh_token are all required")
+	}
+	if f.Key == nil || f.Key.Curve == nil || f.Key.Curve.Params().Name != "P-256" {
+		return errors.New("key is not a P-256 ECDSA key")
+	}
+	return nil
+}
+
+// Save writes f to path, mode 0600, creating its directory 0700 if it is absent; a MachineFile
+// that is not a whole login (validate) is refused, writing nothing. It writes a new temporary file
+// in path's directory (os.CreateTemp: a fresh random name, created exclusively and 0600, so no
+// file or link already there is followed or reused), syncs it, renames it over path and syncs the
+// directory, so path is always either the old login or the new one, never part of either. A save
+// that fails removes its temporary file.
 func (f *MachineFile) Save(path string) error {
 	return f.save(path, (*os.File).Write)
 }
 
 // save is Save with the write of the new file's bytes injectable, so a test can fail it partway.
 func (f *MachineFile) save(path string, write func(*os.File, []byte) (int, error)) (err error) {
+	if err := f.validate(); err != nil {
+		return fmt.Errorf("machine file %s: %w", path, err)
+	}
 	der, err := x509.MarshalPKCS8PrivateKey(f.Key)
 	if err != nil {
 		return err
@@ -96,21 +113,16 @@ func (f *MachineFile) save(path string, write func(*os.File, []byte) (int, error
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	out, err := os.CreateTemp(dir, ".machine-*.json.tmp")
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if err != nil {
 			_ = out.Close()
-			_ = os.Remove(tmp)
+			_ = os.Remove(out.Name())
 		}
 	}()
-	// A tmp file left by an earlier crash keeps its own mode through O_TRUNC.
-	if err := out.Chmod(0o600); err != nil {
-		return err
-	}
 	if _, err := write(out, data); err != nil {
 		return err
 	}
@@ -120,7 +132,7 @@ func (f *MachineFile) save(path string, write func(*os.File, []byte) (int, error
 	if err := out.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := os.Rename(out.Name(), path); err != nil {
 		return err
 	}
 	d, err := os.Open(dir)

@@ -75,8 +75,82 @@ func TestTheMachineFileRoundTripsAndIsPrivate(t *testing.T) {
 	if err != nil || again.CredentialID != "cred-1" || again.RefreshToken != "refresh-1" {
 		t.Fatalf("after a failed save the file reads %+v (%v); want the old login cred-1", again, err)
 	}
-	if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a failed save left %s.tmp behind: %v", path, err)
+	if left := tempFiles(t, filepath.Dir(path)); len(left) != 0 {
+		t.Fatalf("a failed save left %v behind", left)
+	}
+}
+
+// tempFiles lists dir's entries other than machine.json.
+func tempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.Name() != "machine.json" {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// TestASaveNeverUsesAPathAlreadyThere: a symlink or a world-readable file at the predictable
+// machine.json.tmp path (another local user's, or an old crash's) is neither followed nor
+// written: the save goes through a fresh, exclusively created temporary file, the link's target
+// and the stale file are untouched, and the saved file is 0600.
+func TestASaveNeverUsesAPathAlreadyThere(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "agent-secrets")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "machine.json")
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("theirs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, plant := range map[string]func(string) error{
+		"a symlink":             func(p string) error { return os.Symlink(target, p) },
+		"a world-readable file": func(p string) error { return os.WriteFile(p, []byte("stale"), 0o644) },
+	} {
+		tmp := path + ".tmp"
+		_ = os.Remove(tmp)
+		if err := plant(tmp); err != nil {
+			t.Fatal(err)
+		}
+		if err := testMachineFile(t, "cred-1", "refresh-1").Save(path); err != nil {
+			t.Fatalf("%s at %s: Save: %v", name, tmp, err)
+		}
+		if data, _ := os.ReadFile(target); string(data) != "theirs" {
+			t.Fatalf("%s at %s: the link's target now reads %q", name, tmp, data)
+		}
+		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s at %s: machine.json %v %v; want a regular 0600 file", name, tmp, info, err)
+		}
+		if loaded, err := LoadMachineFile(path); err != nil || loaded.CredentialID != "cred-1" {
+			t.Fatalf("%s at %s: loaded %+v %v", name, tmp, loaded, err)
+		}
+	}
+}
+
+// TestASaveRefusesWhatALoadWouldRefuse: Save checks the login as LoadMachineFile does, so the
+// helper never writes a file its next start refuses, and writes nothing for one it refuses.
+func TestASaveRefusesWhatALoadWouldRefuse(t *testing.T) {
+	good := testMachineFile(t, "cred-1", "refresh-1")
+	for name, f := range map[string]*MachineFile{
+		"no credential id": {Key: good.Key, ExpiresAt: good.ExpiresAt, RefreshToken: "r"},
+		"no refresh token": {Key: good.Key, CredentialID: "c", ExpiresAt: good.ExpiresAt},
+		"no expiry":        {Key: good.Key, CredentialID: "c", RefreshToken: "r"},
+		"no key":           {CredentialID: "c", ExpiresAt: good.ExpiresAt, RefreshToken: "r"},
+	} {
+		path := filepath.Join(t.TempDir(), "machine.json")
+		if err := f.Save(path); err == nil {
+			t.Errorf("%s: Save = nil, want an error", name)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s: Save wrote %s (%v)", name, path, err)
+		}
 	}
 }
 
