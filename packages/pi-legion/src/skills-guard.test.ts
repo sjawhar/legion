@@ -126,12 +126,15 @@ test("the controller skill reads pull requests as the review App, and nothing sa
 });
 
 // GitHub honours the `skip-checks: true` trailer only as the last line after two empty lines; the
-// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker skill
-// and the daemon's worker part carry the recipe with two, and no skill or prompt carries one with
-// fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends with exactly three `\n`.
+// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker
+// skill's trailer reference and the daemon's worker part carry the recipe with two, and no skill
+// or prompt carries one with fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends
+// with exactly three `\n`.
 test("the skip-checks recipe writes two empty lines before the trailer, everywhere it is written", () => {
   const recipe = "$'\\n\\n\\nskip-checks: true'";
-  expect(readFileSync(path.join(staged, "legion-worker/SKILL.md"), "utf8")).toContain(recipe);
+  expect(
+    readFileSync(path.join(staged, "legion-worker/references/skip-checks-trailer.md"), "utf8")
+  ).toContain(recipe);
   expect(readFileSync(path.join(promptsRoot, "go/worker-common.md"), "utf8")).toContain(recipe);
   const short = [staged, promptsRoot]
     .flatMap(files)
