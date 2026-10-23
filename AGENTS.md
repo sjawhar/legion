@@ -259,11 +259,11 @@ head waits for the two to agree. Two bounds hold the wait. The first is GitHub's
 GitHub's last change to the pull request (its `updatedAt`) is more than 10 minutes old, a webhook
 never arrived, so the row ends and tells the architect once (`merge-stalled`); routine waits and
 rate-limit deferrals never count toward it. The second ends nothing: a merge the daemon submitted
-that GitHub has not completed within an hour of the workflow queueing the row at READY's acceptance,
-longer than every check the base requires takes, tells the issue's architect once (`merge-waiting`)
-and goes on waiting - nothing is withdrawn, the issue stays in `awaiting_merge`, and the row keeps
-submitting - so what is left to find is on GitHub: a required check that never ran or failed, a
-review only a person can give, a merge queue that has not landed it.
+that GitHub has not completed within an hour of the workflow queueing the row at READY's acceptance
+tells the issue's architect once (`merge-waiting`) and goes on waiting - nothing is withdrawn, the
+issue stays in `awaiting_merge`, and the row keeps submitting - so what is left to find is on
+GitHub: a required check that never ran or failed, a review only a person can give, a merge queue
+that has not landed it.
 A reopen at READY's head reuses that row, starts it over as though nothing had been armed,
 and takes it from any worker still holding it, so the merge is never lost. A refusal GitHub would
 repeat on a retry ends the row and is told to the architect once (`merge-refused`).

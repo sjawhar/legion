@@ -278,10 +278,10 @@ not caught up: the submission waits. It ends and tells the architect only once G
 to the pull request is more than 10 minutes old, far longer than a webhook takes to arrive, however
 long the submission waited before. A merge that simply waits ends nothing: when GitHub has not
 completed one the daemon submitted within an hour of the workflow queueing it at `READY`'s
-acceptance — longer than every check the base requires takes — the issue's architect is told once
-(`merge-waiting`) and the submission goes on. Nothing is withdrawn and the issue stays in
-`awaiting_merge`, so what is left to find is on GitHub: a required check that never ran or failed,
-a review only a person can give, a merge queue that has not landed it.
+acceptance, the issue's architect is told once (`merge-waiting`) and the submission goes on.
+Nothing is withdrawn and the issue stays in `awaiting_merge`, so what is left to find is on
+GitHub: a required check that never ran or failed, a review only a person can give, a merge queue
+that has not landed it.
 A reopen at the `READY` head takes the submission back from a
 run that read the record before the reopen, so it is never lost. A refusal GitHub would repeat on a
 retry ends the submission and is told to the architect too. GitHub checks the expected head only when
