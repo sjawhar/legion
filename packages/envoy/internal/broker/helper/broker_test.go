@@ -109,7 +109,8 @@ type fakeBroker struct {
 	// token answer the helper cannot keep.
 	loginLifetime  time.Duration
 	refreshTokens  map[string]string // live refresh token -> the credential it refreshes
-	refreshOutcome string            // what the refresh grant answers: "" (rotate), "invalid_grant", "unavailable" or "rate_limited"
+	refreshOutcome string            // what the refresh grant answers: "" (rotate), "invalid_grant", "unavailable", "rate_limited" or "no_refresh_token" (a 200 naming none)
+	retired        []string          // credential ids POST /v1/operator/machines/{id}/retire was asked for
 	refreshes      int               // refresh grants answered
 	tokens         int               // tokens minted, for unique values
 	// refreshGate, when set, holds every refresh grant until the test closes it, and
@@ -402,12 +403,27 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 				w.Header().Set("Retry-After", "1")
 				oauthError(http.StatusTooManyRequests, "invalid_request")
 				return
+			case "no_refresh_token":
+				answer := map[string]any{"access_token": "access-bare", "token_type": "DPoP", "expires_in": 900,
+					"credential_id": id, "credential_expires_at": time.Now().Add(f.loginLifetime).UTC().Format(time.RFC3339)}
+				writeJSON(w, 200, answer)
+				return
 			}
 			delete(f.refreshTokens, r.PostForm.Get("refresh_token"))
 			f.writeTokens(w, id)
 		default:
 			oauthError(400, "unsupported_grant_type")
 		}
+	})
+	mux.HandleFunc("POST /v1/operator/machines/{id}/retire", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Header.Get("Proof") == "" {
+			writeJSON(w, 401, map[string]string{"code": "LAUNCHER_INVALID", "error": "no proof presented"})
+			return
+		}
+		f.retired = append(f.retired, r.PathValue("id"))
+		w.WriteHeader(http.StatusNoContent)
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)

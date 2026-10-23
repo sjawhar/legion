@@ -39,13 +39,17 @@ var errNoCredential = errors.New(noCredentialMsg)
 
 // The refresh loop's defaults: a refresh a day at most; after a refresh the broker did not answer
 // (any transport error: a refused, unanswered or unresolved dial, a timeout, a lost answer, a
-// cancelled request) or answered 5xx, a retry every 15 s for as long as that lasts, so a lost
-// answer's rotated token is redeemed again inside the broker's five-minute rotation grace whenever
-// the outage is shorter than that grace; after a 429, its Retry-After; after any other error the
-// broker answered, a minute, doubling to an hour.
+// cancelled request) or answered 5xx, a retry every 15 s until an answer settles it (a success or
+// invalid_grant), answered refusals between included, so a lost answer's rotated token is redeemed
+// again inside the broker's five-minute rotation grace whenever the outage is shorter than that
+// grace; after a 429, its Retry-After, at least 15 s and at most a minute; after any other error
+// the broker answered, a minute, doubling to an hour.
 const (
 	defaultRefreshEvery = 24 * time.Hour
 	defaultRefreshRetry = 15 * time.Second
+	// maxRetryAfter caps the wait a 429's Retry-After asks for, so no hop's large value stops the
+	// refresh or pushes a retry past the broker's rotation grace.
+	maxRetryAfter = time.Minute
 	// defaultRefreshBackoff is the first wait after a refresh the broker refused with an error
 	// other than a 429 or invalid_grant, doubling to maxRefreshRetry.
 	defaultRefreshBackoff = time.Minute
@@ -149,6 +153,26 @@ type Broker struct {
 	// startRefreshBound is how long Start waits on its refresh of the kept login; zero means
 	// defaultStartRefreshBound. Only tests shorten it.
 	startRefreshBound time.Duration
+	// testSave, when set, replaces MachineFile.Save for every save of the machine file, and
+	// testNow time.Now for the unsaved-login deadline (retrySave), so a test fails a save the way a
+	// full disk does (the unlink still works) and moves the clock past the deadline without
+	// waiting. No production caller sets them.
+	testSave func(f *MachineFile, path string) error
+	testNow  func() time.Time
+
+	// unsaved is the held login whose save failed, while no save has landed since: the file still
+	// names the refresh token the broker rotated away at unsavedSince, when the answer came. The
+	// refresh loop then retries only the save (retrySave), never another token request, and
+	// removes the file once unsavedDeadline has passed with no save, before that token's grace
+	// ends. unsavedRemoved records that removal, or its failure, so each is logged once. All three
+	// are guarded by credMu.
+	unsaved        *machineCredential
+	unsavedSince   time.Time
+	unsavedRemoved bool
+	// refusedCred is the credential drop cleared for a 401 LAUNCHER_INVALID (dropRefused), while no
+	// login has installed one since, so the next login retires it (retireReplaced) as it retires a
+	// credential it replaces. Guarded by stateMu.
+	refusedCred *machineCredential
 
 	// signalsOnce makes signals, the refresh loop's wake-ups (refreshSignals).
 	signalsOnce sync.Once
@@ -375,6 +399,7 @@ func (b *Broker) installCredential(cred *machineCredential, issued *loginState) 
 	old := b.cred.Swap(cred)
 	b.login.Store(issued)
 	b.dropped = ""
+	b.refusedCred = nil
 	b.stateMu.Unlock()
 	if old != nil {
 		close(old.gone)
@@ -428,8 +453,9 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, cfg *oauth2.Config, da *oauth2
 // keepLogin keeps the login an approved device grant issued at MachineFile and only then installs
 // it, under credMu, so no refresh runs between the two; it logs the credential with operator, the
 // login_hint the login was signed with, whatever the operator file says by then. A credential the
-// new login replaced is then retired at the broker (retireReplaced), which leaves the sessions it
-// enrolled running. An approval the helper cannot keep (a token answer without the credential's
+// new login replaced, or, holding none, the one a 401 LAUNCHER_INVALID dropped since the last
+// install (refusedCred), is then retired at the broker (retireReplaced), which leaves the sessions
+// it enrolled running. An approval the helper cannot keep (a token answer without the credential's
 // extras, or a machine file it cannot write) is logged at ERROR and recorded "expired", leaving
 // cred untouched.
 func (b *Broker) keepLogin(key *ecdsa.PrivateKey, tok *oauth2.Token, code, operator string) {
@@ -437,8 +463,14 @@ func (b *Broker) keepLogin(key *ecdsa.PrivateKey, tok *oauth2.Token, code, opera
 	var replaced *machineCredential
 	if err == nil {
 		b.credMu.Lock()
-		if err = f.Save(b.MachineFile); err == nil {
+		if err = b.saveFile(f); err == nil {
+			b.stateMu.Lock()
+			refused := b.refusedCred
+			b.stateMu.Unlock()
 			replaced = b.installCredential(f.credential(), &loginState{Code: code, State: "issued"})
+			if replaced == nil {
+				replaced = refused
+			}
 		}
 		b.credMu.Unlock()
 	}
@@ -522,13 +554,19 @@ func (b *Broker) Start(ctx context.Context) error {
 		b.installCredential(kept, &loginState{State: "issued"})
 		first = sched.next(err)
 	default:
-		if err := next.Save(b.MachineFile); err != nil {
-			b.logger().Error("the helper could not keep the machine login's refresh on disk; retrying",
-				"credential_id", next.CredentialID, "machine_file", b.MachineFile, "error", err)
+		answered := b.now()
+		saveErr := b.saveFile(next)
+		if saveErr != nil {
+			b.logger().Error("the helper could not keep the machine login's refresh on disk; it holds the login in memory and retries only the save every 15 s, and removes the machine file, which names a token the broker has rotated away, if no save lands within 4 minutes",
+				"credential_id", next.CredentialID, "machine_file", b.MachineFile, "error", saveErr)
 			first = sched.retry
 		}
 		f = next
-		b.installCredential(next.credential(), &loginState{State: "issued"})
+		installed := next.credential()
+		b.installCredential(installed, &loginState{State: "issued"})
+		if saveErr != nil {
+			b.markUnsaved(installed, answered)
+		}
 	}
 	b.credMu.Unlock()
 	if refusal == "" {
@@ -602,6 +640,69 @@ func (b *Broker) newRetrySchedule() retrySchedule {
 	return retrySchedule{retry: b.refreshRetryOrDefault(), backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
 }
 
+// saveFile writes f to MachineFile (testSave in a test).
+func (b *Broker) saveFile(f *MachineFile) error {
+	if b.testSave != nil {
+		return b.testSave(f, b.MachineFile)
+	}
+	return f.Save(b.MachineFile)
+}
+
+// now is time.Now (testNow in a test).
+func (b *Broker) now() time.Time {
+	if b.testNow != nil {
+		return b.testNow()
+	}
+	return time.Now()
+}
+
+// unsavedFileDeadline is how long after the broker rotated the token the machine file names (when
+// its answer came) the helper waits for a save of the rotated login to land before it removes the
+// file: four minutes, inside the broker's five-minute rotation grace, so no restart can present
+// the rotated-away token once that grace has ended, which the broker would revoke as a reuse.
+const unsavedFileDeadline = 4 * time.Minute
+
+// unsavedRemovedMsg and unsavedStuckMsg are the ERRORs retrySave logs when the deadline passes
+// with no save: the file removed, or not even that.
+const (
+	unsavedRemovedMsg = "the helper could not keep the machine login's refresh on disk for 4 minutes; removed the machine file, which named a token the broker has rotated away: the login is now held only in memory, and a restart will need a new approval (run: agent-secrets machine login)"
+	unsavedStuckMsg   = "the helper could not keep the machine login's refresh on disk for 4 minutes, nor remove the machine file: a restart before the disk is writable again presents a token the broker has rotated away, and the broker revokes the machine as a reuse, ending its sessions; make the disk writable, and do not restart the helper until then"
+)
+
+// markUnsaved records cred, the held login whose save just failed, as not yet on disk, the file
+// still naming the token the broker rotated away at since (when its answer came). The caller holds
+// credMu.
+func (b *Broker) markUnsaved(cred *machineCredential, since time.Time) {
+	b.unsaved, b.unsavedSince, b.unsavedRemoved = cred, since, false
+}
+
+// retrySave saves cred, the held login whose earlier save failed, and spends no rotation. A save
+// that lands ends the unsaved record. One that fails once unsavedFileDeadline has passed since the
+// rotation removes the machine file (an unlink works on a full disk), so no restart presents the
+// rotated-away token past its grace, and logs unsavedRemovedMsg; if even that fails (a read-only
+// filesystem) it logs unsavedStuckMsg. Each is logged once per unsaved login, and a later save
+// writes the file again. The save's error is returned, for the loop to retry. The caller holds
+// credMu.
+func (b *Broker) retrySave(cred *machineCredential) error {
+	err := b.saveFile(&MachineFile{Key: cred.key, CredentialID: cred.id, ExpiresAt: cred.expiresAt, RefreshToken: cred.refreshToken})
+	if err == nil {
+		b.unsaved = nil
+		b.logger().Info("the helper kept the machine login's refresh on disk", "credential_id", cred.id, "machine_file", b.MachineFile)
+		return nil
+	}
+	if !b.unsavedRemoved && !b.now().Before(b.unsavedSince.Add(unsavedFileDeadline)) {
+		b.unsavedRemoved = true
+		if rerr := RemoveMachineFile(b.MachineFile); rerr != nil {
+			b.logger().Error(unsavedStuckMsg, "credential_id", cred.id, "machine_file", b.MachineFile, "error", errors.Join(err, rerr))
+		} else {
+			b.logger().Error(unsavedRemovedMsg, "credential_id", cred.id, "machine_file", b.MachineFile, "error", err)
+		}
+		return err
+	}
+	b.logger().Warn("the helper still cannot keep the machine login's refresh on disk; retrying the save", "credential_id", cred.id, "machine_file", b.MachineFile, "error", err)
+	return err
+}
+
 // nextRefresh is how long the refresh loop waits before refreshing the held credential: half the
 // time left until its expiry, at most every, so a credential the broker mints for less than two
 // days is still refreshed well before it lapses.
@@ -669,41 +770,53 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, sched ret
 }
 
 // retrySchedule is the refresh loop's wait after a refresh that failed (next). A refresh the
-// broker did not answer, or answered 5xx, waits retry (15 s), however long that goes on: the
-// broker may have rotated the token and lost its answer, and the token the helper still holds is
-// redeemable again only inside the broker's five-minute rotation grace, whose start the helper
-// cannot know, so it retries often until an answer comes. An outage longer than the grace right
-// after a lost answer still ends in a reuse, which revokes the machine. A 429 waits its Retry-After
-// (at least retry). Any other error the broker answered waits backoff, from backoffStart doubling
-// to maxRefreshRetry, until a refresh succeeds (reset). An error that is no answer of the broker's
-// (a machine file the answer could not be kept in, a save that failed) waits retry too.
+// broker did not answer, or answered 5xx, waits retry (15 s), and sets unknown: the broker may
+// have rotated the token and lost its answer, and the token the helper still holds is redeemable
+// again only inside the broker's five-minute rotation grace, whose start the helper cannot know.
+// While unknown is set, every failure waits retry, an answered 4xx or 429 among them, until a
+// refresh the broker settles (a success or invalid_grant, reset) clears it, so no run of answered
+// refusals after a lost answer backs a retry past the grace. An outage longer than the grace
+// right after a lost answer still ends in a reuse, which revokes the machine. Otherwise a 429
+// waits its Retry-After, at least retry and at most maxRetryAfter, and any other error the broker
+// answered waits backoff, from backoffStart doubling to maxRefreshRetry, until reset. An error
+// that is no answer of the broker's (a token answer the helper cannot keep, a save that failed)
+// waits retry too.
 type retrySchedule struct {
 	retry, backoffStart, backoff time.Duration
+	unknown                      bool
 }
 
 func (s *retrySchedule) next(err error) time.Duration {
 	var re *oauth2.RetrieveError
 	if !errors.As(err, &re) || re.Response == nil || re.Response.StatusCode >= http.StatusInternalServerError {
+		s.unknown = true
+		return s.retry
+	}
+	if s.unknown {
 		return s.retry
 	}
 	if re.Response.StatusCode == http.StatusTooManyRequests {
-		return max(s.retry, retryAfter(err))
+		return min(maxRetryAfter, max(s.retry, retryAfter(err)))
 	}
 	wait := s.backoff
 	s.backoff = min(2*s.backoff, maxRefreshRetry)
 	return wait
 }
 
-// reset restarts the backoff: a refresh reached the broker, or a credential was installed.
+// reset restarts the backoff and clears unknown: a refresh the broker settled (a success, or
+// invalid_grant), or a credential was installed.
 func (s *retrySchedule) reset() {
-	s.backoff = s.backoffStart
+	s.backoff, s.unknown = s.backoffStart, false
 }
 
 // redeem spends cred's refresh token for the rotated login: the machine file the broker's answer
 // names, or refusal, the broker's invalid_grant code, when it has ended the login (revoked, lapsed
 // or reused), or another error, logged, when the helper did not learn the outcome or cannot keep
 // the answer. The broker's 429 (its token endpoint's rate limit) is one of those: the login is
-// kept and retried after its Retry-After (retryAfter). The caller holds credMu.
+// kept and retried after its Retry-After (retryAfter). An answer naming no new refresh token is
+// another: x/oauth2 copies the presented token into an answer without a refresh_token field, and
+// saving that would keep a token the broker may have rotated away, so the presented login is kept
+// and the refresh retried. The caller holds credMu.
 func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *MachineFile, refusal string, err error) {
 	tok, err := b.oauthConfig().TokenSource(b.tokenContext(ctx, cred.key),
 		&oauth2.Token{RefreshToken: cred.refreshToken, Expiry: time.Unix(1, 0)}).Token()
@@ -718,6 +831,11 @@ func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *Mac
 			return nil, re.ErrorCode, err
 		}
 		b.logger().Warn("the machine login's refresh did not reach the broker; retrying", "credential_id", cred.id, "error", err)
+		return nil, "", err
+	}
+	if tok.RefreshToken == "" || tok.RefreshToken == cred.refreshToken {
+		err := errors.New("the broker's token answer names no new refresh_token")
+		b.logger().Error("the machine login's refresh answer cannot be kept; retrying", "credential_id", cred.id, "error", err)
 		return nil, "", err
 	}
 	next, err = machineFileFrom(cred.key, tok)
@@ -755,8 +873,10 @@ func (b *Broker) removeRefusedFile() {
 // lapsed, or its refresh token was reused) drops the credential (dropRefreshRefused) and deletes
 // the machine file; any other failure keeps both and is returned, so the loop retries. The old
 // refresh token is spent once the broker answers, so a new login the file cannot take is still
-// swapped in, and the failed save is logged and returned to be retried with the next refresh.
-// Holding no credential, it does nothing.
+// swapped in, and the failed save is logged, recorded (markUnsaved) and returned: until a save
+// lands, every later refresh retries only the save (retrySave), never another token request, and
+// the file is removed once unsavedFileDeadline passes without one. Holding no credential, it does
+// nothing.
 func (b *Broker) refresh(ctx context.Context) error {
 	b.credMu.Lock()
 	defer b.credMu.Unlock()
@@ -764,7 +884,11 @@ func (b *Broker) refresh(ctx context.Context) error {
 	if cred == nil {
 		return nil
 	}
+	if b.unsaved == cred {
+		return b.retrySave(cred)
+	}
 	f, refusal, err := b.redeem(ctx, cred)
+	answered := b.now()
 	if refusal != "" {
 		b.drop(cred, dropRefreshRefused, "code", refusal)
 		b.removeRefusedFile()
@@ -773,9 +897,9 @@ func (b *Broker) refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	saveErr := f.Save(b.MachineFile)
+	saveErr := b.saveFile(f)
 	if saveErr != nil {
-		b.logger().Error("the helper could not keep the machine login's refresh on disk; a restart before the next refresh loses the login",
+		b.logger().Error("the helper could not keep the machine login's refresh on disk; it holds the login in memory and retries only the save every 15 s, and removes the machine file, which names a token the broker has rotated away, if no save lands within 4 minutes",
 			"credential_id", f.CredentialID, "machine_file", b.MachineFile, "error", saveErr)
 	}
 	next := f.credential()
@@ -786,6 +910,9 @@ func (b *Broker) refresh(ctx context.Context) error {
 		close(cred.gone)
 		go b.watchExpiry(next)
 		b.logger().Info("machine login refreshed", "credential_id", f.CredentialID, "expires_at", f.ExpiresAt.Format(time.RFC3339))
+		if saveErr != nil {
+			b.markUnsaved(next, answered)
+		}
 	}
 	return saveErr
 }
@@ -806,6 +933,7 @@ func (b *Broker) settleRefused(ctx context.Context, cred *machineCredential) err
 		return nil
 	}
 	f, refusal, err := b.redeem(ctx, cred)
+	answered := b.now()
 	switch {
 	case refusal != "":
 		b.logger().Error(dropRefreshRefused+"; removed the machine file", "credential_id", cred.id, "code", refusal, "machine_file", b.MachineFile)
@@ -814,10 +942,12 @@ func (b *Broker) settleRefused(ctx context.Context, cred *machineCredential) err
 	case err != nil:
 		return err
 	}
-	if err := f.Save(b.MachineFile); err != nil {
-		b.logger().Error("the helper could not keep the machine login's refresh on disk; holding it and retrying",
+	if err := b.saveFile(f); err != nil {
+		b.logger().Error("the helper could not keep the machine login's refresh on disk; it holds the login in memory and retries only the save every 15 s, and removes the machine file, which names a token the broker has rotated away, if no save lands within 4 minutes",
 			"credential_id", f.CredentialID, "machine_file", b.MachineFile, "error", err)
-		b.installCredential(f.credential(), &loginState{State: "issued"})
+		installed := f.credential()
+		b.installCredential(installed, &loginState{State: "issued"})
+		b.markUnsaved(installed, answered)
 		return err
 	}
 	return nil
@@ -960,6 +1090,9 @@ func (b *Broker) drop(cred *machineCredential, why string, attrs ...any) bool {
 			b.testClearHook()
 		}
 		b.dropped = why
+		if why == dropRefused {
+			b.refusedCred = cred
+		}
 	}
 	b.stateMu.Unlock()
 	if !cleared {

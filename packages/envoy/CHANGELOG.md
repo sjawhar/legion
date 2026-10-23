@@ -11,9 +11,12 @@
   bound to the machine's key (DPoP, RFC 9449), and refreshes the login when it starts and then at
   half the time left before the credential's expiry, at most every 24 hours; a refresh whose
   answer is lost, that does not reach the broker, or that the broker answers 5xx is retried every
-  15 s for as long as that lasts, a 429 after its `Retry-After`, and any other refusal but
-  `invalid_grant` after a minute, doubling to an hour; an outage longer than five minutes (the time
-  a rotated token stays redeemable) right after a lost answer makes the next retry a reuse. Both
+  15 s until the broker settles a refresh (a success or `invalid_grant`), answered refusals in
+  between included; otherwise a 429 waits its `Retry-After`, at least 15 s and at most a minute,
+  and any other refusal but `invalid_grant` a minute, doubling to an hour; an outage longer than
+  five minutes (the time a rotated token stays redeemable) right after a lost answer makes the
+  next retry a reuse. A token answer naming no new refresh token is not saved: the helper keeps
+  the token it presented and retries. Both
   OAuth routes refuse a form past 64 KiB, `400 invalid_request`. `machine login` names the page the broker's `verification_uri`
   names when `AGENT_SECRETS_APPROVE_URL` is unset. Each refresh moves the credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
   from then and rotates the refresh token. A rotated token redeemed again within five minutes of
@@ -47,9 +50,15 @@
   first refresh or launcher call the broker refuses. It deletes the file when the broker refuses
   the login's refresh, within seconds of a
   launcher call the broker refuses `LAUNCHER_INVALID`. A refresh the broker rate-limits (429)
-  keeps the login and is retried no sooner than its `Retry-After`. A refreshed login it cannot save is held
-  and its refresh and save retried 15 s later. A machine login that replaces a credential the
-  helper held retires the old one at the broker, best effort, through the new
+  keeps the login and is retried no sooner than its `Retry-After` (at most a minute). A refreshed
+  login it cannot save is held in memory and only its save is retried, every 15 s, with no further
+  token request; if no save lands within 4 minutes of the rotation the helper removes the machine
+  file, which names a token the broker rotated away, so a restart holds no login and needs a new
+  approval rather than presenting that token past its grace, which the broker would revoke as a
+  reuse; a later save writes the file again. A read-only filesystem that refuses even the removal
+  is logged at ERROR: a restart before it is writable again revokes the machine. A machine login
+  that replaces a credential the helper held, or follows one a `LAUNCHER_INVALID` dropped, retires
+  the old one at the broker, best effort, through the new
   `POST /v1/operator/machines/{id}/retire`, signed with that credential's own launcher proof and
   accepted only for the calling credential: the old login can no longer refresh or enroll a
   session, and the sessions it enrolled keep running, so a new login leaves the machine's running
@@ -79,7 +88,8 @@
   again. A running helper from before `drain` is never restarted without
   `--restart-with-sessions`: install lists its sessions and says to re-run with that flag at a
   quiet moment. `agent-secrets register` retries a `DRAINING` answer within its `--wait` (at least
-  10 s), so a session launched during the restart registers with the restarted helper.
+  10 s), and `agent-secrets enroll --helper` within 30 s, so a session or box launched during the
+  restart registers or enrolls with the restarted helper.
 - The secrets broker's sweeper deletes spent machine-login OAuth state each tick: device codes an
   hour past their expiry, expired DPoP proofs, nonces and access tokens, and refresh token
   families none of whose tokens can still be redeemed, at most 10,000 rows of each per tick.

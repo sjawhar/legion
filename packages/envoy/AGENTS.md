@@ -2585,7 +2585,14 @@ helper writes them with the key to `AGENT_SECRETS_MACHINE_FILE` (default
 creates it, written through a fresh `os.CreateTemp` file renamed over it, so no planted path is
 followed; `helper.MachineFile`, whose `validate` both load and save check) before it installs the
 credential. A refresh whose answer the file cannot take is still installed (the old token is
-spent), so until the loop's retried save lands the file can name the login before it.
+spent) and recorded unsaved (`markUnsaved`, with when the answer came): until a save lands the
+loop retries only the save every 15 s (`retrySave`), never another token request, and once 4
+minutes have passed since the rotation (`unsavedFileDeadline`, inside the broker's five-minute
+grace) it removes the file, which names the rotated-away token, and logs at ERROR that the login
+is held only in memory and a restart needs a new approval; a later save writes the file again. An
+unlink works on a full disk; when even it fails (a read-only filesystem) the helper logs at ERROR
+that a restart before the disk is writable again presents a spent token, which the broker revokes
+as a reuse, ending the machine's sessions.
 `LoadMachineFile` refuses a file whose mode grants group or other any access, or that another
 user owns, naming it and `chmod 600`. `serve` first takes an exclusive flock on `<socket>.lock`
 (0600, beside the socket; `claimSocket`), then one on `<machine file>.lock` (`claimMachineFile`),
@@ -2595,8 +2602,8 @@ the socket that is not a unix socket or that a helper still answers on, and remo
 when a dial is refused. It then runs `Broker.Start` before it listens: Start first removes any
 `.machine-*.json.tmp` an interrupted save left beside the file, and a kept file is refreshed once,
 within 5 s, before it is installed, so the socket still listens inside `register`'s 10 s wait
-(answered: saved and installed `issued` with no code, the first refresh 15 s later when the save
-failed; `invalid_grant`: dropped and the file deleted, so a login the broker answered as ended is
+(answered: saved and installed `issued` with no code, or, when the save failed, installed and
+recorded unsaved, its save retried 15 s later; `invalid_grant`: dropped and the file deleted, so a login the broker answered as ended is
 never resumed; an outcome the helper did not learn, the 5 s bound passing among them: the kept
 login installed as `issued`, though the broker may have ended it, and retried by the loop). A file
 that is there but is
@@ -2604,9 +2611,13 @@ not exactly one machine login stops `serve`, naming the file. The refresh loop r
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
 credential is installed; a refresh the broker did not answer (any transport error: a refused,
 unanswered or unresolved dial, a timeout, a lost answer, a cancelled request) or answered 5xx is
-retried every 15 s for as long as that lasts, with no backoff (`retrySchedule`); a 429 (the token
-endpoint's rate limit) waits its `Retry-After` and keeps the login; any other refusal but
-`invalid_grant` waits a minute, doubling to an hour. A lost answer keeps the login only while a
+retried every 15 s, with no backoff (`retrySchedule`), and so is every refresh after it until the
+broker settles one (a success or `invalid_grant`), answered 4xx and 429s between included (its
+`unknown` flag); otherwise a 429 (the token endpoint's rate limit) waits its `Retry-After`, at
+least 15 s and at most a minute, and keeps the login, and any other refusal but `invalid_grant`
+waits a minute, doubling to an hour. A token answer naming no new refresh token (`x/oauth2` copies
+the presented one into an answer without the field) is an error answer: nothing is saved, and the
+refresh is retried. A lost answer keeps the login only while a
 retry lands inside the broker's five-minute rotation grace: retrying every 15 s lands one there
 whenever the outage is shorter, and an outage longer than the grace right after a lost answer makes
 the next retry a reuse, which revokes the machine and ends its sessions. The cost is one request
@@ -2615,12 +2626,13 @@ A 401
 `LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
 dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
 since that 401 can also be a proof the broker could not verify; an answer whose save fails is
-installed, so the helper keeps working, and the loop retries its refresh and save after 15 s.
+installed, so the helper keeps working, and recorded unsaved, as a refresh's is.
 Each refresh spends the refresh token
 for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
 the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)
 drops the login and deletes the file. A machine login installed while the helper held another
-credential retires the replaced one (`retireReplaced`: `POST /v1/operator/machines/{id}/retire`
+credential, or after a 401 `LAUNCHER_INVALID` dropped one (`refusedCred`), retires that one
+(`retireReplaced`: `POST /v1/operator/machines/{id}/retire`
 signed with that credential's own launcher proof, `enroll.Service.RetireCredential`: its expiry set
 to now and its OAuth tokens deleted in one transaction, so a retired refresh token presented later
 is a plain `invalid_grant` that revokes nothing, its sessions left running and renewing with
@@ -2644,7 +2656,8 @@ given, even with the unit unchanged, or, without it, only when the unit changed 
 `drain` op finds it has no sessions (it then refuses every later register and
 `enroll-session-key` `DRAINING` until it exits or is sent `undrain`, so none starts between the
 check and the restart; `agent-secrets register` retries `DRAINING` every 250 ms until the larger
-of its 10 s connect patience and `--wait` has passed, so a session launched then registers with the
+of its 10 s connect patience and `--wait` has passed, and `agent-secrets enroll --helper` for 30 s
+(`enrollRetryingDrain`), so a session or box launched then registers or enrolls with the
 restarted helper; a restart that fails after a drain sends `undrain` and exits with the
 restart's error). An unchanged, active unit without the flag does nothing. With sessions it prints them and
 `not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
@@ -3277,7 +3290,8 @@ login is not refused), and `enroll.Service.RetireCredential` sets its `expires_a
 its OAuth tokens in one transaction (an inactive token would take the reuse path and revoke the
 credential), writing one `launcher_credential.retired` audit row, while its
 enrollments keep running: a session renews with its own proof, as an expired credential's
-sessions do. It answers `204`, also for a credential already expired or revoked.
+sessions do. It answers `204`, but a credential already expired or revoked fails the route's
+launcher authentication first, so retiring one already ended answers `401 LAUNCHER_INVALID`.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

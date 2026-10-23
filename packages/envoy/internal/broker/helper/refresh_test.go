@@ -110,7 +110,7 @@ func TestARefusedRefreshDropsTheLoginAndItsFile(t *testing.T) {
 
 // TestARefreshThatDoesNotReachTheBrokerKeepsTheLogin: a refresh that fails for any other reason
 // (here the broker answers 503) keeps the credential and the machine file as they were, and the
-// refresh loop retries it on its backoff until one succeeds.
+// refresh loop retries it at the fixed retry until one succeeds.
 func TestARefreshThatDoesNotReachTheBrokerKeepsTheLogin(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
@@ -179,8 +179,9 @@ func TestARefreshTheBrokerDidNotAnswerIsRetriedEvery15sForAsLongAsItLasts(t *tes
 	}
 }
 
-// TestARateLimitedRefreshWaitsItsRetryAfter: a 429 waits the Retry-After the broker named, and no
-// less than the fixed retry when it names a shorter one or none, and does not start a backoff.
+// TestARateLimitedRefreshWaitsItsRetryAfter: a 429 waits the Retry-After the broker named, no less
+// than the fixed retry when it names a shorter one or none (at most a minute, capped elsewhere),
+// and does not start a backoff.
 func TestARateLimitedRefreshWaitsItsRetryAfter(t *testing.T) {
 	limited := func(retryAfter string) error {
 		h := http.Header{}
@@ -190,7 +191,7 @@ func TestARateLimitedRefreshWaitsItsRetryAfter(t *testing.T) {
 		return &oauth2.RetrieveError{Response: &http.Response{StatusCode: http.StatusTooManyRequests, Header: h}}
 	}
 	s := (&Broker{}).newRetrySchedule()
-	for retryAfter, want := range map[string]time.Duration{"90": 90 * time.Second, "1": defaultRefreshRetry, "": defaultRefreshRetry} {
+	for retryAfter, want := range map[string]time.Duration{"45": 45 * time.Second, "1": defaultRefreshRetry, "": defaultRefreshRetry} {
 		for i := range 3 {
 			if wait := s.next(limited(retryAfter)); wait != want {
 				t.Fatalf("Retry-After %q: wait %d = %s; want %s", retryAfter, i+1, wait, want)

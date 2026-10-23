@@ -45,8 +45,9 @@ var (
 )
 
 // refreshGrace is how long a rotated refresh token stays redeemable, so a client whose refresh
-// response was lost in transit can retry with the token it still holds, through a backoff of
-// several retries. Its DPoP binding means only the holder of the machine's key can use it.
+// response was lost in transit can retry with the token it still holds (the helper retries every
+// 15 s until an answer settles it). Its DPoP binding means only the holder of the machine's key
+// can use it.
 const refreshGrace = 5 * time.Minute
 
 // sweepBatch bounds how many rows one of Sweep's statements deletes; a variable so tests can sweep
@@ -614,9 +615,10 @@ func (s *Store) RotateRefreshToken(ctx context.Context, requestID string, signat
 // response, in its own transaction): this provider mounts no revocation endpoint and issues no
 // authorization code. The library has already deleted the presented token's row in this
 // transaction before it calls here, so Reused locks the credential's row after a token row, the
-// reverse of the order a revoke or a refresh takes them. A revoke, or a second redemption inside
-// the grace, racing this can therefore deadlock with it: Postgres aborts one of them, which
-// answers 500 and clears on a retry, and the credential ends revoked either way.
+// reverse of the order a revoke, a retire (enroll.Service.RetireCredential, which locks the
+// credential and then deletes its token rows) or a refresh takes them. A revoke, a retire, or a
+// second redemption inside the grace, racing this can therefore deadlock with it: Postgres aborts
+// one of them, which answers 500 and clears on a retry, and the credential ends either way.
 func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error {
 	state, err := txOf(ctx)
 	if err != nil {

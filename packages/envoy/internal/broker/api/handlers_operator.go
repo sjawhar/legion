@@ -57,8 +57,8 @@ func (s *server) revokeOperatorMachine(w http.ResponseWriter, r *http.Request, c
 // retireOperatorMachine retires the calling credential, the login a newer login of its machine
 // replaced (enroll.Service.RetireCredential): it enrolls nothing more and cannot refresh, while the
 // sessions it enrolled keep running. {id} must name the calling credential (403
-// NOT_CALLING_CREDENTIAL otherwise), so a machine retires only its own login. 204 on success,
-// retiring one already ended included.
+// NOT_CALLING_CREDENTIAL otherwise), so a machine retires only its own login. 204 on success; a
+// credential already expired or revoked fails launcher authentication first, 401 LAUNCHER_INVALID.
 func (s *server) retireOperatorMachine(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	id, ok := pathUUID(w, r, "id", "CREDENTIAL_ID_INPUT", "launcher credential")
 	if !ok {
