@@ -10,6 +10,7 @@ import (
 
 	"authelia.com/provider/oauth2"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -201,10 +202,17 @@ func TestARotatedRefreshTokenIsRedeemableOnlyWithinItsGrace(t *testing.T) {
 	}
 }
 
+// TestRevokeRefreshTokenEndsTheWholeFamily: the library revokes a family only on a reuse, so the
+// store ends the family's tokens and hands its credential to Reused, in the reuse's transaction.
 func TestRevokeRefreshTokenEndsTheWholeFamily(t *testing.T) {
 	ctx := context.Background()
 	s, pool := newStore(t)
 	credential := newCredential(t, pool)
+	var reused []string
+	s.Reused = func(_ context.Context, _ pgx.Tx, id string) error {
+		reused = append(reused, id)
+		return nil
+	}
 	signatures := []string{"refresh-1", "refresh-2", "refresh-3"}
 	for i, signature := range signatures {
 		if err := s.CreateRefreshTokenSession(ctx, signature, "", tokenRequest(t, s, "request-1", credential)); err != nil {
@@ -216,12 +224,25 @@ func TestRevokeRefreshTokenEndsTheWholeFamily(t *testing.T) {
 			}
 		}
 	}
-	if err := s.CreateRefreshTokenSession(ctx, "other-family", "", tokenRequest(t, s, "request-2", credential)); err != nil {
+	if err := s.CreateRefreshTokenSession(ctx, "other-family", "", tokenRequest(t, s, "request-2", newCredential(t, pool))); err != nil {
 		t.Fatalf("CreateRefreshTokenSession other: %v", err)
 	}
 
-	if err := s.RevokeRefreshToken(ctx, "request-1"); err != nil {
+	if err := s.RevokeRefreshToken(ctx, "request-1"); err == nil {
+		t.Fatal("RevokeRefreshToken outside a transaction = nil, want an error")
+	}
+	txCtx, err := s.BeginTX(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeRefreshToken(txCtx, "request-1"); err != nil {
 		t.Fatalf("RevokeRefreshToken: %v", err)
+	}
+	if err := s.Commit(txCtx); err != nil {
+		t.Fatal(err)
+	}
+	if len(reused) != 1 || reused[0] != credential {
+		t.Fatalf("Reused saw %v, want the family's one credential %s", reused, credential)
 	}
 	for _, signature := range signatures {
 		if _, err := s.GetRefreshTokenSession(ctx, signature, nil); !errors.Is(err, oauth2.ErrInactiveToken) {

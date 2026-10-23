@@ -163,6 +163,7 @@ const MachineLoginURL = "https://dispatch.example/credentials/machine"
 func newOAuthProvider(t *testing.T, st *store.Store) *oauth.Provider {
 	t.Helper()
 	oauthStore := oauthstore.New(st.Pool)
+	oauthStore.Reused = enroll.RevokeReusedCredential
 	secret, err := oauthStore.Secret(context.Background())
 	if err != nil {
 		t.Fatalf("OAuth secret: %v", err)

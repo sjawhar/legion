@@ -187,6 +187,7 @@ func main() {
 	reqMachine.MintToken = mintToken
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
 	oauthStore := oauthstore.New(st.Pool)
+	oauthStore.Reused = enroll.RevokeReusedCredential
 	oauthSecret, err := oauthStore.Secret(ctx)
 	fatal(err)
 	// verification_uri is Dispatch's machine-login page, where the person types the code.

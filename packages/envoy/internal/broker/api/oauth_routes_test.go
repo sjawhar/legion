@@ -13,6 +13,7 @@ import (
 	"authelia.com/provider/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -26,6 +27,7 @@ import (
 func withOAuth(t *testing.T, deviceLogin func(context.Context, url.Values, string) error) func(*api.Deps) {
 	return func(d *api.Deps) {
 		store := oauthstore.New(d.MachineLogin.Store.Pool)
+		store.Reused = enroll.RevokeReusedCredential
 		secret, err := store.Secret(context.Background())
 		if err != nil {
 			t.Fatalf("Secret: %v", err)

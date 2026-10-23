@@ -155,6 +155,11 @@ const deviceInvalidated = -1
 type Store struct {
 	pool *pgxpool.Pool
 
+	// Reused ends the launcher credential a reused refresh token's family names, in the
+	// transaction the library's reuse response runs in (RevokeRefreshToken). It must be set before
+	// the provider serves a refresh: enroll.Service.RevokeReusedCredential.
+	Reused func(ctx context.Context, tx pgx.Tx, credentialID string) error
+
 	// sweepMu serialises Sweep's refresh walk, which reads and advances sweepAt.
 	sweepMu sync.Mutex
 	sweepAt sweepCursor
@@ -588,10 +593,34 @@ func (s *Store) RotateRefreshToken(ctx context.Context, requestID string, signat
 	return s.RevokeAccessToken(ctx, requestID)
 }
 
-// RevokeRefreshToken deactivates every refresh token of the request: the whole rotation family,
-// which shares the request id.
+// RevokeRefreshToken deactivates every refresh token of the request, the whole rotation family
+// (which shares the request id), and ends the launcher credential the family names (Reused). The
+// library calls it only when a refresh presents a rotated token past its grace (its reuse
+// response, in its own transaction): this provider mounts no revocation endpoint and issues no
+// authorization code. Reused runs first, so it takes the credential's row before any token row,
+// in the order a revoke and a refresh take them.
 func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error {
-	if _, err := s.db(ctx).Exec(ctx, `update oauth_refresh_tokens set active = false where request_id = $1 and active`, requestID); err != nil {
+	state, err := txOf(ctx)
+	if err != nil {
+		return err
+	}
+	if s.Reused == nil {
+		return errors.New("oauthstore: a reused refresh token's credential has no Reused step to end it")
+	}
+	rows, err := state.tx.Query(ctx, `select distinct credential_id::text from oauth_refresh_tokens where request_id = $1 and credential_id is not null`, requestID)
+	if err != nil {
+		return fmt.Errorf("read a reused family's credential: %w", err)
+	}
+	credentials, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("read a reused family's credential: %w", err)
+	}
+	for _, credentialID := range credentials {
+		if err := s.Reused(ctx, state.tx, credentialID); err != nil {
+			return fmt.Errorf("end a reused family's credential: %w", err)
+		}
+	}
+	if _, err := state.tx.Exec(ctx, `update oauth_refresh_tokens set active = false where request_id = $1 and active`, requestID); err != nil {
 		return fmt.Errorf("revoke refresh tokens: %w", err)
 	}
 	return nil

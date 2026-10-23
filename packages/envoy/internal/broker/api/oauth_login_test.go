@@ -327,6 +327,43 @@ func TestARevokedMachineRefusesItsNextCallAndItsRefresh(t *testing.T) {
 	}
 }
 
+// TestReusingARotatedRefreshTokenRevokesTheMachine: a rotated refresh token redeemed after its
+// grace is a copy someone else is using, so the broker revokes the launcher credential its family
+// names, as a revoke does: the key enrolls nothing more, the sessions it enrolled end, and the
+// audit row names the reuse.
+func TestReusingARotatedRefreshTokenRevokesTheMachine(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	m, tok, credentialID := approvedLogin(t, rig)
+	if status, body := enrollSession(t, rig, m.key, credentialID); status != http.StatusCreated {
+		t.Fatalf("enroll = %d: %s", status, body)
+	}
+	if _, err := m.refresh(tok); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := rig.Store.Pool.Exec(ctx, `update oauth_refresh_tokens set grace_until = now() - interval '1 second' where grace_until is not null`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.refresh(tok)
+	if code, _ := oauthErrorCode(t, err); code != "invalid_grant" {
+		t.Fatalf("replaying the rotated token = %s, want invalid_grant", code)
+	}
+	if status, body := enrollSession(t, rig, m.key, credentialID); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
+		t.Fatalf("enroll after the reuse = %d %s, want 401 LAUNCHER_INVALID", status, body)
+	}
+	var live int
+	if err := rig.Store.Pool.QueryRow(ctx, `select count(*) from enrollments where launcher_credential_id=$1 and revoked_at is null`, credentialID).Scan(&live); err != nil || live != 0 {
+		t.Fatalf("live sessions after the reuse = %d (%v), want 0", live, err)
+	}
+	var actor string
+	if err := rig.Store.Pool.QueryRow(ctx, `select actor from audit where kind='launcher_credential.revoked' and detail->>'credential_id'=$1`, credentialID).Scan(&actor); err != nil || actor != "broker:refresh-token-reuse" {
+		t.Fatalf("revoke audit actor = %q (%v), want broker:refresh-token-reuse", actor, err)
+	}
+	if n := activeTokens(t, rig, credentialID); n != 0 {
+		t.Fatalf("active tokens after the reuse = %d, want 0", n)
+	}
+}
+
 func TestAnUnrefreshedLoginLapses(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)

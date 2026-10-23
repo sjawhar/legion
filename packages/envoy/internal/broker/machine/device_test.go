@@ -13,6 +13,7 @@ import (
 
 	"authelia.com/provider/oauth2"
 
+	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
@@ -25,6 +26,7 @@ import (
 func withProvider(t *testing.T, svc *Service, deviceLifetime time.Duration) {
 	t.Helper()
 	st := oauthstore.New(svc.Store.Pool)
+	st.Reused = enroll.RevokeReusedCredential
 	secret, err := st.Secret(context.Background())
 	if err != nil {
 		t.Fatal(err)

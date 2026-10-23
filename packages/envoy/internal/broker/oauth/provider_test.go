@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
@@ -58,6 +59,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(pool.Close)
 	store := oauthstore.New(pool)
+	store.Reused = enroll.RevokeReusedCredential
 	secret, err := store.Secret(context.Background())
 	if err != nil {
 		t.Fatalf("Secret: %v", err)
