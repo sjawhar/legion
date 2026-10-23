@@ -42,10 +42,11 @@
     "shasFetchedBack": "gh api repos/sjawhar/legion/commits/<sha> --jq .sha echoed back both 437320d4a209431775a906a012716fc17eeade84 and df13ed6c7d5b065057fded784b2ad85e54cefb89."
   },
   "threads": {
-    "onGitHub": 13,
-    "answeredByMe": 13,
+    "onGitHub": 11,
+    "resolved": 11,
+    "answeredByMe": 11,
     "botThreadsAdjudicated": 0,
-    "note": "Eleven threads were resolved before this round; the two I opened in round four are answered by the implementer and by me in it. All are mine; no bot has opened a thread on #2121."
+    "note": "Eleven threads, counted at the forge with the paginated GraphQL read rather than from memory: nine were closed before this round, and the two I opened in round four - packages/pi-legion/src/skills-guard.test.ts and skills/legion-worker/references/merge-gate.md - are answered by the implementer and by me in it and resolved by it as the pull request's author. All eleven are mine; no bot has opened a thread on #2121. An earlier draft of this file said thirteen, which was my arithmetic rather than a read; the count above is what gh api graphql reviewThreads(first:100){totalCount} answers."
   },
   "thermonuclear": {
     "head": "df13ed6c7d5b065057fded784b2ad85e54cefb89",
