@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -268,5 +269,35 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 				t.Fatalf("stderr after %s:\n%s\nwant a line carrying %s", tc.sig, logged(), want)
 			}
 		})
+	}
+}
+
+// TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket: serve never takes over a socket another
+// helper answers on (the error names it, and the socket still answers), and removes one nothing
+// answers on, as a helper that died leaves.
+func TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "h.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claimSocket(sock); err == nil || !strings.Contains(err.Error(), sock) {
+		t.Fatalf("claimSocket on a live socket: %v; want an error naming %s", err, sock)
+	}
+	if conn, err := net.Dial("unix", sock); err != nil {
+		t.Fatalf("the live socket stopped answering: %v", err)
+	} else {
+		conn.Close()
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("the stale socket is not there to clear: %v", err)
+	}
+	if err := claimSocket(sock); err != nil {
+		t.Fatalf("claimSocket on a stale socket: %v", err)
+	}
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Fatalf("the stale socket is still there: %v", err)
 	}
 }

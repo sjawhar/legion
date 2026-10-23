@@ -19,14 +19,17 @@ import (
 
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved) and
 // the broker URL from --url or AGENT_SECRETS_URL. When the unit's bytes are unchanged it does
-// nothing more. Otherwise it writes the unit, runs `systemctl --user daemon-reload` and
-// `enable --now`. A helper that was not answering on its socket before that is now started on
-// the new unit. One that was is restarted only when `drain` finds it has no sessions (the helper
-// then refuses new ones until it exits) or restartWithSessions is set; a restart ends the
-// sessions' grants, so with sessions it prints them and why it did not restart, and returns nil.
-// A helper older than `drain` cannot refuse a register between the check and the restart, so
-// without restartWithSessions it is never restarted: install prints its sessions and that it
-// predates drain, and returns nil.
+// nothing more. A helper answering on its socket while the unit is not active was not started by
+// it, and starting the unit would put a second helper on that socket: install refuses, listing
+// that helper's sessions, and writes and starts nothing. Otherwise it writes the unit, runs
+// `systemctl --user daemon-reload` and `enable --now`. A helper that was not answering on its
+// socket before that is now started on the new unit. One that was is restarted only when `drain`
+// finds it has no sessions (the helper then refuses new ones) or restartWithSessions is set; a
+// restart ends the sessions' grants, so with sessions it prints them and why it did not restart,
+// and returns nil. A restart that fails after a drain sends `undrain`, so the helper takes sessions
+// again, and returns the restart's error. A helper older than `drain` cannot refuse a register
+// between the check and the restart, so without restartWithSessions it is never restarted:
+// install prints its sessions and that it predates drain, and returns nil.
 func install(args []string, getenv func(string) string, exe string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	url := fs.String("url", "", "the broker's base URL (default $AGENT_SECRETS_URL)")
@@ -74,8 +77,14 @@ WantedBy=default.target
 	if err != nil {
 		return err
 	}
-	_, err = helper.Call(cfg.Socket, helper.Request{Op: "sessions"}, 2*time.Second)
+	running, err := helper.Call(cfg.Socket, helper.Request{Op: "sessions"}, 2*time.Second)
 	wasRunning := err == nil
+	if wasRunning && !unitActive() {
+		for _, s := range running.Sessions {
+			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State)
+		}
+		return fmt.Errorf("an agent-secrets-helper not run by %s answers at %s (its sessions are listed above); stop it, then re-run install", helper.UnitName, cfg.Socket)
+	}
 	if err := writeFileAtomic(path, unit); err != nil {
 		return err
 	}
@@ -88,8 +97,10 @@ WantedBy=default.target
 	if !wasRunning {
 		return nil
 	}
+	drained := false
 	if !*restartWithSessions {
-		sessions, drained, err := drainHelper(cfg.Socket)
+		var sessions []helper.SessionInfo
+		sessions, drained, err = drainHelper(cfg.Socket)
 		if err != nil {
 			return err
 		}
@@ -105,7 +116,21 @@ WantedBy=default.target
 			return nil
 		}
 	}
-	return systemctl("restart", helper.UnitName)
+	if err := systemctl("restart", helper.UnitName); err != nil {
+		if drained {
+			if resp, uerr := helper.Call(cfg.Socket, helper.Request{Op: "undrain"}, 2*time.Second); uerr != nil || !resp.OK {
+				fmt.Fprintf(stdout, "the helper is still draining (refusing new sessions): undrain failed: %v %s\n", uerr, resp.Error)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
+// unitActive reports whether `systemctl --user is-active` names the helper's unit active.
+func unitActive() bool {
+	out, err := exec.Command("systemctl", "--user", "is-active", helper.UnitName).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "active"
 }
 
 // drainHelper asks the helper at sock to drain: it answers its sessions and, with none, refuses

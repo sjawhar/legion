@@ -182,8 +182,9 @@ type Registry struct {
 	byPID  map[int]*Session
 	// parent reads a process's parent for the ancestry walks: procParent, or a test's fake.
 	parent func(int) (int, error)
-	// draining is set by Drain on a registry with no sessions and never cleared: the helper is
-	// about to be restarted, and a session registered now would lose its grants to the restart.
+	// draining is set by Drain on a registry with no sessions and cleared only by Undrain: the
+	// helper is about to be restarted, and a session registered now would lose its grants to the
+	// restart.
 	draining bool
 }
 
@@ -287,6 +288,13 @@ func (r *Registry) Drain() []*Session {
 		r.draining = true
 	}
 	return out
+}
+
+// Undrain clears what Drain set, for a restart that did not happen.
+func (r *Registry) Undrain() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.draining = false
 }
 
 // Draining reports whether Drain has marked the registry draining.

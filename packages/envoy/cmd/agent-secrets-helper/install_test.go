@@ -15,12 +15,15 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
 
-// installRig is a temp XDG config dir, a fake systemctl on PATH that appends its argv to a log,
-// and the helper socket path install checks for a running helper.
+// installRig is a temp XDG config dir, a fake systemctl on PATH that appends its argv to a log
+// (all but is-active, which prints the unit's state: "active" unless a test writes another to
+// the active file, and logs nothing), and the helper socket path install checks for a running
+// helper.
 type installRig struct {
 	env    map[string]string
 	unit   string
 	calls  string
+	active string
 	sock   string
 	exe    string
 	stdout bytes.Buffer
@@ -39,8 +42,13 @@ func newInstallRig(t *testing.T) *installRig {
 	if err := os.Mkdir(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := &installRig{calls: filepath.Join(dir, "systemctl.log"), sock: filepath.Join(dir, "h.sock"), exe: filepath.Join(real, "agent-secrets-helper")}
-	script := "#!/bin/sh\necho \"$*\" >> " + r.calls + "\n"
+	r := &installRig{calls: filepath.Join(dir, "systemctl.log"), active: filepath.Join(dir, "active"), sock: filepath.Join(dir, "h.sock"), exe: filepath.Join(real, "agent-secrets-helper")}
+	if err := os.WriteFile(r.active, []byte("active\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nif [ \"$2\" = is-active ]; then read -r state < " + r.active + "; echo \"$state\"; exit 0; fi\n" +
+		"echo \"$*\" >> " + r.calls + "\n" +
+		"if [ \"$2\" = restart ] && [ -e " + r.calls + ".fail-restart ]; then exit 1; fi\n"
 	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +82,18 @@ func (r *installRig) systemctlCalls(t *testing.T) []string {
 // asked, in order. With knowsDrain false it answers `drain` as an older helper does.
 func (r *installRig) fakeHelper(t *testing.T, sessions []helper.SessionInfo, knowsDrain ...bool) *[]string {
 	t.Helper()
+	return r.scriptedHelper(t, func(op string) helper.Response {
+		if op == "drain" && len(knowsDrain) > 0 && !knowsDrain[0] {
+			return helper.Response{Code: helper.CodeBadRequest, Error: "unknown op drain"}
+		}
+		return helper.Response{OK: true, Sessions: sessions}
+	})
+}
+
+// scriptedHelper answers each op on the rig's socket with answer(op) and returns the ops it was
+// asked, in order.
+func (r *installRig) scriptedHelper(t *testing.T, answer func(op string) helper.Response) *[]string {
+	t.Helper()
 	ln, err := net.Listen("unix", r.sock)
 	if err != nil {
 		t.Fatal(err)
@@ -91,11 +111,7 @@ func (r *installRig) fakeHelper(t *testing.T, sessions []helper.SessionInfo, kno
 			_ = json.Unmarshal(line, &req)
 			// install reads each reply before its next call, so this append happens-before the test reads ops.
 			*ops = append(*ops, req.Op)
-			resp := helper.Response{OK: true, Sessions: sessions}
-			if req.Op == "drain" && len(knowsDrain) > 0 && !knowsDrain[0] {
-				resp = helper.Response{Code: helper.CodeBadRequest, Error: "unknown op drain"}
-			}
-			data, _ := json.Marshal(resp)
+			data, _ := json.Marshal(answer(req.Op))
 			_, _ = conn.Write(append(data, '\n'))
 			_ = conn.Close()
 		}
@@ -284,5 +300,77 @@ func TestInstallRefusesAnExecutablePathSystemdWouldSplit(t *testing.T) {
 	}
 	if err := install([]string{"--url", "https://s"}, env(r.env), spaced, &r.stdout); err == nil || !strings.Contains(err.Error(), spaced) {
 		t.Fatalf("install from %q: %v", spaced, err)
+	}
+}
+
+// TestInstallRefusesAHelperItsUnitDoesNotRun: a helper answers on the socket while the unit is
+// not active, so something else started it; enabling the unit would start a second helper on
+// its socket. install lists that helper's sessions, says to stop it, and writes and starts
+// nothing.
+func TestInstallRefusesAHelperItsUnitDoesNotRun(t *testing.T) {
+	r := newInstallRig(t)
+	if err := os.WriteFile(r.active, []byte("inactive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ops := r.fakeHelper(t, []helper.SessionInfo{{PID: 41, RuntimeID: "rt-a"}})
+	err := r.run("--url", "https://secrets.example")
+	if err == nil || !strings.Contains(err.Error(), "not run by agent-secrets-helper.service") || !strings.Contains(err.Error(), r.sock) ||
+		!strings.Contains(err.Error(), "stop it, then re-run install") {
+		t.Fatalf("install beside an unmanaged helper: %v", err)
+	}
+	if !strings.Contains(r.stdout.String(), "41\trt-a") {
+		t.Fatalf("output %q; want the running helper's sessions", r.stdout.String())
+	}
+	if _, statErr := os.Stat(r.unit); statErr == nil {
+		t.Fatal("wrote the unit beside an unmanaged helper")
+	}
+	if calls := r.systemctlCalls(t); calls != nil {
+		t.Fatalf("systemctl ran beside an unmanaged helper: %q", calls)
+	}
+	if strings.Join(*ops, ",") != "sessions" {
+		t.Fatalf("ops asked: %q; want only the running check", *ops)
+	}
+}
+
+// TestInstallUndrainsWhenTheRestartFails: a drain found no sessions, so the helper refuses new
+// ones, and then the restart failed: install sends undrain, so the running helper takes sessions
+// again, and returns the restart's error.
+func TestInstallUndrainsWhenTheRestartFails(t *testing.T) {
+	r := newInstallRig(t)
+	if err := os.WriteFile(r.calls+".fail-restart", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ops := r.fakeHelper(t, nil)
+	err := r.run("--url", "https://secrets.example")
+	if err == nil || !strings.Contains(err.Error(), "systemctl --user restart agent-secrets-helper.service") {
+		t.Fatalf("install with a failing restart: %v; want the restart's error", err)
+	}
+	if strings.Join(*ops, ",") != "sessions,drain,undrain" {
+		t.Fatalf("ops asked: %q; want the running check, drain, then undrain", *ops)
+	}
+}
+
+// TestInstallNeverRestartsWhenASessionArrivesBeforeTheDrain: the running check finds no sessions,
+// but one registers before the drain, which finds it: install does not restart, and prints the
+// session and why.
+func TestInstallNeverRestartsWhenASessionArrivesBeforeTheDrain(t *testing.T) {
+	r := newInstallRig(t)
+	r.scriptedHelper(t, func(op string) helper.Response {
+		if op == "drain" {
+			return helper.Response{OK: true, Sessions: []helper.SessionInfo{{PID: 43, RuntimeID: "rt-late"}}}
+		}
+		return helper.Response{OK: true}
+	})
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.systemctlCalls(t) {
+		if strings.Contains(c, "restart") {
+			t.Fatalf("restarted a helper whose drain found a session: %q", c)
+		}
+	}
+	out := r.stdout.String()
+	if !strings.Contains(out, "43\trt-late") || !strings.Contains(out, "not restarted: 1 sessions are registered") {
+		t.Fatalf("output:\n%s", out)
 	}
 }

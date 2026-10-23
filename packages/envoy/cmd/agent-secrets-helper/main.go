@@ -4,7 +4,7 @@
 
 // Command agent-secrets-helper is the machine side of agent secrets: a per-user
 // daemon (the systemd user unit `agent-secrets-helper install` writes) that keeps this machine's login
-// (AGENT_SECRETS_MACHINE_FILE) and refreshes it daily, pins each registered agent session on this
+// (AGENT_SECRETS_MACHINE_FILE) and refreshes it at least daily, pins each registered agent session on this
 // machine by pidfd, keeps the session's P-256 key in memory, enrolls it with the secrets broker as
 // kind "session" under the machine's launcher credential, signs broker proofs for the session's
 // descendants, and revokes the enrollment when the session's process exits.
@@ -117,8 +117,9 @@ func main() {
 }
 
 // serve runs the daemon: it always listens and serves, whether or not a machine credential has
-// ever been installed. It first resumes the machine login kept at MachineFile, if there is one,
-// and refreshes it then and daily; a machine file that is there but does not parse stops it,
+// ever been installed. It refuses to start while another helper answers on its socket
+// (claimSocket). It then resumes the machine login kept at MachineFile, if there is one,
+// refreshing it before it installs it and then at least daily (Broker.Start); a machine file that is there but does not parse stops it,
 // naming the file. There is no startup gate on OperatorFile: a login is a separate ceremony
 // (`agent-secrets machine login`) run against the already-listening socket, and a missing or
 // empty OperatorFile only surfaces later, informatively, the first time Login actually needs it
@@ -146,13 +147,17 @@ func serve(cfg config) error {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	if err := srv.Broker.Start(ctx); err != nil {
-		return err
-	}
+	// The socket is claimed before the kept login is resumed, so a second helper never spends the
+	// refresh token the running one holds.
 	if err := os.MkdirAll(filepath.Dir(cfg.Socket), 0o700); err != nil {
 		return err
 	}
-	_ = os.Remove(cfg.Socket)
+	if err := claimSocket(cfg.Socket); err != nil {
+		return err
+	}
+	if err := srv.Broker.Start(ctx); err != nil {
+		return err
+	}
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: cfg.Socket, Net: "unix"})
 	if err != nil {
 		return err
@@ -177,6 +182,20 @@ func serve(cfg config) error {
 	// it changes (the Broker's resume, machine-login, refresh, expiry-warning and drop lines).
 	log.Info("agent-secrets-helper listening", "socket", cfg.Socket, "broker", cfg.URL, "version", buildversion.String())
 	return srv.Serve(ctx, ln)
+}
+
+// claimSocket clears the way for serve to listen at sock: a socket another helper answers on
+// refuses the start, naming it, since unlinking it would leave that helper's sessions on a helper
+// nobody reaches; one nothing answers (a helper that died) is stale and removed.
+func claimSocket(sock string) error {
+	if conn, err := net.DialTimeout("unix", sock, time.Second); err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("another agent-secrets-helper already answers at %s; stop it first", sock)
+	}
+	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func printSessions(sock string) error {

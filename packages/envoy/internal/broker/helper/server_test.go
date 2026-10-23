@@ -163,6 +163,24 @@ func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
 	}
 }
 
+// TestUndrainTakesSessionsAgain: undrain, install's undo of a drain whose restart failed, leaves
+// a helper that registers sessions again.
+func TestUndrainTakesSessionsAgain(t *testing.T) {
+	r := startRig(t, "")
+	if d := r.call(t, Request{Op: "drain"}); !d.OK || !r.srv.Registry.Draining() {
+		t.Fatalf("drain: %+v", d)
+	}
+	if u := r.call(t, Request{Op: "undrain"}); !u.OK {
+		t.Fatalf("undrain: %+v", u)
+	}
+	if r.srv.Registry.Draining() {
+		t.Fatal("the helper is still draining after undrain")
+	}
+	if resp := r.call(t, Request{Op: "register"}); resp.Code == CodeDraining {
+		t.Fatalf("register after undrain: %+v", resp)
+	}
+}
+
 // TestDrainWithSessionsSetsNothing: a drain that finds sessions answers them and leaves the
 // helper taking registrations.
 func TestDrainWithSessionsSetsNothing(t *testing.T) {
