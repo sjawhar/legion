@@ -46,31 +46,29 @@ func loggedInBrokerLogging(t *testing.T, f *fakeBroker, log *slog.Logger) *Broke
 	return b
 }
 
-// fakeClock is a settable clock for b's unsaved-login deadline.
-type fakeClock struct {
-	mu sync.Mutex
-	at time.Time
-}
-
-func (c *fakeClock) now() time.Time     { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
-func (c *fakeClock) set(at time.Time)   { c.mu.Lock(); c.at = at; c.mu.Unlock() }
-func clockAt(at time.Time) *fakeClock   { return &fakeClock{at: at} }
 func (f *fakeBroker) refreshCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.refreshes }
 
-// TestARefreshWhoseSaveFailsRetriesOnlyTheSave: once the broker has rotated the token and the
-// save failed, every later attempt retries the save alone, never another token request, at the
-// fixed retry, for as long as saves fail; a save that lands then keeps the held login on disk
-// and spends no rotation either.
-func TestARefreshWhoseSaveFailsRetriesOnlyTheSave(t *testing.T) {
+// TestARefreshWhoseSaveFailsRemovesTheFileAndRetriesOnlyTheSave: once the broker has rotated the
+// token and the save failed, the machine file is gone at once (ERROR says so), the login stays in
+// memory, and every later attempt retries the save alone at the fixed retry, never another token
+// request; a save that lands writes the file back and spends no rotation.
+func TestARefreshWhoseSaveFailsRemovesTheFileAndRetriesOnlyTheSave(t *testing.T) {
+	var out syncBuffer
 	f := newFakeBroker(t)
-	b := loggedInBroker(t, f, "ada@example.com")
+	b := loggedInBrokerLogging(t, f, slog.New(slog.NewJSONHandler(&out, nil)))
 	original := b.cred.Load().refreshToken
-	start := time.Now()
-	b.testNow = clockAt(start).now
 	restore := fullDisk(b)
-	err := b.refresh(context.Background())
-	if err == nil || f.refreshCount() != 1 {
+	if err := b.refresh(context.Background()); err == nil || f.refreshCount() != 1 {
 		t.Fatalf("a refresh whose save failed = %v after %d token requests; want the save error after 1", err, f.refreshCount())
+	}
+	if _, err := LoadMachineFile(b.MachineFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the machine file after the failed save: %v; want it removed at once", err)
+	}
+	if line := waitForRecord(t, &out, unsavedRemovedMsg); line["level"] != "ERROR" || line["credential_id"] != b.cred.Load().id {
+		t.Fatalf("the removal line: %v; want an ERROR naming the held credential", line)
+	}
+	if !b.HasCredential() {
+		t.Fatal("the helper must hold the rotated login in memory")
 	}
 	sched := b.newRetrySchedule()
 	for i := range 10 {
@@ -78,15 +76,12 @@ func TestARefreshWhoseSaveFailsRetriesOnlyTheSave(t *testing.T) {
 		if err == nil {
 			t.Fatalf("retry %d: the save cannot land yet, want its error", i+1)
 		}
-		if wait := sched.next(err); wait != defaultRefreshRetry {
+		if wait := sched.after(err, func() time.Duration { return time.Hour }); wait != defaultRefreshRetry {
 			t.Fatalf("retry %d: wait %s; want the fixed %s", i+1, wait, defaultRefreshRetry)
 		}
 	}
 	if n := f.refreshCount(); n != 1 {
 		t.Fatalf("token requests while the save failed = %d; want only the first", n)
-	}
-	if kept, err := LoadMachineFile(b.MachineFile); err != nil || kept.RefreshToken != original {
-		t.Fatalf("machine file %+v, %v; want the old login untouched before the deadline", kept, err)
 	}
 	restore()
 	if err := b.refresh(context.Background()); err != nil {
@@ -95,60 +90,44 @@ func TestARefreshWhoseSaveFailsRetriesOnlyTheSave(t *testing.T) {
 	if !fileHoldsTheHeldLogin(b, original) || f.refreshCount() != 1 {
 		t.Fatalf("after the save landed: file holds the held login %v, token requests %d; want true and 1", fileHoldsTheHeldLogin(b, original), f.refreshCount())
 	}
-	// The next refresh is an ordinary one again.
 	if err := b.refresh(context.Background()); err != nil || f.refreshCount() != 2 {
 		t.Fatalf("the next refresh: %v, token requests %d; want a rotation", err, f.refreshCount())
 	}
 }
 
-// TestAnUnsavedLoginRemovesTheFileBeforeTheGraceEnds: a save still failing 4 minutes after the
-// rotation (inside the broker's 5-minute grace) removes the machine file and says at ERROR that
-// the login is held only in memory; until then the file is left. A later save writes it again.
-func TestAnUnsavedLoginRemovesTheFileBeforeTheGraceEnds(t *testing.T) {
-	var out syncBuffer
+// TestASettlementOfAnUnsavedLoginRetriesOnlyTheSave: a launcher refusal dropping the unsaved
+// login hands it to settleRefused, which retries its save and makes no token request while that
+// save fails.
+func TestASettlementOfAnUnsavedLoginRetriesOnlyTheSave(t *testing.T) {
 	f := newFakeBroker(t)
-	b := loggedInBrokerLogging(t, f, slog.New(slog.NewJSONHandler(&out, nil)))
-	original := b.cred.Load().refreshToken
-	start := time.Now()
-	clock := clockAt(start)
-	b.testNow = clock.now
+	b := loggedInBroker(t, f, "ada@example.com")
 	restore := fullDisk(b)
 	_ = b.refresh(context.Background())
-	clock.set(start.Add(unsavedFileDeadline - time.Second))
-	_ = b.refresh(context.Background())
-	if _, err := LoadMachineFile(b.MachineFile); err != nil {
-		t.Fatalf("the machine file a second before the deadline: %v; want it still there", err)
+	unsaved := b.cred.Load()
+	if !b.drop(unsaved, dropRefused, "code", "LAUNCHER_INVALID") {
+		t.Fatal("drop")
 	}
-	clock.set(start.Add(unsavedFileDeadline))
-	_ = b.refresh(context.Background())
-	if _, err := LoadMachineFile(b.MachineFile); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the machine file at the deadline: %v; want it removed", err)
+	for range 3 {
+		if err := b.settleRefused(context.Background(), unsaved); err == nil {
+			t.Fatal("a settlement whose save cannot land must return its error")
+		}
 	}
-	line := waitForRecord(t, &out, unsavedRemovedMsg)
-	if line["level"] != "ERROR" || line["credential_id"] != b.cred.Load().id {
-		t.Fatalf("the removal line: %v; want an ERROR naming the held credential", line)
-	}
-	if !b.HasCredential() || f.refreshCount() != 1 {
-		t.Fatalf("after the removal: held %v, token requests %d; want the login still held in memory, no new rotation", b.HasCredential(), f.refreshCount())
+	if n := f.refreshCount(); n != 1 {
+		t.Fatalf("token requests while the settlement's save failed = %d; want only the first", n)
 	}
 	restore()
-	if err := b.refresh(context.Background()); err != nil || !fileHoldsTheHeldLogin(b, original) {
-		t.Fatalf("a save after the removal: %v, file holds the held login %v; want it written again", err, fileHoldsTheHeldLogin(b, original))
+	if err := b.settleRefused(context.Background(), unsaved); err != nil || f.refreshCount() != 2 {
+		t.Fatalf("the settlement once the save lands: %v, token requests %d; want the save, then its refresh", err, f.refreshCount())
 	}
 }
 
-// TestAHelperRestartedAfterTheUnsavedFileWasRemovedAsksNothing: with the file removed, a restart
-// holds no login (login-status none) and makes no token request, so the rotated-away token is
-// never presented.
-func TestAHelperRestartedAfterTheUnsavedFileWasRemovedAsksNothing(t *testing.T) {
+// TestAHelperRestartedAfterAFailedSaveAsksNothing: with the file removed, a restart holds no
+// login (login-status none) and makes no token request, so the rotated-away token is never
+// presented.
+func TestAHelperRestartedAfterAFailedSaveAsksNothing(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
-	start := time.Now()
-	clock := clockAt(start)
-	b.testNow = clock.now
 	fullDisk(b)
-	_ = b.refresh(context.Background())
-	clock.set(start.Add(unsavedFileDeadline))
 	_ = b.refresh(context.Background())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -167,35 +146,29 @@ func TestAHelperRestartedAfterTheUnsavedFileWasRemovedAsksNothing(t *testing.T) 
 	}
 }
 
-// TestAnUnsavedLoginOnAReadOnlyDiskSaysARestartWillBeAReuse: when even the unlink fails (a
+// TestAFailedSaveOnAReadOnlyDiskSaysARestartWillBeAReuse: when even the unlink fails (a
 // read-only filesystem), the helper says at ERROR that a restart before the disk is writable
 // again presents a spent token, which the broker revokes as a reuse.
-func TestAnUnsavedLoginOnAReadOnlyDiskSaysARestartWillBeAReuse(t *testing.T) {
+func TestAFailedSaveOnAReadOnlyDiskSaysARestartWillBeAReuse(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
 	b := loggedInBrokerLogging(t, f, slog.New(slog.NewJSONHandler(&out, nil)))
-	start := time.Now()
-	clock := clockAt(start)
-	b.testNow = clock.now
 	unwritable(t, b.MachineFile)
 	_ = b.refresh(context.Background())
-	clock.set(start.Add(unsavedFileDeadline))
-	_ = b.refresh(context.Background())
-	line := waitForRecord(t, &out, unsavedStuckMsg)
-	if line["level"] != "ERROR" {
+	if line := waitForRecord(t, &out, unsavedStuckMsg); line["level"] != "ERROR" {
 		t.Fatalf("the line: %v; want an ERROR", line)
 	}
+	_ = b.refresh(context.Background())
 	if f.refreshCount() != 1 {
 		t.Fatalf("token requests = %d; want only the first", f.refreshCount())
 	}
 }
 
-// TestContractASaveFailingThroughARestartRevokesNothing: against the real broker, a refresh
-// rotates the token while the disk is full, the save keeps failing past the 4-minute deadline,
-// the rotated-away token's grace then ends, and the helper restarts with the disk still full. The
-// restart presents no token: the credential is not revoked, the box's enrollment stays live, and
-// no reuse is audited.
-func TestContractASaveFailingThroughARestartRevokesNothing(t *testing.T) {
+// TestContractASaveFailingThroughTwoRestartsRevokesNothing: against the real broker, a refresh
+// rotates the token while the disk is full; the helper restarts inside the token's grace, then
+// again after it, the disk still full both times. Neither restart presents a token: the
+// credential is not revoked, the box's enrollment stays live, and no reuse is audited.
+func TestContractASaveFailingThroughTwoRestartsRevokesNothing(t *testing.T) {
 	cr := newContractRig(t, brokertest.WithLease(time.Hour))
 	credentialID := cr.login(t)
 	boxKey, err := proof.NewKey()
@@ -211,30 +184,30 @@ func TestContractASaveFailingThroughARestartRevokesNothing(t *testing.T) {
 		t.Fatalf("enroll-session-key: %+v", box)
 	}
 	ctx := context.Background()
-	start := time.Now()
-	clock := clockAt(start)
 	cr.srv.Broker.credMu.Lock()
-	cr.srv.Broker.testNow = clock.now
 	fullDisk(cr.srv.Broker)
 	cr.srv.Broker.credMu.Unlock()
 	if err := cr.srv.Broker.refresh(ctx); err == nil {
 		t.Fatal("the refresh's save must fail on the full disk")
 	}
-	clock.set(start.Add(unsavedFileDeadline))
-	_ = cr.srv.Broker.refresh(ctx)
+	cr.cancel()
+	restart := func() *Broker {
+		b := &Broker{URL: cr.broker.URL, OperatorFile: cr.broker.OperatorFile, MachineFile: cr.machineFile, HTTP: http.DefaultClient,
+			Log: slog.New(slog.DiscardHandler)}
+		fullDisk(b)
+		rctx, cancel := context.WithCancel(ctx)
+		t.Cleanup(cancel)
+		if err := b.Start(rctx); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	first := restart() // inside the grace
 	// More than five minutes pass with the disk still full: the rotated-away token's grace ends.
 	if _, err := cr.broker.Store.Pool.Exec(ctx, `update oauth_refresh_tokens set grace_until = now() - interval '1 second' where grace_until is not null`); err != nil {
 		t.Fatal(err)
 	}
-	cr.cancel()
-	restarted := &Broker{URL: cr.broker.URL, OperatorFile: cr.broker.OperatorFile, MachineFile: cr.machineFile, HTTP: http.DefaultClient,
-		Log: slog.New(slog.DiscardHandler)}
-	fullDisk(restarted)
-	ctx2, cancel2 := context.WithCancel(ctx)
-	defer cancel2()
-	if err := restarted.Start(ctx2); err != nil {
-		t.Fatal(err)
-	}
+	second := restart()
 	var credRevoked bool
 	if err := cr.broker.Store.Pool.QueryRow(ctx, `select revoked_at is not null from launcher_credentials where id = $1`, credentialID).Scan(&credRevoked); err != nil {
 		t.Fatal(err)
@@ -248,9 +221,11 @@ func TestContractASaveFailingThroughARestartRevokesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if credRevoked || !boxLive || audit != 0 {
-		t.Fatalf("after the restart: credential revoked %v, box enrollment live %v, reuse audit rows %d; want not revoked, live, none", credRevoked, boxLive, audit)
+		t.Fatalf("after two restarts: credential revoked %v, box enrollment live %v, reuse audit rows %d; want not revoked, live, none", credRevoked, boxLive, audit)
 	}
-	if ls := restarted.LoginStatus(); ls.State != "" || restarted.HasCredential() {
-		t.Fatalf("the restarted helper's login-status: %+v; want none", ls)
+	for i, b := range []*Broker{first, second} {
+		if ls := b.LoginStatus(); ls.State != "" || b.HasCredential() {
+			t.Fatalf("restart %d's login-status: %+v; want none", i+1, ls)
+		}
 	}
 }

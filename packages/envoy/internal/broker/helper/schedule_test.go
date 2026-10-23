@@ -45,6 +45,26 @@ func TestAfterALostAnswerAnsweredRefusalsKeepTheFixedRetry(t *testing.T) {
 	}
 }
 
+// TestARefreshWithNoCredentialSettlesNothing: a refresh that finds the credential already
+// dropped (a concurrent LAUNCHER_INVALID) returns errNoOutcome, which the schedule does not read
+// as a settled refresh: after a lost answer, the 4xx that follows still waits the fixed retry.
+func TestARefreshWithNoCredentialSettlesNothing(t *testing.T) {
+	if err := (&Broker{}).refresh(context.Background()); !errors.Is(err, errNoOutcome) {
+		t.Fatalf("a refresh holding no credential = %v; want errNoOutcome", err)
+	}
+	lost := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: io.ErrUnexpectedEOF}
+	s := (&Broker{}).newRetrySchedule()
+	day := func() time.Duration { return 24 * time.Hour }
+	s.after(lost, day)
+	s.after(errNoOutcome, day)
+	if wait := s.after(answered(400, ""), day); wait != defaultRefreshRetry {
+		t.Fatalf("a 400 after a lost answer and a refresh with no outcome: %s; want the fixed %s", wait, defaultRefreshRetry)
+	}
+	if wait := s.after(nil, day); wait != 24*time.Hour || s.unknown {
+		t.Fatalf("a settled refresh: wait %s, unknown %v; want a day, cleared", wait, s.unknown)
+	}
+}
+
 // TestARetryAfterIsCappedAtAMinute: a 429's Retry-After is honoured up to 60 s; a longer one waits
 // 60 s, so no hop's large value stops the refresh.
 func TestARetryAfterIsCappedAtAMinute(t *testing.T) {

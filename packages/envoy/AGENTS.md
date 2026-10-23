@@ -2585,14 +2585,17 @@ helper writes them with the key to `AGENT_SECRETS_MACHINE_FILE` (default
 creates it, written through a fresh `os.CreateTemp` file renamed over it, so no planted path is
 followed; `helper.MachineFile`, whose `validate` both load and save check) before it installs the
 credential. A refresh whose answer the file cannot take is still installed (the old token is
-spent) and recorded unsaved (`markUnsaved`, with when the answer came): until a save lands the
-loop retries only the save every 15 s (`retrySave`), never another token request, and once 4
-minutes have passed since the rotation (`unsavedFileDeadline`, inside the broker's five-minute
-grace) it removes the file, which names the rotated-away token, and logs at ERROR that the login
-is held only in memory and a restart needs a new approval; a later save writes the file again. An
-unlink works on a full disk; when even it fails (a read-only filesystem) the helper logs at ERROR
-that a restart before the disk is writable again presents a spent token, which the broker revokes
-as a reuse, ending the machine's sessions.
+spent), and the failed save removes the file at once (`unsaveFile`; an unlink works on a full
+disk), since it names the rotated-away token and the helper cannot know how long ago that token
+was first rotated (a restart loses that), logging at ERROR that the login is held only in memory
+and a restart before the next good save needs a new approval. Until a save lands, the helper
+retries only the save every 15 s (`retrySave`) and makes no token request on any path (the
+refresh loop, `Start`, `settleRefused`); a save that lands writes the file back. When even the
+unlink fails (a read-only filesystem) the helper logs at ERROR that a restart before the disk is
+writable again presents a spent token, which the broker revokes as a reuse, ending the machine's
+sessions. A refresh that finds the credential already dropped returns `errNoOutcome`, which the
+loop treats as no outcome (`retrySchedule.after`): it neither resets the backoff nor clears
+`unknown`.
 `LoadMachineFile` refuses a file whose mode grants group or other any access, or that another
 user owns, naming it and `chmod 600`. `serve` first takes an exclusive flock on `<socket>.lock`
 (0600, beside the socket; `claimSocket`), then one on `<machine file>.lock` (`claimMachineFile`),
@@ -2603,7 +2606,7 @@ when a dial is refused. It then runs `Broker.Start` before it listens: Start fir
 `.machine-*.json.tmp` an interrupted save left beside the file, and a kept file is refreshed once,
 within 5 s, before it is installed, so the socket still listens inside `register`'s 10 s wait
 (answered: saved and installed `issued` with no code, or, when the save failed, installed and
-recorded unsaved, its save retried 15 s later; `invalid_grant`: dropped and the file deleted, so a login the broker answered as ended is
+the file removed, its save retried 15 s later; `invalid_grant`: dropped and the file deleted, so a login the broker answered as ended is
 never resumed; an outcome the helper did not learn, the 5 s bound passing among them: the kept
 login installed as `issued`, though the broker may have ended it, and retried by the loop). A file
 that is there but is
@@ -2626,7 +2629,8 @@ A 401
 `LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
 dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
 since that 401 can also be a proof the broker could not verify; an answer whose save fails is
-installed, so the helper keeps working, and recorded unsaved, as a refresh's is.
+installed, so the helper keeps working, and the file removed, as a refresh's is; while a login is
+unsaved, the settlement retries only its save before any refresh.
 Each refresh spends the refresh token
 for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
 the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)

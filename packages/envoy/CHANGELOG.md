@@ -51,9 +51,9 @@
   the login's refresh, within seconds of a
   launcher call the broker refuses `LAUNCHER_INVALID`. A refresh the broker rate-limits (429)
   keeps the login and is retried no sooner than its `Retry-After` (at most a minute). A refreshed
-  login it cannot save is held in memory and only its save is retried, every 15 s, with no further
-  token request; if no save lands within 4 minutes of the rotation the helper removes the machine
-  file, which names a token the broker rotated away, so a restart holds no login and needs a new
+  login it cannot save is held in memory, the machine file, which names a token the broker
+  rotated away, is removed at once, and only its save is retried, every 15 s, with no further
+  token request on any path; a restart before the next good save holds no login and needs a new
   approval rather than presenting that token past its grace, which the broker would revoke as a
   reuse; a later save writes the file again. A read-only filesystem that refuses even the removal
   is logged at ERROR: a restart before it is writable again revokes the machine. A machine login

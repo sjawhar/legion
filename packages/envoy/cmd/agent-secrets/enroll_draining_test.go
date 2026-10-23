@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
@@ -29,19 +28,17 @@ func TestEnrollHelperRetriesADrainingHelper(t *testing.T) {
 }
 
 // TestEnrollHelperStopsRetryingDrainingAtItsWait: a helper still draining once the wait budget
-// has passed is reported with its DRAINING code, exit 1.
+// has passed (none here) is reported with its DRAINING code, exit 1, after that one call.
 func TestEnrollHelperStopsRetryingDrainingAtItsWait(t *testing.T) {
-	sock, _ := drainingHelper(t, 1<<30)
+	sock, calls := drainingHelper(t, 1<<30)
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
 	t.Setenv("AGENT_SECRETS_KEY_DIR", filepath.Join(t.TempDir(), "keys"))
 	old := enrollDrainWait
-	enrollDrainWait = time.Second
+	enrollDrainWait = 0
 	t.Cleanup(func() { enrollDrainWait = old })
 	var stdout, stderr bytes.Buffer
-	start := time.Now()
 	code := cmdEnrollHelper("box:1", "tp", "", &stdout, &stderr)
-	elapsed := time.Since(start)
-	if code != 1 || !strings.Contains(stderr.String(), helper.CodeDraining) || elapsed < time.Second || elapsed > 30*time.Second {
-		t.Fatalf("enroll against a helper that stays draining = exit %d after %s (stderr %q); want 1 naming DRAINING once its 1 s wait passed", code, elapsed, stderr.String())
+	if code != 1 || !strings.Contains(stderr.String(), helper.CodeDraining) || calls.Load() != 1 {
+		t.Fatalf("enroll against a helper that stays draining = exit %d after %d calls (stderr %q); want 1 naming DRAINING after one call", code, calls.Load(), stderr.String())
 	}
 }
