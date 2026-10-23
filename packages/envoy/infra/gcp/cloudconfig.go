@@ -371,11 +371,10 @@ func (v vm) tailscaledUnit() string {
 // firewallUnit opens Container-Optimized OS's host firewall, which accepts incoming connections for
 // SSH alone (https://cloud.google.com/container-optimized-os/docs/how-to/firewall), to Google's
 // health checks on the monitoring port, the sources the VPC firewall rule admits, and to the
-// tailnet's interface on the client port. Each rule is added only when it is not there yet. The
-// tailnet's rule is needed although tailscaled writes an accept rule for its own interface: the
-// image writes that rule with the iptables backend it picks, and when the host filters with
-// another, the host's drop policy drops the packet whatever that rule accepts. Both rules here
-// are added with the host's own /sbin/iptables.
+// tailnet's interface on the client port. Each rule is added only when it is not there yet, with
+// the host's own /sbin/iptables. The tailnet's rule is needed because COS filters with nf_tables and
+// drops INPUT by default, while Tailscale's image writes its accept rule for tailscale0 with
+// iptables-legacy, which does not admit what nf_tables drops.
 func firewallUnit() string {
 	healthChecks := "INPUT -p tcp -s " + strings.Join(healthCheckRanges, ",") + " --dport " + strconv.Itoa(monitorPort) + " -j ACCEPT"
 	tailnet := "INPUT -i " + tailnetInterface + " -p tcp --dport " + strconv.Itoa(natsPort) + " -j ACCEPT"
