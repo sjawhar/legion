@@ -435,8 +435,9 @@ func TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree(t *testing.T) {
 	})
 }
 
-// A merge Legion submitted that GitHub has not completed within mergeWaitWarn of the row's
-// queueing tells the issue's architect once (merge-waiting), naming the pull request, READY's head
+// A merge Legion submitted that GitHub has not completed within mergeWaitWarn of its queueing
+// (record.ReadyMerge.Queued, which workflow's queueReadyMerge stamps on every submission it
+// queues) tells the issue's architect once (merge-waiting), naming the pull request, READY's head
 // and what GitHub last answered, and then goes on waiting: nothing is withdrawn, the row stays and
 // still waits, the issue stays in awaiting_merge, and every later run of the same row, however
 // much longer it waits, tells nobody again.
@@ -448,9 +449,7 @@ func TestAREADYMergeGitHubLeavesWaitingTellsTheArchitectOnce(t *testing.T) {
 	// repository allows no auto-merge, so the row waits on GitHub however long it runs.
 	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "BLOCKED") }, mergedAnswer)
 	now := time.Now().UTC()
-	row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
-	row.CreatedAt = now
-	enqueueOutbox(t, pool, records, row)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head", Queued: now}, now))
 	clock := now
 	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
 	if err := runner.RunOnce(context.Background()); err != nil {
@@ -468,14 +467,7 @@ func TestAREADYMergeGitHubLeavesWaitingTellsTheArchitectOnce(t *testing.T) {
 		}
 	}
 	// The row goes on waiting on GitHub's answer, recorded as having told its architect.
-	var nextAt time.Time
-	var lastError string
-	var warned bool
-	if err := pool.QueryRow(context.Background(),
-		`select next_at, last_error, coalesce((payload->>'warned')::boolean, false) from outbox where kind = 'ready_merge'`).
-		Scan(&nextAt, &lastError, &warned); err != nil {
-		t.Fatalf("read the ready_merge row: %v", err)
-	}
+	nextAt, lastError, warned, _ := readyMergeState(t, pool)
 	if !nextAt.After(clock) || !strings.Contains(lastError, "BLOCKED") || !warned {
 		t.Fatalf("the ready_merge row runs again at %s with %q, warned %v; want it still waiting on GitHub and recorded as told", nextAt, lastError, warned)
 	}
@@ -486,6 +478,45 @@ func TestAREADYMergeGitHubLeavesWaitingTellsTheArchitectOnce(t *testing.T) {
 	clock = clock.Add(mergeWaitWarn)
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("third RunOnce: %v", err)
+	}
+	assertMergeRows(t, pool, 1, "merge-waiting", 1)
+}
+
+// The compatibility path of that wait: a ready_merge row a daemon before record.ReadyMerge.Queued
+// enqueued carries no queue time, and rememberWait measures its wait from the row's created_at,
+// which is what it was measured from then — reading the zero time as the wait itself would tell
+// the architect of every such row on its first run after the upgrade, naming the decades since the
+// zero time. Production writes no such row any more: workflow's queueReadyMerge stamps Queued on
+// every submission it queues, READY's acceptance and a reopen at READY's head alike, so the only
+// rows of this shape are the ones the upgrade found already queued, and the fallback drains with
+// the release that carries them off.
+func TestAREADYMergeQueuedBeforeTheQueueTimeWarnsFromItsCreatedAt(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "BLOCKED") }, mergedAnswer)
+	now := time.Now().UTC()
+	// The row the upgrade finds: its payload carries no Queued, and the daemon before the field
+	// queued it an hour and two minutes ago.
+	row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+	row.CreatedAt = now.Add(-mergeWaitWarn - 2*time.Minute)
+	enqueueOutbox(t, pool, records, row)
+	clock := now
+	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the first run of the row the upgrade found: %v", err)
+	}
+	reasons := assertMergeRows(t, pool, 1, "merge-waiting", 1)
+	if !strings.Contains(reasons[0], "1h2m0s ago") {
+		t.Fatalf("merge-waiting reason %q, want it to name the hour and two minutes since the row's created_at", reasons[0])
+	}
+	if _, _, warned, _ := readyMergeState(t, pool); !warned {
+		t.Fatal("the ready_merge row is not recorded as having told its architect")
+	}
+	// It waits on, and however much longer it waits it tells nobody again.
+	clock = clock.Add(mergeWaitWarn)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the run an hour on: %v", err)
 	}
 	assertMergeRows(t, pool, 1, "merge-waiting", 1)
 }

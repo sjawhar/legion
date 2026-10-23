@@ -103,10 +103,9 @@ package api
 // from bash any more, since the `legion` tool mints its grants in-process for its own daemon calls
 // (`handoff_complete`, `read_record`, the controller's `read_state` and `set_status`). No
 // `worker-bin` directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX` puts the `legion`
-// launcher directory first alone. `HandoffCompleteResponse` gains `note` (READY's refusals
-// run in the daemon on the pull request's head: `.legion/<issue>/` still carried, a head that is
-// not the approved one plus retro's commits, a head GitHub no longer shows, a conflict with the
-// base); the
+// launcher directory first alone. `HandoffCompleteResponse` gains `note` (READY's three refusals
+// run in the daemon on the pull request's head: `.legion/<issue>/` still carried, a conflict with
+// the base, a required check not green or a required workflow without a passing run); the
 // request's `commit` is the pushed commit carrying the phase's handoff, which the `legion` tool's
 // `handoff_complete` finds in the pane as `legion handoff complete` did.
 // `POST /legion/v1/threads/resolve` is deleted: the reviewer names the bot threads
