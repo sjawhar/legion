@@ -431,6 +431,68 @@ func TestARefreshRotatesAndTheOldTokenIsRefusedAfterItsGrace(t *testing.T) {
 	}
 }
 
+// shiftGrace moves every rotated token's grace earlier by elapsed, as if elapsed had passed since
+// its rotation.
+func (f *fixture) shiftGrace(t *testing.T, elapsed time.Duration) {
+	t.Helper()
+	if _, err := f.pool.Exec(context.Background(), `update oauth_refresh_tokens set grace_until = grace_until - make_interval(secs => $1) where grace_until is not null`, elapsed.Seconds()); err != nil {
+		t.Fatalf("shift the grace: %v", err)
+	}
+}
+
+// TestALostRefreshAnswerRetriedTwoMinutesLaterKeepsTheLogin: a rotated token stays redeemable for
+// five minutes, so a helper whose answer was lost and whose retries back off past a minute still
+// keeps its login, and the token it is answered refreshes on.
+func TestALostRefreshAnswerRetriedTwoMinutesLaterKeepsTheLogin(t *testing.T) {
+	f := newFixture(t)
+	key := newKey(t)
+	first := f.login(t, key)
+	if status, body := f.refresh(t, first, key); status != http.StatusOK {
+		t.Fatalf("refresh whose answer is lost = %d %v", status, body)
+	}
+	f.shiftGrace(t, 2*time.Minute)
+	status, body := f.refresh(t, first, key)
+	retried, _ := body["refresh_token"].(string)
+	if status != http.StatusOK || retried == "" {
+		t.Fatalf("retry at +2 min = %d %v, want a new pair", status, body)
+	}
+	if status, body := f.refresh(t, retried, key); status != http.StatusOK {
+		t.Fatalf("refresh of the retried answer's token = %d %v, want 200", status, body)
+	}
+	f.shiftGrace(t, 4*time.Minute)
+	if status, body := f.refresh(t, first, key); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("the first token past its five minutes = %d %v, want invalid_grant", status, body)
+	}
+}
+
+// TestTwoRedemptionsWithinTheGraceLeaveOneBranch: redeeming a rotated token again within its
+// grace ends the tokens its earlier redemption issued, so the family never forks into two live
+// branches; the earlier branch's token, presented afterwards, is a reuse.
+func TestTwoRedemptionsWithinTheGraceLeaveOneBranch(t *testing.T) {
+	f := newFixture(t)
+	key := newKey(t)
+	first := f.login(t, key)
+	_, body := f.refresh(t, first, key)
+	earlier, _ := body["refresh_token"].(string)
+	_, body = f.refresh(t, first, key)
+	later, _ := body["refresh_token"].(string)
+	if earlier == "" || later == "" || earlier == later {
+		t.Fatalf("two redemptions answered %q and %q, want two tokens", earlier, later)
+	}
+	var live int
+	if err := f.pool.QueryRow(context.Background(), `select count(*) from oauth_refresh_tokens where active and grace_until is null`).Scan(&live); err != nil || live != 1 {
+		t.Fatalf("unrotated live refresh tokens = %d (%v), want 1", live, err)
+	}
+	status, body := f.refresh(t, later, key)
+	next, _ := body["refresh_token"].(string)
+	if status != http.StatusOK || next == "" {
+		t.Fatalf("refresh of the later branch = %d %v, want 200", status, body)
+	}
+	if status, body := f.refresh(t, earlier, key); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("refresh of the earlier branch = %d %v, want invalid_grant", status, body)
+	}
+}
+
 func TestReusingARotatedTokenEndsTheLogin(t *testing.T) {
 	f := newFixture(t)
 	key := newKey(t)

@@ -189,8 +189,8 @@ func TestARotatedRefreshTokenIsRedeemableOnlyWithinItsGrace(t *testing.T) {
 		Scan(&graceSeconds); err != nil {
 		t.Fatalf("read grace_until: %v", err)
 	}
-	if graceSeconds <= 50 || graceSeconds > 60 {
-		t.Errorf("grace left = %.1fs, want about 60s", graceSeconds)
+	if graceSeconds <= 290 || graceSeconds > 300 {
+		t.Errorf("grace left = %.1fs, want about five minutes", graceSeconds)
 	}
 
 	if _, err := pool.Exec(ctx, `update oauth_refresh_tokens set grace_until = now() - interval '1 second' where signature = 'refresh-1'`); err != nil {

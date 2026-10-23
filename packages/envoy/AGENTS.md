@@ -2595,7 +2595,7 @@ dropped and the file deleted; an outcome the helper did not learn: the kept logi
 not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
 credential is installed; a refresh whose outcome it did not learn is retried after 15 s (inside
-the broker's 60 s rotation grace, so a lost answer keeps the login), doubling to an hour. A 401
+the broker's five-minute rotation grace, so a lost answer keeps the login), doubling to an hour. A 401
 `LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
 dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
 since that 401 can also be a proof the broker could not verify; an answer whose save fails is
@@ -3172,8 +3172,12 @@ a login revoked between its approval and its poll issues nothing. Only that endi
 (`oauth.ErrLoginEnded`, which `machine.ErrNotLive` wraps) is `invalid_grant`; any other failure
 of those steps (a lost database connection) is `500 server_error`, which the helper retries.
 Both run only in the token request's transaction, refusing without one. Refresh tokens
-rotate: a replaced one stays redeemable for 60 s (`oauthstore.refreshGrace`) so a lost answer can
-be retried, and one redeemed after that revokes its whole family. A revoke
+rotate: a replaced one stays redeemable for five minutes (`oauthstore.refreshGrace`) so a lost
+answer can be retried, and redeeming it again within that time ends the tokens its earlier
+redemption issued, so the family has one live branch. One redeemed after its grace is a reuse: it
+revokes its whole family and, in the same transaction, the launcher credential the family names
+(`oauthstore.Store.Reused`, which is `enroll.RevokeReusedCredential`: revoked_at, its sessions and
+grants ended, audit actor `broker:refresh-token-reuse`), so a copied key enrolls nothing more. A revoke
 (`enroll.Service.RevokeCredential`) ends the credential's tokens in its own transaction
 (`oauthstore.EndCredential`), so the machine's next refresh is refused. Each sweeper tick
 (`requests.Sweeper`) runs `oauthstore.Store.Sweep`: it deletes device codes an hour past their

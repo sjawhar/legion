@@ -45,8 +45,9 @@ var (
 )
 
 // refreshGrace is how long a rotated refresh token stays redeemable, so a client whose refresh
-// response was lost in transit can retry with the token it still holds.
-const refreshGrace = 60 * time.Second
+// response was lost in transit can retry with the token it still holds, through a backoff of
+// several retries. Its DPoP binding means only the holder of the machine's key can use it.
+const refreshGrace = 5 * time.Minute
 
 // sweepBatch bounds how many rows one of Sweep's statements deletes; a variable so tests can sweep
 // a backlog of several batches.
@@ -584,8 +585,22 @@ func (s *Store) DeleteRefreshTokenSession(ctx context.Context, signature string)
 }
 
 // RotateRefreshToken starts the redeemed refresh token's grace (refreshGrace from its first
-// rotation; a retry within it does not extend it) and revokes the request's access tokens.
+// rotation; a retry within it does not extend it) and revokes the request's access tokens. A
+// token redeemed again within its grace (a client retrying a refresh whose answer it lost) ends
+// every other token of its family first: the branch its earlier redemption started, so the family
+// never has two live branches and a token of the ended one presented later is a reuse. The
+// redeemed token's row lock, taken first, serializes two redemptions of it.
 func (s *Store) RotateRefreshToken(ctx context.Context, requestID string, signature string) error {
+	var again bool
+	err := s.db(ctx).QueryRow(ctx, `select grace_until is not null from oauth_refresh_tokens where signature = $1 for update`, signature).Scan(&again)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("rotate refresh token: %w", err)
+	}
+	if again {
+		if _, err := s.db(ctx).Exec(ctx, `update oauth_refresh_tokens set active = false where request_id = $1 and signature <> $2 and active`, requestID, signature); err != nil {
+			return fmt.Errorf("end the earlier redemption's branch: %w", err)
+		}
+	}
 	if _, err := s.db(ctx).Exec(ctx, `update oauth_refresh_tokens set grace_until = coalesce(grace_until, now() + make_interval(secs => $2))
 		where signature = $1`, signature, refreshGrace.Seconds()); err != nil {
 		return fmt.Errorf("rotate refresh token: %w", err)

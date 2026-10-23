@@ -39,7 +39,7 @@ var errNoCredential = errors.New(noCredentialMsg)
 // The refresh loop's defaults: a refresh a day at most, and after a refresh whose outcome the
 // helper did not learn (it did not reach the broker, its answer was lost, or the broker answered
 // 5xx) a retry 15 s later, doubling to at most an hour. The first retry lands well inside the
-// broker's 60 s rotation grace, during which the refresh token the helper still holds is
+// broker's five-minute rotation grace, during which the refresh token the helper still holds is
 // redeemable again even if the lost answer had rotated it.
 const (
 	defaultRefreshEvery = 24 * time.Hour
