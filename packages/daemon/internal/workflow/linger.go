@@ -110,6 +110,19 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 	return e.openCheck(ctx, tx, issue, *pr, lingers)
 }
 
+// LeaveUnslotted takes out of the workflow a root admission found in it with neither a slot nor a
+// place in the waiting line (admit's releaseUnslotted), as a status leaving todo takes a waiting root
+// out (leave, at the status the root stands at): its phase is done and its tree lingers, so nothing
+// starts for it, and a todo with the label re-admits it as a lingering root's does. That status is
+// the move, so no status write the daemon queued before it lands over it, as for any move out of
+// the workflow (dispatchIssue).
+func (e *Engine) LeaveUnslotted(ctx context.Context, tx pgx.Tx, root record.Issue) error {
+	if err := e.store.DropStatusWrites(ctx, tx, root.Key); err != nil {
+		return err
+	}
+	return e.leave(ctx, tx, root, root.Status)
+}
+
 // openCheckIfMerged opens issue's production check when its pull request has merged: a done issue
 // with no merged pull request — a root closed before its first phase (close_root), a human's done
 // on an issue short of its merge — has nothing to check in production and opens none.

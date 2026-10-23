@@ -743,12 +743,14 @@ func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties, and reports how many candidates it admitted. A candidate a.pending still
-// names is held back: the Dispatch consumer has not yet reached the stream position Reconcile
-// captured when it deferred that key. release, not promote, is what clears pending — it empties
-// the whole set at once, so this need only check membership. An admitted candidate's architect
-// start is queued behind a row creating its issue branch (record.IssueBranch), which the start
-// waits for.
+// waiting line empties, and reports how many candidates it admitted. Before it assigns any, every
+// root in the workflow that neither holds a slot nor waits for one leaves it (releaseUnslotted), so
+// each pass of admission — a live fact, the boot read, a release, a tick — repairs that state
+// rather than keeping it. A candidate a.pending still names is held back: the Dispatch consumer has
+// not yet reached the stream position Reconcile captured when it deferred that key. release, not
+// promote, is what clears pending — it empties the whole set at once, so this need only check
+// membership. An admitted candidate's architect start is queued behind a row creating its issue
+// branch (record.IssueBranch), which the start waits for.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 	return a.promoteHolds(ctx, tx, true)
 }
@@ -760,9 +762,6 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 // transaction commits (see release), so without this, promote's own membership check would hold
 // every one of them back in the very call that released them.
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, error) {
-	if a.cap <= 0 {
-		return 0, nil
-	}
 	issues, err := a.store.Issues(ctx, tx)
 	if err != nil {
 		return 0, fmt.Errorf("list admission issues: %w", err)
@@ -771,19 +770,26 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	if err != nil {
 		return 0, fmt.Errorf("list admission slots: %w", err)
 	}
+	released, err := a.releaseUnslotted(ctx, tx, issues, slots, respectHolds)
+	if err != nil {
+		return 0, err
+	}
+	if a.cap <= 0 {
+		return 0, nil
+	}
+	if released {
+		if issues, err = a.store.Issues(ctx, tx); err != nil {
+			return 0, fmt.Errorf("list admission issues: %w", err)
+		}
+	}
 	own := ownSlots(issues, slots)
 	waiting := record.Waiting(issues, own)
 	admitted := 0
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if respectHolds {
-			a.mu.Lock()
-			_, held := a.pending[candidate.Key]
-			a.mu.Unlock()
-			if held {
-				continue
-			}
+		if respectHolds && a.held(candidate.Key) {
+			continue
 		}
 		if candidate.Key == candidate.Tree {
 			// Claims, tree lifecycles and the runtime key a tree by the normalized project token,
@@ -836,6 +842,70 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		a.logSlot(ctx, "taken", candidate.Key, len(own))
 	}
 	return admitted, nil
+}
+
+// held says whether Reconcile still holds key for the Dispatch consumer to reach the stream
+// position it captured for it (a.pending).
+func (a *Admission) held(key string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, held := a.pending[key]
+	return held
+}
+
+// unslotted says whether issue is a root of this project left in the workflow (workflow's
+// InWorkflow) with no way to run: not lingering, it holds no slot, and its status is one only a
+// running tree has (in_progress, testing, needs_review, retro) rather than todo, where a root
+// waits for a slot (record.Waiting). The workflow takes a root out on a status out of the workflow
+// (its leave) but does nothing on a running tree's status where no tree runs, and a root's slot
+// goes only with its phase done or its status out of the workflow, so only such a move made while
+// it waited leaves a root here: a person's, or an outside session's, which is a person's where no
+// tree runs (workflow's sessionStatusWrite). A root in todo without the label is not one: taking
+// the label off is a pause the label ends.
+func (a *Admission) unslotted(issue record.Issue, slotted map[string]struct{}) bool {
+	if issue.Project != a.project || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() || !workflow.InWorkflow(issue) {
+		return false
+	}
+	switch issue.Status {
+	case "in_progress", "testing", "needs_review", "retro":
+	default:
+		return false
+	}
+	_, running := slotted[issue.Key]
+	return !running
+}
+
+// releaseUnslotted takes every unslotted root out of the workflow, as a status leaving todo takes a
+// waiting root out (workflow's LeaveUnslotted): nothing would ever give it a slot, nothing would
+// ever start it, and its record would keep saying it is admitted. Legion starts nothing for it — it
+// is someone else's work now, or a person's move to make — and the controller is told on the
+// controller topic alone (record.UnslottedNotice, one per root, its reason naming the status). A
+// key Reconcile holds is left for release to apply first, when respectHolds is set. It reports
+// whether it released any.
+func (a *Admission) releaseUnslotted(ctx context.Context, tx pgx.Tx, issues []record.Issue, slots []record.Slot, respectHolds bool) (bool, error) {
+	slotted := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = struct{}{}
+	}
+	released := false
+	for _, issue := range issues {
+		if !a.unslotted(issue, slotted) || (respectHolds && a.held(issue.Key)) {
+			continue
+		}
+		if err := a.engine.LeaveUnslotted(ctx, tx, issue); err != nil {
+			return released, fmt.Errorf("release unslotted root %s: %w", issue.Key, err)
+		}
+		reason := fmt.Sprintf("%s was %s with no admission slot, a status only a running tree has, so no slot would ever reach it: "+
+			"the daemon took it out of the workflow and starts nothing for it; todo with the legion label queues it again", issue.Key, issue.Status)
+		if err := a.enqueue(ctx, tx, issue.Key, record.ControllerNotice{Kind: record.UnslottedNotice, Reason: reason}, a.now()); err != nil {
+			return released, err
+		}
+		intake.OnCommit(ctx, func() {
+			a.log.Warn("admission: released a root that held no slot and waited for none", "issue", issue.Key, "status", issue.Status, "phase", issue.Phase, "generation", issue.Generation)
+		})
+		released = true
+	}
+	return released, nil
 }
 
 // Held reports whether any key currently waits on the Dispatch consumer reaching the stream
