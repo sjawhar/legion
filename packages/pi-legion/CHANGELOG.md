@@ -73,6 +73,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   issue's architect once (`merge-waiting`). The merger's role prompt and the Legion skills carry
   the new catalogue, the pull request body has no `CI:` line, and every list read that decides
   something is paginated (sjawhar/legion#2121).
+  A daemon rolled back to a release before this one refuses what this one writes on a `ready_merge`
+  row and in the notice it adds, as the entry below says of `armed` and `merge-removed`: the
+  payload's `warned` and `queued` fields, which its strict decoder refuses on every retry, and the
+  `merge-waiting` notice kind, which its reader refuses and which holds every waiting notice of the
+  project behind it. Before starting the older daemon, run against its database, with `<KEY>` the
+  Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'warned' - 'queued' where kind = 'ready_merge' and (payload ? 'warned' or payload ? 'queued') and split_part(issue, '-', 1) = '<KEY>';`
+  and
+  `delete from outbox where kind = 'notice' and payload->>'kind' = 'merge-waiting' and split_part(issue, '-', 1) = '<KEY>';`
+  The notice is deleted rather than rewritten to a kind the older daemon knows: it says only that a
+  merge is still waiting, and the nearest older kind, `merge-refused`, would tell an architect that
+  a merge ended when it has not. Dropping it loses one telling; the row goes on submitting.
 - **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
   under `--check-config`, a host with any character outside ASCII in `advertise_host`, `bind`, an
   NFS volume's `server`, and the host of `daemon_url`, `envoy_url`, `dispatch_url`, each
