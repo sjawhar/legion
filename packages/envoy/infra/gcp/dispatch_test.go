@@ -885,6 +885,25 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 }
 
+// Without the annotation the cluster autoscaler evicts a pod whenever it consolidates its node,
+// and the one-replica front door takes Dispatch off the tailnet until the replacement is ready:
+// every Deployment the component registers, now the app, the front door and the listener, carries it.
+func TestDispatchPodsAreNotEvictedForScaleDown(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	var deployments []string
+	for _, r := range m.Registrations() {
+		if r.Type != "kubernetes:apps/v1:Deployment" {
+			continue
+		}
+		deployments = append(deployments, r.Name)
+		annotations, _ := deploymentPodTemplate(t, m, r.Name)["metadata"].(map[string]any)["annotations"].(map[string]any)
+		require.Equal(t, "false", annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"],
+			"Deployment %s's pod template lacks cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\"", r.Name)
+	}
+	require.ElementsMatch(t, []string{"example-dispatch", "example-dispatch-tailnet", "example-dispatch-listener"}, deployments)
+}
+
 // Pulumi's deletionProtection stops only a Pulumi delete; the instance's own setting stops the API
 // and the console too, and the same input drives both.
 func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {

@@ -90,6 +90,16 @@ func outputString(value any) (string, error) {
 	return "", fmt.Errorf("resolved to a %T, not a string", value)
 }
 
+// safeToEvictAnnotation, set to "false" on the pod templates of all three Dispatch Deployments
+// (the app, <hostname>-tailnet and <hostname>-listener), keeps the cluster autoscaler from
+// evicting their pods to scale a node down. Without it the autoscaler evicts the one-replica front
+// door whenever it consolidates a node, and Dispatch drops off the tailnet until the replacement
+// pod is ready. Autopilot honours it as extended-duration protection: for up to seven days, from
+// scale-down and node auto-upgrade only (node repair, maintenance and drains still evict), on a
+// node of the pod's own whenever possible, and with each pod raised to at least 500m CPU and 512Mi
+// memory, so no pod here requests less.
+const safeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+
 func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
 	values := pulumi.StringMap{"cpu": pulumi.String(cpu), "memory": pulumi.String(memory)}
 	return &corev1.ResourceRequirementsArgs{Requests: values, Limits: values}
@@ -314,8 +324,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 				Strategy: strategy,
 				Selector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(name)}},
 				Template: corev1.PodTemplateSpecArgs{
-					Metadata: &metav1.ObjectMetaArgs{Labels: pulumi.StringMap{"app": pulumi.String(name)}},
-					Spec:     pod,
+					Metadata: &metav1.ObjectMetaArgs{
+						Labels:      pulumi.StringMap{"app": pulumi.String(name)},
+						Annotations: pulumi.StringMap{safeToEvictAnnotation: pulumi.String("false")},
+					},
+					Spec: pod,
 				},
 			},
 		}, append(opts, child...)...)
@@ -351,7 +364,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	tailnet, err := deployment(tailnetName, 1, deploymentStrategy(recreate), corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), EnableServiceLinks: pulumi.Bool(false),
 		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("tailscale"), Image: pulumi.String(s.images.tailscale), Resources: resources("100m", "128Mi"), Env: corev1.EnvVarArray{
+			corev1.ContainerArgs{Name: pulumi.String("tailscale"), Image: pulumi.String(s.images.tailscale), Resources: resources("500m", "512Mi"), Env: corev1.EnvVarArray{
 				secretEnv("TS_AUTHKEY", authKeyName, "TS_AUTHKEY"),
 				valueEnv("TS_AUTH_ONCE", "true"), valueEnv("TS_KUBE_SECRET", stateName), valueEnv("TS_USERSPACE", "true"), valueEnv("TS_SOCKS5_SERVER", "0.0.0.0:"+socks5Port), valueEnv("TS_SERVE_CONFIG", "/etc/tailscale/serve.json"), valueEnv("TS_HOSTNAME", s.hostname), valueEnv("TS_EXTRA_ARGS", "--advertise-tags="+strings.Join(s.tags, ",")), valueEnv("TS_ENABLE_HEALTH_CHECK", "true"), valueEnv("TS_LOCAL_ADDR_PORT", "127.0.0.1:9002"),
 			}, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("serve"), MountPath: pulumi.String("/etc/tailscale")}}, StartupProbe: tailnetStartup, ReadinessProbe: tailnetReady},
@@ -382,7 +395,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if _, err := deployment(listenerName, 1, deploymentStrategy(recreate), corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), EnableServiceLinks: pulumi.Bool(false),
 		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("200m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + listenerPort + "/healthz")}}}},
+			corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("500m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + listenerPort + "/healthz")}}}},
 		},
 		Volumes: seedVolume,
 	}, frontDoor, seedGrant); err != nil {

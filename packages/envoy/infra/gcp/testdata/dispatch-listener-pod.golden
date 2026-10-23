@@ -1,5 +1,8 @@
 {
   "metadata": {
+    "annotations": {
+      "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+    },
     "labels": {
       "app": "example-dispatch-listener"
     }
@@ -59,11 +62,11 @@
         },
         "resources": {
           "limits": {
-            "cpu": "200m",
+            "cpu": "500m",
             "memory": "512Mi"
           },
           "requests": {
-            "cpu": "200m",
+            "cpu": "500m",
             "memory": "512Mi"
           }
         },
