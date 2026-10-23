@@ -113,9 +113,9 @@ func fileOf(t *testing.T, doc gcp.CloudConfig, path string) string {
 // Container-Optimized OS's host firewall accepts incoming connections for SSH alone
 // (https://cloud.google.com/container-optimized-os/docs/how-to/firewall), so before NATS starts the
 // VM opens the monitoring port to Google's health checks, the sources the VPC firewall rule admits,
-// and the client port to the tailnet's interface, each rule only when it is not there yet. The
-// tailnet's rule is the host's own, whichever iptables backend Tailscale's image writes its rules
-// with.
+// and the client port to the tailnet's interface, each rule only when it is not there yet. COS
+// filters with nf_tables, so Tailscale's own accept rule, written with iptables-legacy, does not
+// admit 4222; the tailnet's rule names tailscale0, so 4222 stays closed on the VPC interface.
 func TestCloudConfigOpensTheHostFirewallToTheHealthChecksAndTheTailnet(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)

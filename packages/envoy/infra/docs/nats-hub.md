@@ -283,7 +283,7 @@ order. They are started and never enabled, since `/etc` does not outlive the boo
 | `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-secret /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. It runs only on a mounted data disk without `/mnt/disks/data/tailnet-joined`, so no boot after the node has joined fetches the key. |
 | `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It mounts `/etc/tailscale-serve` read-only and sets `TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json`: containerboot applies that configuration once the node is up, and again whenever the file changes, watching its directory (tailscale v1.104.1 `cmd/containerboot/serve.go`). With a `listener`, the configuration forwards port 9020; without one it is `{}`, which clears a prior forward. It wants the fetch and starts after it ends, but does not require it. |
 | `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it empties the key file, which stays for the container's bind mount, and only once that has succeeded writes the marker. A simple service, so its start returns at once; a run that fails, as one whose key drop fails does, is run again 10 seconds later. |
-| `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
+| `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables with COS's own `/sbin/iptables`, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)): it filters with nf_tables and drops INPUT by default. So without the first rule the health check never reaches NATS, and without the second the tailnet never does either, since Tailscale's image writes its own accept rule for `tailscale0` with iptables-legacy, which does not admit what nf_tables drops. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
 | `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the seed to that env file; then `docker run --name envoy-listener` of `listener.image` on the host's network, with `--env-file /run/envoy/listener.env`, `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_ALLOWED_HOSTS=<h>.<tailnetDnsName>` and each of `listener.allowedHosts` after it, comma-separated, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`, in that order, as `gcp/testdata/cloud-config.golden` shows. `TimeoutStartSec=600` exceeds the fetcher's 590-second maximum: six attempts, each with three 30-second curl limits, separated by five 10-second waits. A seed that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
 
@@ -306,9 +306,9 @@ the secret's choosing to the listener's environment, and writes `NATS_NKEY_SEED=
 NATS listens for clients on 4222 and serves its monitoring endpoints on 8222, on every interface.
 The hub's VPC firewall rule and `nats-firewall` admit Google's health checks to 8222, and
 `nats-firewall` admits the tailnet's interface, `tailscale0`, to 4222; nothing else is opened. So
-the tailnet's policy decides which peers reach 4222. 8222's `/varz`, `/connz` and `/jsz` are
-reachable over the tailnet only through Tailscale's own accept rule for `tailscale0`, as are its
-other ports (see
+the tailnet's policy decides which peers reach 4222. 8222's `/varz`, `/connz` and `/jsz` stay
+closed to the tailnet, as does every port neither `nats-firewall` nor Serve opens, since
+Tailscale's own accept rule for `tailscale0` does not admit what COS's nf_tables policy drops (see
 [What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)). The
 listener's port 9020 needs no host firewall rule: tailscaled takes a connection to a port Serve
 publishes before the host's iptables sees it, and opens its own connection to `127.0.0.1:9020`.
@@ -559,7 +559,9 @@ as the session user on real NATS servers. None of them runs
 Google Cloud, COS or a tailnet, so the first deployment is where these hold or fail. Watch them on
 its first `pulumi up`:
 
-- `/dev/net/tun` exists on COS without `modprobe`, so the Tailscale container starts.
+- `/dev/net/tun` is present at boot on COS 121 without `modprobe`, as it was on a scratch VM;
+  `bootcmd`'s `modprobe tun` stays for a release where it is not. The Tailscale container starts
+  with it.
 - `docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json` answers on COS
   with Tailscale v1.104.1's image, and reports `"BackendState": "Running"` once the node has
   joined, so `tailnet-joined` empties the key file and writes its marker.
@@ -583,11 +585,12 @@ its first `pulumi up`:
   `pulumi up`'s wait for `STABLE` ends within the provider's timeout despite autohealing's
   initial delay, 573 seconds for the default disk. Google Cloud accepts `maxSurgeFixed: 0` with
   `maxUnavailableFixed: 1` on a zonal group of one, and the template's `namePrefix`.
-- Clients reach 4222 over the tailnet through `nats-firewall`'s rule, added with COS's own
-  `/sbin/iptables` as the health checks' is, whichever backend Tailscale v1.104.1's image writes
-  its own accept rule for `tailscale0` with. `iptables -V` on the VM names COS's backend; under
-  `nf_tables`, Tailscale's own rule, written with iptables-legacy, does not open 8222 over the
-  tailnet.
+- Clients reach 4222 over the tailnet through `nats-firewall`'s rule with a real tailscaled. COS
+  121 filters with nf_tables (`iptables -V` prints `iptables v1.8.13 (nf_tables)`) and drops INPUT
+  by default, while Tailscale v1.104.1's image writes its own accept rule for `tailscale0` with
+  iptables-legacy. On a scratch COS VM, with a veth named `tailscale0`, a connection to 4222 on
+  that interface timed out until the rule was added and then opened, and one to 8222 there, with
+  no rule, still timed out. tailscaled itself did not run on that VM.
 - The key fetcher runs on COS's `/bin/sh`, curl, jq, base64 and mktemp, and the service account's
   grant reaches Secret Manager within the fetcher's six attempts at the first boot. When every
   attempt fails, containerboot, finding no key, exits at its 60-second boot timeout
