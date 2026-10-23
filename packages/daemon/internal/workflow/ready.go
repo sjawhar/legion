@@ -32,12 +32,15 @@ func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, merge
 
 // queueReadyMerge queues the merge of merger's READY head on issue's open pull request
 // (record.ReadyMerge). A READY a person merges (its by-hand note) queues none. The row decides by
-// GitHub and the record when it runs, so a READY the issue has left by then submits nothing.
+// GitHub and the record when it runs, so a READY the issue has left by then submits nothing. The
+// payload carries the moment it was queued (record.ReadyMerge.Queued), which its executor measures
+// the wait it tells the architect of from (the daemon's mergeWaitWarn): a reopen's queue of the
+// same head replaces the payload, so it starts that wait over as it starts the telling over.
 func (e *Engine) queueReadyMerge(ctx context.Context, tx pgx.Tx, issue string, merger record.PhaseRow, pr *record.PullRequest) error {
 	if merger.MergeNote != "" || pr == nil || pr.State != record.PullRequestOpen {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
+	return e.enqueue(ctx, tx, issue, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit, Queued: e.now()})
 }
 
 // mergeFailed sends an issue back to implementing when the merge queue took its pull request out
