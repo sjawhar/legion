@@ -298,18 +298,10 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 - **No deferrals.** A finding that changes
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
   or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
-- **The implementer pushes, then completes; it never waits for CI.** It runs the repository's fast
-  local checks for the paths it changed before the push, then pushes and completes. It never
-  waits for, watches or polls the pull request's remote CI (`gh run watch`, `gh pr checks
-  --watch`, `sleep` around `gh run view`) and never sleeps in a loop. Under the Go daemon a check
-  or workflow the base branch requires that settles red on the head, before the completion or
-  after it, sends the work back to `implementing` with the failing checks named.
+- **The implementer pushes, then completes; it never waits for, watches or polls CI**, and never
+  sleeps in a loop: `skill://legion-worker/references/pr-body.md` (*Never waiting on CI*).
 - **A red CI job** that failed on its own is re-run with
-  `gh run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base. This is
-  the one CI result an implementer waits for: when its task names a red that failed on its own, it
-  re-runs the failed jobs and completes once the re-run settles green, woken by the pull request's
-  checks event (`skill://envoy`, *Waiting for CI or a merge*: subscribe, then end the turn), never
-  by a sleep loop. A completion while that red still stands is sent straight back.
+  `gh run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
