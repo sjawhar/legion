@@ -5,7 +5,8 @@
 # refused a write there (its mount is read-only by default), and writes a file to the export it
 # mounts with `read_only: false` that the NFS server then holds. `legion probe-boot` mounts both
 # shares, and refuses a claim that does not exist, an export the server does not have and a server
-# that never answers, each naming the volume and its share.
+# that never answers, each naming the volume and its share, and an image digest the registry does
+# not have, naming the image.
 # The pod is built by Legion's own code: the daemon's loader reads the legion.yaml, its
 # sandboxOptions builds the Agent Sandbox runtime, which launches the issue's root through Agent
 # Sandbox v1.0.3's controller (internal/daemon/share_volumes_live_test.go). The share is an

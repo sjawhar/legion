@@ -219,8 +219,11 @@ One answer is no proof: containerd 2 resolves a digest as a manifest and then as
 reports the blob request's 404 — which a registry such as GHCR answers for a manifest it holds —
 over a manifest request the network cut. The kubelet pulls again about ten seconds after the first
 failure, and the daemon reads the events at most every 15 s, so the refusal comes within about half
-a minute of the first pull: `worker image sha256:<digest> failed its probe: the registry does not
-have image <image>: …`, quoting the kubelet. Every other failed pull — credentials the registry
+a minute of the first pull (on kubelet 1.32 and later, whose `ImagePullBackOff` message carries the
+failed pull's error; an older kubelet's carries none, so the refusal waits for a read that finds the
+container waiting `ErrImagePull`, later but within the attempt): `worker image sha256:<digest>
+failed its probe: the registry does not have image <image>: …`, quoting the kubelet. Every other
+failed pull — credentials the registry
 refused (`pull access denied`, `401`, `403`; Docker Hub answers a repository it does not have this
 way), a registry the node cannot reach (`i/o timeout`, `connection refused`, `connection reset by
 peer`), a rate limit (`429`, `toomanyrequests`), a server error, containerd's other not-found

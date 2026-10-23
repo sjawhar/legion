@@ -128,9 +128,11 @@ func (g *probeRig) waitsSaying(reason, message string) *probeRig {
 }
 
 // pullFails leaves the probe's container waiting for reason, ErrImagePull or ImagePullBackOff,
-// with the kubelet's message for a pull that failed with code and cause (pullFailure).
+// with the kubelet's message for a pull that failed with code and cause (pullFailure), and records
+// the kubelet's Failed event for two such pulls, as it records one at every failed pull: so a row
+// is judged by its message, never retried merely for want of a second pull.
 func (g *probeRig) pullFails(reason, code, cause string) *probeRig {
-	return g.waitsSaying(reason, pullFailure(reason, code, cause))
+	return g.waitsSaying(reason, pullFailure(reason, code, cause)).pullsFailed(2, code, cause)
 }
 
 // pullsFailed records the kubelet's Failed event for count pulls of testImage that failed with
@@ -411,10 +413,10 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		// The registry answered 404 for the reference: no retry of the pull finds the image, on the
 		// first pull or the back-off after it, once the kubelet has met that answer on two pulls.
 		{"an image the registry does not have", func(g *probeRig) {
-			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found")).pullsFailed(2, "NotFound", resolving(testImage+": not found"))
+			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found"))
 		}, []string{"worker image sha256:" + testDigestHex + " failed its probe: the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack image", ": " + testImage + ": not found"}},
 		{"an image the registry does not have, in back-off", func(g *probeRig) {
-			g.pullFails("ImagePullBackOff", "NotFound", resolving(testImage+": not found")).pullsFailed(2, "NotFound", resolving(testImage+": not found"))
+			g.pullFails("ImagePullBackOff", "NotFound", resolving(testImage+": not found"))
 		}, []string{"the registry does not have image " + testImage + ": pod " + probeSandboxName + " Pending, container probe waiting: ImagePullBackOff: Back-off pulling image"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -535,7 +537,7 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 		// request the network cut followed by a blob request the registry answered 404, so it waits
 		// for the kubelet's next pull.
 		{"a missing manifest met on one pull", func(g *probeRig) {
-			g.pullFails("ErrImagePull", "NotFound", resolving(testImage+": not found")).pullsFailed(1, "NotFound", resolving(testImage+": not found"))
+			g.waitsSaying("ErrImagePull", pullFailure("ErrImagePull", "NotFound", resolving(testImage+": not found"))).pullsFailed(1, "NotFound", resolving(testImage+": not found"))
 		}, []string{"(container probe waiting: ErrImagePull)"}},
 		{"no pod at all", func(g *probeRig) { g.hold.Store(true) },
 			[]string{"probe sandbox " + probeSandboxName + " has no pod after 300ms"}},
