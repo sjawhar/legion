@@ -129,12 +129,11 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 			break
 		}
 		// A required workflow's result is as old as the pass's last read of the runs, up to two
-		// minutes: a run re-run green since, which READY found green on GitHub, still reads red until
-		// the next read. So a settlement, which reads no run, withdraws only a red a required check
-		// makes. A red only the workflows make is left to the pass's next read, which the cleared
-		// head the runs were read at makes a change (record.RequiredReadUnchanged), so it withdraws
-		// the READY if the run is still red, and leaves it if the run passed; that read decides the
-		// count's report too.
+		// minutes: a run re-run green since still reads red until the next read. So a settlement,
+		// which reads no run, withdraws only a red a required check makes. A red only the workflows
+		// make is left to the pass's next read, which the cleared head the runs were read at makes a
+		// change (record.RequiredReadUnchanged), so it withdraws the READY if the run is still red,
+		// and leaves it if the run passed; that read decides the count's report too.
 		if !requiredRead && classify.RedOnlyByWorkflows(*pr) {
 			pr.WorkflowsHead = ""
 			return e.store.PutPullRequest(ctx, tx, *pr)

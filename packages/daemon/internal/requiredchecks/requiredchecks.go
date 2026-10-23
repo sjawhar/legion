@@ -113,11 +113,6 @@ type WorkflowRun struct {
 	Attempt int
 }
 
-// Standing is the run's result as classify judges a required check's, named by the workflow's path.
-func (r WorkflowRun) Standing() classify.Standing {
-	return classify.Standing{Name: r.Path, Result: r.Result}
-}
-
 // Workflows is how each required workflow's run stands on sha, one WorkflowRun for each workflow in
 // workflows, in order: the latest run (the highest id; a re-run keeps its run's id and reports its
 // newest attempt) that a pull_request or pull_request_target event started for that file of that

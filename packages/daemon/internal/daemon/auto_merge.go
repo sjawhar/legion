@@ -69,7 +69,7 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 // base that requires a merge queue, leaves the row waiting until GitHub reports the pull request
 // mergeable, so a merge-queue base never has auto-merge armed; an arm or a queue entry leaves it
 // waiting until GitHub reports the merge (ghautomerge.Armed), and a READY the record has left ends
-// the row. The first arm or entry the row sees is recorded on the row (rememberArm), so a later run
+// the row. The first arm or entry the row sees is recorded on the row (rememberWait), so a later run
 // that finds it gone reads the removal from GitHub instead of submitting again: the merge queue
 // failing the merge sends the issue back to implementing (intake.MergeFailed, applied through the
 // workflow), and anyone else's removal ends the row with the architect told (ghautomerge.Removed,
