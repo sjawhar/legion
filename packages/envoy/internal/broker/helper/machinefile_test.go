@@ -185,3 +185,59 @@ func TestAMachineFileThatDoesNotParseIsAnErrorNamingIt(t *testing.T) {
 		}
 	}
 }
+
+// TestAMachineFileOthersCanReadIsRefused: LoadMachineFile refuses a machine file whose mode grants
+// its group or anyone else any access, naming the path and the fix, and loads it once it is 0600.
+func TestAMachineFileOthersCanReadIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "machine.json")
+	if err := testMachineFile(t, "cred-1", "refresh-1").Save(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o610} {
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadMachineFile(path); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "chmod 600") {
+			t.Errorf("mode %v: LoadMachineFile = %v; want a refusal naming %s and chmod 600", mode, err, path)
+		}
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadMachineFile(path); err != nil {
+		t.Fatalf("mode 0600: %v", err)
+	}
+}
+
+// TestRemoveLeftoverMachineTempsRemovesOnlyTheSavesTemps: the temporary files an interrupted save
+// leaves beside the machine file (.machine-*.json.tmp, holding a key and a refresh token) are
+// removed; the machine file and anything else in the directory are left alone.
+func TestRemoveLeftoverMachineTempsRemovesOnlyTheSavesTemps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "machine.json")
+	if err := testMachineFile(t, "cred-1", "refresh-1").Save(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".machine-123.json.tmp", ".machine-abc.json.tmp", "operator", "machine.json.lock"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RemoveLeftoverMachineTemps(path); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, ",") != "machine.json,machine.json.lock,operator" {
+		t.Fatalf("directory after the cleanup: %v; want the machine file, its lock and the operator file", names)
+	}
+	if err := RemoveLeftoverMachineTemps(filepath.Join(t.TempDir(), "absent", "machine.json")); err != nil {
+		t.Fatalf("a directory that is not there: %v; want nothing to do", err)
+	}
+}

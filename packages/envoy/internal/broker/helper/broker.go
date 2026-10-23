@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,9 @@ const (
 	defaultRefreshEvery = 24 * time.Hour
 	defaultRefreshRetry = 15 * time.Second
 	maxRefreshRetry     = time.Hour
+	// defaultStartRefreshBound bounds Start's refresh of the kept login, so serve listens well
+	// inside the 10 s `agent-secrets register` waits for the socket.
+	defaultStartRefreshBound = 5 * time.Second
 )
 
 // machineCredential is the helper's launcher identity: the machine key, the launcher credential
@@ -111,7 +115,7 @@ type Broker struct {
 	login   atomic.Pointer[loginState] // most recent login: code, state
 	// credMu is held by whatever changes the held login and its machine file together: a login's
 	// save and install, a start's install, and a refresh from its request to its save and swap, so
-	// a refresh never races a login's install and the file always names the credential in memory.
+	// a refresh never races a login's install.
 	credMu sync.Mutex
 	// stateMu is held by every write of cred, login and dropped, and by LoginStatus while it reads
 	// the three, so login-status never pairs one moment's login with another's credential, and a
@@ -128,6 +132,9 @@ type Broker struct {
 	// credential it returns one for (nil keeps time.After), so a test fires an expiry's timers
 	// without waiting for them. No production caller sets it.
 	testAfter func(cred *machineCredential, d time.Duration) <-chan time.Time
+	// testWatchEnded, when set, runs as watchExpiry returns for cred, so a test knows a watch said
+	// all it will. No production caller sets it.
+	testWatchEnded func(cred *machineCredential)
 	// expiryWarning is how long before the credential's expiry the helper warns that no refresh
 	// has moved it; zero means a day. Only tests shorten it.
 	expiryWarning time.Duration
@@ -135,6 +142,9 @@ type Broker struct {
 	// or a login's install (nextRefresh), and refreshRetry its first wait after one whose outcome
 	// it did not learn (doubling to an hour); zero means a day and 15 s. Only tests shorten them.
 	refreshEvery, refreshRetry time.Duration
+	// startRefreshBound is how long Start waits on its refresh of the kept login; zero means
+	// defaultStartRefreshBound. Only tests shorten it.
+	startRefreshBound time.Duration
 
 	// signalsOnce makes signals, the refresh loop's wake-ups (refreshSignals).
 	signalsOnce sync.Once
@@ -354,8 +364,9 @@ func (b *Broker) CredentialInstalled() <-chan struct{} {
 // installCredential makes cred the helper's launcher credential and issued the login that minted
 // it, in one write under stateMu that also ends any record of a dropped credential, then wakes
 // every waiter on CredentialInstalled, watches cred's expiry (watchExpiry) and has the refresh
-// loop schedule its next refresh from cred's expiry (nextRefresh). A credential it replaces is gone from then on, so its expiry watch says nothing more about it.
-func (b *Broker) installCredential(cred *machineCredential, issued *loginState) {
+// loop schedule its next refresh from cred's expiry (nextRefresh). It returns the credential it
+// replaced, if any, which is gone from then on, so its expiry watch says nothing more about it.
+func (b *Broker) installCredential(cred *machineCredential, issued *loginState) *machineCredential {
 	b.stateMu.Lock()
 	old := b.cred.Swap(cred)
 	b.login.Store(issued)
@@ -375,6 +386,7 @@ func (b *Broker) installCredential(cred *machineCredential, issued *loginState) 
 		close(b.installed)
 	}
 	b.installed = make(chan struct{})
+	return old
 }
 
 // pollLogin polls the token endpoint for a pending machine login until a human decides it, at the
@@ -410,17 +422,18 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, cfg *oauth2.Config, da *oauth2
 }
 
 // keepLogin keeps the login an approved device grant issued at MachineFile and only then installs
-// it, under credMu, so the file names the login the helper holds and no refresh runs between the
-// two; it logs the credential with operator, the login_hint the login was signed with, whatever
-// the operator file says by then. An approval the helper cannot keep (a token answer without the
-// credential's extras, or a machine file it cannot write) is logged at ERROR and recorded
-// "expired", leaving cred untouched.
+// it, under credMu, so no refresh runs between the two; it logs the credential with operator, the
+// login_hint the login was signed with, whatever the operator file says by then. A credential the
+// new login replaced is then revoked at the broker (revokeReplaced). An approval the helper cannot
+// keep (a token answer without the credential's extras, or a machine file it cannot write) is
+// logged at ERROR and recorded "expired", leaving cred untouched.
 func (b *Broker) keepLogin(key *ecdsa.PrivateKey, tok *oauth2.Token, code, operator string) {
 	f, err := machineFileFrom(key, tok)
+	var replaced *machineCredential
 	if err == nil {
 		b.credMu.Lock()
 		if err = f.Save(b.MachineFile); err == nil {
-			b.installCredential(f.credential(), &loginState{Code: code, State: "issued"})
+			replaced = b.installCredential(f.credential(), &loginState{Code: code, State: "issued"})
 		}
 		b.credMu.Unlock()
 	}
@@ -431,17 +444,54 @@ func (b *Broker) keepLogin(key *ecdsa.PrivateKey, tok *oauth2.Token, code, opera
 	}
 	b.logger().Info("machine login issued; the helper holds a launcher credential",
 		"credential_id", f.CredentialID, "operator", operator, "expires_at", f.ExpiresAt.Format(time.RFC3339))
+	if replaced != nil && replaced.id != f.CredentialID {
+		b.revokeReplaced(replaced)
+	}
+}
+
+// revokeReplaced ends old, the credential a new machine login replaced, at the broker: POST
+// /v1/operator/machines/{id}/revoke signed with old's own launcher proof, the route a person's
+// machine ends its own login with. Nothing uses old again, and revoking it means no old copy of
+// the machine file can refresh it. It is best effort: a failure is logged at WARN, never retried,
+// and changes nothing the helper holds.
+func (b *Broker) revokeReplaced(old *machineCredential) {
+	url := b.URL + "/v1/operator/machines/" + old.id + "/revoke"
+	err := func() error {
+		compact, err := proof.SignLauncher(old.key, old.id, http.MethodPost, url, time.Now())
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequest(http.MethodPost, url, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Proof", compact)
+		return b.do(req, []int{http.StatusOK}, nil)
+	}()
+	if err != nil {
+		b.logger().Warn("the helper could not revoke the machine login a new one replaced; revoke it with agent-secrets machine revoke",
+			"credential_id", old.id, "error", err)
+		return
+	}
+	b.logger().Info("the helper revoked the machine login a new one replaced", "credential_id", old.id)
 }
 
 // Start resumes the machine login kept at MachineFile, if there is one, and starts the refresh
-// loop (refreshLoop) until ctx ends; serve runs it before it listens. A kept login is refreshed
-// once before it is installed, within b.HTTP's timeout, so a restarted helper never reports a
-// login the broker has ended: a refresh the broker answers is saved and installed as an issued
-// login with no code; one it refuses (invalid_grant: revoked, lapsed or reused) drops the login
-// (dropRefreshRefused) and deletes the file; one whose outcome the helper did not learn (the broker
-// unreachable, a lost answer, a 5xx) installs the kept login and leaves the refresh loop to retry
-// it. A file that is there but is not a machine login is an error naming it.
+// loop (refreshLoop) until ctx ends; serve runs it before it listens, holding the machine file's
+// claim. It first removes the temporary files an interrupted save left beside the file
+// (RemoveLeftoverMachineTemps), logging a failure. A kept login is refreshed once before it is
+// installed, within startRefreshBound (5 s), so a restarted helper never reports a login the
+// broker has ended and still listens within `register`'s wait: a refresh the broker answers is
+// saved and installed as an issued login with no code; one it refuses (invalid_grant: revoked,
+// lapsed or reused) drops the login (dropRefreshRefused) and deletes the file; one whose outcome
+// the helper did not learn (the broker unreachable or rate-limiting, a lost or late answer, a 5xx)
+// installs the kept login and leaves the refresh loop to retry it, no sooner than a Retry-After
+// the broker named. A file that is there but is not a machine login, or that others can read, is
+// an error naming it.
 func (b *Broker) Start(ctx context.Context) error {
+	if err := RemoveLeftoverMachineTemps(b.MachineFile); err != nil {
+		b.logger().Error("removing the temporary files an interrupted machine file save left", "machine_file", b.MachineFile, "error", err)
+	}
 	f, err := LoadMachineFile(b.MachineFile)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -452,7 +502,9 @@ func (b *Broker) Start(ctx context.Context) error {
 	}
 	kept := f.credential()
 	b.credMu.Lock()
-	next, refusal, err := b.redeem(ctx, kept)
+	bounded, cancel := context.WithTimeout(ctx, b.startRefreshBoundOrDefault())
+	next, refusal, err := b.redeem(bounded, kept)
+	cancel()
 	first := time.Duration(0)
 	switch {
 	case refusal != "":
@@ -461,7 +513,7 @@ func (b *Broker) Start(ctx context.Context) error {
 		b.removeRefusedFile()
 	case err != nil:
 		b.installCredential(kept, &loginState{State: "issued"})
-		first = b.refreshRetryOrDefault()
+		first = max(b.refreshRetryOrDefault(), retryAfter(err))
 	default:
 		if err := next.Save(b.MachineFile); err != nil {
 			b.logger().Error("the helper could not keep the machine login's refresh on disk; retrying",
@@ -481,6 +533,13 @@ func (b *Broker) Start(ctx context.Context) error {
 	}
 	go b.refreshLoop(ctx, first)
 	return nil
+}
+
+func (b *Broker) startRefreshBoundOrDefault() time.Duration {
+	if b.startRefreshBound > 0 {
+		return b.startRefreshBound
+	}
+	return defaultStartRefreshBound
 }
 
 // refreshSignals wake the refresh loop: reschedule when a credential is installed, so the next
@@ -544,9 +603,10 @@ func (b *Broker) nextRefresh(every time.Duration) time.Duration {
 
 // refreshLoop refreshes the held machine login after first, then at nextRefresh after each
 // refresh that reached the broker and each install of a credential; one whose outcome it did not
-// learn is retried refreshRetry later (15 s), the wait doubling to an hour. A credential a
-// launcher call's refusal dropped is settled at once (settleRefused), and retried the same way
-// until it is. It ends with ctx.
+// learn is retried refreshRetry later (15 s), the wait doubling to an hour, and never sooner than
+// a Retry-After the broker answered it with (retryAfter). A credential a launcher call's refusal
+// dropped is settled at once (settleRefused), and retried the same way until it is. It ends with
+// ctx.
 func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
 	every, retry := b.refreshEveryOrDefault(), b.refreshRetryOrDefault()
 	sig := b.refreshSignals()
@@ -591,7 +651,7 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
 			err = b.refresh(ctx)
 		}
 		if err != nil {
-			timer.Reset(backoff)
+			timer.Reset(max(backoff, retryAfter(err)))
 			backoff = min(2*backoff, maxRefreshRetry)
 			continue
 		}
@@ -603,13 +663,19 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
 // redeem spends cred's refresh token for the rotated login: the machine file the broker's answer
 // names, or refusal, the broker's invalid_grant code, when it has ended the login (revoked, lapsed
 // or reused), or another error, logged, when the helper did not learn the outcome or cannot keep
-// the answer. The caller holds credMu.
+// the answer. The broker's 429 (its token endpoint's rate limit) is one of those: the login is
+// kept and retried after its Retry-After (retryAfter). The caller holds credMu.
 func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *MachineFile, refusal string, err error) {
 	tok, err := b.oauthConfig().TokenSource(b.tokenContext(ctx, cred.key),
 		&oauth2.Token{RefreshToken: cred.refreshToken, Expiry: time.Unix(1, 0)}).Token()
 	if err != nil {
 		var re *oauth2.RetrieveError
-		if errors.As(err, &re) && re.ErrorCode == "invalid_grant" {
+		switch {
+		case errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == http.StatusTooManyRequests:
+			b.logger().Warn("the broker rate-limited the machine login's refresh; retrying after its Retry-After",
+				"credential_id", cred.id, "retry_after", retryAfter(err), "error", err)
+			return nil, "", err
+		case errors.As(err, &re) && re.ErrorCode == "invalid_grant":
 			return nil, re.ErrorCode, err
 		}
 		b.logger().Warn("the machine login's refresh did not reach the broker; retrying", "credential_id", cred.id, "error", err)
@@ -621,6 +687,20 @@ func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *Mac
 		return nil, "", err
 	}
 	return next, "", nil
+}
+
+// retryAfter is the wait a token endpoint answer named in its Retry-After header (whole seconds),
+// or zero when err carries none.
+func retryAfter(err error) time.Duration {
+	var re *oauth2.RetrieveError
+	if !errors.As(err, &re) || re.Response == nil {
+		return 0
+	}
+	seconds, perr := strconv.Atoi(strings.TrimSpace(re.Response.Header.Get("Retry-After")))
+	if perr != nil || seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // removeRefusedFile deletes the machine file of a login the broker refused to refresh.
@@ -710,6 +790,9 @@ func (b *Broker) settleRefused(ctx context.Context, cred *machineCredential) err
 // until a human approves a new machine login. It ends early, silently, once the helper stops
 // holding cred (a refusal, a refresh, or a newer login).
 func (b *Broker) watchExpiry(cred *machineCredential) {
+	if b.testWatchEnded != nil {
+		defer b.testWatchEnded(cred)
+	}
 	lead := b.expiryWarning
 	if lead == 0 {
 		lead = 24 * time.Hour

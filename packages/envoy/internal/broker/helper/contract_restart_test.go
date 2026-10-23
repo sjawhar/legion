@@ -263,3 +263,88 @@ func TestContractAReLoginReplacesTheKeptLogin(t *testing.T) {
 		t.Fatalf("machine file after the re-login: %+v %v; want the second login %s and its key", kept, err, second)
 	}
 }
+
+// TestContractAReLoginRevokesTheCredentialItReplaces: once a re-login is installed, the helper
+// revokes the credential it replaced at the broker, signing with that credential's own launcher
+// proof, so no old copy of the machine file can refresh it; the new login keeps working.
+func TestContractAReLoginRevokesTheCredentialItReplaces(t *testing.T) {
+	cr := newContractRig(t)
+	first := cr.login(t)
+	code, err := cr.srv.Broker.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := cr.broker.DecideMachineLogin(t, code, true)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var revoked bool
+		if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select revoked_at is not null from launcher_credentials where id = $1`, first).Scan(&revoked); err != nil {
+			t.Fatal(err)
+		}
+		if revoked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the replaced credential %s was never revoked; status %+v", first, cr.srv.Broker.LoginStatus())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if cred := cr.srv.Broker.cred.Load(); cred == nil || cred.id != second {
+		t.Fatalf("after the revoke the helper holds %+v; want the new login %s", cred, second)
+	}
+	if err := cr.srv.Broker.refresh(context.Background()); err != nil || !cr.srv.Broker.HasCredential() {
+		t.Fatalf("the new login's refresh after the revoke: %v, held %v; want it refreshed", err, cr.srv.Broker.HasCredential())
+	}
+	if !strings.Contains(cr.logBuf.String(), "revoked the machine login a new one replaced") {
+		t.Fatalf("no line names the revoke:\n%s", cr.logBuf.String())
+	}
+}
+
+// TestContractALostRefreshAnswerIsRedeemableUntilTheGraceEnds: the broker rotates a refresh but
+// its answer is lost. A retry two minutes later (the grace pushed back, not waited for) still
+// redeems the token the helper holds and keeps the login; a retry once the grace has ended is a
+// reuse, which the broker refuses, and the helper drops the login and its file.
+func TestContractALostRefreshAnswerIsRedeemableUntilTheGraceEnds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		shift string
+		keeps bool
+	}{
+		{"two minutes later", `update oauth_refresh_tokens set grace_until = grace_until - interval '2 minutes' where grace_until is not null`, true},
+		{"after the grace", `update oauth_refresh_tokens set grace_until = now() - interval '1 second' where grace_until is not null`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := newContractRig(t)
+			first.login(t)
+			first.cancel()
+			lossy := &losingTokenTransport{}
+			b := &Broker{URL: first.broker.URL, OperatorFile: first.broker.OperatorFile, MachineFile: first.machineFile,
+				HTTP: &http.Client{Transport: lossy}, refreshRetry: time.Hour}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := b.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			lossy.mu.Lock()
+			lost := lossy.lost
+			lossy.mu.Unlock()
+			if !lost {
+				t.Fatal("the start's refresh answer was not lost")
+			}
+			if _, err := first.broker.Store.Pool.Exec(ctx, tc.shift); err != nil {
+				t.Fatal(err)
+			}
+			err := b.refresh(ctx)
+			_, fileErr := LoadMachineFile(first.machineFile)
+			if tc.keeps {
+				if err != nil || !b.HasCredential() || fileErr != nil {
+					t.Fatalf("retry inside the grace: %v, held %v, file %v; want the login kept", err, b.HasCredential(), fileErr)
+				}
+				return
+			}
+			if b.HasCredential() || b.LoginStatus().Dropped != dropRefreshRefused || !errors.Is(fileErr, os.ErrNotExist) {
+				t.Fatalf("retry after the grace: %v, status %+v, file %v; want the login dropped and its file gone", err, b.LoginStatus(), fileErr)
+			}
+		})
+	}
+}

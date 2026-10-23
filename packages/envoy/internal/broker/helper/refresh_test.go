@@ -156,6 +156,8 @@ func TestARefreshMovesTheExpiryAndSilencesTheOldWatch(t *testing.T) {
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
 		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: time.Hour}
 	timers := installExpiryTimers(b)
+	watchEnded := make(chan *machineCredential, 4)
+	b.testWatchEnded = func(cred *machineCredential) { watchEnded <- cred }
 	old := expiryLogin(t, b)
 	f.mu.Lock()
 	f.loginLifetime = 7 * 24 * time.Hour
@@ -164,7 +166,11 @@ func TestARefreshMovesTheExpiryAndSilencesTheOldWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	timers.fire(t, old, 0)
-	time.Sleep(50 * time.Millisecond)
+	for ended := range watchEnded {
+		if ended == old {
+			break
+		}
+	}
 	now := b.cred.Load()
 	if now == nil || now.id != old.id || time.Until(now.expiresAt) < 6*24*time.Hour {
 		t.Fatalf("the credential after its first expiry's timer: %+v; want %s held a week out", now, old.id)
@@ -513,11 +519,82 @@ func TestALauncherRefusalWhoseSettlementSaveFailsIsRetried(t *testing.T) {
 	waitFor(t, func() bool { return fileHoldsTheHeldLogin(b, original) })
 }
 
-// TestTheFirstRetryLandsInsideTheRotationGrace: the broker keeps a rotated refresh token
-// redeemable for 60 s, so a refresh whose answer was lost is retried well inside that.
-func TestTheFirstRetryLandsInsideTheRotationGrace(t *testing.T) {
-	if defaultRefreshRetry > 20*time.Second {
-		t.Fatalf("first refresh retry %s; want it well inside the broker's 60 s rotation grace", defaultRefreshRetry)
+// TestARateLimitedRefreshKeepsTheLoginAndWaitsItsRetryAfter: the broker's 429 (its token
+// endpoint's per-address limit) is a refresh whose outcome the helper must retry, never a refusal:
+// the credential and the machine file stay as they were, and the next attempt waits at least the
+// Retry-After the broker named (1 s here), however short the loop's own retry.
+func TestARateLimitedRefreshKeepsTheLoginAndWaitsItsRetryAfter(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "ada@example.com")
+	held := b.cred.Load()
+	f.mu.Lock()
+	f.refreshOutcome = "rate_limited"
+	f.mu.Unlock()
+	err := b.refresh(context.Background())
+	if err == nil {
+		t.Fatal("a rate-limited refresh must be retried")
+	}
+	if got := retryAfter(err); got != time.Second {
+		t.Fatalf("retryAfter of the 429 = %s; want the broker's 1 s", got)
+	}
+	if b.cred.Load() != held {
+		t.Fatal("a rate-limited refresh replaced or dropped the credential")
+	}
+	if kept, err := LoadMachineFile(b.MachineFile); err != nil || kept.RefreshToken != held.refreshToken {
+		t.Fatalf("the machine file after a rate-limited refresh: %+v %v; want it unchanged", kept, err)
+	}
+
+	b.refreshEvery, b.refreshRetry = time.Hour, 10*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.mu.Lock()
+	before := f.refreshes
+	f.mu.Unlock()
+	start := time.Now()
+	go b.refreshLoop(ctx, 0)
+	waitFor(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.refreshes >= before+2
+	})
+	if elapsed := time.Since(start); elapsed < time.Second {
+		t.Fatalf("the loop retried a 429 after %s; want at least its Retry-After of 1 s", elapsed)
+	}
+	if !b.HasCredential() {
+		t.Fatal("rate-limited refreshes dropped the login")
+	}
+}
+
+// TestAStartWhoseRefreshHangsResumesTheLoginWithinItsBound: a startup refresh the broker does not
+// answer is abandoned at Start's bound (shortened here from 5 s), so serve listens within the
+// wait `register` gives it: the kept login is installed as issued and the loop retries the refresh.
+func TestAStartWhoseRefreshHangsResumesTheLoginWithinItsBound(t *testing.T) {
+	f := newFakeBroker(t)
+	path, kept := keptLogin(t, f)
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.refreshGate = gate
+	f.mu.Unlock()
+	t.Cleanup(func() { close(gate) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: path, HTTP: f.srv.Client(),
+		startRefreshBound: 200 * time.Millisecond, refreshRetry: time.Hour}
+	done := make(chan error, 1)
+	go func() { done <- b.Start(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start waited on a refresh the broker never answered")
+	}
+	if held := b.cred.Load(); held == nil || held.refreshToken != kept.RefreshToken {
+		t.Fatalf("as Start returns the helper holds %+v; want the kept login", held)
+	}
+	if ls := b.LoginStatus(); ls.State != "issued" || !ls.CredentialHeld {
+		t.Fatalf("login-status: %+v; want issued and held", ls)
 	}
 }
 

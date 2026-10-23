@@ -17,8 +17,10 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
 
-// install writes the helper's systemd user unit for the binary at exe (symlinks resolved) and
-// the broker URL from --url or AGENT_SECRETS_URL, in three steps. First the preflight: a helper
+// install writes the helper's systemd user unit for the binary at exe (symlinks resolved), the
+// broker URL from --url or AGENT_SECRETS_URL and each of AGENT_SECRETS_HELPER_SOCK,
+// AGENT_SECRETS_OPERATOR_FILE and AGENT_SECRETS_MACHINE_FILE set in its environment, so the unit's
+// helper uses the socket install probes and the machine file the caller named, in three steps. First the preflight: a helper
 // answering on its socket while the unit is not active was not started by it, and starting the
 // unit would put a second helper on that socket, so install refuses, listing that helper's
 // sessions, and writes and starts nothing, whether or not the unit file already matches. Then
@@ -46,23 +48,34 @@ func install(args []string, getenv func(string) string, exe string, stdout io.Wr
 	if *url == "" {
 		return errors.New("install needs the broker's URL: pass --url URL or set AGENT_SECRETS_URL")
 	}
-	if strings.ContainsAny(*url, " \t\r\n\"'\\%$;") {
+	const needsEscaping = " \t\r\n\"'\\%$;"
+	if strings.ContainsAny(*url, needsEscaping) {
 		return fmt.Errorf("broker URL %q holds characters a unit's Environment= line would need escaped", *url)
+	}
+	environment := "Environment=AGENT_SECRETS_URL=" + *url + "\n"
+	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE"} {
+		value := getenv(name)
+		if value == "" {
+			continue
+		}
+		if strings.ContainsAny(value, needsEscaping) {
+			return fmt.Errorf("%s %q holds characters a unit's Environment= line would need escaped", name, value)
+		}
+		environment += "Environment=" + name + "=" + value + "\n"
 	}
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
 		return fmt.Errorf("resolve this binary's path: %w", err)
 	}
 	// ExecStart splits on whitespace and expands % specifiers and $ variables.
-	if strings.ContainsAny(resolved, " \t\r\n\"'\\%$;") {
+	if strings.ContainsAny(resolved, needsEscaping) {
 		return fmt.Errorf("this binary's path %q holds characters ExecStart would split or expand; install it at a plain path", resolved)
 	}
 	unit := []byte(`[Unit]
 Description=agent-secrets helper: pins agent sessions by pidfd and signs their secrets-broker proofs
 [Service]
 ExecStart=` + resolved + ` serve
-Environment=AGENT_SECRETS_URL=` + *url + `
-# A SIGTERM from anything but systemd ends the helper with exit 0, so restart on any exit.
+` + environment + `# A SIGTERM from anything but systemd ends the helper with exit 0, so restart on any exit.
 Restart=always
 RestartSec=10
 [Install]

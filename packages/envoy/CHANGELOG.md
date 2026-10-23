@@ -35,21 +35,28 @@
 - The helper keeps its machine login in `AGENT_SECRETS_MACHINE_FILE` (default
   `~/.config/agent-secrets/machine.json`, mode 0600): the machine key, the credential's id and
   expiry and the current refresh token, written through a fresh temporary file so no file or link
-  already in the directory is followed. It refreshes that login before it resumes it at start, so
+  already in the directory is followed. A file its group or anyone else can access, or another
+  user owns, stops the helper at start, naming it and `chmod 600`; temporary files an interrupted
+  save left beside it are removed at start. It refreshes that login before it resumes it at start,
+  waiting at most 5 s so its socket listens within `register`'s wait, so
   a restart, a reboot or an upgrade keeps the machine logged in. A machine revoked while its
   helper was stopped is refused by the broker from then on, and the helper drops the login at its
   first refresh or launcher call the broker refuses. It deletes the file when the broker refuses
   the login's refresh, within seconds of a
-  launcher call the broker refuses `LAUNCHER_INVALID`. A refreshed login it cannot save is held
-  and its refresh and save retried 15 s later. `serve` holds an exclusive lock on
-  `<socket>.lock` for its lifetime and refuses to start, naming the socket, while another helper
-  holds it, before it spends any refresh token; it refuses a path at the socket that is not a
+  launcher call the broker refuses `LAUNCHER_INVALID`. A refresh the broker rate-limits (429)
+  keeps the login and is retried no sooner than its `Retry-After`. A refreshed login it cannot save is held
+  and its refresh and save retried 15 s later. A machine login that replaces a credential the
+  helper held revokes the old one at the broker, best effort. `serve` holds exclusive locks on
+  `<socket>.lock` and `<machine file>.lock` for its lifetime and refuses to start, naming the
+  socket or the machine file, while another helper holds either, before it spends any refresh
+  token; it refuses a path at the socket that is not a
   unix socket. A file that is there but is not a machine login stops the helper at start,
   naming the file.
 - `agent-secrets-helper install [--url URL] [--restart-with-sessions]` writes the helper's
   `systemd --user` unit (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`, by default
   under `~/.config`), running this binary's `serve` with `AGENT_SECRETS_URL` from `--url` or the
-  environment and `Restart=always`, then runs `systemctl --user daemon-reload` and
+  environment, each of `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and
+  `AGENT_SECRETS_MACHINE_FILE` that is set in install's environment, and `Restart=always`, then runs `systemctl --user daemon-reload` and
   `enable --now`. An unchanged unit that is running changes nothing; one that is not is started.
   A helper answering on the socket that the unit does not run is refused, even when the unit file
   already matches: install lists its sessions, says to stop it, exits 2, and writes and starts

@@ -163,6 +163,53 @@ func TestInstallResolvesSymlinksAndTakesTheURLFromTheEnvironment(t *testing.T) {
 	}
 }
 
+// TestInstallWritesTheHelpersEnvironmentIntoTheUnit: each helper setting set in install's
+// environment (the socket, the operator file and the machine file, beside the broker URL) becomes
+// an Environment= line, so the unit's helper reads the machine file and listens on the socket
+// install probed; one that is unset is left out, and a value a unit line would need escaped is
+// refused, writing nothing.
+func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
+	r := newInstallRig(t)
+	dir := filepath.Dir(r.sock)
+	r.env["AGENT_SECRETS_OPERATOR_FILE"] = filepath.Join(dir, "operator")
+	r.env["AGENT_SECRETS_MACHINE_FILE"] = filepath.Join(dir, "machine.json")
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(r.unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"\nEnvironment=AGENT_SECRETS_URL=https://secrets.example\n",
+		"\nEnvironment=AGENT_SECRETS_HELPER_SOCK=" + r.sock + "\n",
+		"\nEnvironment=AGENT_SECRETS_OPERATOR_FILE=" + filepath.Join(dir, "operator") + "\n",
+		"\nEnvironment=AGENT_SECRETS_MACHINE_FILE=" + filepath.Join(dir, "machine.json") + "\n",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("unit lacks %q:\n%s", want, data)
+		}
+	}
+
+	bare := newInstallRig(t)
+	delete(bare.env, "AGENT_SECRETS_HELPER_SOCK")
+	if err := bare.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(bare.unit); strings.Count(string(data), "Environment=") != 1 {
+		t.Fatalf("with only the URL set the unit has other Environment= lines:\n%s", data)
+	}
+
+	spaced := newInstallRig(t)
+	spaced.env["AGENT_SECRETS_MACHINE_FILE"] = filepath.Join(dir, "my machine.json")
+	if err := spaced.run("--url", "https://secrets.example"); err == nil || !strings.Contains(err.Error(), "AGENT_SECRETS_MACHINE_FILE") {
+		t.Fatalf("install with a spaced machine file: %v; want a refusal naming AGENT_SECRETS_MACHINE_FILE", err)
+	}
+	if _, err := os.Stat(spaced.unit); !os.IsNotExist(err) {
+		t.Fatalf("a refused install wrote the unit: %v", err)
+	}
+}
+
 func TestInstallIsANoOpWhenNothingChanged(t *testing.T) {
 	r := newInstallRig(t)
 	if err := r.run("--url", "https://secrets.example"); err != nil {

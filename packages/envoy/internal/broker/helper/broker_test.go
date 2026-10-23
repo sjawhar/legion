@@ -71,7 +71,8 @@ const failAlways = 1 << 30
 // grant with loginOutcome ("issued" by default, or "denied"/"expired" when a test sets it before
 // Login, or "pending" to hold the login undecided until the test sets "issued"), minting a fresh
 // credential id on "issued", and the refresh grant with refreshOutcome ("" rotates the refresh
-// token and moves the expiry, "invalid_grant" refuses it, "unavailable" answers 503).
+// token and moves the expiry, "invalid_grant" refuses it, "unavailable" answers 503,
+// "rate_limited" answers the broker's 429 invalid_request with Retry-After 1).
 type fakeBroker struct {
 	mu               sync.Mutex
 	srv              *httptest.Server
@@ -108,7 +109,7 @@ type fakeBroker struct {
 	// token answer the helper cannot keep.
 	loginLifetime  time.Duration
 	refreshTokens  map[string]string // live refresh token -> the credential it refreshes
-	refreshOutcome string            // what the refresh grant answers: "" (rotate), "invalid_grant", or "unavailable"
+	refreshOutcome string            // what the refresh grant answers: "" (rotate), "invalid_grant", "unavailable" or "rate_limited"
 	refreshes      int               // refresh grants answered
 	tokens         int               // tokens minted, for unique values
 	// refreshGate, when set, holds every refresh grant until the test closes it, and
@@ -396,6 +397,10 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 				return
 			case "unavailable":
 				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			case "rate_limited":
+				w.Header().Set("Retry-After", "1")
+				oauthError(http.StatusTooManyRequests, "invalid_request")
 				return
 			}
 			delete(f.refreshTokens, r.PostForm.Get("refresh_token"))

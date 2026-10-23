@@ -2581,21 +2581,30 @@ answer relays), and the helper polls `POST /v1/oauth/token` with DPoP
 proofs from that key (`pollLogin`, `dpop.go`) until the person decides. An approval's token answer
 carries the refresh token and the broker's extras `credential_id` and `credential_expires_at`; the
 helper writes them with the key to `AGENT_SECRETS_MACHINE_FILE` (default
-`~/.config/agent-secrets/machine.json`, mode 0600, its directory 0700, written through a fresh
-`os.CreateTemp` file renamed over it, so no planted path is followed; `helper.MachineFile`, whose
-`validate` both load and save check) before it installs the credential, so the file always names
-the credential in memory. `serve` first takes an exclusive flock on `<socket>.lock` (0600, beside
-the socket; `claimSocket`) and holds it for its lifetime, so a second `serve` on the socket exits
-2 naming it, before any refresh; with the lock held it refuses a path at the socket that is not a
-unix socket or that a helper still answers on, and removes a socket only when a dial is refused.
-It then runs `Broker.Start` before it listens: a kept file is refreshed
-once before it is installed, so a revoked machine never resumes as `issued` (answered: saved and
-installed `issued` with no code, the first refresh 15 s later when the save failed; `invalid_grant`:
-dropped and the file deleted; an outcome the helper did not learn: the kept login installed, retried by the loop). A file that is there but is
+`~/.config/agent-secrets/machine.json`, mode 0600, its directory created 0700 when the helper
+creates it, written through a fresh `os.CreateTemp` file renamed over it, so no planted path is
+followed; `helper.MachineFile`, whose `validate` both load and save check) before it installs the
+credential. A refresh whose answer the file cannot take is still installed (the old token is
+spent), so until the loop's retried save lands the file can name the login before it.
+`LoadMachineFile` refuses a file whose mode grants group or other any access, or that another
+user owns, naming it and `chmod 600`. `serve` first takes an exclusive flock on `<socket>.lock`
+(0600, beside the socket; `claimSocket`), then one on `<machine file>.lock` (`claimMachineFile`),
+and holds both for its lifetime, so a second `serve` on the socket, or on the machine file with
+any socket, exits 2 naming it, before any refresh; with the socket lock held it refuses a path at
+the socket that is not a unix socket or that a helper still answers on, and removes a socket only
+when a dial is refused. It then runs `Broker.Start` before it listens: Start first removes any
+`.machine-*.json.tmp` an interrupted save left beside the file, and a kept file is refreshed once,
+within 5 s, before it is installed, so a revoked machine never resumes as `issued` and the socket
+still listens inside `register`'s 10 s wait (answered: saved and installed `issued` with no code,
+the first refresh 15 s later when the save failed; `invalid_grant`: dropped and the file deleted;
+an outcome the helper did not learn, the 5 s bound passing among them: the kept login installed,
+retried by the loop). A file that is there but is
 not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
 credential is installed; a refresh whose outcome it did not learn is retried after 15 s (inside
-the broker's five-minute rotation grace, so a lost answer keeps the login), doubling to an hour. A 401
+the broker's five-minute rotation grace, so a lost answer keeps the login), doubling to an hour,
+and never sooner than the `Retry-After` of a 429 (the token endpoint's rate limit), which keeps
+the login like any other unlearned outcome. A 401
 `LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
 dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
 since that 401 can also be a proof the broker could not verify; an answer whose save fails is
@@ -2603,12 +2612,17 @@ installed, so the helper keeps working, and the loop retries its refresh and sav
 Each refresh spends the refresh token
 for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
 the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)
-drops the login and deletes the file. The helper no longer speaks the earlier
+drops the login and deletes the file. A machine login installed while the helper held another
+credential revokes the replaced one (`revokeReplaced`: `POST /v1/operator/machines/{id}/revoke`
+signed with that credential's own launcher proof), best effort, logging a failure at WARN. The
+helper no longer speaks the earlier
 `POST /v1/launcher-credentials` login, so it needs a broker that serves the OAuth routes.
 `agent-secrets-helper install [--url URL] [--restart-with-sessions]` (`install.go`) writes the
 helper's user unit to `helper.UnitPath` (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`,
 else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`,
-`Environment=AGENT_SECRETS_URL=<url>` and `Restart=always`, refusing a URL or path a unit line
+`Environment=AGENT_SECRETS_URL=<url>`, an `Environment=` line for each of
+`AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE` set in
+its environment, and `Restart=always`, refusing a URL, value or path a unit line
 would split or expand. First, a helper answering on the socket while `systemctl --user
 is-active agent-secrets-helper.service` is not `active` was started some other way: `install`
 lists its sessions and exits 2 (`stop it, then re-run install`), writing and starting nothing,

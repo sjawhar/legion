@@ -58,6 +58,11 @@ A helper that answers on the socket but that the unit does not run (one started 
 agent-secrets-helper not run by agent-secrets-helper.service answers at …; stop it, then re-run
 install`, since starting the unit would put a second helper on the socket.
 
+The unit carries `AGENT_SECRETS_URL` and each of `AGENT_SECRETS_HELPER_SOCK`,
+`AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE` that is set where you run
+`install`, so run it with the same exports your shells use. One helper holds a machine file at a
+time: a second `serve` on the same file, whatever its socket, exits naming the file.
+
 Put `export AGENT_SECRETS_URL=https://secrets.internal.example` in the profile your shells and
 agents start from, so every agent session gets it: every `agent-secrets` form that calls the
 broker needs it.

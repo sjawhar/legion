@@ -97,7 +97,7 @@ token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` b
 readable only by its user, so a restarted helper resumes it. It refreshes the login when it starts,
 before it resumes it, and at most a day apart after: each refresh spends the refresh token for a new one and moves the
 credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from then. A refresh token it has
-replaced still works for a minute, so a refresh whose answer was lost is retried, 15 s later; spent after
+replaced still works for five minutes, so a refresh whose answer was lost is retried, 15 s later; spent after
 that, it ends every refresh token of the login, so the login can no longer be refreshed, and the
 helper holding it drops it at its next refresh.
 

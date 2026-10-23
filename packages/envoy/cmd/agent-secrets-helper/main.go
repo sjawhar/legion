@@ -118,8 +118,9 @@ func main() {
 
 // serve runs the daemon: it always listens and serves, whether or not a machine credential has
 // ever been installed. It refuses to start while another helper holds or answers on its socket
-// (claimSocket). It then resumes the machine login kept at MachineFile, if there is one,
-// refreshing it before it installs it and then at least daily (Broker.Start); a machine file that is there but does not parse stops it,
+// (claimSocket) or holds its machine file (claimMachineFile). It then resumes the machine login
+// kept at MachineFile, if there is one, refreshing it before it installs it and then at least
+// daily (Broker.Start); a machine file that is there but does not parse stops it,
 // naming the file. There is no startup gate on OperatorFile: a login is a separate ceremony
 // (`agent-secrets machine login`) run against the already-listening socket, and a missing or
 // empty OperatorFile only surfaces later, informatively, the first time Login actually needs it
@@ -147,8 +148,9 @@ func serve(cfg config) error {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	// The socket is claimed, and held until the process exits, before the kept login is resumed,
-	// so a second helper never spends the refresh token the running one holds.
+	// The socket and then the machine file are claimed, and held until the process exits, before
+	// the kept login is resumed, so a second helper, on this socket or any other, never spends the
+	// refresh token the running one holds.
 	if err := os.MkdirAll(filepath.Dir(cfg.Socket), 0o700); err != nil {
 		return err
 	}
@@ -157,6 +159,11 @@ func serve(cfg config) error {
 		return err
 	}
 	defer lock.Close()
+	machineLock, err := claimMachineFile(cfg.MachineFile)
+	if err != nil {
+		return err
+	}
+	defer machineLock.Close()
 	if err := srv.Broker.Start(ctx); err != nil {
 		return err
 	}
@@ -209,6 +216,28 @@ func claimSocket(sock string) (*os.File, error) {
 	if err := clearStaleSocket(sock); err != nil {
 		lock.Close()
 		return nil, err
+	}
+	return lock, nil
+}
+
+// claimMachineFile takes the helper's claim on the machine login at path: an exclusive flock on
+// path+".lock" (0600, beside it, its directory created 0700 if absent), which the returned file
+// holds until it is closed or the process exits. Another helper holding it, whatever its socket,
+// refuses the start, naming the machine file.
+func claimMachineFile(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another agent-secrets-helper already holds the machine login %s; stop it first", path)
+		}
+		return nil, fmt.Errorf("claiming %s: %w", path, err)
 	}
 	return lock, nil
 }

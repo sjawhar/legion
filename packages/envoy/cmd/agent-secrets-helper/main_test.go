@@ -360,3 +360,37 @@ func TestASecondServeNeverSpendsTheRefreshToken(t *testing.T) {
 		t.Fatalf("the second serve made %d broker calls; want none", n)
 	}
 }
+
+// TestASecondServeOnTheSameMachineFileNeverSpendsItsRefreshToken: while one helper holds the
+// machine file's claim, a serve on another socket but the same machine file exits with an error
+// naming the file and never reaches the broker, so it never spends the login's refresh token.
+func TestASecondServeOnTheSameMachineFileNeverSpendsItsRefreshToken(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineFile := filepath.Join(dir, "machine.json")
+	kept := &helper.MachineFile{Key: key, CredentialID: "lcred-1", ExpiresAt: time.Now().Add(time.Hour), RefreshToken: "refresh-1"}
+	if err := kept.Save(machineFile); err != nil {
+		t.Fatal(err)
+	}
+	first, err := claimMachineFile(machineFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	cfg := config{URL: srv.URL, Socket: dir + "/other.sock", OperatorFile: dir + "/none", MachineFile: machineFile, StatePath: dir + "/s.json"}
+	if err := serve(cfg); err == nil || !strings.Contains(err.Error(), machineFile) {
+		t.Fatalf("a serve on a claimed machine file: %v; want an error naming %s", err, machineFile)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("the second serve made %d broker calls; want none", n)
+	}
+}

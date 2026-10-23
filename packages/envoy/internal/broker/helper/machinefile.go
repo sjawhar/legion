@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -37,13 +38,25 @@ type machineFileJSON struct {
 }
 
 // LoadMachineFile reads the machine login at path. A file that is not there is an error matching
-// os.ErrNotExist; one that is there but is not exactly one whole machine login (unreadable JSON,
-// anything after the object, an unknown field, a missing value, a key that is not a P-256 PKCS#8
-// key) is an error naming path.
+// os.ErrNotExist; one whose mode grants its group or anyone else any access, or that this user
+// does not own, is refused, naming path and the fix, since it holds the machine's key and refresh
+// token; one that is there but is not exactly one whole machine login (unreadable JSON, anything
+// after the object, an unknown field, a missing value, a key that is not a P-256 PKCS#8 key) is an
+// error naming path.
 func LoadMachineFile(path string) (*MachineFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("machine file %s is mode %04o, which lets others read the machine's key; run: chmod 600 %s", path, perm, path)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return nil, fmt.Errorf("machine file %s is owned by uid %d, not this user (uid %d); remove it, or run the helper as its owner, and chmod 600 it", path, st.Uid, os.Getuid())
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -148,4 +161,21 @@ func RemoveMachineFile(path string) error {
 		return err
 	}
 	return nil
+}
+
+// RemoveLeftoverMachineTemps deletes the temporary files a save interrupted between creating and
+// renaming them left in path's directory (.machine-*.json.tmp, each holding a key and a refresh
+// token). Nothing else there is touched, and a directory that is not there is nothing to do.
+func RemoveLeftoverMachineTemps(path string) error {
+	temps, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".machine-*.json.tmp"))
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, temp := range temps {
+		if err := os.Remove(temp); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
