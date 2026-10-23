@@ -12,6 +12,7 @@ import {
   claudeCommandLine,
   installedMarketplace,
   loadedMarketplace,
+  managedSettingsDirectory,
   processCommandLine,
 } from "../src/claude-channel"
 
@@ -286,12 +287,13 @@ test("a development channel naming this plugin is loaded", () => {
   ).toEqual({ loaded: true })
 })
 
-test("--channels loads this plugin only when an org allowlist names it", () => {
+test("--channels loads this plugin only when the managed settings allowlist names it", () => {
   const commandLine = exact("--channels", "plugin:claude-envoy@legion-plugins")
+  const where = `${join(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`
   expect(claudeChannelGate({ commandLine, plugin, allowlist: ORG_LIST })).toEqual({ loaded: true })
   expect(claudeChannelGate({ commandLine, plugin, allowlist: undefined })).toEqual({
     loaded: false,
-    why: "plugin:claude-envoy@legion-plugins is not on Claude Code's approved channels allowlist (an organization adds it with allowedChannelPlugins in managed settings; for one session use --dangerously-load-development-channels plugin:claude-envoy@legion-plugins)",
+    why: `plugin:claude-envoy@legion-plugins is not on Claude Code's approved channels allowlist (add it to allowedChannelPlugins in ${where}; for one session use --dangerously-load-development-channels plugin:claude-envoy@legion-plugins)`,
   })
   expect(
     claudeChannelGate({
@@ -301,7 +303,7 @@ test("--channels loads this plugin only when an org allowlist names it", () => {
     }),
   ).toEqual({
     loaded: false,
-    why: "plugin:claude-envoy@legion-plugins is not on your organization's approved channels list (allowedChannelPlugins in managed settings)",
+    why: `plugin:claude-envoy@legion-plugins is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${where})`,
   })
 })
 

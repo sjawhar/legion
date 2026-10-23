@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- The README and Dispatch's Agents page guide say to restart Claude Code once after its first
+  launch on a new profile and to check that its banner says the channel is loaded: a first launch
+  can come up with `--channels ignored` (all four new profiles tried whose key came only from an
+  `apiKeyHelper`, measured on 2.1.309), dropping every channel message while the session
+  advertises Aside, so Dispatch records the message as sent. They also say that the first launch's
+  "waiting for your organization's policy … Messages are dropped" banner stays up after the policy
+  loads, while messages already reach the model. The README's "Enable the channel" section says
+  whoever administers the machine writes the managed settings.
+
+- A session whose `--channels` entry is not allowlisted says where the allowlist goes: the
+  machine's `managed-settings.json` (`/etc/claude-code/managed-settings.json` on Linux), or the
+  server-managed settings when the account receives them, where it said an organization adds it.
+
 - The `dispatch` command (`dist/dispatch.js`) ends a write's cadence advice (three or more
   messages on an issue with no human response) with that line, opening `Posted.`, so a tail of
   the output shows the write went through; `dispatch issue --help` says `--priority` takes a

@@ -47394,14 +47394,15 @@ function claudeChannelGate(input) {
   if (allowlist === undefined) {
     return {
       loaded: false,
-      why: `${asked} is not on Claude Code's approved channels allowlist (an organization adds it with allowedChannelPlugins in managed settings; for one session use --dangerously-load-development-channels ${asked})`
+      why: `${asked} is not on Claude Code's approved channels allowlist (add it to allowedChannelPlugins in ${MANAGED_SETTINGS_HINT}; for one session use --dangerously-load-development-channels ${asked})`
     };
   }
   return allowlist.some((allowed) => allowed.marketplace === entry.marketplace && allowed.plugin === entry.name) ? { loaded: true } : {
     loaded: false,
-    why: `${asked} is not on your organization's approved channels list (allowedChannelPlugins in managed settings)`
+    why: `${asked} is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${MANAGED_SETTINGS_HINT})`
   };
 }
+var MANAGED_SETTINGS_HINT = `${join3(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
 function cacheDirectoryName(marketplace) {
   return marketplace.replace(/[^a-zA-Z0-9\-_]/g, "-");
 }
