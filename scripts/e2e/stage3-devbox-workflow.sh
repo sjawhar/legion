@@ -595,13 +595,13 @@ upstream_nats=${SMOKE_UPSTREAM_NATS:-}
 upstream_nats=${upstream_nats#"${upstream_nats%%[![:space:]]*}"}
 upstream_nats=${upstream_nats%"${upstream_nats##*[![:space:]]}"}
 [ -n "$upstream_nats" ] ||
-  fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name (nats://envoy-nats.<tailnet>.ts.net:4222)"
+  fail "SMOKE_UPSTREAM_NATS is unset: the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name (the nats:// URL the operator's envoy.json names as envoy.natsUrls)"
 # One URL: optional scheme and user info, a host with a dot, optional port, nothing after it (the
 # client dials what follows the last "://"); scripts/e2e/lib/envoy-bridge.ts holds the same
 # pattern.
 nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)+(:[0-9]+)?/?$'
 [[ "$upstream_nats" =~ $nats_url ]] ||
-  fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
+  fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as the operator's envoy.json does (envoy.natsUrls, nats://<host>.<tailnet>.ts.net:4222)"
 development=${from:+from $from}${until:+until $until}
 # Every pane's gh and jj are whatever the daemon's PATH gives, since every pane inherits it
 # (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go, includes PATH). This
