@@ -11,11 +11,11 @@ import { z } from "zod"
  * process's own command line and applies the gate Claude Code applies to it (as of 2.1.301): the
  * entry must be named by `--channels` or, in an interactive session,
  * `--dangerously-load-development-channels`; a plugin entry must name the marketplace the plugin
- * is installed from; and a `--channels` entry must be allowlisted, which for this plugin means an
- * organization's `allowedChannelPlugins` in managed settings, since it is not on Anthropic's own
- * list. Claude Code's account and provider checks are not repeated here, and neither is a channel
- * an SDK host turns on after startup (`enableChannel`): the check runs once, so such a session
- * advertises no mode and Dispatch refuses messages Claude Code would pass on.
+ * is installed from; and a `--channels` entry must be allowlisted, which for this plugin means
+ * `allowedChannelPlugins` in the managed settings Claude Code applies, since it is not on
+ * Anthropic's own list. Claude Code's account and provider checks are not repeated here, and
+ * neither is a channel an SDK host turns on after startup (`enableChannel`): the check runs once,
+ * so such a session advertises no mode and Dispatch refuses messages Claude Code would pass on.
  */
 export type ChannelGate =
   | { readonly loaded: true }
@@ -341,7 +341,7 @@ export function claudeChannelGate(input: {
   if (allowlist === undefined) {
     return {
       loaded: false,
-      why: `${asked} is not on Claude Code's approved channels allowlist (an organization adds it with allowedChannelPlugins in managed settings; for one session use --dangerously-load-development-channels ${asked})`,
+      why: `${asked} is not on Claude Code's approved channels allowlist (add it to allowedChannelPlugins in ${MANAGED_SETTINGS_HINT}; for one session use --dangerously-load-development-channels ${asked})`,
     }
   }
   return allowlist.some(
@@ -350,9 +350,13 @@ export function claudeChannelGate(input: {
     ? { loaded: true }
     : {
         loaded: false,
-        why: `${asked} is not on your organization's approved channels list (allowedChannelPlugins in managed settings)`,
+        why: `${asked} is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${MANAGED_SETTINGS_HINT})`,
       }
 }
+
+/** Where an allowlist goes: the machine's managed-settings.json, unless the account receives
+ *  server-managed settings, which then own `allowedChannelPlugins` (see `channelAllowlist`). */
+const MANAGED_SETTINGS_HINT = `${join(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`
 
 /** A marketplace name as Claude Code writes it into its plugin cache path. */
 function cacheDirectoryName(marketplace: string): string {
