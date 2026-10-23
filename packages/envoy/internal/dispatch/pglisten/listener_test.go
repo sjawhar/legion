@@ -614,3 +614,37 @@ func TestTheListenerWakesItsCallerBeforeItsIdleWait(t *testing.T) {
 		t.Fatalf("notification inside a wake's wait = %+v, want dispatch_events with payload woken", note)
 	}
 }
+
+// A caller that sets NextWake and leaves OnWake nil is not woken, and the listener lives: the
+// pair is absent unless both are set (waitFor), so the wake is not even asked for, the wait
+// stays the idle period, and the ping that belongs to that wait still runs. Without the pairing
+// the first wait NextWake ended called a nil func, and the panic took the whole process with it
+// - the delivery hub's listener and the event stream relay's included, since they run in it.
+func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
+	database := storetest.Open(t)
+	probe := newListenerProbe()
+	listener := probe.listener(database.Pool.Listener)
+	listener.ListenIdle, listener.PingTimeout = 200*time.Millisecond, time.Second
+	// Far sooner than the idle period, so a listener that honoured it would end every wait on it
+	// and the backend's last statement below would be the LISTEN, not the ping.
+	listener.NextWake = func() time.Duration { return time.Millisecond }
+	runListener(t, probe, listener)
+	probe.waitConnected(t, 5*time.Second, "first connection")
+	pid := probe.lastConn(t).PgConn().PID()
+
+	time.Sleep(1500 * time.Millisecond)
+	if dials := probe.dials.Load(); dials != 1 {
+		t.Fatalf("dials over seven idle periods = %d, want 1", dials)
+	}
+	var query string
+	if err := database.Pool.QueryRow(context.Background(), `select query from pg_stat_activity where pid = $1`, int(pid)).Scan(&query); err != nil {
+		t.Fatalf("read the listener's backend: %v", err)
+	}
+	if query != "-- ping" {
+		t.Fatalf("the listener's last statement = %q, want its idle ping: a wake nothing can run must not take the wait the ping belongs to", query)
+	}
+	notifyChannel(t, database, "dispatch_events", "heard")
+	if note := probe.waitNote(t, 5*time.Second, "a notification to a listener with no OnWake"); note != (listenerNote{channel: "dispatch_events", payload: "heard"}) {
+		t.Fatalf("notification = %+v, want dispatch_events with payload heard", note)
+	}
+}

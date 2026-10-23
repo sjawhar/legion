@@ -64,6 +64,11 @@ type Listener struct {
 	// nothing about one that has not. A notification that arrives first is reported as any other
 	// is, and the wake is asked again on the next round. A caller that leaves both nil - the
 	// delivery hub and the event stream relay - waits exactly as it did before.
+	//
+	// The two go together or not at all: a NextWake with no OnWake is a wake nothing would run,
+	// so waitFor treats the pair as absent and the wait stays the idle period (ListenIdle), ping
+	// included. The other reading - wake, and do nothing - would cut that wait short every round
+	// for no work, and with it the ping that is the only thing that finds a half-open connection.
 	NextWake func() time.Duration
 	OnWake   func()
 }
@@ -181,9 +186,14 @@ func (l *Listener) idle() time.Duration {
 // waitFor is how long the next wait for a notification runs, and whether its deadline is the
 // caller's wake rather than the idle period: the sooner of the two, so a caller is woken on time
 // however long ListenIdle is, and the ping stays with the wait that really was idle for all of it.
+//
+// A caller that set only one of the pair has asked for nothing this can give it: an OnWake
+// nothing asks for never runs, and a NextWake with no OnWake would end a wait at a wake the
+// listener cannot make. Both nil to listen's eye, so that caller waits the idle period out and
+// is pinged on it.
 func (l *Listener) waitFor() (time.Duration, bool) {
 	idle := l.idle()
-	if l.NextWake == nil {
+	if l.NextWake == nil || l.OnWake == nil {
 		return idle, false
 	}
 	wake := l.NextWake()

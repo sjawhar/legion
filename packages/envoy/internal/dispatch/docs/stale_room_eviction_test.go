@@ -367,6 +367,70 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 	requireNoStaleRoomNote(t, notes, pair.artifactID, "after the window ended")
 }
 
+// A room whose re-examination reaches no verdict is tried again at the next window, not dropped.
+// The wake takes a room out of the deferred set to re-examine it (dueRooms), so the window the
+// interval's refusal armed is spent the moment that wake begins, and a re-examination that then
+// gets no answer used to leave nothing behind at all. What that drops is the burst's last write:
+// every notification inside the window is refused, the last of them is one of those, and a
+// document nobody writes again notifies nobody again, so the room stays resident behind the head
+// with its reader on text the store replaced - roomIdleTimeout counts from the last peer leaving,
+// which a room with a tab in it never reaches. Here the window is spent only by a verdict, and
+// the attempt that got no answer arms the next window (armRetry), one interval on, so a room
+// whose reads keep failing is retried on the interval rather than as fast as the listener loops.
+//
+// The no-answer path here is the unlocked head read: the pool refuses a caller already holding
+// one of its connections (store.ErrNestedAcquire), which documentChanged meets as it would any
+// failed read. Evict failing is the other way to reach no verdict, and this service's closes
+// cannot be made to fail from a test without a seam in the service itself.
+func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	now := time.Now()
+	evictor.now = func() time.Time { return now }
+	ctx := context.Background()
+	bob := model.Actor{Kind: "user", ID: "bob"}
+
+	// The burst's first write, which evicts: the eviction the interval refuses the next one by.
+	pair.leaveTaskABehind(t, 2, bob, "Bob types once.\n")
+	if !evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatal("the first write on the other process evicted nothing, so the interval holds no eviction to defer the next notification by")
+	}
+	// The burst's last write, inside the window: refused, and the window it arms is all that is
+	// left to close the room.
+	pair.leaveTaskABehind(t, 3, bob, "Bob types again inside the window.\n")
+	if evictor.documentChanged(ctx, pair.artifactID) {
+		t.Fatalf("a second write within %s evicted the room again, under readers the eviction before it had not finished re-syncing", staleRoomEvictInterval)
+	}
+	if wake := evictor.wakeIn(); wake <= 0 {
+		t.Fatalf("the refusal asks for no wake (wakeIn = %s), so the room is already dropped and this row tests nothing", wake)
+	}
+
+	// The window ends, and the re-examination it was waiting for gets no answer.
+	now = now.Add(staleRoomEvictInterval)
+	blind, release := store.HoldsConnection(context.Background())
+	defer release()
+	evictor.woke(blind)()
+	if pair.taskA.srv.GetDoc(pair.artifactID) == nil {
+		t.Fatal("a re-examination that could not read the head closed the room anyway")
+	}
+	if !roomBehind(t, pair.taskA, pair.artifactID) {
+		t.Fatal("task A's room stands at the head, so there is nothing left for the next window to find")
+	}
+	wake := evictor.wakeIn()
+	if wake <= 0 {
+		t.Fatalf("the re-examination that got no answer spent the room's window (wakeIn = %s): the room is behind the head with a reader in it and nothing will look at it again", wake)
+	}
+	if wake < staleRoomEvictInterval {
+		t.Fatalf("the room was re-armed %s out, inside the %s interval: a read that goes on failing would re-run the whole decision as fast as the listener loops", wake, staleRoomEvictInterval)
+	}
+
+	// The next window, with the reads answering again: the room goes, on the wake and with
+	// nothing notifying this process.
+	now = now.Add(wake)
+	evictor.woke(ctx)()
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
 // A notification sent while the listener has no connection converges on its reconnect. That
 // notification reaches nobody and nothing sends it again, and a redial backs off as far as thirty
 // seconds (pglisten.RedialBackoff), so a room the other process wrote under in that window would
