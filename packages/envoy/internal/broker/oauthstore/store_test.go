@@ -263,6 +263,53 @@ func TestADPoPNonceIsValidUntilItExpires(t *testing.T) {
 	}
 }
 
+// TestSweepDeletesOnlySpentState pins each of Sweep's rules against a row it must delete and one
+// it must keep.
+func TestSweepDeletesOnlySpentState(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newStore(t)
+	for _, q := range []string{
+		`insert into oauth_device_codes (signature, user_code_signature, request, expires_at) values
+			('device-long-gone', 'u1', '{}', now() - interval '2 hours'),
+			('device-just-expired', 'u2', '{}', now() - interval '30 minutes'),
+			('device-live', 'u3', '{}', now() + interval '10 minutes')`,
+		`insert into oauth_dpop_proofs (jti, htu, expires_at) values ('proof-expired', 'h', now() - interval '1 second'), ('proof-live', 'h', now() + interval '1 minute')`,
+		`insert into oauth_dpop_nonces (nonce, expires_at) values ('nonce-expired', now() - interval '1 second'), ('nonce-live', now() + interval '1 minute')`,
+		`insert into oauth_access_tokens (signature, request_id, request, expires_at) values
+			('access-expired', 'r', '{}', now() - interval '1 second'), ('access-live', 'r', '{}', now() + interval '1 hour')`,
+		// rotated: its old token's grace passed, its newest is live, so all of it stays.
+		// revoked: every row inactive. lapsed: every row past its expiry. spent: its only token's
+		// grace passed with no successor. retrying: its only token is inside its grace.
+		`insert into oauth_refresh_tokens (signature, request_id, request, active, grace_until, expires_at) values
+			('rotated-old', 'rotated', '{}', true, now() - interval '1 second', now() + interval '1 day'),
+			('rotated-new', 'rotated', '{}', true, null, now() + interval '1 day'),
+			('revoked-old', 'revoked', '{}', false, now() - interval '1 second', now() + interval '1 day'),
+			('revoked-new', 'revoked', '{}', false, null, now() + interval '1 day'),
+			('lapsed-1', 'lapsed', '{}', true, null, now() - interval '1 second'),
+			('spent-1', 'spent', '{}', true, now() - interval '1 second', now() + interval '1 day'),
+			('retrying-1', 'retrying', '{}', true, now() + interval '30 seconds', now() + interval '1 day')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if err := s.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	for table, want := range map[string]string{
+		"select string_agg(signature, ',' order by signature) from oauth_device_codes":   "device-just-expired,device-live",
+		"select string_agg(jti, ',' order by jti) from oauth_dpop_proofs":                "proof-live",
+		"select string_agg(nonce, ',' order by nonce) from oauth_dpop_nonces":            "nonce-live",
+		"select string_agg(signature, ',' order by signature) from oauth_access_tokens":  "access-live",
+		"select string_agg(signature, ',' order by signature) from oauth_refresh_tokens": "retrying-1,rotated-new,rotated-old",
+	} {
+		var got string
+		if err := pool.QueryRow(ctx, table).Scan(&got); err != nil || got != want {
+			t.Errorf("%s = %q (%v), want %q", table, got, err, want)
+		}
+	}
+}
+
 func TestTheSecretIsCreatedOnceAndKept(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t)

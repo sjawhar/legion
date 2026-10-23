@@ -418,6 +418,31 @@ func TestReusingARotatedTokenEndsTheLogin(t *testing.T) {
 	}
 }
 
+// TestReusingARotatedTokenEndsTheLoginAfterASweep: a family whose newest token is live keeps its
+// rotated rows through a sweep, so a replay is still found and still revokes the family.
+func TestReusingARotatedTokenEndsTheLoginAfterASweep(t *testing.T) {
+	f := newFixture(t)
+	key := newKey(t)
+	first := f.login(t, key)
+	_, body := f.refresh(t, first, key)
+	second, _ := body["refresh_token"].(string)
+	if second == "" {
+		t.Fatalf("refresh answer %v has no refresh_token", body)
+	}
+	if _, err := f.pool.Exec(context.Background(), `update oauth_refresh_tokens set grace_until = now() - interval '1 second' where grace_until is not null`); err != nil {
+		t.Fatalf("end the grace: %v", err)
+	}
+	if err := oauthstore.New(f.pool).Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if status, body := f.refresh(t, first, key); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("reusing the rotated token after a sweep = %d %v, want invalid_grant", status, body)
+	}
+	if status, body := f.refresh(t, second, key); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
+		t.Fatalf("the newest token after a reuse = %d %v, want invalid_grant", status, body)
+	}
+}
+
 func TestBeforeCanRefuse(t *testing.T) {
 	f := newFixture(t)
 	key := newKey(t)

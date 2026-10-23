@@ -217,7 +217,7 @@ func main() {
 		}
 	}
 	sweeper := &requests.Sweeper{
-		Enrollments: enr, Machine: reqMachine, MachineLogins: mach,
+		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
 		Interval: time.Duration(cfg.SweepSeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)

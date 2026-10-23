@@ -36,6 +36,9 @@
   and the restart. A running helper from before `drain` is never restarted without
   `--restart-with-sessions`: install lists its sessions and says to re-run with that flag at a
   quiet moment.
+- The secrets broker's sweeper deletes spent machine-login OAuth state each tick: device codes an
+  hour past their expiry, expired DPoP proofs, nonces and access tokens, and refresh token
+  families none of whose tokens can still be redeemed.
 - The secrets broker serves a minted secret: a GCP secret with no version tagged
   `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
   its name with that account and its owner and the secret is human-tier. Each release mints a

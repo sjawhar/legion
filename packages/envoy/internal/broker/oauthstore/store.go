@@ -45,6 +45,29 @@ var (
 // response was lost in transit can retry with the token it still holds.
 const refreshGrace = 60 * time.Second
 
+// Sweep deletes spent OAuth state: device codes an hour past their expiry (so a helper still
+// polling one is answered expired_token, not invalid_grant as for an unknown code), DPoP proofs
+// and nonces past theirs, access tokens past theirs, and every refresh token of a family (rows
+// sharing request_id) none of whose rows is still redeemable (active, unexpired, and in its
+// rotation's grace or never rotated). A family with a redeemable row keeps all its rows, so
+// replaying one of its rotated tokens still finds it and revokes the family.
+func (s *Store) Sweep(ctx context.Context) error {
+	db := s.db(ctx)
+	for _, q := range []struct{ what, sql string }{
+		{"device codes", `delete from oauth_device_codes where expires_at < now() - interval '1 hour'`},
+		{"DPoP proofs", `delete from oauth_dpop_proofs where expires_at <= now()`},
+		{"DPoP nonces", `delete from oauth_dpop_nonces where expires_at <= now()`},
+		{"access tokens", `delete from oauth_access_tokens where expires_at <= now()`},
+		{"refresh token families", `delete from oauth_refresh_tokens f where not exists (select 1 from oauth_refresh_tokens r
+			where r.request_id = f.request_id and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))`},
+	} {
+		if _, err := db.Exec(ctx, q.sql); err != nil {
+			return fmt.Errorf("sweep %s: %w", q.what, err)
+		}
+	}
+	return nil
+}
+
 // deviceInvalidated is the oauth_device_codes status of a device code already exchanged for
 // tokens; the library's own statuses (new, approved, denied) are 0 to 2.
 const deviceInvalidated = -1
