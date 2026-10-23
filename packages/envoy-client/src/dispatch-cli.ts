@@ -186,10 +186,10 @@ export async function runDispatchCli(
     (env.DISPATCH_HOST === undefined ? null : handedConfigFile(env)) ??
     sessionConfigFile(host, env);
   if (parsed.dryRun) {
-    // The call's own check before it sends anything, so only what the call reads from Dispatch
-    // can still refuse a call its dry run passed. A dry run reads nothing from Dispatch, so it
-    // runs with Dispatch off too, reading a dashboard-URL ref only against a server it knows,
-    // and its standard output is the JSON alone.
+    // The call's own argument check, so the call refuses no arguments its dry run passed; what
+    // the call needs besides (Dispatch's configuration, this session's state, Dispatch's answers)
+    // a dry run does not read. It runs with Dispatch off too, reading a dashboard-URL ref only
+    // against a server it knows, and its standard output is the JSON alone.
     const settings =
       file.path === null ? null : sessionDispatchSettings(file, env, { cwd: io.cwd }).dispatch;
     const { problems } = await checkDispatchCall({
