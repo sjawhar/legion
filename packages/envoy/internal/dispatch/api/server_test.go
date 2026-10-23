@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -84,8 +85,10 @@ type testServerOptions struct {
 	// deployment with no bucket does.
 	files files.Store
 	// lifetime is the server's Deps.Lifetime, on which Register builds the delivery hub GET
-	// /ws/delivery serves; nil, every test but the socket's, mounts no such route. It must end
-	// by the test's end (derive it from t.Context()): the test waits out the hub's goroutines.
+	// /ws/delivery serves and the event stream relay every SSE connection reads. Nil is the
+	// test's own context (t.Context()), which ends before the cleanups that wait those
+	// goroutines out; a test that stops the server before it ends (the socket's) passes one it
+	// can cancel itself. It must end by the test's end, so derive it from t.Context().
 	lifetime context.Context
 	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
@@ -148,6 +151,10 @@ func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Hand
 	if settle == 0 {
 		settle = 20 * time.Millisecond
 	}
+	lifetime := options.lifetime
+	if lifetime == nil {
+		lifetime = t.Context()
+	}
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	var documentPersistence docs.VersionedStore
@@ -172,7 +179,7 @@ func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Hand
 		App:              options.app,
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
-		Lifetime:         options.lifetime,
+		Lifetime:         lifetime,
 		StreamHeartbeat:  options.streamHeartbeat,
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
@@ -186,6 +193,7 @@ func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Hand
 	}
 	mux := http.NewServeMux()
 	served := register(mux, deps)
+	t.Cleanup(served.eventRelay.wait)
 	if served.deliveryHub != nil {
 		t.Cleanup(served.deliveryHub.wait)
 		t.Cleanup(served.deliverySockets.wait)
@@ -2127,12 +2135,15 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      broker,
+		// The event stream relay runs on this, and the wait below is what keeps its listening
+		// connection from outliving the database the test drops.
+		Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, deps))
 
 	return mux, database, broker
 }
@@ -2244,73 +2255,31 @@ func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 	}
 }
 
-// TestSSELiveEventBelowSinceIsNotDropped proves the server never uses an id
-// comparison to decide whether to forward a live event. Event ids are assigned by
-// nextval() when an insert runs, before commit, so a transaction that grabbed a
-// lower id can commit after a higher id is already visible — exactly the ordering
-// this test forces. The old `event.ID <= lastID` filter would have silently
-// dropped the late-committing lower id forever.
-func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
-	handler, database, broker := newTestHandlerWithBroker(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+// eventHead is the newest committed event id: what a connection resuming now would pass as since.
+func eventHead(t *testing.T, database *store.Store) int64 {
+	t.Helper()
+	var head int64
+	if err := database.Pool.QueryRow(context.Background(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
+		t.Fatalf("read the event log's head: %v", err)
 	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
-	}
-	issue := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created)
+	return head
+}
 
-	ctx := context.Background()
-	// Holds a low id open, uncommitted — simulating a request that started first
-	// but is slower to finish than one that starts later.
-	stalled, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin stalled transaction: %v", err)
-	}
-	defer stalled.Rollback(ctx)
-	var lowID int64
-	if err := stalled.QueryRow(ctx, `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		values ($1, 100, 'seeded', '{"kind":"session","id":"seed"}'::jsonb, '{}'::jsonb, false)
-		returning id
-	`, issue.Key).Scan(&lowID); err != nil {
-		t.Fatalf("insert stalled event: %v", err)
-	}
+// sseStreamDeadline bounds a stream a test opens: a frame that never arrives fails the read with
+// the context's error rather than holding the test until the package's own timeout, which would
+// take every other test's result with it.
+const sseStreamDeadline = 30 * time.Second
 
-	// An independent insert grabs a higher id and commits immediately — this is
-	// what makes it visible as the current head before the lower id ever is.
-	var highID int64
-	if err := database.Pool.QueryRow(ctx, `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		values ($1, 101, 'seeded', '{"kind":"session","id":"seed"}'::jsonb, '{}'::jsonb, false)
-		returning id
-	`, issue.Key).Scan(&highID); err != nil {
-		t.Fatalf("insert committed event: %v", err)
-	}
-	if highID <= lowID {
-		t.Fatalf("expected the committed insert to take a higher id than the stalled one: low=%d high=%d", lowID, highID)
-	}
-	broker.Publish(model.Event{
-		Actor:    model.Actor{Kind: "session", ID: "seed"},
-		ID:       highID,
-		IssueKey: new(issue.Key),
-		Payload:  map[string]any{},
-		Seq:      101,
-		Type:     "seeded",
-	})
-
-	// A client opens the stream at since=highID: it has seen everything the server
-	// can currently prove exists, but not the still-uncommitted lowID.
-	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since="+fmt.Sprintf("%d", highID), nil)
+// openSSEStream opens one event stream as an agent bearer, closed when the test ends, and answers
+// a scanner over its frames. It returns once the handler has answered 200, which it does only
+// after it has subscribed and resolved its since. Its caller closes the httptest server with
+// t.Cleanup rather than defer: Close waits for the handlers still running, and this body closes
+// with the cleanups, after every defer.
+func openSSEStream(t *testing.T, url string) *bufio.Scanner {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
+	t.Cleanup(cancel)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatalf("construct SSE request: %v", err)
 	}
@@ -2319,230 +2288,183 @@ func TestSSELiveEventBelowSinceIsNotDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open SSE stream: %v", err)
 	}
-	defer stream.Body.Close()
+	t.Cleanup(func() { stream.Body.Close() })
 	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
+		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
 	}
-	scanner := bufio.NewScanner(stream.Body)
+	return bufio.NewScanner(stream.Body)
+}
 
-	// The stalled transaction finally commits and is published: a lower id than
-	// the client's since, arriving live after the stream is already open.
-	if err := stalled.Commit(ctx); err != nil {
-		t.Fatalf("commit stalled transaction: %v", err)
+// sseFrameID is the event id of one frame readSSEFrame read.
+func sseFrameID(t *testing.T, frame []string) int64 {
+	t.Helper()
+	if len(frame) == 0 || !strings.HasPrefix(frame[0], "id: ") {
+		t.Fatalf("SSE frame = %#v, want an id line", frame)
 	}
-	broker.Publish(model.Event{
-		Actor:    model.Actor{Kind: "session", ID: "seed"},
-		ID:       lowID,
-		IssueKey: new(issue.Key),
-		Payload:  map[string]any{},
-		Seq:      100,
-		Type:     "seeded",
-	})
+	id, err := strconv.ParseInt(strings.TrimPrefix(frame[0], "id: "), 10, 64)
+	if err != nil {
+		t.Fatalf("SSE frame id %q: %v", frame[0], err)
+	}
+	return id
+}
 
-	frame := readSSEFrame(t, scanner)
-	if frame[0] != fmt.Sprintf("id: %d", lowID) {
-		t.Fatalf("expected the late-committing lower id %d to be delivered, got %#v", lowID, frame)
+// TestSSEDoesNotResendAnEventAtOrBelowItsSince covers the one id comparison the live loop makes.
+// The relay is one per process and can stand behind a connection opened after it: it then
+// publishes ids that connection's catch-up has already covered, which sentDuringCatchup cannot be
+// asked about, since it holds only the ids above since that catch-up sent. Forwarding them would
+// show a client an event it has already seen.
+//
+// The comparison is safe because since is fixed for the connection, and the commit-order lock
+// events.Broker.Append holds until its transaction commits leaves no uncommitted id at or below a
+// committed max(id). A late-committing lower id -- what the live loop used to carry a rule
+// against -- is now the lock's to prevent and TestOnlyTheBrokerInsertsEvents's to keep.
+func TestSSEDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	// Long enough that the second connection below opens between a commit and the read that
+	// commit's notification wakes, so the relay really is behind that connection's since.
+	served.eventRelay.coalesce = time.Second
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	// The first connection starts the relay, whose cursor stops at what has committed by now.
+	openSSEStream(t, httpServer.URL+"/api/v1/events")
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	since := eventHead(t, database)
+
+	// This connection's catch-up covers everything through since, which the relay has not read
+	// up to yet: what the relay publishes next is this connection's own backlog.
+	scanner := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed again",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue again: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if id := sseFrameID(t, readSSEFrame(t, scanner)); id <= since {
+		t.Fatalf("live frame id = %d, want an id above the connection's since %d", id, since)
 	}
 }
 
-// TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging: a capped catch-up
-// page that ended the stream (forcing a client reconnect with a higher
-// Last-Event-ID) would mean a still-uncommitted low id — invisible to every
-// catch-up page, since each page's cursor only moves forward — could never be
-// recovered once it finally committed. Keeping one subscription
-// attached across every page closes that gap.
-func TestSSECappedCatchupStillDeliversLowerIDCommittedDuringPaging(t *testing.T) {
-	handler, database, broker := newTestHandlerWithBroker(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
-	}
-	issue := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created)
-
-	ctx := context.Background()
-	// Holds a low id open, uncommitted, before the 1000-row backlog below is
-	// seeded — so it keeps a lower id than all of them for the entire test.
-	stalled, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin stalled transaction: %v", err)
-	}
-	defer stalled.Rollback(ctx)
-	var lowID int64
-	if err := stalled.QueryRow(ctx, `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		values ($1, 100, 'seeded', '{"kind":"session","id":"seed"}'::jsonb, '{}'::jsonb, false)
-		returning id
-	`, issue.Key).Scan(&lowID); err != nil {
-		t.Fatalf("insert stalled event: %v", err)
-	}
-
-	// Exactly maxSSEReplay committed events, all with higher ids than lowID, so
-	// the first catch-up page hits the cap and a second page runs.
-	if _, err := database.Pool.Exec(ctx, `
+// TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce: a catch-up that fills a page keeps
+// paging on the subscription it opened with. An event committing while it pages reaches the
+// client on a later page or live from the relay, whichever sees it first, and sentDuringCatchup is
+// what keeps it from arriving on both. A capped page that ended the stream instead, sending the
+// client to a reconnect, would leave a gap between the last page and the new subscription for that
+// commit to fall into.
+func TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	// Exactly maxSSEReplay committed events, so the first catch-up page fills and a second runs.
+	if _, err := database.Pool.Exec(context.Background(), `
 		insert into events (issue_key, seq, type, actor, payload, notify)
 		select $1, value, 'seeded', jsonb_build_object('kind', 'session', 'id', 'seed'), jsonb_build_object('seq', value), false
 		from generate_series(101, 1100) as value
 	`, issue.Key); err != nil {
 		t.Fatalf("seed capped backlog: %v", err)
 	}
-
 	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=2", nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
-	for range 1000 {
-		readSSEFrame(t, scanner)
-	}
+	t.Cleanup(httpServer.Close)
+	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events?since=2")
 
-	// The stalled transaction finally commits, past the point where any catch-up
-	// page could still see it (every page's cursor has already moved beyond it).
-	if err := stalled.Commit(ctx); err != nil {
-		t.Fatalf("commit stalled transaction: %v", err)
+	// Committed while that catch-up is still paging.
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
 	}
-	broker.Publish(model.Event{
-		Actor:    model.Actor{Kind: "session", ID: "seed"},
-		ID:       lowID,
-		IssueKey: new(issue.Key),
-		Payload:  map[string]any{},
-		Seq:      100,
-		Type:     "seeded",
-	})
-
-	frame := readSSEFrame(t, scanner)
-	if frame[0] != fmt.Sprintf("id: %d", lowID) {
-		t.Fatalf("expected the late-committing lower id %d to be delivered, got %#v", lowID, frame)
+	live := eventHead(t, database)
+	seen := map[int64]bool{}
+	for id := int64(0); id != live; {
+		id = sseFrameID(t, readSSEFrame(t, scanner))
+		if seen[id] {
+			t.Fatalf("event %d was delivered twice", id)
+		}
+		seen[id] = true
+		if len(seen) > maxSSEReplay+100 {
+			t.Fatalf("the commit %d made during the catch-up was not delivered in %d frames", live, len(seen))
+		}
 	}
 }
 
-// TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost: a client making
-// two separate requests (GET /events/head, then GET /events?since=<head>) would let a
-// transaction that grabbed a lower id before the head was read commit in the gap
-// between those two requests and never be delivered — invisible to a catch-up
-// query (its id is <= since) and to the subscription (registered only by the
-// second request, after the gap). A cold request (no since=, no Last-Event-ID)
-// now subscribes to the broker before computing its own head inside this same
-// handler, so a commit landing after Subscribe is still forwarded live
-// regardless of its id — exactly like TestSSELiveEventBelowSinceIsNotDropped,
-// but for the head the server resolves for itself instead of one the client
-// supplies.
-func TestSSEColdStartSubscribesBeforeReadingHeadSoLateCommitIsNotLost(t *testing.T) {
-	handler, database, broker := newTestHandlerWithBroker(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
-	}
-	issue := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created)
-
-	ctx := context.Background()
-	// Holds a low id open, uncommitted — allocated before the cold request below
-	// ever runs, so it stays lower than whatever head that request resolves.
-	stalled, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin stalled transaction: %v", err)
-	}
-	defer stalled.Rollback(ctx)
-	var lowID int64
-	if err := stalled.QueryRow(ctx, `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		values ($1, 100, 'seeded', '{"kind":"session","id":"seed"}'::jsonb, '{}'::jsonb, false)
-		returning id
-	`, issue.Key).Scan(&lowID); err != nil {
-		t.Fatalf("insert stalled event: %v", err)
-	}
-
-	// An independent insert grabs a higher id and commits immediately — this is
-	// exactly the current head the cold request below will resolve for itself.
-	var highID int64
-	if err := database.Pool.QueryRow(ctx, `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		values ($1, 101, 'seeded', '{"kind":"session","id":"seed"}'::jsonb, '{}'::jsonb, false)
-		returning id
-	`, issue.Key).Scan(&highID); err != nil {
-		t.Fatalf("insert committed event: %v", err)
-	}
-	if highID <= lowID {
-		t.Fatalf("expected the committed insert to take a higher id than the stalled one: low=%d high=%d", lowID, highID)
-	}
-	broker.Publish(model.Event{
-		Actor:    model.Actor{Kind: "session", ID: "seed"},
-		ID:       highID,
-		IssueKey: new(issue.Key),
-		Payload:  map[string]any{},
-		Seq:      101,
-		Type:     "seeded",
-	})
-
-	// A cold client opens the stream with no since= and no Last-Event-ID: it must
-	// subscribe to the broker before resolving highID as its own head, or the
-	// still-stalled lowID would land in the gap between those two steps. Under
-	// the old two-request design this since=0 catch-up would have replayed highID
-	// immediately as its first frame; the fixed cold path resolves its head as
-	// highID internally and sends nothing until the live lowID commit below.
+// TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit: a cold connection (no since= and no
+// Last-Event-ID) resolves its own head inside this one handler, after it has subscribed. It is
+// sent nothing already committed, which is the backlog it asked not to get, and everything
+// committing after it, which lands in its subscription however its catch-up went. A client that
+// read its head through a separate request first would lose an event committing between that
+// request and this one: invisible to the catch-up (id <= since) and to a subscription registered
+// only afterwards.
+func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	backlog := eventHead(t, database)
 	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events", nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
+	t.Cleanup(httpServer.Close)
+	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events")
 
-	// The stalled transaction finally commits and is published: a lower id than
-	// the head this cold connection resolved for itself, arriving live after the
-	// stream is already open. The old design lost this forever.
-	if err := stalled.Commit(ctx); err != nil {
-		t.Fatalf("commit stalled transaction: %v", err)
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
 	}
-	broker.Publish(model.Event{
-		Actor:    model.Actor{Kind: "session", ID: "seed"},
-		ID:       lowID,
-		IssueKey: new(issue.Key),
-		Payload:  map[string]any{},
-		Seq:      100,
-		Type:     "seeded",
-	})
+	live := eventHead(t, database)
+	for id := int64(0); id != live; {
+		id = sseFrameID(t, readSSEFrame(t, scanner))
+		if id <= backlog {
+			t.Fatalf("cold connection was sent event %d, backlog at or below the head %d it opened on", id, backlog)
+		}
+	}
+}
 
-	frame := readSSEFrame(t, scanner)
-	if frame[0] != fmt.Sprintf("id: %d", lowID) {
-		t.Fatalf("expected the late-committing lower id %d to be delivered as the cold connection's first frame, got %#v", lowID, frame)
+// TestSSEResumesAfterTheEventLogIsResetBeneathTheReader: the browser suite empties the event log
+// between its scenarios (`truncate ... restart identity cascade`, e2e/seed.ts), so the next row's
+// id is 1 again. The relay notices, ends every open subscription and sends the browser through
+// its reconnect -- and a browser only ever raises its lastEventId, never lowers it
+// (web/src/api/sse.ts), so it comes back asking for a since above the new log's head. Without the
+// handler's clamp, catch-up (`id > since`) matches nothing and the live loop drops every event of
+// the new log for ever, because they all sit at or below that stale since: a reader silent for
+// good, on a connection that stays open and heartbeats, with nothing logged and nothing failed.
+//
+// The assertion is the frame of an event committed after the reset, whose id is below the
+// pre-reset head this connection resumed from. It can reach the reader only through a since the
+// handler clamped to the head it resolved for this connection; an unclamped since drops it, and
+// the only frame this reader then ever sees is a heartbeat.
+func TestSSEResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed before the reset",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue before the reset: status=%d body=%s", response.Code, response.Body.String())
+	}
+	head := eventHead(t, database)
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	// What the browser reconnects with after the relay ended its subscription: the last id it saw,
+	// which the reset has left above the whole new log.
+	scanner := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, head))
+
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"title": "Renamed after the reset",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("rename issue after the reset: status=%d body=%s", response.Code, response.Body.String())
+	}
+	live := eventHead(t, database)
+	if live >= head {
+		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", live, head)
+	}
+	for id := int64(0); id != live; {
+		id = sseFrameID(t, readSSEFrame(t, scanner))
+		if id > live {
+			t.Fatalf("frame id = %d, above the %d committed after the reset", id, live)
+		}
 	}
 }
 

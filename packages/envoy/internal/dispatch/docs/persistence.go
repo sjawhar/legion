@@ -28,6 +28,11 @@ type PgVersioned struct {
 	// or waits for it and dropped with the last, so it holds only the rooms being written.
 	locksMu sync.Mutex
 	locks   map[string]*roomLock
+	// afterAppendCommit runs between an append's commit and the advance of the room cursor that
+	// takes that version in, inside the document's advisory lock the append holds across both.
+	// Nil outside tests; tests use it to hold a reader of the cursor and the head in that window
+	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
+	afterAppendCommit func(room string, version persistence.Version)
 }
 
 // roomLock is one room's in-process lock and how many callers hold it or wait for it.
@@ -130,6 +135,15 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("commit document update: %w", err)
 		}
 		credit.held(version)
+		if p.afterAppendCommit != nil {
+			p.afterAppendCommit(room, version)
+		}
+		// The room instance's cursor advances here, inside the lock the append holds, rather than
+		// where the caller marked the context with it (StoreUpdateContext): a writer that took the
+		// lock after this commit released it would otherwise read a cursor one version behind the
+		// head it reads under that lock, and the gate would refuse an agent's edit while nothing
+		// was wrong with its room.
+		advanceRoomCursor(roomCursorFrom(ctx), version)
 		return nil
 	})
 	return version, err
@@ -202,10 +216,31 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	`, room).Scan(&latest); err != nil {
 		return 0, fmt.Errorf("read latest document update: %w", err)
 	}
+	// The gate: the document this update was made on must stand at the head. Two envoy-dispatch
+	// processes serve one database, and an append of the other process's room is not in this
+	// one's document; appending from a room behind the head is itself harmless, since Yjs updates
+	// commute and this lock serialises them, but everything the appending transaction renders
+	// from that document - an upload's or a conditional edit's version, a settlement's repairs -
+	// is rendered from text the writer never saw. The order is the lock, then the cursor, then
+	// the head: a peer of this very room whose append committed under this lock has already
+	// advanced the cursor (appendUpdate), so two peers of one room never refuse each other.
+	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), latest); err != nil {
+		return 0, err
+	}
 	version := persistence.Version(latest + 1)
+	// The insert announces the change itself (documentChangedChannel), as a data-modifying CTE
+	// rather than a statement of its own, so a durable append is one round trip under the
+	// document's advisory lock instead of two: every browser update is its own append
+	// (PersistCoalesceWindow = -1). Why the announcement belongs inside this transaction is
+	// notifyDocumentChanged's doc comment, which still carries a rebuild's. The room is passed
+	// twice because its two parameters are different types: doc_updates.artifact_id is a uuid,
+	// and pg_notify takes text.
 	if _, err := tx.Exec(ctx, `
-		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
-	`, room, int64(version), update, contentChanged); err != nil {
+		with appended as (
+			insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+		)
+		select pg_notify('`+documentChangedChannel+`', $5)
+	`, room, int64(version), update, contentChanged, room); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
 	authors, lastActor, include := credit.take()
@@ -582,6 +617,9 @@ func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, see
 		values ($1, $2, $3, true)
 	`, room, report.Head, seed); err != nil {
 		return RebuildReport{}, fmt.Errorf("seed rebuilt document: %w", err)
+	}
+	if err := notifyDocumentChanged(ctx, tx, room); err != nil {
+		return RebuildReport{}, err
 	}
 	return report, nil
 }

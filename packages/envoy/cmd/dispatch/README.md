@@ -19,6 +19,7 @@ below add only what a setting's one line cannot say.
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
 | `DISPATCH_AGENT_TOKEN` | One value, or several separated by whitespace, so the shared token can rotate with an overlap: write the new value followed by the old one, move every consumer to the new one, then write the new value alone. The first is the current value; the API and the document websocket accept every value, comparing a bearer with each in constant time. Whitespace at either end is ignored; startup refuses an empty entry (two whitespace characters in a row, a CR LF among them) or a repeated one, naming its position, never its value. A request that authenticates with a value after the first logs one WARN line, `dispatch: request authenticated with a previous shared agent token`, with `entry` (the value's position), `address` (the rightmost `X-Forwarded-For` entry, which is the load balancer's view of the caller, or the connection's own address without one), `user_agent` and `path`, at most once per address and User-Agent every 10 minutes, and never a token. Each field keeps its first 256 bytes, and the server remembers up to 10,000 callers; one past that is logged on each request. Callers that share an address and User-Agent share a line, so the log says whether a value on its way out is still in use, not who uses it. |
+| `DISPATCH_SIGNING_KEY` | The HMAC key every session cookie is signed and verified with, and the key the stored refresh tokens' seal is derived from (Identity, below). Unset, each process mints a key of its own in its own data directory (`auth.LoadOrCreateSigningKey`), so a deployment of more than one process sets one value every process is given: with a key apiece, a session minted on one process is refused by the other — every person is signed out by whichever process answers next — and every stored refresh token reads as absent. No process can see another's key, so nothing refuses the boot and `/healthz` cannot report it; it is a precondition of running more than one process, never a check (Running more than one process, below). Rotating it signs everyone out and leaves every stored refresh token unopenable. |
 | `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
 | `DISPATCH_TEST_HOOKS` | Set to `1` to mount test-only routes: `POST /api/v1/events/_test/disconnect` closes every open SSE connection; `POST /api/v1/artifacts/_test/quiesce` closes every live document and waits for settlements; and `POST /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed document e2e uses. Leave unset in every real deployment. |
 | `DISPATCH_ASSET_STORE_BUCKET` | Optional bucket of immutable dashboard assets from earlier builds, each stored under its URL path without the leading slash (`assets/<file>`). When a local `/assets/*` file is absent, Dispatch reads the object under that key through the AWS SDK default credential chain, which takes its region and credentials from the task's environment. It reads the whole object, at most 8 MiB, within 3 seconds before it answers, so the browser's own download is not held to that time. It never reads `index.html` or a non-asset path from the bucket. An absent object stays a 404; any other store failure (an error, a short body, an object over the limit) is a 502 with no cache header, logged at ERROR with its key. An object stays in memory until its client has read it, so at most 64 MiB of retained objects are held at once: a request reserves 8 MiB before it asks the bucket, waiting within its 3 seconds for earlier requests to finish, and keeps its object's size until the response is written or the client goes away. A request that cannot reserve room in time, or whose admitted fetch then runs out of that same 3 seconds before the bucket answers, is a 503 with `Cache-Control: no-store` and `Retry-After: 1`, logged at WARN with its key — the bound expiring is never a 502, since the store was only asked too late to answer in time; a room refusal asks the bucket nothing. A client that disconnects while still queued for room logs nothing above a debug line and gets no response. The task role needs `s3:GetObject` on `<bucket>/assets/*` and `s3:ListBucket` on the bucket: without `ListBucket`, S3 answers a missing key with 403, and Dispatch returns 502 where it should return 404. Leave it unset for local-only static serving. |
@@ -338,6 +339,63 @@ with or without brackets (`::1` or `[::1]`). A bad `DISPATCH_PORT` refuses the
 boot before anything connects, and an address the server cannot bind ends the
 process with exit status 1.
 
+## Running more than one process
+
+Two `envoy-dispatch` processes serve one Postgres and one NATS, so a release rolls instead of
+taking Dispatch away from everyone while it deploys. A rolling update is supported, under two
+preconditions, one of which the server cannot check for itself.
+
+**Every process is given the same `DISPATCH_SIGNING_KEY`.** Unset, each process mints a key of its
+own in its own data directory (`cmd/dispatch/main.go`, `auth.LoadOrCreateSigningKey`), and a
+session is verified by HMAC under the key of the process that answers: at two processes with data
+directories of their own, every person is signed out by whichever process answers next, and every
+stored refresh token, sealed under a key derived from the same value (Identity, above), reads as
+absent (`store/refresh_token_seal.go`). One process cannot detect another's key, so nothing
+refuses the boot, no log line names it and `/healthz` cannot report it: it is a hard precondition
+of a multi-process deployment rather than something the server checks.
+
+**Every migration leaves the release before it able to read and write the schema** (Database
+migrations, below): a rolling update runs the old build and the new build against one database at
+once. A change that cannot be written that way is a stop-the-world migration, deployed with no
+server of the earlier release running, and that is an exception named in the pull request.
+
+What the two processes share, and what each keeps to itself:
+
+- Each event is published once. The outbox claims a batch (`for update skip locked`) before it
+  publishes it, so two processes never publish one event twice. A process that dies between a
+  publish and its `published_at` write republishes once the claim's minute lapses, which is
+  at-least-once on the `notifications.role.*` core-NATS lanes, whose receivers dedupe by key.
+- A reader's live SSE stream carries the other process's events. It is re-sourced from Postgres
+  through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an
+  event committed on either process reaches every open stream with no reconnect.
+- The two delivery durables keep their shape. NATS admits one binder; the second process stands
+  by, asking every two seconds, and takes the durable over within seconds of the holder dying.
+- Six periodic maintenance loops run once per period across the processes, not once per process.
+  Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
+  process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
+  recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
+  lands between another's passes — the ordinary case, since each ticker draws its phase at boot
+  and a rolling update starts the second process minutes after the first — finds the period
+  already served and logs the same skip. The settlement resumption, the delivery live hub, the
+  event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by
+  design, and the embedding queue, the task progress reconciliation and the outbox's own scan
+  claim their own work; `cmd/dispatch/main.go` says at the call site which loop is which and why.
+
+**Two processes do not share a live document session.** Durable convergence is unconditional:
+every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
+history is the union of them, so no edit is lost whichever process took it, and no process writes
+a version, a settlement or an ask retraction from a document state it does not hold
+(`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
+process it does not receive the other's updates, so presence and cursors show only the peers on
+that process. A write committed elsewhere closes the room within a notification round trip
+(`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
+`staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
+room is re-examined when that window ends — the case the trailing write of an editing burst
+meets, since the last notification of a burst is one of the refused ones. Either way the browser
+reconnects, re-syncs and shows the current text. A reader sees a brief reconnect, never stale
+text they can act on. Cross-process live co-editing of one document — two rooms with text
+streaming between them — is a follow-up issue, out of scope here.
+
 ## Database migrations
 
 Boot applies `internal/dispatch/store/migrations/*.up.sql` in version order and records each
@@ -345,6 +403,33 @@ version in `schema_migrations`, which it creates under the runner's advisory loc
 booting together against an empty database migrate one after the other. Version 8 is an empty
 file: that version was recorded from Go by the one-time conversion of pre-Proof `Y.Text` rooms and
 offset anchors into Proof trees and mark anchors, which every deployed database has already run.
+
+**A migration must leave the release before it able to read and write the schema.** A rolling
+update runs the old build and the new build against one database at once (Running more than one
+process, above), and the old build applies no compatibility shim: nothing at boot refuses a schema
+newer than the binary knows, since the runner applies the versions it has not recorded and reads
+no other (`internal/dispatch/store/store.go`, `migrate`). So a schema change is expand-then-contract
+across two releases. The expanding migration adds, with a default or a backfill, and the release
+that ships it writes both shapes; the contracting migration — one that drops, renames or narrows —
+ships no earlier than the next release, once no running build reads the old shape:
+
+- A `not null` column is added with a default — a constant default rewrites no row — and the
+  release that ships it writes the column on every insert; the release after it may drop the
+  default, once no build inserts a row without the column.
+- A rename is two migrations in two releases: the new column added and filled (a backfill for the
+  rows already stored), its release writing both columns, then the old column dropped a release
+  later. One `alter table … rename column` breaks every statement the earlier release still sends.
+- A narrowing — a type made smaller, a nullable column made `not null`, a check added — ships
+  behind a release that writes only the values the narrower shape admits, and narrows in the
+  release after it.
+
+A migration that cannot be written that way is a stop-the-world migration: it is deployed with no
+server of the earlier release running, and that is an exception named in the pull request, not a
+default (`0113` below was one). The pre-deploy census ("Pre-deploy census" below) is unchanged by
+that rule and still applies to every migration: it is taken before any migration of the release
+applies, and a census that refuses fails the deploy before the service moves. The rule in brief
+is `internal/dispatch/store/README.md`, beside the migrations directory rather than in it, since
+the loader below refuses a set holding a file named anything else.
 
 The runner records a migration by its version alone, so before it touches the database it reads
 the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every
@@ -556,12 +641,14 @@ loop, naming up to 20 of them and the repair: `PATCH /api/v1/issues/<ancestor>` 
 `repo_projects` and `issues` in `ACCESS EXCLUSIVE` before it counts and holds both to commit, so a
 write of the earlier release that commits while it waits is in the count.
 
-**Deploy `0113` with no server of the earlier release running, and never start one again after
-it applies.** Stop the earlier release, or scale it to zero, before the new release boots and
-migrates: a Kubernetes Deployment's `strategy: Recreate`, never `RollingUpdate`. A failed deploy
-recovers forward, not by rolling the image back. Only the new release's API holds the limit;
-nothing in the database does. Boot has
-no check that refuses a schema newer than the binary knows: the runner applies the versions it has
+**`0113` was deployed with no server of the earlier release running, and no release older than it
+is started over it again.** That instruction was `0113`'s own, not the rule for `0114` and after:
+`0113` is applied in production, and a release whose migrations are written to the rule above
+rolls (Running more than one process, above). Its own deploy stopped the earlier release, or
+scaled it to zero, before the new release booted and migrated — for that deploy, a Kubernetes
+Deployment's `strategy: Recreate`. A failed deploy recovers forward, not by rolling the image
+back. Only the new release's API holds the limit; nothing in the database does. Boot has no check
+that refuses a schema newer than the binary knows: the runner applies the versions it has
 not recorded and reads no other (`internal/dispatch/store/store.go`, `migrate`). So an earlier
 release left serving after `0113`, or started again over it by a rollback, writes as it always did,
 and can build a chain past the limit again. Such a chain, or one written by direct SQL, fails every

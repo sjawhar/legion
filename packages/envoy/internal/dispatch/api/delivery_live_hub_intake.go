@@ -10,6 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pglisten"
 )
 
 // intake moves the hub's two cursors. It subscribes to the broker before it reads where the event
@@ -21,12 +22,8 @@ func (h *deliveryHub) intake(ctx context.Context) {
 	events, unsubscribe := broker.Subscribe()
 	defer func() { unsubscribe() }()
 	for attempt := 1; !h.readCursors(); attempt++ {
-		timer := time.NewTimer(deliveryListenerBackoff(attempt))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !waitFor(ctx, pglisten.RedialBackoff(attempt)) {
 			return
-		case <-timer.C:
 		}
 	}
 	close(h.ready)

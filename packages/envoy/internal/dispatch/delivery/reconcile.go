@@ -57,17 +57,35 @@ func (r *Reconcile) HasApp() bool {
 	return r != nil && r.github != nil
 }
 
+// deliveryReconcileLease names the lease one reconcile pass runs under. Every pass searches and
+// lists GitHub against one installation's rate limit - a backfill is tens of thousands of
+// requests - so N processes reconciling is N times those calls for one result.
+const deliveryReconcileLease = "delivery-reconcile"
+
 // Run re-imports delivery facts on ReconcileInterval until ctx is cancelled. The first tick is
 // jittered so a restart does not stampede GitHub, and a server without App credentials logs once
 // and stops: no import can be signed.
-func (r *Reconcile) Run(ctx context.Context) {
+//
+// Each pass runs under deliveryReconcileLease for one ReconcileInterval, so one process
+// reconciles per interval however many serve the database: the two tickers are jittered to phases
+// of their own, so the second's tick lands between the first's rather than on it, and finds the
+// interval reconciled. leases is required: unlike StartIntakes, which opens the lease pool itself
+// because it is the boot's error-returning constructor, Run has no error to return, so it takes
+// the pool cmd/dispatch has already opened (and exits at boot without).
+func (r *Reconcile) Run(ctx context.Context, leases duty.Leases) {
 	duty.RunJittered(ctx, ReconcileInterval, func() bool {
 		if r.HasApp() {
 			return false
 		}
 		slog.Info("dispatch delivery: no GitHub App key — the reconcile is idle")
 		return true
-	}, r.runOnce)
+	}, func(ctx context.Context) { r.leasedPass(ctx, leases) })
+}
+
+// leasedPass runs one reconcile pass under the lease, for the ReconcileInterval this loop ticks
+// on.
+func (r *Reconcile) leasedPass(ctx context.Context, leases duty.Leases) {
+	duty.Exclusive(ctx, leases, deliveryReconcileLease, ReconcileInterval, r.runOnce)
 }
 
 // runOnce performs one reconcile pass: a permission check (so a missing Actions or Pull-requests

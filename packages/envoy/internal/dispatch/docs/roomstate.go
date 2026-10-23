@@ -89,13 +89,15 @@ type roomState struct {
 
 // documentUpdateClass is what the room's update observer recorded for one update, which its
 // persistence takes (consumeUpdateClass): whether it changed the content, whether it is durable
-// work the room's state waits on, and the browser edit's in-flight credit, nil for an update no
-// browser edit credited.
+// work the room's state waits on, the browser edit's in-flight credit, nil for an update no
+// browser edit credited, and cursor, the durable version the room instance the update was made in
+// stands at, which gates and then takes in the update's own append (StoreUpdateContext).
 type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
 	durable        bool
 	credit         *UpdateCredit
+	cursor         *roomCursor
 }
 
 // lockState returns room's state locked, creating it when the service holds none.
@@ -193,13 +195,17 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
 }
 
+// recordUpdateClass records what the room's update observer read off one update, for the
+// persistence that takes it next (consumeUpdateClass). Only a durable class is work the room's
+// state waits on: a repair's update is recorded for the room instance it names alone, and its
+// writer, not the room's persistence, is what makes it durable.
 func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	class.update = append([]byte(nil), update...)
 	state.updateClasses = append(state.updateClasses, class)
-	state.pendingUpdates++
 	if class.durable {
+		state.pendingUpdates++
 		state.durableAppends.Add(1)
 	}
 }
@@ -219,7 +225,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 			continue
 		}
 		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
-		state.pendingUpdates--
+		if class.durable {
+			state.pendingUpdates--
+		}
 		return class, true
 	}
 	return documentUpdateClass{contentChanged: true}, false
@@ -250,6 +258,22 @@ func (s *Service) hasDurableAppend(room string) bool {
 	}
 	defer s.unlockState(room, state)
 	return state.durableAppends.Load() > 0
+}
+
+// hasWriteInFlight is whether this process has durable work of room's document under way that is
+// about to advance the room instance's cursor: an open live-write transaction (liveWrite, whose
+// publish takes its versions in), a browser append the room's persistence has not landed
+// (durableAppends), or a settlement running on the room (settleRoomWithin, which takes in the
+// version its repair is stored at). The stale-room evictor asks it before it closes a room
+// another process's write left behind: closing one of these rooms would take the room out from
+// under the writer that is mid-write on it.
+func (s *Service) hasWriteInFlight(room string) bool {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return false
+	}
+	defer s.unlockState(room, state)
+	return state.liveWriter != nil || state.durableAppends.Load() > 0 || state.settling > 0
 }
 
 func (s *Service) roomFailure(room string) error {

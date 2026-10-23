@@ -1415,12 +1415,21 @@ func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
 	// The unreadable row is backed off rather than published, so a scan run after that backoff
 	// reaches what was queued behind it. A scan that beats the backoff hits the same row again
 	// and doubles it, so this converges however loaded the box is.
+	//
+	// Each of those scans also claims the row behind the unreadable one (scanPendingEvents
+	// claims a whole batch before reading any of it) and then never reads it, so in production
+	// that row waits out claimWindow's minute. Lapsing its claim each time round is what that
+	// minute does, without spending a minute of the package's clock on it.
 	deadline := time.Now().Add(20 * time.Second)
 	for publishedAt(t, database, behind.ID) == nil {
 		if time.Now().After(deadline) {
 			t.Fatal("event behind the unreadable row was never published")
 		}
 		time.Sleep(10 * time.Millisecond)
+		if _, err := database.Pool.Exec(context.Background(),
+			`update events set next_attempt_at = now() - interval '1 second' where id = $1`, behind.ID); err != nil {
+			t.Fatalf("lapse the claim on the row behind the unreadable one: %v", err)
+		}
 		scan(context.Background(), deps)
 	}
 	items := publisher.all()

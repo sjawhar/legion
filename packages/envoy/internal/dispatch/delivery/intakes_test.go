@@ -236,6 +236,9 @@ func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
 // TestIntakesWhoseSecondConnectFailsStartNeither: the job intake's connect failing returns its
 // error with neither intake started and the intake's client closed, so no durable is bound.
 func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
+	// A real pool rather than none: StartIntakes opens the lease pool its intakes reconcile
+	// their durables under before it connects anything.
+	pool, _ := deliveryTestPool(t)
 	publisher := intakeTestClient(t)
 	natsURL := testnats.URL(t)
 	var first *bus.Client
@@ -247,7 +250,7 @@ func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
 		var err error
 		first, err = bus.Connect([]string{natsURL})
 		return first, err
-	}, nil, newFakeGitHub(t).newTestClient(), events.NewBroker())
+	}, pool, newFakeGitHub(t).newTestClient(), events.NewBroker())
 	if !errors.Is(err, refused) {
 		t.Fatalf("start the intakes = %v, want the job intake's connect error", err)
 	}
@@ -270,6 +273,7 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	shared := intakeTestClient(t)
 	github := newFakeGitHub(t).newTestClient()
+	leases := deliveryTestLeases(t, pool)
 	pushBound := func(durable string) bool {
 		info, err := shared.JS().ConsumerInfo(bus.Stream, durable)
 		return err == nil && info.PushBound
@@ -279,7 +283,7 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 	jobsDone := make(chan struct{})
 	go func() {
 		defer close(jobsDone)
-		newJobIntake(shared, pool, github, realJobClock{}).Run(jobsCtx)
+		newJobIntake(shared, pool, leases, github, realJobClock{}).Run(jobsCtx)
 	}()
 	t.Cleanup(func() {
 		stopJobs()
@@ -290,7 +294,7 @@ func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
 	})
 
 	seedDeliverySettings(t, ctx, pool)
-	startIntake(t, newIntake(shared, pool, github, events.NewBroker()))
+	startIntake(t, newIntake(shared, pool, leases, github, events.NewBroker()))
 	var refusal map[string]any
 	waitFor(t, 20*time.Second, func() bool {
 		for _, record := range logs() {

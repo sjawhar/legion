@@ -15,6 +15,12 @@ the whole set, applying nothing, when `pgmigrate.Load` refuses it, and bounding
 every migration's lock waits at `pgmigrate.LockTimeout`; README "Database
 migrations"), then starts HTTP serving. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
+A migration must leave the release before it able to read and write the
+schema, since two processes serve one database through a rolling update: a
+change expands in one release and contracts in the next, and one that cannot
+be written that way is deployed with no server of the earlier release running
+(README "Database migrations" and "Running more than one process";
+`internal/dispatch/store/README.md`).
 `envoy-dispatch census` (`cmd/dispatch/census.go`, `store.Census` over
 `pgmigrate.Census`) is a deployment's pre-deploy census of the migrations the
 database has not applied, read-only, run before the service rolls (README
@@ -524,3 +530,18 @@ default ten-minute deadline:
 ```sh
 env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./cmd/dispatch
 ```
+
+The two-process tests (`multiprocess_test.go`, INFRA-66) start two real Dispatch servers on one
+Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
+across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
+published once, a live event stream fed from the other process, and a document room closed when
+the other process writes it. They build only under the `multiprocess` tag and run in their own CI
+job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
+and their NATS take minutes rather than seconds:
+
+```sh
+env DISPATCH_TEST_DATABASE_URL=… DISPATCH_TEST_NATS_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch
+```
+
+A developer who runs only the block above runs neither tagged suite, which is why both are named
+here: the evidence for anything about two processes serving one database is in the second one.

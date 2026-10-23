@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -28,6 +29,38 @@ const (
 	retryInterval       = 5 * time.Second
 	compactInterval     = 24 * time.Hour
 	documentTopicPrefix = "notifications.dispatch.document."
+	// claimWindow is how long scanPendingEvents' claim keeps an event out of every other
+	// process's batch. Two envoy-dispatch processes serve one Postgres and one NATS, and a
+	// plain select would hand both the same rows and publish every one of them twice. The
+	// claim is one statement (select ... for update skip locked, then push next_attempt_at
+	// out by this), never a transaction held open across the publishes that follow: an open
+	// cursor or transaction holds its pooled connection, which is exactly what pendingEvent's
+	// comment above scanBatch's drain exists to avoid.
+	//
+	// One minute: a batch is batchSize (100) events, each a NATS round trip plus the write
+	// that records it, so a healthy batch finishes well inside it, and a process that dies
+	// mid-batch leaves its rows claimed for no longer than that before the other process
+	// picks them up. A publish that fails is backed off by scheduleRetry, whose write
+	// legitimately overwrites the claim with the retry's own (usually shorter) wait;
+	// published_at, not this, is what marks an event done.
+	//
+	// What the claim gives, for a batch that finishes inside the window: two healthy processes
+	// no longer publish one event twice, and each events row still reaches published_at exactly
+	// once - the terminal write is guarded on published_at is null, so a second one changes no
+	// row. A batch that overruns the window gets no such guarantee: claimPendingEvents commits
+	// the claim, and scanBatch then publishes up to batchSize events outside any transaction,
+	// re-checking nothing, so once the window lapses the other process claims the rows this one
+	// has not reached yet - legitimately, by the same statement, their next_attempt_at being due
+	// again - and publishes them a second time; the guarded write discards RowsAffected, so
+	// neither process notices. Nor does the claim cover a process that dies between a successful
+	// publish and its published_at write: it leaves the row claimed but unmarked, and the other
+	// process republishes it once the window lapses. Either repeat is the same at-least-once on
+	// the role lanes (notifications.role.*), which go over core NATS with no nats.MsgId on the
+	// envelope (internal/bus/nats.go) and so carry no deduplication of their own; their receivers
+	// already drop the repeat by its dedupe key (internal/contracts/dedupe.go). A JetStream
+	// destination suppresses the repeat inside the stream's duplicate window. Neither is fixed
+	// here.
+	claimWindow = time.Minute
 	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
 	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
 	// recursive query and stall the outbox scan.
@@ -39,12 +72,21 @@ type Publisher interface {
 	Publish(contracts.Envelope) error
 }
 
+// documentCompactionLease names the lease the daily document compaction runs under. It walks
+// every document, so two envoy-dispatch processes compacting at the same moment is twice the work
+// for one result.
+const documentCompactionLease = "document-compaction"
+
 // Deps are the durable state and delivery dependencies for the outbox.
 type Deps struct {
 	Store     *store.Store
 	Publisher Publisher
 	Broker    *events.Broker
 	Docs      docs.API
+	// Leases is where the compaction tick takes documentCompactionLease (compactDocuments). It
+	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
+	// exits at boot if the lease pool cannot be opened.
+	Leases duty.Leases
 }
 
 // Run drains unpublished events at startup, after committed local events, and
@@ -78,11 +120,21 @@ func Run(ctx context.Context, deps Deps) {
 		case <-retry.C:
 			scan(ctx, deps)
 		case <-compact.C:
-			if err := deps.Docs.CompactAll(ctx); err != nil {
-				slog.Error("dispatch outbox: compact documents", "error", err)
-			}
+			compactDocuments(ctx, deps)
 		}
 	}
+}
+
+// compactDocuments runs the daily compaction of every document under documentCompactionLease, so
+// that one process does that walk however many serve the database, once per compactInterval and
+// not once per process: the period is this loop's own tick, so a process whose ticker fires hours
+// after the other's finds the day's compaction already done and skips it.
+func compactDocuments(ctx context.Context, deps Deps) {
+	duty.Exclusive(ctx, deps.Leases, documentCompactionLease, compactInterval, func(ctx context.Context) {
+		if err := deps.Docs.CompactAll(ctx); err != nil {
+			slog.Error("dispatch outbox: compact documents", "error", err)
+		}
+	})
 }
 
 func scan(ctx context.Context, deps Deps) {
@@ -159,7 +211,52 @@ func retryEvent(ctx context.Context, deps Deps, item pendingEvent, what string, 
 	return false
 }
 
+// claimPendingEvents claims at most batchSize eligible events, lowest id first, and returns their
+// ids: one statement takes them under for update skip locked, so a second process's concurrent
+// scan skips them rather than waiting on them, and pushes their next_attempt_at out by
+// claimWindow in the same breath. It locks rows of events alone - the issue and artifact columns
+// a publish needs are read by scanPendingEvents afterwards, from the ids this returns, because a
+// statement that both locks `for update` and names issues or artifacts is refused by the room
+// lock's rule (TestNoForUpdateOnOwnerTables in internal/dispatch/api). The claimed rows are this
+// process's for the window whether or not that read succeeds, so the split costs a round trip
+// and nothing else: a read that fails leaves them claimed until the window lapses, exactly as a
+// process dying mid-batch does.
+func claimPendingEvents(ctx context.Context, deps Deps) ([]int64, error) {
+	rows, err := deps.Store.Pool.Query(ctx, `
+		update events set next_attempt_at = now() + $2
+		where id in (
+			select id from events
+			where published_at is null
+			  and (next_attempt_at is null or next_attempt_at <= now())
+			  and coalesce(payload ->> 'pending', 'false') <> 'true'
+			order by id
+			limit $1
+			for update skip locked
+		)
+		returning id
+	`, batchSize, claimWindow)
+	if err != nil {
+		return nil, fmt.Errorf("claim unpublished events: %w", err)
+	}
+	// CollectRows closes the cursor, which the read below needs: a pooled connection held open
+	// by one query is a second connection this caller may not ask for (store.ErrNestedAcquire).
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("claim unpublished events: %w", err)
+	}
+	return ids, nil
+}
+
+// scanPendingEvents claims a batch (claimPendingEvents) and reads each claimed event with the
+// issue and artifact columns a publish needs, in the order by id every batch has always had.
 func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
+	claimed, err := claimPendingEvents(ctx, deps)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(claimed) == 0 {
+		return nil, false, nil
+	}
 	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
@@ -168,14 +265,11 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 		left join issues i on i.key = e.issue_key
 		left join artifacts ar on ar.id = e.artifact_id
 		left join issues ai on ai.key = ar.issue_key
-		where e.published_at is null
-		  and (e.next_attempt_at is null or e.next_attempt_at <= now())
-		  and coalesce(e.payload ->> 'pending', 'false') <> 'true'
+		where e.id = any($1)
 		order by e.id
-		limit $1
-	`, batchSize)
+	`, claimed)
 	if err != nil {
-		return nil, false, fmt.Errorf("select unpublished events: %w", err)
+		return nil, false, fmt.Errorf("read claimed events: %w", err)
 	}
 	defer rows.Close()
 
@@ -204,7 +298,10 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 			// row ends the batch and rows.Err() below repeats the same error. Carrying the
 			// row on as a failure backs it off like any other unpublishable event, which is
 			// what lets the events queued behind it be read at all; e.id is the first
-			// destination, so the row scanned that far before it failed.
+			// destination, so the row scanned that far before it failed. The rest of the
+			// batch is claimed (claimPendingEvents) and is never read here, so its claim
+			// is cleared below instead of left to lapse, and this row is backed off
+			// rather than left to poison every batch after it too.
 			item.failure = fmt.Errorf("read event: %w", err)
 			item.failureLog = "dispatch outbox: read event"
 			unreadable = true
@@ -220,10 +317,53 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 		}
 		pending = append(pending, item)
 	}
+	// Closed before the statement below rather than at the return: a cursor still open holds
+	// one of the pool's connections, and a caller asking for a second is refused
+	// (store.ErrNestedAcquire). Close is idempotent, so the deferred one above still stands.
+	rows.Close()
 	if err := rows.Err(); err != nil && !unreadable {
 		return nil, false, fmt.Errorf("iterate unpublished events: %w", err)
 	}
+	// A row that fails to scan kills the cursor, so the claimed ids behind it are never read,
+	// never published and never backed off: without this they would sit out the whole
+	// claimWindow, a minute argued from how long a healthy batch of 100 takes (claimWindow),
+	// where before the claim existed the next scan tick re-selected them retryInterval later.
+	// Driven by the ids actually read, because scanBatch's loop reaches every item returned
+	// here: a row the batch reached and backed off keeps the backoff retryEvent wrote for it,
+	// and a row it published keeps its published_at. The paths above that return an error
+	// release nothing and leave the claim standing, as claimPendingEvents describes.
+	if len(pending) < len(claimed) {
+		releaseClaim(ctx, deps, unreachedIDs(claimed, pending))
+	}
 	return pending, unreadable, nil
+}
+
+// unreachedIDs returns the claimed ids missing from pending: those a cursor that died mid-scan
+// never produced, and so the ones no part of the batch touched.
+func unreachedIDs(claimed []int64, pending []pendingEvent) []int64 {
+	read := make(map[int64]struct{}, len(pending))
+	for _, item := range pending {
+		read[item.event.ID] = struct{}{}
+	}
+	unreached := make([]int64, 0, len(claimed)-len(pending))
+	for _, id := range claimed {
+		if _, ok := read[id]; !ok {
+			unreached = append(unreached, id)
+		}
+	}
+	return unreached
+}
+
+// releaseClaim clears the claim claimPendingEvents wrote on ids, so the next scan tick selects
+// them again. Guarded on published_at is null like every other terminal write here, so a row
+// another process published once the window lapsed keeps its mark. A failure is logged and
+// nothing more: those rows then wait the claim out, which is what they did before this existed.
+func releaseClaim(ctx context.Context, deps Deps, ids []int64) {
+	if _, err := deps.Store.Pool.Exec(ctx, `
+		update events set next_attempt_at = null where id = any($1) and published_at is null
+	`, ids); err != nil {
+		slog.Error("dispatch outbox: release unread claim", "event_ids", ids, "error", err)
+	}
 }
 
 func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {

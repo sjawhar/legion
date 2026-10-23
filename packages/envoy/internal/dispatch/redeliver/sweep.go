@@ -36,6 +36,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
 
@@ -217,36 +218,55 @@ type limitRecord struct {
 	Strikes int `json:"strikes"`
 }
 
+// webhookRedeliveryLease names the lease one sweep of Run's loop runs under. It is not what makes
+// the sweep safe to run twice: every redelivery is already claimed by a compare-and-set on the
+// delivery's record in the sweep's NATS KV bucket, so two processes sweeping at once ask GitHub
+// for no delivery twice. It is the GitHub rate limit: each sweep lists every failed attempt in
+// its window, page by page, against one installation's limit, and N processes sweeping is N
+// times those list calls for one result.
+const webhookRedeliveryLease = "webhook-redelivery"
+
 // Run sweeps now and then every interval until ctx ends, logging each sweep's counts: the failed
-// attempts listed, the deliveries they belong to, and how many deliveries had each outcome.
-func (s *Sweeper) Run(ctx context.Context, interval time.Duration) {
+// attempts listed, the deliveries they belong to, and how many deliveries had each outcome. Each
+// sweep runs under webhookRedeliveryLease for one interval, so one sweep's listings are what the
+// installation's rate limit pays for that interval however many processes sweep - a process that
+// starts in the middle of another's interval, which is what a rolling update makes, finds that
+// interval swept and skips. The period is interval itself, the loop's own tick, and not the
+// package's Interval. leases is required, as it is of every leased loop (cmd/dispatch exits at
+// boot if the lease pool cannot be opened).
+func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		report, err := s.Sweep(ctx, Options{})
-		if err != nil {
-			s.Logger.Warn("webhook redelivery sweep failed", "error", err)
-		} else {
-			attrs := []any{
-				"since", report.Since.Format(time.RFC3339),
-				"failed_attempts", report.Listed,
-				"deliveries", len(report.Decisions),
-			}
-			for _, outcome := range Outcomes {
-				attrs = append(attrs, outcome.logKey(), report.Count(outcome))
-			}
-			attrs = append(attrs, "complete", report.Complete)
-			if !report.RateLimitedUntil.IsZero() {
-				attrs = append(attrs, "rate_limited_until", report.RateLimitedUntil.Format(time.RFC3339))
-			}
-			s.Logger.Info("webhook redelivery sweep", attrs...)
-		}
+		duty.Exclusive(ctx, leases, webhookRedeliveryLease, interval, s.sweepAndReport)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// sweepAndReport is one sweep of the running loop and its log line.
+func (s *Sweeper) sweepAndReport(ctx context.Context) {
+	report, err := s.Sweep(ctx, Options{})
+	if err != nil {
+		s.Logger.Warn("webhook redelivery sweep failed", "error", err)
+		return
+	}
+	attrs := []any{
+		"since", report.Since.Format(time.RFC3339),
+		"failed_attempts", report.Listed,
+		"deliveries", len(report.Decisions),
+	}
+	for _, outcome := range Outcomes {
+		attrs = append(attrs, outcome.logKey(), report.Count(outcome))
+	}
+	attrs = append(attrs, "complete", report.Complete)
+	if !report.RateLimitedUntil.IsZero() {
+		attrs = append(attrs, "rate_limited_until", report.RateLimitedUntil.Format(time.RFC3339))
+	}
+	s.Logger.Info("webhook redelivery sweep", attrs...)
 }
 
 // Sweep lists the failed deliveries in its window, adds the refused deliveries the listing no

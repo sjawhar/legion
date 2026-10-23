@@ -968,11 +968,20 @@ func appendCredited(t *testing.T, service *Service, artifactID string, credited 
 	appendCreditedTo(t, service, artifactID, credited, nil)
 }
 
-// appendCreditedTo is appendCredited for an update hold's room instance takes: its credit records
-// the stored version in hold (UpdateCredit.held).
-func appendCreditedTo(t *testing.T, service *Service, artifactID string, credited *testCredit, hold *roomHold) {
+// appendCreditedTo is appendCredited for an update instance's room takes: its credit records the
+// stored version in that instance's hold (UpdateCredit.held), and the append carries the
+// instance's cursor, as a room's own append does (StoreUpdateContext), so the room takes the
+// version in and is not left behind the head. A nil instance is another process's append, which
+// this room neither holds nor takes in.
+func appendCreditedTo(t *testing.T, service *Service, artifactID string, credited *testCredit, instance *roomInstance) {
 	t.Helper()
 	var credit *UpdateCredit
+	var hold *roomHold
+	ctx := context.Background()
+	if instance != nil {
+		hold = &instance.hold
+		ctx = withRoomCursor(ctx, &instance.cursor)
+	}
 	if credited != nil {
 		state := service.lockState(artifactID)
 		record := &inflightCredit{seq: state.creditSeq.Add(1), authors: make(map[string]model.Actor), lastActor: credited.lastActor}
@@ -985,7 +994,7 @@ func appendCreditedTo(t *testing.T, service *Service, artifactID string, credite
 	}
 	doc := crdt.New()
 	doc.GetXmlFragment(fragmentName)
-	if _, err := service.persistence.AppendUpdateWithCredit(context.Background(), artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true, credit); err != nil {
+	if _, err := service.persistence.AppendUpdateWithCredit(ctx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true, credit); err != nil {
 		t.Fatalf("append the update: %v", err)
 	}
 }

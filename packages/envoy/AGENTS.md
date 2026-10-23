@@ -648,6 +648,22 @@ append lands (`unusedLocked`). A forced eviction (`evictRoom`) forgets the state
 append still reaches the credit through its `UpdateCredit`, so it writes or skips the author all
 the same.
 
+Two `envoy-dispatch` processes do not share a live document session, and durable convergence does
+not depend on one: every edit is appended under the document's advisory lock, Yjs updates commute,
+and the stored history is their union, so no edit is lost whichever process took it. No process
+writes durable state for a document from a room that is not at the durable head: each resident
+instance carries the version it holds the document through, and an append, a settlement, a
+version, a fork of the live tree or a rebuild from a room behind the head is refused
+(`ErrRoomBehindHead`, `docs/pending_authors.go`), the live write taking the cold path instead.
+What is per-process is the room: while a room is resident in one process it receives none of the
+other's updates, so presence and cursors show only the peers on that process. Every durable
+change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory
+lock, and the other process's listener (`docs/stale_room.go`, over `internal/dispatch/pglisten`)
+closes the room that notification leaves behind the head, so within that round trip the browser
+reconnects, re-syncs and shows the current text - a brief reconnect, never stale text a reader
+can act on. Cross-process live co-editing of one document, two rooms with updates streaming
+between them, is a follow-up issue and out of scope here.
+
 The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms,
 never documents touched since the process started (LEGION-513). A room an `Apply` opened with no
 peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
