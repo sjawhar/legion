@@ -79,8 +79,16 @@ func (s *Stream) Publish(e model.Event) {
 }
 
 // CloseAll disconnects every active local subscriber, ending their SSE response
-// bodies as if the server had restarted. Test-only: exercises a client's
-// reconnect-from-lastId path without seeding enough events to trip the replay cap.
+// bodies as if the server had restarted. Its production caller is the event stream
+// relay's reset path (api/event_stream_relay.go, resetCursor): when the event log's
+// ids have restarted under the relay's cursor, the rows those ids now name are not
+// the ones a subscriber was already sent, so a reader resuming on the old ids cannot
+// be served that log in order and every subscription is ended rather than served
+// something that would mean the wrong thing. Each browser then reconnects from its
+// last id and resolves its position against the log as it now stands. The test hook
+// behind POST /api/v1/events/_test/disconnect (api/events.go) calls it for the same
+// effect: it exercises a client's reconnect-from-lastId path without seeding enough
+// events to trip the replay cap.
 func (s *Stream) CloseAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

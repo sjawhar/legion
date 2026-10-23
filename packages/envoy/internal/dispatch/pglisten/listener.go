@@ -50,7 +50,14 @@ type Listener struct {
 	// catches up what it missed while it had none. Nil for a caller with nothing to catch up.
 	OnConnected func()
 	// OnNotify is called once per notification, on the listener's goroutine, so a caller that
-	// does slow work in it delays the notifications behind it.
+	// does slow work in it delays the notifications behind it. Nil drops every notification:
+	// the listener keeps its connection, waits and pings on it and still runs OnConnected after
+	// each LISTEN, and a caller with nowhere to report a notification simply never hears one.
+	// Dropping rather than refusing to run such a listener, because the only louder answer
+	// available this far down is the panic the unchecked call used to make, and a nil field of
+	// one caller's takes every listener in the process with it - the delivery hub's and the
+	// event stream relay's included, since they run in it. The same reading as the
+	// NextWake/OnWake pair below.
 	OnNotify func(channel, payload string)
 	// Backoff is the wait before the attempt-th redial in a row; nil is RedialBackoff.
 	Backoff func(attempt int) time.Duration
@@ -127,7 +134,7 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 		notification, err := conn.WaitForNotification(waitCtx)
 		reached := errors.Is(waitCtx.Err(), context.DeadlineExceeded)
 		cancel()
-		if notification != nil {
+		if notification != nil && l.OnNotify != nil {
 			l.OnNotify(notification.Channel, notification.Payload)
 		}
 		if err == nil {

@@ -648,3 +648,35 @@ func TestAListenerWithNoOnWakeIsNotWokenAndDoesNotPanic(t *testing.T) {
 		t.Fatalf("notification = %+v, want dispatch_events with payload heard", note)
 	}
 }
+
+// A listener that names channels and leaves OnNotify nil drops what arrives on them and lives:
+// OnNotify is nil-checked where OnConnected is, so the caller loses its notifications and
+// nothing else - the connection it heard them on is still the one it waits and pings on.
+// Without the check the first notification called a nil func, and the panic took the whole
+// process with it - the delivery hub's listener and the event stream relay's included, since
+// they run in it.
+func TestAListenerWithNoOnNotifyDropsItsNotificationsAndDoesNotPanic(t *testing.T) {
+	database := storetest.Open(t)
+	probe := newListenerProbe()
+	listener := probe.listener(database.Pool.Listener)
+	listener.OnNotify = nil
+	listener.ListenIdle, listener.PingTimeout = 200*time.Millisecond, time.Second
+	runListener(t, probe, listener)
+	probe.waitConnected(t, 5*time.Second, "first connection")
+	pid := probe.lastConn(t).PgConn().PID()
+
+	notifyChannel(t, database, "dispatch_events", "dropped")
+	// Long enough for the notification to arrive and for the wait after it to end on the idle
+	// period and be pinged.
+	time.Sleep(500 * time.Millisecond)
+	if dials := probe.dials.Load(); dials != 1 {
+		t.Fatalf("dials after a notification the listener has nowhere to report = %d, want 1: the notification cost it the connection", dials)
+	}
+	var query string
+	if err := database.Pool.QueryRow(context.Background(), `select query from pg_stat_activity where pid = $1`, int(pid)).Scan(&query); err != nil {
+		t.Fatalf("read the listener's backend: %v", err)
+	}
+	if query != "-- ping" {
+		t.Fatalf("the listener's last statement = %q, want its idle ping: a notification it has nowhere to report must leave it waiting on the same connection", query)
+	}
+}

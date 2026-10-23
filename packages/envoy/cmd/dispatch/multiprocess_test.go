@@ -799,9 +799,17 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	case <-editor.Ended:
 		// Where the interval's window starts, as closely as this side can see it: Evict closes
 		// the room - which is what ends this socket - and the stamp the interval reads is taken
-		// as that call returns (recordEviction). Taken here rather than after the wait below,
-		// which polls at 50 ms: a later stamp would make the gap measured at the end of this
-		// helper read shorter than the window the write really spent, and this one cannot.
+		// as that call returns (recordEviction, docs/stale_room.go). This stamp is on the test's
+		// side of that close, so it is the later of the two, and the gap measured at the end of
+		// this helper reads shorter than the window the write really spent, by the close's trip
+		// out to this process. The error runs towards under-reading, which makes the assertion
+		// below permissive rather than conservative: a write that landed a hair past the
+		// interval could still read under it. That is acceptable for what this guard is for -
+		// catching a run that drifted out of the window altogether - because the gaps it reads
+		// are 91-164 ms against a 2 s interval, and no trip of a loopback socket close brings a
+		// run that really spent the interval back under it. Stamped here rather than after the
+		// wait below, which polls at 50 ms, because that stamp would be later still and would
+		// hide up to a further 50 ms of the window.
 		evicted = time.Now()
 	case <-time.After(30 * time.Second):
 		t.Fatalf("the room A held never closed after B's first write:\n%s", pair.a.Output.String())
@@ -891,9 +899,18 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 // closes it a little under two seconds after the trailing write - what the write left of the
 // interval, plus the close - which was 1.9486 s in this row's green run here and 1.88 s when it
 // was built. The settlement rescue - three refusals two seconds apart, maxSettleFailures of
-// them, ending in failRoomLocked - took 6.018 s in the control run with the wake unwired. Four
-// seconds is past the first and short of the second, so this row goes red when the wake is gone
-// instead of green on the rescue's clock.
+// them, ending in failRoomLocked - took 6.018 s in the control run with the wake unwired.
+//
+// Both of those figures are taken from the trailing write; this budget is not counted from
+// there. It is spent by requireTheRoomClosed's own time.After, which starts when that helper is
+// entered: after burstLeavingTheRoomBehind returned, so after the trailing write's answer came
+// back, and after the row's settlementOwedFor query. The wrote stamp the helper is also passed
+// only labels its log line. That origin is later than wrote by the trailing write's own
+// duration plus that one query, which is inside the 91-164 ms the helper logs for the whole
+// stretch from the first eviction, the write included. So in the terms the two figures above
+// use, the deadline falls at about 4.1 s: some 2.2 s past the window's close and some 1.9 s
+// short of the rescue. This row still goes red when the wake is gone instead of green on the
+// rescue's clock.
 const refusedWindowClosesWithin = 4 * time.Second
 
 // The deferred re-examination, in the branch where something else could also have rescued the
