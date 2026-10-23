@@ -47,7 +47,13 @@ helper with no sessions refuses new ones from the moment `install` checks until 
 none starts in between. A running helper from a release before that refusal (`drain`) cannot
 hold new sessions off, so `install` never restarts it on its own: it lists its sessions and
 prints `not restarted: the running agent-secrets-helper predates drain, …`. Re-run with
-`--restart-with-sessions` at a quiet moment.
+`--restart-with-sessions` at a quiet moment. If the restart itself fails, `install` lets the
+helper take sessions again and exits with systemd's error.
+
+A helper that answers on the socket but that the unit does not run (one started by hand) makes
+`install` stop before it writes anything: it lists that helper's sessions and exits 1 with `an
+agent-secrets-helper not run by agent-secrets-helper.service answers at …; stop it, then re-run
+install`, since starting the unit would put a second helper on the socket.
 
 Put `export AGENT_SECRETS_URL=https://secrets.internal.example` in the profile your shells and
 agents start from, so every agent session gets it: every `agent-secrets` form that calls the
@@ -67,8 +73,10 @@ machine login code: EAGD-7372
 enter it at https://dispatch.example.com/credentials/machine — approve only if the code matches this terminal
 ```
 
-The command waits for the decision. Set `AGENT_SECRETS_APPROVE_URL` to your Dispatch address to get
-the full link; without it, the second line says to enter the code on the Dispatch credential page.
+The command waits for the decision. The second line names the page the broker is configured with
+(`BROKER_MACHINE_LOGIN_URL`); set `AGENT_SECRETS_APPROVE_URL` to your Dispatch address to name
+`<that address>/credentials/machine` instead. A helper from before it relayed the broker's page
+says to enter the code on the Dispatch credential page.
 Interrupting it (Ctrl-C) leaves the login pending: run it again and it shows the same code, until
 someone approves the login or it expires.
 
@@ -99,7 +107,9 @@ Back on the machine, `agent-secrets machine login` exits 0 and the helper logs
 minted, which the helper now enrolls sessions with. The helper writes the login to
 `~/.config/agent-secrets/machine.json` (`AGENT_SECRETS_MACHINE_FILE`), mode 0600, and resumes it
 whenever it starts, logging `the helper resumed the machine login it kept`, so a restart, a reboot
-or an upgrade keeps the machine logged in. It refreshes the login at start and every day after,
+or an upgrade keeps the machine logged in. It refreshes the login at start, before it resumes it,
+so a machine revoked while its helper was stopped resumes nothing, and then at most a day apart
+(sooner for a credential that lives less than two days),
 logging `machine login refreshed` with the new expiry. Check it at any time; it also says when the
 login lapses if no refresh reaches the broker:
 

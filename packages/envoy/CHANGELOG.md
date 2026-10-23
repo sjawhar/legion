@@ -8,8 +8,11 @@
   broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
   itself. `agent-secrets machine login` prints the same code, which the person the login names
   types into Dispatch's machine-login page as before; on approval the helper gets a refresh token
-  bound to the machine's key (DPoP, RFC 9449), and refreshes the login when it starts and every
-  24 hours after. Each refresh moves the credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
+  bound to the machine's key (DPoP, RFC 9449), and refreshes the login when it starts and then at
+  half the time left before the credential's expiry, at most every 24 hours; a refresh whose
+  answer is lost or that the broker cannot serve is retried 15 s later, inside the minute a
+  rotated token stays redeemable. `machine login` names the page the broker's `verification_uri`
+  names when `AGENT_SECRETS_APPROVE_URL` is unset. Each refresh moves the credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
   from then and rotates the refresh token; a rotated token redeemed more than a minute after its
   replacement ends the login. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
   its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
@@ -22,21 +25,27 @@
   or with a space for the dash.
 - The helper keeps its machine login in `AGENT_SECRETS_MACHINE_FILE` (default
   `~/.config/agent-secrets/machine.json`, mode 0600): the machine key, the credential's id and
-  expiry and the current refresh token. It resumes that login when it starts, so a restart, a
-  reboot or an upgrade keeps the machine logged in, and deletes the file when the broker refuses
-  the login's refresh. A file that is there but is not a machine login stops the helper at start,
+  expiry and the current refresh token, written through a fresh temporary file so no file or link
+  already in the directory is followed. It refreshes that login before it resumes it at start, so
+  a restart, a reboot or an upgrade keeps the machine logged in while a revoked machine resumes
+  nothing, and deletes the file when the broker refuses the login's refresh, within seconds of a
+  launcher call the broker refuses `LAUNCHER_INVALID`. `serve` refuses to start while another
+  helper answers on its socket. A file that is there but is not a machine login stops the helper at start,
   naming the file.
 - `agent-secrets-helper install [--url URL] [--restart-with-sessions]` writes the helper's
   `systemd --user` unit (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`, by default
   under `~/.config`), running this binary's `serve` with `AGENT_SECRETS_URL` from `--url` or the
   environment and `Restart=always`, then runs `systemctl --user daemon-reload` and
-  `enable --now`. An unchanged unit changes nothing. A helper that was already running is restarted
+  `enable --now`. An unchanged unit changes nothing. A helper answering on the socket that the
+  unit does not run is refused: install lists its sessions, says to stop it, and writes and starts
+  nothing. A helper that was already running is restarted
   only when it has no sessions registered, or with `--restart-with-sessions`, since a restart ends
   the sessions' grants; with sessions it lists them, prints `not restarted: <n> sessions are
   registered; a restart ends their grants. Re-run with --restart-with-sessions.`, and exits 0. The
   helper's new `drain` op is that check: it answers the registered sessions and, with none, refuses
   every later register `DRAINING` until the helper exits, so no session starts between the check
-  and the restart. A running helper from before `drain` is never restarted without
+  and the restart; a restart that fails sends the new `undrain` op, so the helper takes sessions
+  again. A running helper from before `drain` is never restarted without
   `--restart-with-sessions`: install lists its sessions and says to re-run with that flag at a
   quiet moment.
 - The secrets broker's sweeper deletes spent machine-login OAuth state each tick: device codes an

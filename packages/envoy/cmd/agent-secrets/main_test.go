@@ -1001,6 +1001,12 @@ func TestRequestSignsARequestObject(t *testing.T) {
 // drive the poll loop through however many pending answers it wants before a terminal state.
 func fakeLoginHelper(t *testing.T, code string, states []string) string {
 	t.Helper()
+	return fakeLoginHelperAt(t, code, "", states)
+}
+
+// fakeLoginHelperAt is fakeLoginHelper whose login answer names verificationURI.
+func fakeLoginHelperAt(t *testing.T, code, verificationURI string, states []string) string {
+	t.Helper()
 	sock := filepath.Join(t.TempDir(), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
@@ -1020,7 +1026,7 @@ func fakeLoginHelper(t *testing.T, code string, states []string) string {
 			var resp helper.Response
 			switch req.Op {
 			case "login":
-				resp = helper.Response{OK: true, Code: code, LoginState: "pending"}
+				resp = helper.Response{OK: true, Code: code, LoginState: "pending", VerificationURI: verificationURI}
 			case "login-status":
 				idx := int(atomic.AddInt32(&calls, 1)) - 1
 				state := states[len(states)-1]
@@ -1070,6 +1076,24 @@ func TestMachineLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	want := "machine login code: KQ7M-X4PZ\nenter it at https://dispatch.example/credentials/machine — approve only if the code matches this terminal\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// TestMachineLoginPrintsTheBrokersVerificationURI: with AGENT_SECRETS_APPROVE_URL unset, the
+// second line names the page the broker's device authorization named, which the helper relays;
+// with it set, that setting still wins.
+func TestMachineLoginPrintsTheBrokersVerificationURI(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock := fakeLoginHelperAt(t, "KQ7M-X4PZ", "https://dispatch.example/credentials/machine", []string{"issued"})
+	for _, tc := range []struct{ approve, want string }{
+		{"", "machine login code: KQ7M-X4PZ\nenter it at https://dispatch.example/credentials/machine — approve only if the code matches this terminal\n"},
+		{"https://other.example", "machine login code: KQ7M-X4PZ\nenter it at https://other.example/credentials/machine — approve only if the code matches this terminal\n"},
+	} {
+		stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+			[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=" + tc.approve}, "machine", "login")
+		if exit != 0 || stdout != tc.want {
+			t.Fatalf("AGENT_SECRETS_APPROVE_URL=%q: exit %d stdout %q stderr %q; want %q", tc.approve, exit, stdout, stderr, tc.want)
+		}
 	}
 }
 

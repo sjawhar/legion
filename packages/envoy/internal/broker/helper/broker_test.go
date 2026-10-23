@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
@@ -327,7 +328,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		_ = r.ParseForm()
 		f.lastLoginRequest = r.PostForm.Get("request")
 		ro, err := record.VerifyRequestObject(f.lastLoginRequest, f.srv.URL, time.Minute, time.Now())
-		if err != nil || r.PostForm.Get("client_id") != oauthClientID || r.PostForm.Get("dpop_jkt") != ro.Thumbprint {
+		if err != nil || r.PostForm.Get("client_id") != oauthwire.ClientID || r.PostForm.Get("dpop_jkt") != ro.Thumbprint {
 			writeJSON(w, 400, map[string]string{"error": "invalid_request", "error_description": fmt.Sprintf("REQUEST_INVALID: %v", err)})
 			return
 		}
@@ -353,7 +354,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		oauthError := func(status int, code string) { writeJSON(w, status, map[string]string{"error": code}) }
-		if r.PostForm.Get("client_id") != oauthClientID {
+		if r.PostForm.Get("client_id") != oauthwire.ClientID {
 			oauthError(401, "invalid_client")
 			return
 		}

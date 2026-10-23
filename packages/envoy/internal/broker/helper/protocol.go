@@ -50,6 +50,7 @@ type Response struct {
 	RuntimeID           string        `json:"runtime_id,omitempty"`
 	Operator            string        `json:"operator,omitempty"`
 	State               string        `json:"state,omitempty"`                 // register: enrolling | enrolled
+	VerificationURI     string        `json:"verification_uri,omitempty"`      // login: where a person types the code, the broker's device authorization verification_uri; empty from a helper before this field
 	LoginState          string        `json:"login_state,omitempty"`           // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
 	CredentialHeld      bool          `json:"credential_held,omitempty"`       // login-status: the helper holds a launcher credential, whatever the most recent login's state
 	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential lapses without a refresh; empty while none is held

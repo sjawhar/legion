@@ -2575,16 +2575,27 @@ The machine login is an OAuth 2.0 device authorization grant on the broker's own
 (`helper.Broker.Login`, client id `agent-secrets-helper`): a fresh P-256 key signs a
 `launcher_credential` request object naming the host and the operator file's login as
 `login_hint`, sent to `POST /v1/oauth/device_authorization` with the key's thumbprint as
-`dpop_jkt`; the CLI prints the user code, and the helper polls `POST /v1/oauth/token` with DPoP
+`dpop_jkt`; the CLI prints the user code and where to type it (`AGENT_SECRETS_APPROVE_URL`'s
+`/credentials/machine` when set, else the answer's `verification_uri`, which the socket's `login`
+answer relays), and the helper polls `POST /v1/oauth/token` with DPoP
 proofs from that key (`pollLogin`, `dpop.go`) until the person decides. An approval's token answer
 carries the refresh token and the broker's extras `credential_id` and `credential_expires_at`; the
 helper writes them with the key to `AGENT_SECRETS_MACHINE_FILE` (default
-`~/.config/agent-secrets/machine.json`, mode 0600, its directory 0700, written atomically;
-`helper.MachineFile`) before it installs the credential, so the file always names the credential
-in memory. `Broker.Start`, which `serve` runs before it listens, resumes that file as an `issued`
-login with no code and refreshes it at once; a file that is there but is not exactly one machine
-login stops `serve`, naming the file. The refresh loop then refreshes every 24 h, retrying one that
-did not reach the broker after a minute, doubling to an hour. Each refresh spends the refresh token
+`~/.config/agent-secrets/machine.json`, mode 0600, its directory 0700, written through a fresh
+`os.CreateTemp` file renamed over it, so no planted path is followed; `helper.MachineFile`, whose
+`validate` both load and save check) before it installs the credential, so the file always names
+the credential in memory. `serve` refuses to start while another helper answers on its socket,
+removing only a stale one, then runs `Broker.Start` before it listens: a kept file is refreshed
+once before it is installed, so a revoked machine never resumes as `issued` (answered: saved and
+installed `issued` with no code; `invalid_grant`: dropped and the file deleted; an outcome the
+helper did not learn: the kept login installed, retried by the loop). A file that is there but is
+not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
+the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
+credential is installed; a refresh whose outcome it did not learn is retried after 15 s (inside
+the broker's 60 s rotation grace, so a lost answer keeps the login), doubling to an hour. A 401
+`LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
+dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
+since that 401 can also be a proof the broker could not verify. Each refresh spends the refresh token
 for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
 the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)
 drops the login and deletes the file. The helper no longer speaks the earlier
@@ -2593,10 +2604,14 @@ drops the login and deletes the file. The helper no longer speaks the earlier
 helper's user unit to `helper.UnitPath` (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`,
 else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`,
 `Environment=AGENT_SECRETS_URL=<url>` and `Restart=always`, refusing a URL or path a unit line
-would split or expand. An unchanged unit does nothing; otherwise it runs `systemctl --user
-daemon-reload` and `enable --now`, and restarts a helper that was already answering only when the
+would split or expand. An unchanged unit does nothing. A helper answering on the socket while `systemctl --user
+is-active agent-secrets-helper.service` is not `active` was started some other way: `install`
+lists its sessions and exits 1 (`stop it, then re-run install`), writing and starting nothing.
+Otherwise it runs `systemctl --user daemon-reload` and `enable --now`, and restarts a helper that was already answering only when the
 `drain` op finds it has no sessions (it then refuses every later register and
-`enroll-session-key` `DRAINING` until it exits, so none starts between the check and the restart)
+`enroll-session-key` `DRAINING` until it exits or is sent `undrain`, so none starts between the
+check and the restart; a restart that fails after a drain sends `undrain` and exits with the
+restart's error)
 or `--restart-with-sessions` is given; with sessions it prints them and
 `not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
 --restart-with-sessions.` and exits 0. A helper older than `drain` answers it `unknown op`; it

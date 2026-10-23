@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+// keptLogin logs a Broker in against f and returns the machine file it kept, for a second Broker
+// to Start on.
+func keptLogin(t *testing.T, f *fakeBroker) (path string, kept *MachineFile) {
+	t.Helper()
+	b := loggedInBroker(t, f, "ada@example.com")
+	kept, err := LoadMachineFile(b.MachineFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.MachineFile, kept
+}
+
 // TestALoginIsKeptOnDiskAndAStartResumesIt: an approved login is saved to the machine file before
 // the helper installs it, and a new Broker started on that file holds the same credential at once,
 // reports it issued, and refreshes it right away: the refresh spends the kept refresh token, and
@@ -113,7 +125,7 @@ func TestARefreshThatDoesNotReachTheBrokerKeepsTheLogin(t *testing.T) {
 	b.refreshEvery, b.refreshRetry = time.Hour, 50*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go b.refreshLoop(ctx, true)
+	go b.refreshLoop(ctx, 0)
 	waitFor(t, func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -138,10 +150,11 @@ func TestARefreshMovesTheExpiryAndSilencesTheOldWatch(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
 	f.mu.Lock()
-	f.loginLifetime = 3 * time.Second
+	f.loginLifetime = 3 * time.Hour
 	f.mu.Unlock()
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
-		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: time.Second}
+		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: time.Hour}
+	timers := installExpiryTimers(b)
 	old := expiryLogin(t, b)
 	f.mu.Lock()
 	f.loginLifetime = 7 * 24 * time.Hour
@@ -149,10 +162,11 @@ func TestARefreshMovesTheExpiryAndSilencesTheOldWatch(t *testing.T) {
 	if err := b.refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(time.Until(old.expiresAt.Add(time.Second)))
+	timers.fire(t, old, 0)
+	time.Sleep(50 * time.Millisecond)
 	now := b.cred.Load()
 	if now == nil || now.id != old.id || time.Until(now.expiresAt) < 6*24*time.Hour {
-		t.Fatalf("the credential past its first expiry: %+v; want %s held a week out", now, old.id)
+		t.Fatalf("the credential after its first expiry's timer: %+v; want %s held a week out", now, old.id)
 	}
 	for _, rec := range logRecords(t, &out) {
 		if rec["msg"] == expiresSoonMsg || rec["msg"] == expiredMsg {
@@ -279,5 +293,191 @@ func TestARefusalDuringARefreshNeverUndoesIt(t *testing.T) {
 	}
 	if ls := b.LoginStatus(); ls.State != "issued" || ls.Refused {
 		t.Fatalf("login-status: %+v; want issued, not refused", ls)
+	}
+}
+
+// TestAStartRefreshesTheKeptLoginBeforeItHoldsIt: Start refreshes a kept login before it returns,
+// so a restarted helper's first answer already holds the rotated login, in memory and on disk.
+func TestAStartRefreshesTheKeptLoginBeforeItHoldsIt(t *testing.T) {
+	f := newFakeBroker(t)
+	path, kept := keptLogin(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: path, HTTP: f.srv.Client()}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	refreshes := f.refreshes
+	f.mu.Unlock()
+	held := b.cred.Load()
+	if refreshes != 1 || held == nil || held.refreshToken == kept.RefreshToken || held.id != kept.CredentialID {
+		t.Fatalf("as Start returns: %d refreshes, holding %+v; want the kept login %s refreshed once", refreshes, held, kept.CredentialID)
+	}
+	if now, err := LoadMachineFile(path); err != nil || now.RefreshToken != held.refreshToken {
+		t.Fatalf("the machine file as Start returns: %+v %v; want the rotated login", now, err)
+	}
+	if ls := b.LoginStatus(); ls.State != "issued" || !ls.CredentialHeld {
+		t.Fatalf("login-status: %+v; want issued and held", ls)
+	}
+}
+
+// TestAStartWhoseRefreshIsRefusedHoldsNothing: the broker refuses the kept login's refresh
+// (revoked, lapsed or reused), so by the time Start returns the helper holds no credential,
+// reads expired, refused for that reason, and the machine file is gone: a revoked machine never
+// resumes its login as issued.
+func TestAStartWhoseRefreshIsRefusedHoldsNothing(t *testing.T) {
+	f := newFakeBroker(t)
+	path, _ := keptLogin(t, f)
+	f.mu.Lock()
+	f.refreshOutcome = "invalid_grant"
+	f.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: path, HTTP: f.srv.Client()}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ls := b.LoginStatus(); ls.CredentialHeld || ls.State != "expired" || ls.Dropped != dropRefreshRefused {
+		t.Fatalf("login-status as Start returns: %+v; want expired, dropped for %q", ls, dropRefreshRefused)
+	}
+	if _, err := LoadMachineFile(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the machine file as Start returns: %v; want it deleted", err)
+	}
+}
+
+// TestAStartWhoseRefreshFailsResumesTheLogin: a refresh whose outcome the helper does not learn
+// (here a 503) resumes the kept login as issued, the file unchanged, for the loop to retry.
+func TestAStartWhoseRefreshFailsResumesTheLogin(t *testing.T) {
+	f := newFakeBroker(t)
+	path, kept := keptLogin(t, f)
+	f.mu.Lock()
+	f.refreshOutcome = "unavailable"
+	f.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: path, HTTP: f.srv.Client(), refreshRetry: time.Hour}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if held := b.cred.Load(); held == nil || held.refreshToken != kept.RefreshToken {
+		t.Fatalf("as Start returns the helper holds %+v; want the kept login", held)
+	}
+	if now, err := LoadMachineFile(path); err != nil || now.RefreshToken != kept.RefreshToken {
+		t.Fatalf("the machine file: %+v %v; want it unchanged", now, err)
+	}
+}
+
+// TestALauncherRefusalSettlesTheMachineFileAtOnce: a launcher call the broker answers 401
+// LAUNCHER_INVALID drops the credential and wakes the refresh loop, which refreshes the dropped
+// login at once; the broker refuses it (the machine was revoked), so the machine file is deleted
+// within seconds rather than at the next day's refresh.
+func TestALauncherRefusalSettlesTheMachineFileAtOnce(t *testing.T) {
+	f := newFakeBroker(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Login(ctx, "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
+	f.mu.Lock()
+	f.enrollUnauthorizedNext = 1
+	f.refreshOutcome = "invalid_grant"
+	f.mu.Unlock()
+	if _, _, err := b.EnrollSessionKey(ctx, "rt", "tp", nil); !errors.Is(err, errNoCredential) {
+		t.Fatalf("an enroll the broker refused: %v; want errNoCredential", err)
+	}
+	waitFor(t, func() bool {
+		_, err := LoadMachineFile(b.MachineFile)
+		return errors.Is(err, os.ErrNotExist)
+	})
+	if ls := b.LoginStatus(); ls.CredentialHeld || ls.Dropped != dropRefused {
+		t.Fatalf("login-status: %+v; want no credential, dropped for %q", ls, dropRefused)
+	}
+}
+
+// TestALauncherRefusalTheBrokerStillRefreshesKeepsTheFile: a 401 LAUNCHER_INVALID can be a proof
+// the broker could not verify (clock skew, a URL mismatch) of a login it has not ended: the
+// refresh the drop wakes succeeds, and the machine file keeps the rotated login for a restart.
+func TestALauncherRefusalTheBrokerStillRefreshesKeepsTheFile(t *testing.T) {
+	f := newFakeBroker(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Login(ctx, "helper-host"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
+	held := b.cred.Load()
+	f.mu.Lock()
+	f.enrollUnauthorizedNext = 1
+	f.mu.Unlock()
+	if _, _, err := b.EnrollSessionKey(ctx, "rt", "tp", nil); !errors.Is(err, errNoCredential) {
+		t.Fatalf("an enroll the broker refused: %v; want errNoCredential", err)
+	}
+	waitFor(t, func() bool {
+		now, err := LoadMachineFile(b.MachineFile)
+		return err == nil && now.RefreshToken != held.refreshToken
+	})
+	if b.HasCredential() {
+		t.Fatal("the helper holds a credential the broker refused")
+	}
+}
+
+// TestTheFirstRetryLandsInsideTheRotationGrace: the broker keeps a rotated refresh token
+// redeemable for 60 s, so a refresh whose answer was lost is retried well inside that.
+func TestTheFirstRetryLandsInsideTheRotationGrace(t *testing.T) {
+	if defaultRefreshRetry > 20*time.Second {
+		t.Fatalf("first refresh retry %s; want it well inside the broker's 60 s rotation grace", defaultRefreshRetry)
+	}
+}
+
+// TestAShortLivedCredentialIsRefreshedBeforeItLapses: a broker that mints credentials for less
+// than the day between refreshes still sees each refreshed before it lapses: the loop refreshes
+// at half the time left, rescheduled when a login installs one.
+func TestAShortLivedCredentialIsRefreshedBeforeItLapses(t *testing.T) {
+	f := newFakeBroker(t)
+	f.mu.Lock()
+	f.loginLifetime = 2 * time.Second
+	f.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first := expiryLogin(t, b)
+	waitFor(t, func() bool {
+		cred := b.cred.Load()
+		return cred != nil && cred != first && cred.id == first.id && cred.expiresAt.After(first.expiresAt)
+	})
+	if time.Now().After(first.expiresAt) {
+		t.Fatalf("refreshed only after the credential's expiry %s", first.expiresAt)
+	}
+}
+
+func TestNextRefreshIsHalfTheTimeLeftAtMostEvery(t *testing.T) {
+	b := &Broker{}
+	if got := b.nextRefresh(24 * time.Hour); got != 24*time.Hour {
+		t.Fatalf("holding nothing: %s; want every", got)
+	}
+	b.cred.Store(&machineCredential{expiresAt: time.Now().Add(4 * time.Hour)})
+	if got := b.nextRefresh(24 * time.Hour); got > 2*time.Hour || got < 2*time.Hour-time.Minute {
+		t.Fatalf("4 h left: %s; want 2 h", got)
+	}
+	b.cred.Store(&machineCredential{expiresAt: time.Now().Add(7 * 24 * time.Hour)})
+	if got := b.nextRefresh(24 * time.Hour); got != 24*time.Hour {
+		t.Fatalf("a week left: %s; want a day", got)
+	}
+	b.cred.Store(&machineCredential{expiresAt: time.Now().Add(-time.Hour)})
+	if got := b.nextRefresh(24 * time.Hour); got != 0 {
+		t.Fatalf("past its expiry: %s; want 0", got)
 	}
 }

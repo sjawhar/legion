@@ -121,6 +121,13 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		// a helper that refuses every later register until it exits.
 		peer.Close()
 		resp = s.drain()
+	case "undrain":
+		// undrain is install's undo of a drain whose restart then failed: the helper takes
+		// registrations again.
+		peer.Close()
+		s.Registry.Undrain()
+		s.Log.Info("undrained: taking new sessions again")
+		resp = Response{OK: true}
 	case "login":
 		// login, login-status, enroll-session-key and unenroll-session-key are pass-through broker
 		// calls, not registry-session ops: a key the helper does not hold is not a registry session
@@ -421,12 +428,16 @@ func (s *Server) unregister(ctx context.Context, peer *Peer, pid int) Response {
 }
 
 func (s *Server) sessions() Response {
-	list := s.Registry.List()
+	return Response{OK: true, Sessions: sessionInfos(s.Registry.List())}
+}
+
+// sessionInfos is list as the sessions a sessions or drain answer carries.
+func sessionInfos(list []*Session) []SessionInfo {
 	infos := make([]SessionInfo, 0, len(list))
 	for _, sess := range list {
 		infos = append(infos, sess.Info())
 	}
-	return Response{OK: true, Sessions: infos}
+	return infos
 }
 
 // drainingResponse answers a register or enroll-session-key on a helper that drain has marked
@@ -434,11 +445,7 @@ func (s *Server) sessions() Response {
 var drainingResponse = Response{Code: CodeDraining, Error: "the helper is restarting; retry"}
 
 func (s *Server) drain() Response {
-	list := s.Registry.Drain()
-	infos := make([]SessionInfo, 0, len(list))
-	for _, sess := range list {
-		infos = append(infos, sess.Info())
-	}
+	infos := sessionInfos(s.Registry.Drain())
 	if len(infos) == 0 {
 		s.Log.Info("draining: refusing new sessions until restart")
 	}
@@ -446,14 +453,15 @@ func (s *Server) drain() Response {
 }
 
 // login starts (or reports the running) machine login and returns its human-facing
-// confirmation code. A pass-through broker call: it needs no registered session, so the
+// confirmation code and the page where a person types it (the broker's verification_uri). A pass-through broker call: it needs no registered session, so the
 // dispatcher closes peer before calling it.
 func (s *Server) login(ctx context.Context) Response {
 	code, err := s.Broker.Login(ctx, s.Hostname)
 	if err != nil {
 		return Response{Code: CodeLoginFailed, Error: err.Error()}
 	}
-	return Response{OK: true, Code: code, LoginState: s.Broker.LoginStatus().State}
+	ls := s.Broker.LoginStatus()
+	return Response{OK: true, Code: code, LoginState: ls.State, VerificationURI: ls.VerificationURI}
 }
 
 // loginStatus reports the most recent machine login, current or settled, whether the helper holds

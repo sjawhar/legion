@@ -6,9 +6,11 @@ package helper
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -22,6 +24,75 @@ func (failingTokenTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 		return nil, errors.New("dial tcp: connection refused")
 	}
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+// losingTokenTransport sends every request on, and after the first refresh grant's round trip
+// (which the broker answers and commits) reports the answer lost, as a dropped connection would.
+type losingTokenTransport struct {
+	mu   sync.Mutex
+	lost bool
+}
+
+func (l *losingTokenTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := http.DefaultTransport.RoundTrip(r)
+	if err != nil || !strings.HasSuffix(r.URL.Path, "/v1/oauth/token") {
+		return resp, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.lost {
+		return resp, nil
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `"refresh_token"`) || !strings.Contains(string(body), "credential_id") {
+		resp.Body = io.NopCloser(strings.NewReader(string(body)))
+		return resp, nil
+	}
+	l.lost = true
+	return nil, errors.New("read tcp: connection reset by peer")
+}
+
+// TestContractALostRefreshAnswerIsRetriedInsideTheGrace: the broker rotates a refresh and
+// commits it, but its answer never reaches the helper. The helper's retry, at its first retry
+// interval, redeems the refresh token it still holds inside the broker's rotation grace, so the
+// login is kept, rotated, in memory and on disk.
+func TestContractALostRefreshAnswerIsRetriedInsideTheGrace(t *testing.T) {
+	first := newContractRig(t)
+	credentialID := first.login(t)
+	kept, err := LoadMachineFile(first.machineFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.cancel()
+	lossy := &losingTokenTransport{}
+	b := &Broker{URL: first.broker.URL, OperatorFile: first.broker.OperatorFile, MachineFile: first.machineFile,
+		HTTP: &http.Client{Transport: lossy}, refreshRetry: 200 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		now, err := LoadMachineFile(first.machineFile)
+		if err == nil && now.RefreshToken != kept.RefreshToken {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the retried refresh never kept a rotated login: %+v %v; status %+v", now, err, b.LoginStatus())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	lossy.mu.Lock()
+	lost := lossy.lost
+	lossy.mu.Unlock()
+	if !lost {
+		t.Fatal("no refresh answer was lost")
+	}
+	if ls := b.LoginStatus(); ls.State != "issued" || !ls.CredentialHeld || b.cred.Load().id != credentialID {
+		t.Fatalf("login-status after the retried refresh: %+v; want %s issued and held", ls, credentialID)
+	}
 }
 
 // TestContractALoginSurvivesARestart: an approved machine login leaves a machine file readable
@@ -140,7 +211,7 @@ func TestContractAnUnrefreshedLoginDropsAtItsExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kept.ExpiresAt = time.Now().Add(3 * time.Second).UTC()
+	kept.ExpiresAt = time.Now().Add(time.Second).UTC()
 	if err := kept.Save(first.machineFile); err != nil {
 		t.Fatal(err)
 	}
