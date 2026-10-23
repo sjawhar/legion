@@ -128,6 +128,45 @@ type DispatchArtifact struct {
 
 func (DispatchArtifact) isFact() {}
 
+// DispatchAskOpened is an ordinary question a session opened on an issue. Approval asks belong to
+// the design gate and are distinguished by Kind.
+type DispatchAskOpened struct {
+	Key           string
+	Ask           string
+	Kind          string
+	AuthorSession string
+}
+
+func (DispatchAskOpened) isFact() {}
+
+// DispatchAskClosed is an answered or resolved ask. Both return a waiting architect to its tree.
+type DispatchAskClosed struct {
+	Key string
+	Ask string
+}
+
+func (DispatchAskClosed) isFact() {}
+
+// DispatchAskReply is a comment on an open ask that names whose turn it leaves. An agent turn
+// wakes a root that suspended itself on that ask; a human turn leaves it waiting.
+type DispatchAskReply struct {
+	Key       string
+	Ask       string
+	WaitingOn string
+}
+
+func (DispatchAskReply) isFact() {}
+
+// DispatchClaim is the holder Dispatch records for an issue at Seq. ClaimedBy is `<kind>:<id>`,
+// or empty when an issue.released event clears its claim.
+type DispatchClaim struct {
+	Key       string
+	Seq       int64
+	ClaimedBy string
+}
+
+func (DispatchClaim) isFact() {}
+
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
 // redeliveries and naks included — and whether it is idle, nothing pending or unacknowledged at

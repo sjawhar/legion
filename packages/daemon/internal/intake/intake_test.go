@@ -247,6 +247,48 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			want:    DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
 		},
 		{
+			name:    "Dispatch ask opened",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.opened",
+			file:    "dispatch/ask-opened.json",
+			want:    DispatchAskOpened{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "question", AuthorSession: "session-architect"},
+		},
+		{
+			name:    "Dispatch ask answered",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.answered",
+			file:    "dispatch/ask-answered.json",
+			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007"},
+		},
+		{
+			name:    "Dispatch ask resolved",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.resolved",
+			file:    "dispatch/ask-resolved.json",
+			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007"},
+		},
+		{
+			name:    "Dispatch ask reply returning the turn to the agent",
+			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
+			file:    "dispatch/comment-ask-agent.json",
+			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent"},
+		},
+		{
+			name:    "Dispatch ask reply leaving the turn with the human",
+			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
+			file:    "dispatch/comment-ask-human.json",
+			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human"},
+		},
+		{
+			name:    "Dispatch issue claimed",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.claimed",
+			file:    "dispatch/issue-claimed.json",
+			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 11, ClaimedBy: "user:human"},
+		},
+		{
+			name:    "Dispatch issue released",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.released",
+			file:    "dispatch/issue-released.json",
+			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 12},
+		},
+		{
 			name:    "pull request opened",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-opened.json",
@@ -1707,6 +1749,20 @@ func TestARateLimitedPermissionReadWaitsTheTimeGitHubNames(t *testing.T) {
 				t.Fatalf("the failed read was made again after %s, want the %s nak delay", gap, spec.NakDelay)
 			}
 		})
+	}
+}
+
+func TestDecodeAskOpenedAsAWorkflowFact(t *testing.T) {
+	data, err := os.ReadFile("testdata/dispatch/ask-opened.json")
+	if err != nil {
+		t.Fatalf("read ask.opened fixture: %v", err)
+	}
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-4.ask.opened", "CAPTURE", capturedRepositories, data)
+	if err != nil {
+		t.Fatalf("decode ask.opened: %v", err)
+	}
+	if decoded.Fact == nil {
+		t.Fatal("ask.opened decoded no workflow fact")
 	}
 }
 

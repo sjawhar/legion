@@ -28,6 +28,7 @@ func MessageBodyLength(body string) int {
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
+	Ask(ctx context.Context, id string) (Ask, error)
 	SetStatus(ctx context.Context, key, status string) error
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
@@ -97,8 +98,25 @@ type Issue struct {
 	HandedOver        bool
 	PrimaryArtifactID string
 	LastSeq           int64
+	// Claim is Dispatch's current issue claim, nil when no actor has it.
+	Claim *Claim
 	// ResolvedRepo is IssueSummary.ResolvedRepo.
 	ResolvedRepo string
+}
+
+// Claim is the actor Dispatch currently records as the issue's holder.
+type Claim struct {
+	Kind string
+	ID   string
+}
+
+// Ask is the bounded portion of a Dispatch ask detail the daemon needs to catch up a suspended
+// architect after boot.
+type Ask struct {
+	ID       string
+	IssueKey string
+	Kind     string
+	State    string
 }
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying

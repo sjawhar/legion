@@ -85,6 +85,15 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
+	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
+	// change together, as Hold and held do.
+	Awaiting *Awaiting
+	// ClaimedBy is who holds the issue's Dispatch claim, as `<kind>:<id>` (an actor: a session or
+	// a user), "" for nobody or not yet seen, and ClaimSeq the Dispatch sequence it was seen at:
+	// an issue.claimed or issue.released event's, or a boot listing's. A claim seen at an older
+	// sequence than ClaimSeq is not applied.
+	ClaimedBy string
+	ClaimSeq  int64
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -115,6 +124,23 @@ type HoldReason string
 
 // HoldEscalated is a hold its architect sent to the controller.
 const HoldEscalated HoldReason = "escalated"
+
+// Awaiting is what a root in awaiting_person waits on: an ask its architect opened on the root
+// (Ask, the ask's id), or the closed design gate at the spec version it registered (GateVersion),
+// and when a person answered it (AnsweredAt, nil until then). An answered root waits for a slot
+// ahead of every root that never ran (Waiting).
+type Awaiting struct {
+	Ask         string
+	GateVersion int
+	AnsweredAt  *time.Time
+}
+
+// AwaitingPerson says whether the issue is a root waiting on a person (phase awaiting_person).
+func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson && i.Awaiting != nil }
+
+// Answered says whether the issue is a root a person's answer released from awaiting_person, which
+// waits for its slot.
+func (i Issue) Answered() bool { return i.AwaitingPerson() && i.Awaiting.AnsweredAt != nil }
 
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {

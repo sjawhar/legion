@@ -35,7 +35,10 @@ fresh read-only `plan-gap-analyst` check the current spec against the code and t
 and resolve every finding before requesting approval with `dispatch request-approval`. Its
 `--summary` says only what the human is approving. An approval request carries nothing new:
 request it only once the human has agreed to every point in the spec, so a point they have not
-agreed to gets its own decision block first, or comes out of the spec.
+agreed to gets its own decision block first, or comes out of the spec. Each request, the first and
+every one after a changes request or a newer version, is followed by `register_gate` at the
+version it names, then the end of your turn: that registration of a closed version is what returns
+the root's admission slot while the human decides.
 Approval is pinned to the spec version: any new version closes the gate until it is approved,
 except the version a human's own answer to a decision block writes when that answer is the whole
 change since the version they approved: Dispatch records an `approved` review in their name at

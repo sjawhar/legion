@@ -182,6 +182,7 @@ func minimalSettingsConfig(t *testing.T) config.Config {
 func populatedState(t *testing.T) State {
 	t.Helper()
 	approvedVersion := 6
+	awaitedAt := time.Date(2026, 9, 22, 9, 21, 0, 0, time.UTC)
 	return State{
 		Daemon: DaemonInfo{
 			Project:       "legion",
@@ -315,6 +316,16 @@ func populatedState(t *testing.T) State {
 					LastWake:    &CheckWakeView{Kind: "issue.deployed", Detail: "run 38230245571 completed 2026-09-22T09:10:44Z", At: time.Date(2026, 9, 22, 9, 10, 51, 0, time.UTC)},
 					NextWakeAt:  time.Date(2026, 10, 6, 8, 40, 12, 0, time.UTC),
 				},
+			},
+			"LEGION-211": {
+				Key:           "LEGION-211",
+				Generation:    1,
+				Phase:         phase.AwaitingPerson,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
+				WaitingOn:     &WaitingOnView{Kind: "ask", Ask: "9a8fd348-55d5-4d72-a793-3cd037f75f13", AnsweredAt: &awaitedAt},
 			},
 		},
 		// LEGION-208's lifecycle lane is running row 801; the supervise row queued after it came due

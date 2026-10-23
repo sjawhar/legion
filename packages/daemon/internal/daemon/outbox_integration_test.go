@@ -271,6 +271,10 @@ func (d *blockingDispatch) ListIssues(context.Context, string, []string) ([]disp
 func (d *blockingDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, nil
 }
+
+func (*blockingDispatch) Ask(context.Context, string) (dispatch.Ask, error) {
+	return dispatch.Ask{}, nil
+}
 func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
 	d.mu.Lock()
 	d.writes++
@@ -431,6 +435,10 @@ func (d *refusingDispatch) GetIssue(_ context.Context, key string) (dispatch.Iss
 	d.reads++
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
+
+func (*refusingDispatch) Ask(context.Context, string) (dispatch.Ask, error) {
+	return dispatch.Ask{}, nil
+}
 func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string) error {
 	if refusal, refused := d.refuse[status]; refused {
 		return fmt.Errorf("set Dispatch status %s: %w", status, refusal)
@@ -465,6 +473,8 @@ func (d *boardDispatch) ListIssues(context.Context, string, []string) ([]dispatc
 func (d *boardDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
 	return dispatch.Issue{Key: key, Status: d.status}, nil
 }
+
+func (*boardDispatch) Ask(context.Context, string) (dispatch.Ask, error) { return dispatch.Ask{}, nil }
 func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) error {
 	if d.failures > 0 {
 		d.failures--

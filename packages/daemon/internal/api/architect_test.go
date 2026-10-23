@@ -88,6 +88,10 @@ func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue
 	return issue, nil
 }
 
+func (*statusRecorder) Ask(context.Context, string) (dispatch.Ask, error) {
+	return dispatch.Ask{}, errors.New("architect status recorder reads no asks")
+}
+
 func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) error {
 	if r.err != nil {
 		return r.err

@@ -102,6 +102,14 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.gateRegistered(ctx, tx, fact)
 	case intake.DispatchArtifact:
 		return e.dispatchArtifact(ctx, tx, fact)
+	case intake.DispatchAskOpened:
+		return e.dispatchAskOpened(ctx, tx, fact)
+	case intake.DispatchAskClosed:
+		return e.dispatchAskClosed(ctx, tx, fact)
+	case intake.DispatchAskReply:
+		return e.dispatchAskReply(ctx, tx, fact)
+	case intake.DispatchClaim:
+		return e.dispatchClaim(ctx, tx, fact)
 	case intake.HandoffComplete:
 		return e.handoff(ctx, tx, fact)
 	case intake.PullRequestOpened:
@@ -305,6 +313,74 @@ func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue
 	return slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == issue.Key }), nil
 }
 
+// awaitPerson moves a quiet admitted root into awaiting_person. Admission releases its slot in the
+// same intake transaction and fills it from Waiting before the fact commits. The architect's daemon
+// suspension waits for its current turn to end, keeping the session for the answer's resume.
+func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting, reason string) error {
+	if root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !InWorkflow(root) {
+		return nil
+	}
+	admitted, err := e.admittedRoot(ctx, tx, root)
+	if err != nil || !admitted {
+		return err
+	}
+	members, err := e.treeMembers(ctx, tx, root)
+	if err != nil {
+		return err
+	}
+	for _, member := range members {
+		if member.Key != root.Key && InWorkflow(member) && member.Phase != phase.Admitted {
+			return nil
+		}
+	}
+	root.Phase, root.Awaiting = phase.AwaitingPerson, &waiting
+	if err := e.store.PutIssue(ctx, tx, root); err != nil {
+		return err
+	}
+	suspendReason := fmt.Sprintf("%s waits on a person (%s): its slot is released until they answer", root.Key, reason)
+	if err := e.suspend(ctx, tx, root, claim.RoleArchitect, suspendReason); err != nil {
+		return err
+	}
+	if err := e.enqueue(ctx, tx, root.Key, record.ControllerNotice{Kind: record.AwaitingPersonNotice, Reason: suspendReason}); err != nil {
+		return err
+	}
+	e.logOnCommit(ctx, "workflow: root waits on a person and returns its admission slot", "issue", root.Key, "tree", root.Tree, "reason", reason)
+	return nil
+}
+
+// ResumeAwaitedRoot starts an architect in the session its daemon suspension kept, told what the
+// person answered. When that answer opened the design gate, it advances the now-admitted tree only
+// after the root has its slot again. A gate still closed — changes requested, or a newer version
+// that handed the approval request back — tells the architect to register the version it asks
+// approval of again, since that registration is what starts the root's next wait.
+func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
+	task := ""
+	if waiting.Ask != "" {
+		task = fmt.Sprintf("Your question %s on %s was answered; read the answer and continue.", waiting.Ask, root.Key)
+	}
+	gate, err := e.store.Gate(ctx, tx, root.Key)
+	if err != nil {
+		return err
+	}
+	if waiting.GateVersion != 0 {
+		if gate != nil && classify.DesignGateOpen(*gate) {
+			task = fmt.Sprintf("Your spec version %d on %s was approved; continue.", gate.LatestVersion, root.Key)
+		} else {
+			task = fmt.Sprintf("Your spec on %s is not approved at version %d: a person requested changes, or a newer version handed the approval request back to you. "+
+				"Read the review, revise the spec, request approval again, register that version with register_gate, then end your turn.", root.Key, waiting.GateVersion)
+		}
+	}
+	if err := e.enqueue(ctx, tx, root.Key, record.SuperviseRequest{
+		Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: root.Generation, Task: task,
+	}); err != nil {
+		return err
+	}
+	if gate != nil {
+		return e.advanceAdmittedTree(ctx, tx, root, *gate)
+	}
+	return nil
+}
+
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission
 // records only roots and orphans because this runs first in intake.ApplyFact.
 func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact intake.DispatchIssue) (intake.Result, error) {
@@ -422,7 +498,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err != nil {
 		return err
 	}
-	if gate != nil && classify.DesignGateOpen(*gate) {
+	if gate != nil && classify.DesignGateOpen(*gate) && !root.AwaitingPerson() {
 		return e.gateOpened(ctx, tx, child)
 	}
 	return nil
@@ -860,7 +936,7 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 }
 
 func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
-	if !classify.DesignGateOpen(gate) {
+	if root.AwaitingPerson() || !classify.DesignGateOpen(gate) {
 		return nil
 	}
 	members, err := e.treeMembers(ctx, tx, root)

@@ -132,5 +132,13 @@ func containsPhase(phases []phase.Phase, wanted phase.Phase) bool {
 }
 
 func namedIgnore(current phase.Phase, trigger TriggerKind) string {
+	if current == phase.AwaitingPerson {
+		switch trigger {
+		case TriggerGateOpened, TriggerPlannerCompleted, TriggerImplementationReady, TriggerTesterPassed,
+			TriggerTesterFailed, TriggerReviewApproved, TriggerReviewRejected, TriggerRetroCompleted,
+			TriggerReady, TriggerPullRequestMerged, TriggerSignOff, TriggerBackward, TriggerChecksRed:
+			return fmt.Sprintf("%s does not advance awaiting_person: admission resumes the root only after the person answers and a slot is free", trigger)
+		}
+	}
 	return fmt.Sprintf("%s does not advance %s", trigger, current)
 }

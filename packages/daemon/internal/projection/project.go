@@ -110,6 +110,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if slot, ok := slotViews[issue.Key]; ok {
 			view.Slot = &slot
 		}
+		if issue.AwaitingPerson() {
+			waiting := &api.WaitingOnView{AnsweredAt: issue.Awaiting.AnsweredAt}
+			if issue.Awaiting.GateVersion != 0 {
+				waiting.Kind, waiting.GateVersion = "gate", issue.Awaiting.GateVersion
+			} else {
+				waiting.Kind, waiting.Ask = "ask", issue.Awaiting.Ask
+			}
+			view.WaitingOn = waiting
+		}
 
 		phases, err := s.Phases(ctx, tx, issue.Key)
 		if err != nil {

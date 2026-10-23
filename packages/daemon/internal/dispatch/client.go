@@ -77,6 +77,10 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 	if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key), nil, &response); err != nil {
 		return Issue{}, err
 	}
+	var claimed *Claim
+	if response.Claim != nil {
+		claimed = &Claim{Kind: response.Claim.Actor.Kind, ID: response.Claim.Actor.ID}
+	}
 	return Issue{
 		Key:               response.Key,
 		Project:           response.Project,
@@ -88,8 +92,20 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 		HandedOver:        CarriesLegionLabel(response.Labels),
 		PrimaryArtifactID: response.PrimaryArtifactID,
 		LastSeq:           response.LastSeq,
+		Claim:             claimed,
 		ResolvedRepo:      deref(response.ResolvedRepo),
 	}, nil
+}
+
+// Ask reads GET /api/v1/asks/{id}.
+func (c *HTTPClient) Ask(ctx context.Context, id string) (Ask, error) {
+	var response struct {
+		Ask askResponse `json:"ask"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/api/v1/asks/"+url.PathEscape(id), nil, &response); err != nil {
+		return Ask{}, err
+	}
+	return Ask{ID: response.Ask.ID, IssueKey: deref(response.Ask.IssueKey), Kind: response.Ask.Kind, State: response.Ask.State}, nil
 }
 
 // ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
@@ -339,16 +355,28 @@ type issueSummaryResponse struct {
 }
 
 type issueResponse struct {
-	Key               string   `json:"key"`
-	Project           string   `json:"project"`
-	Title             string   `json:"title"`
-	Status            string   `json:"status"`
-	Parent            *string  `json:"parent"`
-	Rank              string   `json:"rank"`
-	Labels            []string `json:"labels"`
-	PrimaryArtifactID string   `json:"primary_artifact_id"`
-	LastSeq           int64    `json:"last_seq"`
-	ResolvedRepo      *string  `json:"resolved_repo"`
+	Key               string         `json:"key"`
+	Project           string         `json:"project"`
+	Title             string         `json:"title"`
+	Status            string         `json:"status"`
+	Parent            *string        `json:"parent"`
+	Rank              string         `json:"rank"`
+	Labels            []string       `json:"labels"`
+	PrimaryArtifactID string         `json:"primary_artifact_id"`
+	LastSeq           int64          `json:"last_seq"`
+	Claim             *claimResponse `json:"claim"`
+	ResolvedRepo      *string        `json:"resolved_repo"`
+}
+
+type claimResponse struct {
+	Actor actor `json:"actor"`
+}
+
+type askResponse struct {
+	ID       string  `json:"id"`
+	IssueKey *string `json:"issue_key"`
+	Kind     string  `json:"kind"`
+	State    string  `json:"state"`
 }
 
 type repoProjectResponse struct {

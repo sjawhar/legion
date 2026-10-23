@@ -94,6 +94,8 @@ func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispat
 func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return d.issue, d.getErr
 }
+
+func (*outboxDispatch) Ask(context.Context, string) (dispatch.Ask, error) { return dispatch.Ask{}, nil }
 func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
 	d.statuses = append(d.statuses, status)
 	return d.statusErr

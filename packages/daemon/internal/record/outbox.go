@@ -261,14 +261,17 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // names an issue not handed to Legion that changed in `todo`, a new candidate for that walk; a
 // tick is the daemon's periodic wake, whose issue is the project key. An unslotted notice names a
 // root admission found in the workflow with neither a slot nor a place in the waiting line, which
-// it took out of the workflow; its reason names the status the root stood at. When admission sends
-// each is its rule (admit.Admission.wakeController and its callers, admit's releaseUnslotted).
+// it took out of the workflow; its reason names the status the root stood at. An awaiting-person
+// notice names a root that released its slot while its architect waits on a person. When admission
+// sends each is its rule (admit.Admission.wakeController and its callers, admit's
+// releaseUnslotted).
 const (
-	TriageNotice    NoticeKind = "triage"
-	SlotFreeNotice  NoticeKind = "slot-free"
-	TodoNotice      NoticeKind = "todo"
-	TickNotice      NoticeKind = "tick"
-	UnslottedNotice NoticeKind = "unslotted"
+	TriageNotice         NoticeKind = "triage"
+	SlotFreeNotice       NoticeKind = "slot-free"
+	TodoNotice           NoticeKind = "todo"
+	TickNotice           NoticeKind = "tick"
+	UnslottedNotice      NoticeKind = "unslotted"
+	AwaitingPersonNotice NoticeKind = "awaiting-person"
 )
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
@@ -705,7 +708,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice:
 		return true
 	default:
 		return false

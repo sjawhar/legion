@@ -140,7 +140,7 @@ func (e *Engine) operatorHoldsTree(ctx context.Context, tx pgx.Tx, root record.I
 func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
 		"issue", root.Key, "tree", root.Tree, "status", status)
-	root.Phase, root.Hold, root.ReadyPendingVersion = phase.Done, nil, nil
+	root.Phase, root.Hold, root.Awaiting, root.ReadyPendingVersion = phase.Done, nil, nil, nil
 	return e.store.PutIssue(ctx, tx, root)
 }
 
@@ -216,7 +216,7 @@ func InWorkflow(issue record.Issue) bool {
 func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	until := e.lingerAt()
 	root.LingerUntil = &until
-	root.Phase, root.Hold = phase.Done, nil
+	root.Phase, root.Hold, root.Awaiting = phase.Done, nil, nil
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}

@@ -191,6 +191,7 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
       type: "string",
       enum: [
         "admitted",
+        "awaiting_person",
         "planning",
         "implementing",
         "testing",

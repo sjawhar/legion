@@ -249,17 +249,23 @@ Check, in order:
    person or another session already holds the claim, the architect starts nothing and asks the
    holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
 
-## A tree waits at the design gate
+## A tree waits on a person
 
-The root's phase stays `admitted` until a person approves the spec at its current version:
+When a root has no worker running and waits for a design review or a root-level question, its phase
+is `awaiting_person`: it returned its admission slot and the architect session is suspended until
+the answer. Read the exact wait:
 
 ```sh
-legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, designGate}'
+legion state --config legion.yaml --json |
+  jq '.issues["<KEY>"] | {phase, waitingOn, designGate, slot}'
 ```
 
-`designGate.approvedVersion` is `null`, or lower than `currentVersion`, until someone approves the
-latest version from the document's header or the Inbox. An approval of an earlier version does not
-count: the spec changed since. The merger's `READY` waits on the same approval.
+`waitingOn.kind` is `gate` with `gateVersion`, or `ask` with its ask identifier. `answeredAt` means
+the person answered; the root is ahead of never-run roots and resumes itself at the next free slot.
+Do not park or manually start it. An approval, requested changes, a question answer or resolution,
+an agent-turn reply, or a newer spec version wakes it. A missing `legion` label or a foreign
+Dispatch claim instead produces `unslotted`; Legion deliberately does not resume work another owner
+took. The merger's `READY` still waits for the design gate's current approved version.
 
 ## An issue is held
 
