@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-83",
+  "completed": "2026-10-23T09:45:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 5,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/prompts/go/worker-common.md:19 (and skills/legion-worker/SKILL.md:403-405, packages/claude-envoy/legion/skills/legion-worker/SKILL.md:403-405)",
+      "description": "The replacement clause states as a general fact that 'a head with no CI is one GitHub will not merge, so the merge waits and the daemon tells the issue's architect once it has waited an hour'. True of sjawhar/legion, whose main requires lint, typecheck, test and pr-title; false of a base branch that requires no check, where GitHub merges such a head at once - theorem-labs/agent-infra today, this project's other repository and the exposure the spec accepts (dispatch://INFRA-142). This prompt part reaches every phase worker of every issue, and it is a sentence about a merge decision that is true of one question and will be read as the answer to another - the defect this issue removes. One clause: condition the promise on a base that requires a check."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/daemon/auto_merge.go:144",
+      "description": "The one merge-waiting notice can be spent on a transient failure. 'case err != nil' (auto_merge.go:120-124) catches every non-Armed, non-MergeFailed error Submit returns, not only a wait: a readRepository HTTP or network failure (ghautomerge.go:164-166, 208), GitHub's non-terminal mutation refusal (ghautomerge.go:204-211) and the record read inside keep (auto_merge.go:90-96, ghautomerge.go:175-178, which can be a Postgres error) all arrive here. permanentRefusal excludes only Refused, Removed and a stalled Lagging, so the first such error past the hour sets Warned, enqueues the notice, and prints 'GitHub last answered: <that error>' to the architect; the genuine wait is then never reported, because Warned is already true. The concept exists one package away and settle already uses it (outbox.go:195): gate on errors.Is(cause, wait.ErrWaiting), which Armed, Unmergeable, Merging, Lagging and Disappeared all declare (ghautomerge.go:271, 297, 321, 398, 418)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/daemon/auto_merge.go:143",
+      "description": "A reopen at READY's head warns again at once and misstates the wait. readyMergeConflict (record/store.go:716-718) sets attempts, payload and lease_token on conflict and never created_at, so the reopen's fresh ReadyMerge clears Warned (as auto_merge.go:139-140 intends) while row.CreatedAt keeps the original queue time. A row queued two hours ago whose pull request is closed and reopened therefore satisfies waited > mergeWaitWarn on its very first run after the reopen: the architect is told a second time, and readyMergeWaiting prints 'submitted ... 2h0m ago' about a merge submitted seconds earlier. The branch's acceptance line is 'tells the architect once', and TestAREADYMergeGitHubLeavesWaitingTellsTheArchitectOnce never reopens, so nothing catches it. Put the clock where the once-flag lives: a timestamp on record.ReadyMerge stamped by workflow/ready.go, replaced by the reopen with Warned."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-legion/CHANGELOG.md:69-75",
+      "description": "The release's own rollback procedure is left incomplete. The same Unreleased section (CHANGELOG.md:184-190) tells the operator that a daemon rolled back before this release refuses two outbox payloads - a ready_merge row's armed field and the merge-removed notice kind - and gives the two update statements to run first. This change adds exactly that pair again: ReadyMerge.Warned (record/outbox.go:421), which the strict decoder (record/outbox.go:489 DisallowUnknownFields) refuses on every retry, and the merge-waiting notice kind (record/outbox.go:697), which validateOutboxPayload refuses on read, holding every waiting notice of the project. An operator who follows the documented procedure verbatim still jams the rolled-back daemon."
+    },
+    {
+      "severity": "important",
+      "file": "docs/solutions/legion/text-only-skill-pr-mechanics.md:118-122, docs/solutions/legion/fast-follow-pr-mechanics-and-queue-registration.md:116-124, docs/solutions/legion/template-names-a-ci-check-the-repository-never-produces.md:37-43",
+      "description": "Three live learnings still instruct agents to fill the CI: line this change deletes from the template; the third is about that line end to end and prescribes its exact wording. skills/legion-oracle/SKILL.md:47-56 sends every agent to docs/solutions first and says Legion runs no pass that reconciles these links, so a worker reading them re-creates the record the issue deletes - a check result an agent read and retyped. The spec's own proof for deliverable two is 'a search of the whole tree finds no CI line left to write'; the implement and test sweeps both excluded docs/solutions deliberately. A supersedes note on each, naming dispatch://INFRA-83, closes it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/auto_merge.go:101-105, 120-124",
+      "description": "rememberWait's two call sites are the same body with a positional bool to tell them apart. ghautomerge.Submit builds each error alone and never wraps one in another, so *Armed and *MergeFailed can never both match and folding the arms reorders nothing observable; the implementer's simplify pass skipped it on a behaviour-preservation worry that does not hold. Fast-follow unless the fix for the two findings above touches that switch anyway."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/api/ready.go:141",
+      "description": "readyChecks reads no check of the head any more, and its callers still say 'READY's checks' (api/handoff.go:228, api/server.go:92) while classify/required.go:51 has to write the disclaimer. Renaming it (readyRefusal, judgeReady) removes the ambiguity. Fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/auto_merge.go:26-37",
+      "description": "mergeWaitWarn is one global hour justified by one repository's measured check durations, with no per-project setting; a repository whose required suite legitimately runs longer gets a merge-waiting on every merge. Hardening, not a blocker: either say in the comment that it is a deliberate global floor, or make it a project setting later."
+    }
+  ],
+  "ci": {
+    "codeHead": "a4d99c506c443141fa78854a42a8a7eb8a3a1062",
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "observed": "lint, typecheck, test all completed success; pr-title present twice - check run 120315373153 success at 08:19:56Z (run 39923866314) superseding check run 120314878093 failure at 08:18:40Z, so the name's latest run is success. The non-required dispatch and Legion Envoy and Contracts runs were still in progress and decide nothing. gh api compare a4d99c50...eeb9c72a: ahead, every file under .legion/, so the code under review is the CI head's.",
+    "requiredSetRead": "gh api --paginate repos/sjawhar/legion/rules/branches/main -> lint typecheck test pr-title; branch protection has no required checks"
+  },
+  "threads": {
+    "opened": 4,
+    "botThreadsAdjudicated": 0,
+    "note": "No review threads and no reviews existed on #2121 before this round; the four inline comments of this submission are the round's threads."
+  },
+  "thermonuclear": {
+    "head": "eeb9c72a0f7cb6b594e2c31e660c8ef866129dcf",
+    "deepReview": "CHANGES at eeb9c72a - five findings, one Medium (the rollback note) and four Minor; its clean checks cover rememberWait's atomicity under the row lease, permanentRefusal's arms, READY's surviving refusals and the absence of any consumer of the deleted refusal code.",
+    "codeQuality": "CHANGES at eeb9c72a - the boolean-flag duplication, the reopen clock, the warn gate, and the readyChecks name; it found no dead code left by the deletion."
+  }
+}
