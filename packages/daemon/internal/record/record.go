@@ -517,6 +517,9 @@ type Store interface {
 	// the fact commits. A reserved cleanup returns treelifecycle.ErrCleanupReserved without
 	// admitting work.
 	OpenTreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
+	// TreeLifecycle is the tree's lifecycle under the project token, and whether it has one, read
+	// without opening anything (treelifecycle.Read).
+	TreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string) (treelifecycle.Lifecycle, bool, error)
 	// ControllerRegistered says whether a session holds the current controller registration of the
 	// Dispatch project key project (controller.Record.Registered's rule), reading the controllers
 	// table under the project token (claim.ProjectToken) `legion controller start` mints under.

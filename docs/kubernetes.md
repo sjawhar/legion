@@ -740,6 +740,11 @@ binds the open epoch in the same short transaction that first writes it, and eve
 retry binds again before it launches, all under the fact path's one global serializer. A reserved
 epoch refuses those writes with a named wait that keeps the start's outbox row and charges no
 launch failure; a confirmed epoch admits nothing until a fresh root admission opens the next one.
+A workflow root whose key names an open operator tree waits for its slot behind that tree's epoch,
+and when it leaves the workflow while it waits (a person parks it, or someone moves it to a running
+tree's status) its record goes to `done` and nothing more: the operator's claims and pod carry the
+root's tokens and names, so the workflow queues no stop, no `issue_suspend` and no linger close for
+them (`leaveUnderOperator`, `internal/workflow/linger.go`). `todo` with the label queues it again.
 
 A workflow close or withdrawal queues a separate `issue_suspend` effect for each affected issue,
 after its per-role stops. The effect checks both workflow generations, later starts, unfinished
