@@ -50,6 +50,14 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
 
+The `CI` line names the runs GitHub started for the code head, by run id, with each run's state
+as GitHub shows it when the line is written: `success`, a failure, or `queued` / `in progress`
+at <head-sha>. The implementer writes it at its completion from `gh run list --commit <head-sha>`
+and never waits for a run to finish to fill it in: the daemon reads every settlement itself, and a
+check or workflow the base branch requires that settles red sends the work back to `implementing`,
+before or after that completion. A later role that reads CI on GitHub updates the line's states to
+what it read.
+
 ## The brief for the human
 
 `## For the reviewer` is written for the person who merges; `## Verification` below it stays the
