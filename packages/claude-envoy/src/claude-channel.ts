@@ -355,7 +355,7 @@ export function claudeChannelGate(input: {
 }
 
 /** Where an allowlist goes: the machine's managed-settings.json, unless the account receives
- *  server-managed settings, which then own the key (`channelAllowlist`). */
+ *  server-managed settings, which then own `allowedChannelPlugins` (see `channelAllowlist`). */
 const MANAGED_SETTINGS_HINT = `${join(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`
 
 /** A marketplace name as Claude Code writes it into its plugin cache path. */

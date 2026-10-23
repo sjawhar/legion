@@ -289,7 +289,10 @@ string, so a test holds both files to none.
 Channels are gated by Claude Code's managed settings: whoever administers the machine writes
 `/etc/claude-code/managed-settings.json` (on macOS,
 `/Library/Application Support/ClaudeCode/managed-settings.json`), which turns channels on and
-allowlists the plugin, and the user opts the plugin into each session with `--channels`:
+allowlists the plugin, and the user opts the plugin into each session with `--channels`. An
+account that receives server-managed settings (cached as `remote-settings.json` in the Claude Code
+config directory) takes these keys from them instead, and under the default
+`managedSourcesBehavior` the local file then changes nothing:
 
 ```json
 {

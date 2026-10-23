@@ -81,10 +81,11 @@ A Claude Code session started for the first time on a new profile (a fresh `~/.c
 `CLAUDE_CONFIG_DIR`) can come up without its channel: its terminal says `--channels ignored` and
 "Channels are not currently available". It still says it takes Aside, so a message you send it is
 recorded as sent but never reaches the agent. Whoever started it restarts Claude Code with the same
-`--channels` flag; the channel is loaded when the terminal says "Channels (experimental) messages
-from plugin:claude-envoy@legion-plugins inject directly in this session". A first launch may
-instead say "waiting for your organization's policy … Messages are dropped until it loads" and
-keep saying it after the policy has loaded; messages reach the agent anyway.
+`--channels` flag, and again while the terminal still says the channel is ignored; the channel is
+loaded when it says "Channels (experimental) messages from plugin:claude-envoy@legion-plugins
+inject directly in this session". A first launch may instead say "waiting for your organization's
+policy … Messages are dropped until it loads" and keep saying it after the policy has loaded;
+messages reach the agent anyway.
 
 On an Oh My Pi session, your Send or Aside arrives as your own message in its conversation, and the
 agent answers there. A Send or Aside that starts with `/` runs as the session's terminal would run
