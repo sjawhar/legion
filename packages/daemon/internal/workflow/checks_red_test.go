@@ -240,8 +240,8 @@ func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEvery
 // implementer's start waiting on the role the red took the phase from, and the architect told the
 // phase the red stopped. In awaiting_merge the READY head arriving over its handoff push withdraws
 // nothing, as the late push does not (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing):
-// READY found the head's own CI green on GitHub, so the issue stays, nobody is told and nothing is
-// started.
+// that red stood before the READY and says nothing new about the submitted head, so the issue
+// stays, nobody is told and nothing is started.
 func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase(t *testing.T) {
 	for _, tc := range []struct {
 		from    phase.Phase

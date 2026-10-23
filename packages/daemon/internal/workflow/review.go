@@ -475,8 +475,8 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // follows (decideChecks's count report), a review round's own decision governing meanwhile. The
 // rule runs before awaiting_merge: there only the head's own red withdraws the READY
 // (classify.RedWithdrawsReady, decideChecks's AwaitingMerge case), never one carried to the READY
-// head from the code head a .legion/-only push replaced, since READY found the head's own CI green
-// on GitHub, which is what GitHub merges by. The invariant is that the rule is applied by whichever
+// head from the code head a .legion/-only push replaced, since that red stood before the READY and
+// says nothing new about the submitted head. The invariant is that the rule is applied by whichever
 // fact makes a red stand for the head, in whatever phase the issue is when it does, and never by a
 // review or a completion, which change nothing about the verdict and read none. A red comes to
 // stand by a settlement or a read of the required set, the facts that change the verdict

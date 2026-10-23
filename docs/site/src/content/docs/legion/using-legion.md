@@ -116,8 +116,8 @@ the default branch; the pull request's file list shows them only until that comm
 ## Merge
 
 When the change is tested, reviewed and approved, the merger sends **READY**. The daemon accepts it
-only when no check or workflow the repository requires has failed or is missing (one still running
-refuses nothing), and posts it on the Dispatch issue as one message:
+on the approved head plus retro's notes, reading no check of that head, and posts it on the
+Dispatch issue as one message:
 
 ```text
 READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pull request url>)

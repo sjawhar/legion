@@ -362,7 +362,8 @@ The daemon reads no handoff file and no branch head; it refuses, before recordin
   commit this phase's handoff before completing.
 - each `READY_…` refusal of the merger's READY — named, with its remedy, in the merger's role
   prompt (`skill://legion-worker/references/merge-gate.md` says how READY is checked).
-- `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading READY's checks: complete again.
+- `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading the pull request's head on
+  GitHub: complete again.
 
 Such a refusal records nothing, so the corrected call at the same commit is applied. The answer
 may carry a `note` (READY published on an already-merged pull request, or the
