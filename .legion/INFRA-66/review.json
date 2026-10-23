@@ -2,47 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-66",
-  "completed": "2026-10-23T09:35:00Z",
-  "round": 7,
-  "decision": "changes_requested",
+  "completed": "2026-10-23T11:40:00Z",
+  "round": 8,
+  "decision": "approved",
+  "approvedHead": "the head this round's handoff push makes, named by SHA in the submitted review",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/stale_room.go:504-506 and :196-198; packages/envoy/internal/dispatch/docs/stale_room_eviction_test.go:434-448 and :494; packages/envoy/internal/dispatch/pglisten/listener_test.go:564-565 and :609; pull request body, Not proven / risk",
-      "description": "The model round 6 retired is corrected in two places and still taught in six, and the body says both statements were corrected. staleRoomRetryBackoffMax's own comment now says the right thing - the ping does not depend on the ceiling, and no ceiling here could carry it - and forty lines below it armRetry, the constant's only caller and the place a maintainer stands when re-tuning or deleting it, still says the backoff climbs 'to a ceiling past the listener's idle period, which hands the wait back to the listener so its ping can prove the connection'. woke still ends 'the listener still gets its idle period back'. The backoff row's own premise still says the listener's wait is the sooner of the caller's wake and its idle period and that every wait ends at a wake so the ping never runs, and its Fatalf - the message a future maintainer reads when that row goes red - says waitFor returns that wake on every round so the ping never fires. In pglisten's own test, 'a wait the wake ended is not pinged' is contradicted by the row fifty lines below it. No runtime behaviour is affected and no code change is asked for: the remedy is six sentences and one body line. It is blocking for the reason this pull request has blocked twice before on the same class - round 4's enumeration and round 6's ceiling comment - and because these are precisely the sentences that would license removing the listener-side mechanism in the belief that the evictor's ceiling carries it."
-    },
-    {
-      "severity": "minor",
-      "file": "pull request body",
-      "description": "Two stale facts. 'Proven by: ... seven rows' predates rounds 9 and 10: cmd/dispatch/multiprocess_test.go holds nine build-tagged Test functions, the two deferred-re-examination rows the body itself discusses among them, so the line understates its own evidence. 'Size: 73 files changed, +9,123/-883' does not match the branch at this head, measured at 74 files, +10,013/-1,353 over the whole diff and 70 / +9,428 / -1,353 excluding .legion/; the deletion figure is out by 470."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pglisten/listener_test.go:659-663 and packages/envoy/internal/dispatch/store/pool.go:227-229",
-      "description": "Two hardening items carried rather than demanded. The new row's 'wakes < 2' floor is load-sensitive in the opposite direction from its own ten-idle-period budget: a single 80 ms wake delayed past about 140 ms before the 300 ms ping turns a correct listener red, where a floor of one, or counting wakes after the ping, keeps the discrimination without the flake. And listenerPoolSize = 1 now backs three permanent listeners, so one listener's redial serialises behind another's dial, which pgxpool floors at a two-minute connect timeout; it costs reconnection latency only, since each hijack frees the slot at once, but the constant's comment still reasons about a single caller."
-    }
-  ],
-  "whatThisRoundProved": {
-    "pingInvariant": "traced at this head and not broken: every wait is capped at proven+idle through waitFor's untilPing; the only continue that skips the due-check is the notification path, which re-stamps proven two lines earlier; an untilPing at or below zero makes an already-done context that pgx answers without touching the socket, so the ping runs on the same connection and the ping re-stamps proven, so there is no spin; a wake asked at one nanosecond every round still lets time.Since(proven) climb to the boundary; proven moves only on a real round trip, so there is no premature ping, no extra dial and no redial loop; and both hookless callers take the NextWake == nil || OnWake == nil branch and wait exactly as before",
-    "probeDrivenNotArgued": "TestAListenerWokenShorterThanItsIdlePeriodIsStillPinged reads '-- ping' back from pg_stat_activity for the listener's own pid, which is a statement the server ran rather than a call the code made, with dials == 1 asserted so it is the connection the listener already had and at least two wakes asserted so the row is a listener taking its wake branch. The control is the implementer's two-step revert: with only the ping decision reverted the row stays green, because waitFor's cap alone ends the wait at the due point, and with both halves reverted it fails with the backend's last statement still the LISTEN text. The two halves cannot be tested apart, since the cap reads the guard's own stamp - which is why the comment on the separable half is the first finding above",
-    "testerMeasurement": "the architect's discriminating row was a negative result, recorded as one: the cap and the guard share the stamp, so no build has one without the other, and the row was dropped rather than landed as a row that proves nothing"
-  },
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundSevenFindingAnswered": "all six statements corrected in 10f143cb, plus listenerPoolSize's, and swept by the model rather than the wording. I verified each at the head rather than from the list: armRetry now says the ceiling bounds one room's retry rate and nothing besides and carries nothing for the ping; woke prices the ceiling at once a minute rather than every window; the backoff row's premise and its red-run message describe the re-read cost instead of the ping; pglisten's row doc says no ping is owed because its wakes are inside one idle period of the LISTEN that proved the connection, and names the row below it as the pinged case; listenerPoolSize stops reasoning about a single caller, correctly, since three permanent listeners dial through it and each connection is hijacked, so one bounds dials in flight rather than connections held. Both thermonuclear passes swept the whole tree independently for the retired framing and found nothing left teaching it - only the corrected sites and past-tense records in .legion/. Every hunk of that commit is a comment, a doc string or a test failure message: the only non-comment changed lines are one t.Fatalf and one t.Fatal, both in _test.go, which both passes verified mechanically.",
+  "whyThisIsApproved": "Eight rounds, each of which removed a false statement from the tree rather than a preference. The mechanism this issue turns on is proven rather than argued at this head: the listener's idle ping hangs on the time since its connection last proved a round trip, every wait is capped at that due time, and the probe reads `-- ping` back out of pg_stat_activity for the listener's own pid with dials == 1 and at least two wakes asserted - a statement the server ran, not a call the code made - with the control being both halves reverted, where the backend's last statement stays the LISTEN text. The deferred re-examination's severity is measured in both branches with the mechanism removed as the control: 1.9 s wired against 6.0 s unwired with a settlement owed, 1.9 s against never where no settlement can fire. The contract census enumerates the gate from its own call graph rather than from a grep for one constructor, and its four surfaces reproduce at this head. Nothing false stands, and both passes return APPROVE.",
   "ciReadAtTheCodeHead": {
-    "codeHead": "ef38d858d075",
+    "codeHead": "10f143cb9443",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "requiredSetSource": "main's rulesets, re-read at this head rather than carried; branch protection reports no required status checks for this role's token",
-    "observed": "all four required names present, completed and success at ef38d858, with dispatch, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, build, changes and pi-legion also success. Seven check-runs are named pr-title there; the newest (08:31:30Z) is success and the cancelled one (08:31:14Z) is the concurrency cancellation it superseded. The dispatch browser job is green at this head for the second round running, so the red-head conditions the architect ruled on are packed away rather than retired - that row has failed twice on this branch and nothing in this round touched it.",
-    "aboveTheCodeHead": "compare ef38d858...10a028cd is ahead and touches only .legion/INFRA-66/implement.json and .legion/INFRA-66/test.json"
+    "requiredSetSource": "main's rulesets, re-read at this head rather than carried from any earlier round; branch protection reports no required status checks for this role's token",
+    "observed": "all four required names present, completed and success at 10f143cb, with dispatch, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, build, changes and pi-legion also success. The dispatch browser job failed first on dispatch://INFRA-95's random row - its fourth failure on this branch, recorded there with the failure text pulled from the attempt-1 archive before the re-run - and passed on the re-run; it is green at this head, so the architect's red-head conditions stay packed away rather than retired.",
+    "aboveTheCodeHead": "compare 10f143cb...1c1c8e44 is ahead and touches only .legion/INFRA-66/implement.json and .legion/INFRA-66/test.json",
+    "bothE2ELines": "present: the implementer's at its own heads with its negative controls, and the tester's round-12 line at head b80925f2 (code head 10f143cb), which names what it did not re-run - the two-process package and the browser suite, both green at the previous head, this head differing by comments and two test strings - rather than leaving the omission to be noticed. I accept that judgement: CI's dispatch-multiprocess and dispatch jobs are green at this head besides."
   },
   "thermonuclear": {
-    "head": "10a028cd3aed05dc5faa9d6d4378ba951a51e01a",
-    "deepReview": "CHANGES - 1 medium (adopted as the important finding), 2 low (adopted as the first minor), 2 hardening (adopted as the second); it states that it could construct no sequence that pushes the ping past idle, that the new row discriminates and reads a statement the server ran, that both hookless callers are unchanged, and that the census's four surfaces, the connection arithmetic and the thread count are all true",
-    "codeQuality": "CHANGES - 2 blocking-quality, the same six statements by another road plus the body line, and one fast-follow worth recording: hoisting the ping to the top of the loop would delete the revertable branch entirely and make the invariant structural rather than commented. I am not requiring it"
+    "head": "1c1c8e44474f46d608b9c1045d4008686bee7d87",
+    "deepReview": "APPROVE - 0 blocking, 3 low and 2 hardening, every one of them already carried in the pull request's risk list or added to it this round",
+    "codeQuality": "APPROVE - nothing blocking; it confirms every hunk of the round a comment or a test string, every rewritten statement true of the code, and no surviving teaching of the retired model anywhere in the tree"
   },
-  "threads": "round 6's two threads were answered by the implementer and resolved by it as the pull request's author; I verified both at the head and replied on each, accepting the enumeration outright and accepting the listener fix as the mechanism while opening one new thread for the statements it left behind. No bot thread exists on this pull request.",
-  "stoppingRule": "the architect's rule (INFRA-66 comment 9ab8bf0a) applies to a fourth remedy on this mechanism. This round asks for none: the mechanism is proven and nothing is added, removed or re-tuned - six sentences and one body line come down to what the code does.",
-  "whatWouldMakeTheNextRoundTheLast": "the six statements corrected and the body's risk line brought to the number actually corrected, with the two stale body facts fixed in the same edit. No code change. If that is the next push, I approve."
+  "residualsCarriedIntoReady": [
+    "the variable-period loop is not gated once per period across processes while drift lasts: readPeriod matches a stored pass only on an equal period_ns, and RunReferenceExcerptReconciliation alternates 2 s and 5 minutes, so with two processes the alternation is persistent rather than one-off - about one extra idempotent batch per five minutes while drift exists, where migration 0115's comment prices it as one pass per change. Added to the risk list this round rather than spent as a ninth round: it is bounded, the lease still serialises the passes, the batch claims nothing, and the limit was already disclosed in weaker form",
+    "the legacy durable replacement's one-round-trip window, which costs a silently idle standby until that process restarts",
+    "the outbox claim's crash-latency regression and its at-least-once overrun",
+    "api.Register's non-returning wait without Deps.Lifetime, documented rather than enforced",
+    "the reconnect sweep's per-room round trip, Evict's unbounded context on the listener goroutine, listenerPoolSize backing three listeners, leasePoolSize's zero headroom",
+    "a Listener with OnNotify nil dropping notifications silently, and duty.Exclusive stopping a leased loop when its record read persistently fails",
+    "three log-contract changes with no consumer found in this repository",
+    "the per-durable consumer lease, a behaviour change that reached the branch inside a merge commit's conflict resolution",
+    "dispatch-multiprocess not being in the base branch's required set",
+    "the ping decision's separability: the cap reads the guard's own stamp so the two cannot be tested apart, no row covers the decision itself, and what keeps it honest is its comment - which is why the structural fix (hoisting the ping) is named in the risk list as the better shape not taken, under the architect's stopping rule (INFRA-66 comment 9ab8bf0a)"
+  ],
+  "threads": "23 threads, all answered by the implementer and resolved by it as the pull request's author, and all answered by me in my own words at the head that fixed them; 0 unresolved at this head, read in gh api graphql rather than from the body's Threads section. No bot thread exists on this pull request, so none was adjudicated and none was named to the implementer to resolve.",
+  "afterThisApproval": "the issue goes to the architect's acceptance, then retro, then READY. One task of mine remains and follows this round rather than preceding it: a measurements section in INFRA-66's spec carrying four measurements with their run identifiers and commands - the deferred re-examination's severity in both branches, the three-room ping simulation with its counts, this round's driven ping probe, and the proof boundary in one sentence - agreed with the architect, who verified that INFRA-66's spec is a different artifact from the root's gated one (3bdfa324-c79d-4a15-b196-2ee6ddb416b7 at version 14 approved), so writing it cannot close the tree's design gate."
 }
