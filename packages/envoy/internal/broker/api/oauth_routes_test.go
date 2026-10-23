@@ -80,8 +80,9 @@ func TestTheOAuthRoutesNeedTheProvider(t *testing.T) {
 	}
 }
 
-// TestRegisterRefusesAProviderWithoutItsSteps: an OAuth provider wired without DeviceLogin or
-// either token hook would answer every request with a nil call, so Register refuses it at wiring.
+// TestRegisterRefusesAProviderWithoutItsSteps: an OAuth provider wired without MachineLogin,
+// DeviceLogin or either token hook would answer every request with a nil call, so Register refuses
+// it at wiring.
 func TestRegisterRefusesAProviderWithoutItsSteps(t *testing.T) {
 	provider, err := oauth.New(oauth.Config{
 		Secret: make([]byte, 32), DeviceLifetime: time.Minute, RefreshLifetime: time.Hour,
@@ -93,10 +94,12 @@ func TestRegisterRefusesAProviderWithoutItsSteps(t *testing.T) {
 	login := func(context.Context, url.Values, string) error { return nil }
 	before := func(context.Context, oauth2.GrantType, map[string]any) error { return nil }
 	after := func(context.Context, oauth2.GrantType, map[string]any) (map[string]any, error) { return nil, nil }
+	svc := &machine.Service{}
 	for name, deps := range map[string]api.Deps{
-		"no DeviceLogin":       {OAuth: provider, TokenHooks: oauth.TokenHooks{Before: before, After: after}},
-		"no TokenHooks.Before": {OAuth: provider, DeviceLogin: login, TokenHooks: oauth.TokenHooks{After: after}},
-		"no TokenHooks.After":  {OAuth: provider, DeviceLogin: login, TokenHooks: oauth.TokenHooks{Before: before}},
+		"no MachineLogin":      {OAuth: provider, DeviceLogin: login, TokenHooks: oauth.TokenHooks{Before: before, After: after}},
+		"no DeviceLogin":       {OAuth: provider, MachineLogin: svc, TokenHooks: oauth.TokenHooks{Before: before, After: after}},
+		"no TokenHooks.Before": {OAuth: provider, MachineLogin: svc, DeviceLogin: login, TokenHooks: oauth.TokenHooks{After: after}},
+		"no TokenHooks.After":  {OAuth: provider, MachineLogin: svc, DeviceLogin: login, TokenHooks: oauth.TokenHooks{Before: before}},
 	} {
 		func() {
 			defer func() {

@@ -84,8 +84,8 @@ type server struct {
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
-	if deps.OAuth != nil && (deps.DeviceLogin == nil || deps.TokenHooks.Before == nil || deps.TokenHooks.After == nil) {
-		panic("api: Deps.OAuth needs DeviceLogin and both TokenHooks")
+	if deps.OAuth != nil && (deps.MachineLogin == nil || deps.DeviceLogin == nil || deps.TokenHooks.Before == nil || deps.TokenHooks.After == nil) {
+		panic("api: Deps.OAuth needs MachineLogin, DeviceLogin and both TokenHooks")
 	}
 	limits := DefaultLauncherLimits
 	if deps.LauncherLimits != nil {
