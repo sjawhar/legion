@@ -53,6 +53,12 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWith(t, func(*oauth.Config) {})
+}
+
+// newFixtureWith is newFixture with adjust applied to the provider's Config.
+func newFixtureWith(t *testing.T, adjust func(*oauth.Config)) *fixture {
+	t.Helper()
 	pool, err := pgxpool.New(context.Background(), storetest.URL(t))
 	if err != nil {
 		t.Fatalf("open pool: %v", err)
@@ -64,12 +70,15 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatalf("Secret: %v", err)
 	}
-	provider, err := oauth.New(oauth.Config{
+	cfg := oauth.Config{
 		Secret:          secret,
 		DeviceLifetime:  15 * time.Minute,
 		RefreshLifetime: time.Hour,
+		ProofSkew:       10 * time.Second,
 		VerificationURL: "https://dispatch.example/credentials/machine",
-	}, store)
+	}
+	adjust(&cfg)
+	provider, err := oauth.New(cfg, store)
 	if err != nil {
 		t.Fatalf("oauth.New: %v", err)
 	}
@@ -134,12 +143,18 @@ func (f *fixture) post(t *testing.T, path string, form url.Values, key *ecdsa.Pr
 // dpopProof is an RFC 9449 proof of key for a POST to htu.
 func dpopProof(t *testing.T, key *ecdsa.PrivateKey, htu string) string {
 	t.Helper()
+	return dpopProofAt(t, key, htu, time.Now())
+}
+
+// dpopProofAt is dpopProof issued at iat.
+func dpopProofAt(t *testing.T, key *ecdsa.PrivateKey, htu string, iat time.Time) string {
+	t.Helper()
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key},
 		(&jose.SignerOptions{EmbedJWK: true}).WithType("dpop+jwt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(map[string]any{"jti": uuid.NewString(), "htm": http.MethodPost, "htu": htu, "iat": time.Now().Unix()})
+	payload, err := json.Marshal(map[string]any{"jti": uuid.NewString(), "htm": http.MethodPost, "htu": htu, "iat": iat.Unix()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,6 +380,40 @@ func TestAPollThatReadThePendingCodeBeforeTheApprovalKeepsTheApproval(t *testing
 	}
 }
 
+// TestATokenRequestsDPoPSkewIsTheBrokersProofSkew: the token endpoint accepts a proof from a
+// clock as far off as BROKER_PROOF_SKEW_SECONDS allows every other broker proof, not the library's
+// ten seconds, and refuses one past it.
+func TestATokenRequestsDPoPSkewIsTheBrokersProofSkew(t *testing.T) {
+	f := newFixtureWith(t, func(c *oauth.Config) { c.ProofSkew = time.Minute })
+	key := newKey(t)
+	first := f.login(t, key)
+	post := func(refreshToken string, iat time.Time) (int, map[string]any) {
+		form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}, "client_id": {oauthwire.ClientID}}
+		req, err := http.NewRequest(http.MethodPost, f.url+"/token", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("DPoP", dpopProofAt(t, key, f.url+"/token", iat))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		return resp.StatusCode, body
+	}
+	status, body := post(first, time.Now().Add(15*time.Second))
+	if status != http.StatusOK {
+		t.Fatalf("refresh with a proof 15 s ahead under a 60 s skew = %d %v, want 200", status, body)
+	}
+	next, _ := body["refresh_token"].(string)
+	if status, body := post(next, time.Now().Add(90*time.Second)); status != http.StatusBadRequest || body["error"] != "invalid_dpop_proof" {
+		t.Fatalf("refresh with a proof 90 s ahead = %d %v, want invalid_dpop_proof", status, body)
+	}
+}
+
 func TestADeniedCodeAnswersAccessDenied(t *testing.T) {
 	f := newFixture(t)
 	key := newKey(t)
@@ -575,15 +624,16 @@ func TestABeforeFailureIsAServerError(t *testing.T) {
 	}
 }
 
-func TestNewRefusesLifetimesThatAreNotPositive(t *testing.T) {
+func TestNewRefusesLifetimesAndASkewThatAreNotPositive(t *testing.T) {
 	secret := make([]byte, 32)
 	for _, c := range []oauth.Config{
-		{Secret: secret, DeviceLifetime: 0, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine"},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: 0, VerificationURL: "https://dispatch.example/credentials/machine"},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: -1, VerificationURL: "https://dispatch.example/credentials/machine"},
+		{Secret: secret, DeviceLifetime: 0, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
+		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: 0, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
+		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: -1, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
+		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine"},
 	} {
 		if _, err := oauth.New(c, nil); err == nil {
-			t.Errorf("oauth.New(device %v, refresh %v) = nil, want an error", c.DeviceLifetime, c.RefreshLifetime)
+			t.Errorf("oauth.New(device %v, refresh %v, skew %v) = nil, want an error", c.DeviceLifetime, c.RefreshLifetime, c.ProofSkew)
 		}
 	}
 }

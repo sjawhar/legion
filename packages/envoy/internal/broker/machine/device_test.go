@@ -32,7 +32,7 @@ func withProvider(t *testing.T, svc *Service, deviceLifetime time.Duration) {
 		t.Fatal(err)
 	}
 	svc.OAuth, err = oauth.New(oauth.Config{
-		Secret: secret, DeviceLifetime: deviceLifetime, RefreshLifetime: time.Hour, VerificationURL: testAudience,
+		Secret: secret, DeviceLifetime: deviceLifetime, RefreshLifetime: time.Hour, VerificationURL: testAudience, ProofSkew: time.Minute,
 	}, st)
 	if err != nil {
 		t.Fatal(err)

@@ -169,7 +169,7 @@ func newOAuthProvider(t *testing.T, st *store.Store) *oauth.Provider {
 		t.Fatalf("OAuth secret: %v", err)
 	}
 	provider, err := oauth.New(oauth.Config{
-		Secret: secret, DeviceLifetime: 15 * time.Minute, RefreshLifetime: 7 * 24 * time.Hour, VerificationURL: MachineLoginURL,
+		Secret: secret, DeviceLifetime: 15 * time.Minute, RefreshLifetime: 7 * 24 * time.Hour, VerificationURL: MachineLoginURL, ProofSkew: time.Minute,
 	}, oauthStore)
 	if err != nil {
 		t.Fatalf("oauth.New: %v", err)

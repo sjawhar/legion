@@ -36,6 +36,10 @@ type Config struct {
 	RefreshLifetime time.Duration
 	// VerificationURL is the page a person types the user code into.
 	VerificationURL string
+	// ProofSkew is BROKER_PROOF_SKEW_SECONDS: a DPoP proof is accepted while the broker's clock is
+	// within this of its iat, as every other broker proof is (proof.Verifier.Skew), give or take
+	// the one second the library's proof lifespan adds after it.
+	ProofSkew time.Duration
 }
 
 // Provider runs the machine login's device authorization and token endpoints.
@@ -85,6 +89,9 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 	if c.DeviceLifetime <= 0 || c.RefreshLifetime <= 0 {
 		return nil, fmt.Errorf("oauth: the device lifetime (%v) and refresh lifetime (%v) must both be positive", c.DeviceLifetime, c.RefreshLifetime)
 	}
+	if c.ProofSkew <= 0 {
+		return nil, fmt.Errorf("oauth: the proof skew (%v) must be positive", c.ProofSkew)
+	}
 	cfg := &oauth2.Config{
 		GlobalSecret:                c.Secret,
 		RFC8628CodeLifespan:         c.DeviceLifetime,
@@ -95,6 +102,11 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 		RefreshTokenScopes:          []string{},
 		DPoPEnabled:                 true,
 		DPoPEnforce:                 true,
+		// The library accepts a proof from DPoPClockSkew before its iat until DPoPProofLifespan
+		// plus DPoPClockSkew after it; a lifespan of one second (zero is its 10 s default) keeps
+		// that window the broker's own.
+		DPoPClockSkew:     c.ProofSkew,
+		DPoPProofLifespan: time.Second,
 	}
 	strategy := &codeStrategy{HMACCoreStrategy: compose.NewOAuth2HMACStrategy(cfg)}
 	provider := compose.Compose(cfg, store, strategy,

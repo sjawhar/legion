@@ -193,7 +193,7 @@ func main() {
 	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
 		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, RefreshLifetime: credentialLifetime,
-		VerificationURL: cfg.MachineLoginURL,
+		VerificationURL: cfg.MachineLoginURL, ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 	}, oauthStore)
 	fatal(err)
 	mach := &machine.Service{
