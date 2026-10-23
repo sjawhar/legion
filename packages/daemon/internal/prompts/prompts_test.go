@@ -49,7 +49,7 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
 			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed"}},
 		// The packet limit the merger is told is the one the handoff route enforces.
-		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base", "`READY_CHECKS_NOT_GREEN`: a check the base branch requires",
+		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
 			"`READY_HEAD_CARRIES_HANDOFFS`", "`READY_DISARM_PENDING`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
 			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
 			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
@@ -193,6 +193,46 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 		for _, want := range []string{"`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`"} {
 			if role == claim.RoleMerger && !strings.Contains(text.String(), want) {
 				t.Errorf("the merger's prompt does not name %s, READY's refusal of a change above the approved head no review approved", want)
+			}
+		}
+	}
+}
+
+// GitHub, under each repository's base-branch rules, decides whether a merge happens, and no
+// prompt may tell an agent that Legion refuses one over a check (dispatch://INFRA-83). READY reads
+// none of the head's checks and judges none, so no composed prompt — any phase worker's, and the
+// architect's in both its shapes — still names the refusal that read them, the packet note that
+// said which checks went unread, or a trailer the daemon turns away for the CI it leaves the head
+// without.
+func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
+	composer, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	retired := []string{"READY_CHECKS_NOT_GREEN", "no check is required on", "refused at READY"}
+	for _, tc := range []struct {
+		role   claim.Role
+		isRoot bool
+	}{
+		{claim.RolePlanner, false}, {claim.RoleImplementer, false}, {claim.RoleTester, false},
+		{claim.RoleReviewer, false}, {claim.RoleMerger, false},
+		{claim.RoleArchitect, true}, {claim.RoleArchitect, false},
+	} {
+		parts, err := composer.Compose(tc.role, tc.isRoot)
+		if err != nil {
+			t.Fatalf("Compose %s (root %t): %v", tc.role, tc.isRoot, err)
+		}
+		var text strings.Builder
+		for _, path := range parts.RolePromptPaths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			text.Write(body)
+		}
+		for _, phrase := range retired {
+			if strings.Contains(text.String(), phrase) {
+				t.Errorf("the composed %s prompt (root %t) still says %q", tc.role, tc.isRoot, phrase)
 			}
 		}
 	}
