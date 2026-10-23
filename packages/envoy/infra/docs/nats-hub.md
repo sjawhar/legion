@@ -305,7 +305,7 @@ the secret's choosing to the listener's environment, and writes `NATS_NKEY_SEED=
 
 NATS listens for clients on 4222 and serves its monitoring endpoints on 8222, on every interface.
 The hub's VPC firewall rule and `nats-firewall` admit Google's health checks to 8222, and
-`nats-firewall` admits the tailnet's interface, `tailscale0`, to 4222; nothing else is opened. So
+`nats-firewall` admits the tailnet's interface, `tailscale0`, to 4222; the hub opens nothing else. So
 the tailnet's policy decides which peers reach 4222. 8222's `/varz`, `/connz` and `/jsz` stay
 closed to the tailnet, as does every port that neither `nats-firewall`, Serve nor COS's own SSH
 rule (tcp/22, accepted on every interface) opens, since Tailscale's own accept rule for
