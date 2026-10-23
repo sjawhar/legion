@@ -278,7 +278,10 @@ function flagTable(tool: string, fields: ReadonlyMap<string, FieldInfo>): Map<st
     }
   }
   add("--help", { action: "help", text: "Prints this help." });
-  add("--dry-run", { action: "dry-run", text: "Prints the arguments as JSON and sends nothing." });
+  add("--dry-run", {
+    action: "dry-run",
+    text: "Checks the arguments as the call would, then prints them as JSON and sends nothing.",
+  });
   return flags;
 }
 
@@ -558,7 +561,7 @@ export function commandsHelp(): string {
       return `  ${commandName(spec.name).padEnd(width)}  ${sentence}`;
     }),
     "",
-    "Run dispatch <command> --help for its flags and an example; --dry-run prints the arguments a command would send.",
+    "Run dispatch <command> --help for its flags and an example; --dry-run checks a command's arguments and prints what it would send.",
     "",
   ].join("\n");
 }

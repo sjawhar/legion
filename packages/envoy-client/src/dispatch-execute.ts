@@ -91,6 +91,7 @@ import {
   askTexts,
   datedBodies,
   eventTexts,
+  type LocalPicture,
   localPictures,
   type PicturesRead,
   type PictureTextLimit,
@@ -2510,6 +2511,94 @@ function withAccount(error: unknown, account: string): Error {
   return new Error(told, { cause: error });
 }
 
+/** The schema's own "issue is required": a required `issue` field left out, or the owner refine. */
+function restatesMissingOwner(issue: z.core.$ZodIssue): boolean {
+  return (
+    (issue.code === "invalid_type" &&
+      issue.path.length === 1 &&
+      issue.path[0] === "issue" &&
+      issue.input === undefined) ||
+    (issue.code === "custom" &&
+      issue.path.length === 0 &&
+      (issue.message.startsWith("Exactly one of issue and project is required") ||
+        issue.message.startsWith("issue is required unless in_reply_to")))
+  );
+}
+
+export interface CheckedCall {
+  /** Every problem the check found; the call is refused once, listing them all. */
+  readonly problems: string[];
+  readonly owner: OwnerResolution;
+  /** The arguments as the schema parsed them (the owner-resolved ones when it refused them). */
+  readonly args: ToolArguments;
+  readonly pictures: LocalPicture[];
+}
+
+/** What the pre-send check reads: the call's arguments, its checkout and environment, and the
+ *  Dispatch server's addresses, whose dashboard URLs a `ref` may be (none when the session has no
+ *  Dispatch configured, which only a dry run checks with). */
+export interface DispatchCallCheckInput
+  extends Pick<ExecuteDispatchToolInput, "tool" | "args" | "cwd" | "env" | "exec"> {
+  readonly serverUrls: readonly string[];
+}
+
+/** The addresses `config` reaches Dispatch at, the API's and the dashboard's: what the call and
+ *  its dry run both read a dashboard-URL `ref` against. */
+export function dispatchServerUrls(
+  config: Pick<ActiveDispatchConfig, "url" | "publicUrl">
+): readonly string[] {
+  return config.publicUrl === undefined ? [config.url] : [config.url, config.publicUrl];
+}
+
+/**
+ * The check a call makes before it sends anything, the one `--dry-run` runs too: the owner (from
+ * the arguments, the ref, or LEGION_ISSUE), the strict schema, the cross-field checks, and the
+ * picture files `images` names. The schema sees the owner-resolved arguments, so it judges an
+ * issue, artifact or version the ref supplies, and its validation sees the owner it requires.
+ */
+export async function checkDispatchCall(input: DispatchCallCheckInput): Promise<CheckedCall> {
+  const { tool, args, cwd } = input;
+  const problems: string[] = [];
+  const owner = await resolveOwnerArguments(
+    tool,
+    args,
+    cwd,
+    input.env ?? process.env,
+    input.exec ?? defaultExec,
+    input.serverUrls,
+    problems
+  );
+  // Judged on the caller's own arguments, before the ref filled any: the ref as resolved, read
+  // back from a dashboard URL when it was one.
+  const conflicts =
+    issueFreeTools[tool] === true
+      ? []
+      : ownerConflictProblems(tool, args, owner.ref, optionalString(owner.args, "ref"));
+  problems.push(...conflicts);
+  // Every owner-missing exit (no issue, bad LEGION_ISSUE, no repo in cwd) leaves owner null, and
+  // a conflict already names the owners; the schema's own "issue is required" would only restate
+  // the actionable line already pushed.
+  const ownerMissing =
+    issueFreeTools[tool] !== true && (owner.owner === null || conflicts.length > 0);
+  const schema = toolSchema(tool);
+  const parsed = schema.safeParse(owner.args, { reportInput: true });
+  if (!parsed.success) {
+    const issues = ownerMissing
+      ? parsed.error.issues.filter((issue) => !restatesMissingOwner(issue))
+      : parsed.error.issues;
+    problems.push(...formatZodIssues(issues, schema, tool));
+  }
+  problems.push(...argumentProblems(tool, owner.args));
+  const pictures =
+    pictureSendingTools[tool] === true ? await localPictures(owner.args.images, cwd, problems) : [];
+  return {
+    problems,
+    owner,
+    args: parsed.success ? (parsed.data as ToolArguments) : owner.args,
+    pictures,
+  };
+}
+
 /** Validate and execute one native Dispatch tool against the JSON HTTP API. */
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
@@ -2537,64 +2626,14 @@ export async function executeDispatchTool(
   );
   const env = input.env ?? process.env;
   const exec = input.exec ?? defaultExec;
-  // One validation pass: owner resolution, the strict schema, and the cross-field hand
-  // checks all push onto `problems`; the call is refused once with every problem listed,
-  // or proceeds with arguments the schema has fully validated (unknown keys and wrong
-  // types are impossible below, so structured arguments only need the contract's shape named).
-  const problems: string[] = [];
-  const ownerArguments = await resolveOwnerArguments(
-    input.tool,
-    input.args,
-    input.cwd,
-    env,
-    exec,
-    input.config.publicUrl === undefined ? [configUrl] : [configUrl, input.config.publicUrl],
-    problems
-  );
-  // Judged on the caller's own arguments, before the ref filled any: the ref as resolved, read
-  // back from a dashboard URL when it was one.
-  const conflicts =
-    issueFreeTools[input.tool] === true
-      ? []
-      : ownerConflictProblems(
-          input.tool,
-          input.args,
-          ownerArguments.ref,
-          optionalString(ownerArguments.args, "ref")
-        );
-  problems.push(...conflicts);
-  // Every owner-missing exit (no issue, bad LEGION_ISSUE, no repo in cwd) leaves owner null, and
-  // a conflict already names the owners; the schema's own "issue is required" would only restate
-  // the actionable line already pushed.
-  const ownerMissing =
-    issueFreeTools[input.tool] !== true && (ownerArguments.owner === null || conflicts.length > 0);
-  const schema = toolSchema(input.tool);
-  const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
-  if (!parsed.success) {
-    // When the owner is already reported missing, the schema's own "issue is required"
-    // (a required `issue` field, or the owner refine) restates it; keep the actionable line.
-    const issues = parsed.error.issues.filter(
-      (issue) =>
-        !ownerMissing ||
-        !(
-          (issue.code === "invalid_type" &&
-            issue.path.length === 1 &&
-            issue.path[0] === "issue" &&
-            issue.input === undefined) ||
-          (issue.code === "custom" &&
-            issue.path.length === 0 &&
-            (issue.message.startsWith("Exactly one of issue and project is required") ||
-              issue.message.startsWith("issue is required unless in_reply_to")))
-        )
-    );
-    problems.push(...formatZodIssues(issues, schema, input.tool));
-  }
-  problems.push(...argumentProblems(input.tool, ownerArguments.args));
-  const pictures =
-    pictureSendingTools[input.tool] === true
-      ? await localPictures(ownerArguments.args.images, input.cwd, problems)
-      : [];
-  if (problems.length > 0) throw new ToolInputError(input.tool, problems);
+  // One validation pass: owner resolution, the strict schema, the cross-field hand checks and the
+  // picture files; the call is refused once with every problem listed, or proceeds with arguments
+  // the schema has fully validated (unknown keys and wrong types are impossible below, so
+  // structured arguments only need the contract's shape named).
+  const checked = await checkDispatchCall({ ...input, serverUrls: dispatchServerUrls(input.config) });
+  if (checked.problems.length > 0) throw new ToolInputError(input.tool, checked.problems);
+  const ownerArguments = checked.owner;
+  const pictures = checked.pictures;
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
@@ -2633,7 +2672,7 @@ export async function executeDispatchTool(
       details: { session: sessionId, owner, service },
     };
   }
-  const args = (parsed.success ? parsed.data : ownerArguments.args) as ToolArguments;
+  const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
   // The document part of the call's dispatch:// reference is a slug by definition; a document
