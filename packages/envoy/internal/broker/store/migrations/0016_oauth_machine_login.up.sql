@@ -35,10 +35,8 @@ create table oauth_refresh_tokens (
 );
 create index oauth_refresh_tokens_request on oauth_refresh_tokens (request_id);
 create index oauth_refresh_tokens_credential on oauth_refresh_tokens (credential_id) where active;
--- The sweep finds a spent family from its rows that are not redeemable themselves.
-create index oauth_refresh_tokens_expires on oauth_refresh_tokens (expires_at);
-create index oauth_refresh_tokens_inactive on oauth_refresh_tokens (signature) where not active;
-create index oauth_refresh_tokens_grace on oauth_refresh_tokens (grace_until) where grace_until is not null;
+-- The sweep walks the table in this order with a cursor, a batch at a time.
+create index oauth_refresh_tokens_sweep on oauth_refresh_tokens (expires_at, signature);
 create table oauth_dpop_proofs (
   jti text not null,
   htu text not null,

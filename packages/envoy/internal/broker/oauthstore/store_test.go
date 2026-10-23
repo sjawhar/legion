@@ -3,8 +3,8 @@ package oauthstore_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -424,12 +424,12 @@ func TestSweepWorkIsBoundedPerCall(t *testing.T) {
 	}
 }
 
-// TestEverySweepStatementHasAnIndexPath: each of Sweep's statements can find its rows through an
-// index on the predicate it sweeps by, so a table of mostly live rows is not read whole every
-// tick. The seeded tables are small enough that the planner would pick a sequential scan on its
-// own, so the plan is read with sequential scans priced out: one that remains has no index to
-// use. The refresh family statement reads only rows that are themselves not redeemable (expired,
-// revoked or past their grace), and each one's family through the request_id index.
+// TestEverySweepStatementHasAnIndexPath: each of Sweep's statements reads a bounded set of rows
+// through an index, so a pass's work is its batch however many rows the table holds. A statement
+// that picks its batch does so with one index scan cut off by its LIMIT: nothing under the Limit
+// gathers, merges, dedupes or sorts rows before it cuts. The seeded tables are small enough that
+// the planner would pick a sequential or bitmap scan (which reads every match, then sorts) on its
+// own, so the plan is read with both priced out: one that remains has no index to use.
 func TestEverySweepStatementHasAnIndexPath(t *testing.T) {
 	ctx := context.Background()
 	_, pool := newStore(t)
@@ -438,29 +438,87 @@ func TestEverySweepStatementHasAnIndexPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `set local enable_seqscan = off`); err != nil {
+	if _, err := tx.Exec(ctx, `set local enable_seqscan = off; set local enable_bitmapscan = off`); err != nil {
 		t.Fatal(err)
 	}
+	type node struct {
+		NodeType string `json:"Node Type"`
+		Plans    []node `json:"Plans"`
+	}
+	var walk func(n node, visit func(node))
+	walk = func(n node, visit func(node)) {
+		visit(n)
+		for _, c := range n.Plans {
+			walk(c, visit)
+		}
+	}
 	for _, q := range oauthstore.SweepStatements() {
-		rows, err := tx.Query(ctx, "explain "+q.SQL, 1000)
-		if err != nil {
+		var raw []byte
+		if err := tx.QueryRow(ctx, "explain (format json) "+q.SQL, q.Args...).Scan(&raw); err != nil {
 			t.Fatalf("explain %s: %v", q.What, err)
 		}
-		var plan []string
-		for rows.Next() {
-			var line string
-			if err := rows.Scan(&line); err != nil {
-				t.Fatal(err)
+		var plans []struct{ Plan node }
+		if err := json.Unmarshal(raw, &plans); err != nil || len(plans) != 1 {
+			t.Fatalf("explain %s: %v in %s", q.What, err, raw)
+		}
+		limits := 0
+		walk(plans[0].Plan, func(n node) {
+			if n.NodeType == "Seq Scan" {
+				t.Errorf("sweeping %s reads a table whole:\n%s", q.What, raw)
 			}
-			plan = append(plan, line)
+			if n.NodeType != "Limit" {
+				return
+			}
+			limits++
+			indexed := false
+			for _, c := range n.Plans {
+				walk(c, func(m node) {
+					switch m.NodeType {
+					case "Aggregate", "Append", "Merge Append", "Unique", "Sort", "Incremental Sort", "SetOp", "Hash", "Materialize":
+						t.Errorf("sweeping %s runs %s under its Limit:\n%s", q.What, m.NodeType, raw)
+					case "Index Scan", "Index Only Scan":
+						indexed = true
+					}
+				})
+			}
+			if !indexed {
+				t.Errorf("sweeping %s has no index scan under its Limit:\n%s", q.What, raw)
+			}
+		})
+		if q.PicksBatch && limits == 0 {
+			t.Errorf("sweeping %s has no Limit:\n%s", q.What, raw)
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			t.Fatalf("explain %s: %v", q.What, err)
+	}
+}
+
+// TestSweepExaminesALiveFamilyOncePerPass: the refresh sweep walks the table with a cursor, so a
+// tick examines rows the last tick did not, a live family's rows are read once per pass over the
+// table rather than every tick, and a family that dies after the cursor passed its rows loses
+// them on the next pass.
+func TestSweepExaminesALiveFamilyOncePerPass(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newStore(t)
+	oauthstore.SetSweepBatch(t, 3)
+	oauthstore.SetSweepMaxBatches(t, 1)
+	if _, err := pool.Exec(ctx, `insert into oauth_refresh_tokens (signature, request_id, request, active, grace_until, expires_at)
+		select 'live-'||i, 'live', '{}'::jsonb, true, now() - interval '1 second', now() + interval '1 day' from generate_series(1, 6) i
+		union all select 'live-newest', 'live', '{}'::jsonb, true, null, now() + interval '2 days'`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep 1: %v", err)
+	}
+	// Sweep 1 examined live-1 to live-3 and kept them; the family dies now.
+	if _, err := pool.Exec(ctx, `update oauth_refresh_tokens set active = false where request_id = 'live'`); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	for i, want := range []int{4, 3, 0} {
+		if err := s.Sweep(ctx); err != nil {
+			t.Fatalf("Sweep %d: %v", i+2, err)
 		}
-		joined := strings.Join(plan, "\n")
-		if strings.Contains(joined, "Seq Scan") {
-			t.Errorf("sweeping %s reads a table whole:\n%s", q.What, joined)
+		var n int
+		if err := pool.QueryRow(ctx, `select count(*) from oauth_refresh_tokens`).Scan(&n); err != nil || n != want {
+			t.Fatalf("after Sweep %d: %d rows (%v), want %d", i+2, n, err, want)
 		}
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"authelia.com/provider/oauth2"
@@ -55,13 +56,9 @@ var sweepBatch = 1000
 // sweeper ticks rather than one long one; a variable so tests can exceed it.
 var sweepMaxBatches = 10
 
-// sweepStatements are Sweep's statements, $1 the batch. Each selects its batch by primary key
-// through an index on the predicate it sweeps by (0016's *_expires indexes, and for refresh
-// tokens the partial inactive and grace indexes), oldest first, so a table of mostly live rows is
-// never read whole. A refresh family is found from its rows that are themselves not redeemable
-// (expired, revoked or past their grace), each checked against its family through the request_id
-// index; a live family's rotated rows are among those, so each tick re-reads them, a few per
-// machine for each day it has been logged in.
+// sweepStatements are Sweep's statements for state deleted row by row, $1 the batch. Each
+// selects its batch by primary key through 0016's *_expires index on the predicate it sweeps by,
+// oldest first, so a table of mostly live rows is never read whole.
 var sweepStatements = []struct{ what, sql string }{
 	{"device codes", `delete from oauth_device_codes where signature in (select signature from oauth_device_codes
 		where expires_at < now() - interval '1 hour' order by expires_at limit $1)`},
@@ -71,13 +68,26 @@ var sweepStatements = []struct{ what, sql string }{
 		where expires_at <= now() order by expires_at limit $1)`},
 	{"access tokens", `delete from oauth_access_tokens where signature in (select signature from oauth_access_tokens
 		where expires_at <= now() order by expires_at limit $1)`},
-	{"refresh token families", `delete from oauth_refresh_tokens where signature in (select f.signature from (
-			select signature, request_id from oauth_refresh_tokens where expires_at <= now()
-			union select signature, request_id from oauth_refresh_tokens where not active
-			union select signature, request_id from oauth_refresh_tokens where grace_until < now()) f
-		where not exists (select 1 from oauth_refresh_tokens r
-			where r.request_id = f.request_id and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))
-		limit $1)`},
+}
+
+// sweepRefreshCandidates reads the next $1 refresh tokens after the cursor ($2, $3) in
+// (expires_at, signature) order, through 0016's oauth_refresh_tokens_sweep index.
+const sweepRefreshCandidates = `select signature, expires_at from oauth_refresh_tokens
+	where (expires_at, signature) > ($2, $3) order by expires_at, signature limit $1`
+
+// sweepRefreshDelete deletes those of the candidates $1 that are not redeemable on their own
+// terms (inactive, expired, or past their grace) and whose family (rows sharing request_id) has
+// no redeemable row: active, unexpired, and in its rotation's grace or never rotated.
+const sweepRefreshDelete = `delete from oauth_refresh_tokens t where signature = any($1)
+	and (not t.active or t.expires_at <= now() or t.grace_until < now())
+	and not exists (select 1 from oauth_refresh_tokens r where r.request_id = t.request_id
+		and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))`
+
+// sweepCursor is where the refresh sweep's walk over oauth_refresh_tokens stands: the last
+// (expires_at, signature) it examined. Its zero value sorts before every row.
+type sweepCursor struct {
+	expiresAt time.Time
+	signature string
 }
 
 // Sweep deletes spent OAuth state: device codes an hour past their expiry (so a helper still
@@ -85,9 +95,12 @@ var sweepStatements = []struct{ what, sql string }{
 // and nonces past theirs, access tokens past theirs, and every refresh token of a family (rows
 // sharing request_id) none of whose rows is still redeemable (active, unexpired, and in its
 // rotation's grace or never rotated). A family with a redeemable row keeps all its rows, so
-// replaying one of its rotated tokens still finds it and revokes the family. Each kind is deleted
-// by row in batches of sweepBatch, each its own statement, until a batch comes up short or
-// sweepMaxBatches have run; what is left waits for the next Sweep.
+// replaying one of its rotated tokens still finds it and revokes the family. Each kind is
+// worked in batches of sweepBatch, each its own statements, until a batch comes up short or
+// sweepMaxBatches have run; what is left waits for the next Sweep. Refresh tokens are walked
+// with a cursor held on the Store: each batch examines the sweepBatch rows after the last one
+// examined, deleted or kept, and a short batch returns the cursor to the start, so a live
+// family's rows are read once per pass over the table rather than every tick.
 func (s *Store) Sweep(ctx context.Context) error {
 	db := s.db(ctx)
 	for _, q := range sweepStatements {
@@ -101,6 +114,36 @@ func (s *Store) Sweep(ctx context.Context) error {
 			}
 		}
 	}
+	s.sweepMu.Lock()
+	defer s.sweepMu.Unlock()
+	for range sweepMaxBatches {
+		rows, err := db.Query(ctx, sweepRefreshCandidates, sweepBatch, s.sweepAt.expiresAt, s.sweepAt.signature)
+		if err != nil {
+			return fmt.Errorf("sweep refresh tokens: %w", err)
+		}
+		var signatures []string
+		next := s.sweepAt
+		for rows.Next() {
+			if err := rows.Scan(&next.signature, &next.expiresAt); err != nil {
+				rows.Close()
+				return fmt.Errorf("sweep refresh tokens: %w", err)
+			}
+			signatures = append(signatures, next.signature)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("sweep refresh tokens: %w", err)
+		}
+		if len(signatures) > 0 {
+			if _, err := db.Exec(ctx, sweepRefreshDelete, signatures); err != nil {
+				return fmt.Errorf("sweep refresh tokens: %w", err)
+			}
+		}
+		if len(signatures) < sweepBatch {
+			s.sweepAt = sweepCursor{}
+			break
+		}
+		s.sweepAt = next
+	}
 	return nil
 }
 
@@ -111,6 +154,10 @@ const deviceInvalidated = -1
 // Store is the provider's storage on a broker Postgres pool.
 type Store struct {
 	pool *pgxpool.Pool
+
+	// sweepMu serialises Sweep's refresh walk, which reads and advances sweepAt.
+	sweepMu sync.Mutex
+	sweepAt sweepCursor
 }
 
 // New returns the store on db, whose schema the broker's migrations have created.
