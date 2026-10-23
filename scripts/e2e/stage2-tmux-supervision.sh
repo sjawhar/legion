@@ -219,7 +219,7 @@ env_of() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
 # — every pane.
 start_daemon() {
   echo "=== boot at $(date -u +%FT%TZ)" >>"$daemon_log"
-  env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
+  env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" PATH="$work/realbin:$PATH" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
   daemon_pid=$!
   until_true 180 "the daemon to answer /healthz" curl -fs "http://127.0.0.1:$port/healthz"
 }
@@ -241,7 +241,7 @@ stop_daemon() {
 # expect_refusal NAME PATTERN: `legion start` must refuse, printing PATTERN.
 expect_refusal() {
   local out=$work/refusal-$1.log st=0
-  env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$out" 2>&1 || st=$?
+  env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" PATH="$work/realbin:$PATH" timeout 300 "$work/legion" start --config "$work/legion.yaml" >"$out" 2>&1 || st=$?
   [ "$st" != 0 ] || fail "legion start was not refused (exit 0)"
   [ "$st" != 124 ] || fail "legion start neither refused nor served within 300s"
   grep -qF "$2" "$out" || fail "the refusal (exit $st) does not say \"$2\": $(grep -v '^{' "$out" | head -3)"
@@ -261,6 +261,12 @@ done
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
 make_omp_home "$omp_home"
+# Every daemon of the run starts with the real tmux first on its PATH: the tmux runtime looks tmux
+# up on the pane PATH and runs it with the pane allow-list alone, where a shimmed tmux finds mise's
+# global config untrusted and exits 1 (lib/rig.sh, real_bin_path, which this script does not source).
+real_tmux=$(mise which tmux) || fail "mise has no tmux"
+mkdir -p "$work/realbin"
+ln -sfn "$real_tmux" "$work/realbin/tmux"
 # The model route, installed while this shell still holds the operator's HOME and XDG directories
 # (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
 # it, but is installed the same way, here, for one setup step regardless of route). The gateway
@@ -638,7 +644,7 @@ operator_token_file: $work/operator-token
 worker_boot_timeout_seconds: 5
 worker_boot_registration_deadline_intervals: 2
 EOF
-LEGION_OMP_PATH=$work/stub/omp HOME=$omp_home OMP_PROFILE=$profile "$work/legion" start --config "$work/deadline.yaml" >"$work/deadline.log" 2>&1 &
+LEGION_OMP_PATH=$work/stub/omp HOME=$omp_home OMP_PROFILE=$profile PATH="$work/realbin:$PATH" "$work/legion" start --config "$work/deadline.yaml" >"$work/deadline.log" 2>&1 &
 deadline_pid=$!
 until_true 120 "the second daemon to answer /healthz" curl -fs "http://127.0.0.1:$deadline_port/healthz"
 dclaims() {
