@@ -54,7 +54,7 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 	}
 	r.srv = &Server{
 		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client(), Log: log},
+		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
 		Hostname: "testhost",
 		Log:      log,
 		MinRenew: 50 * time.Millisecond,
@@ -142,6 +142,62 @@ func (r *rig) call(t *testing.T, req Request) Response {
 		t.Fatal(err)
 	}
 	return resp
+}
+
+// TestDrainRefusesARegisterThatArrivesAfterIt: a drain that finds no sessions leaves a helper
+// that refuses every later register and enroll-session-key, so none can lose its grants to the
+// restart drain licensed.
+func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
+	r := startRig(t, "")
+	if d := r.call(t, Request{Op: "drain"}); !d.OK || len(d.Sessions) != 0 {
+		t.Fatalf("drain: %+v", d)
+	}
+	for _, op := range []string{"register", "enroll-session-key", "enroll-box"} {
+		resp := r.call(t, Request{Op: op, RuntimeID: "rt", Thumbprint: "tp"})
+		if resp.OK || resp.Code != CodeDraining || resp.Error != "the helper is restarting; retry" {
+			t.Fatalf("%s after drain: %+v", op, resp)
+		}
+	}
+	if s := r.call(t, Request{Op: "sessions"}); len(s.Sessions) != 0 {
+		t.Fatalf("a session registered after drain: %+v", s)
+	}
+}
+
+// TestUndrainTakesSessionsAgain: undrain, install's undo of a drain whose restart failed, leaves
+// a helper that registers sessions again.
+func TestUndrainTakesSessionsAgain(t *testing.T) {
+	r := startRig(t, "")
+	if d := r.call(t, Request{Op: "drain"}); !d.OK || !r.srv.Registry.Draining() {
+		t.Fatalf("drain: %+v", d)
+	}
+	if u := r.call(t, Request{Op: "undrain"}); !u.OK {
+		t.Fatalf("undrain: %+v", u)
+	}
+	if r.srv.Registry.Draining() {
+		t.Fatal("the helper is still draining after undrain")
+	}
+	if resp := r.call(t, Request{Op: "register"}); resp.Code == CodeDraining {
+		t.Fatalf("register after undrain: %+v", resp)
+	}
+}
+
+// TestDrainWithSessionsSetsNothing: a drain that finds sessions answers them and leaves the
+// helper taking registrations.
+func TestDrainWithSessionsSetsNothing(t *testing.T) {
+	r := startRig(t, "")
+	if resp := r.call(t, Request{Op: "register"}); !resp.OK && resp.Code != CodeNoCredential {
+		t.Fatalf("register: %+v", resp)
+	}
+	d := r.call(t, Request{Op: "drain"})
+	if !d.OK || len(d.Sessions) != 1 {
+		t.Fatalf("drain: %+v", d)
+	}
+	if r.srv.Registry.Draining() {
+		t.Fatal("drain with a session marked the helper draining")
+	}
+	if resp := r.call(t, Request{Op: "register"}); resp.Code == CodeDraining {
+		t.Fatalf("register after a drain with sessions: %+v", resp)
+	}
 }
 
 func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
@@ -431,7 +487,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	// A second helper on the same state and the same fake broker.
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -551,7 +607,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -654,7 +710,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	r.fake.revokeFailFirst = failAlways
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -904,9 +960,8 @@ func TestUnregisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T
 }
 
 // delayingTransport delays a request whose path contains match, letting a test hold the fake's
-// GET /v1/launcher-credentials/{pending} poll open long enough to observe a machine login sit
-// "pending" — the fake otherwise answers "issued" on its very first poll, closing that window
-// before a second socket round trip could ever land inside it.
+// token endpoint poll open long enough to observe a machine login sit "pending" past a second
+// socket round trip.
 type delayingTransport struct {
 	http.RoundTripper
 	delay time.Duration
@@ -933,7 +988,7 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *t
 	r.srv.Broker.HTTP = &http.Client{Transport: &delayingTransport{
 		RoundTripper: r.fake.srv.Client().Transport,
 		delay:        300 * time.Millisecond,
-		match:        "/v1/launcher-credentials/",
+		match:        "/v1/oauth/token",
 	}}
 	before := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"})
 	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets machine login") {

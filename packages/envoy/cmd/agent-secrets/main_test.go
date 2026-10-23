@@ -1001,6 +1001,12 @@ func TestRequestSignsARequestObject(t *testing.T) {
 // drive the poll loop through however many pending answers it wants before a terminal state.
 func fakeLoginHelper(t *testing.T, code string, states []string) string {
 	t.Helper()
+	return fakeLoginHelperAt(t, code, "", states)
+}
+
+// fakeLoginHelperAt is fakeLoginHelper whose login answer names verificationURI.
+func fakeLoginHelperAt(t *testing.T, code, verificationURI string, states []string) string {
+	t.Helper()
 	sock := filepath.Join(t.TempDir(), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
@@ -1020,7 +1026,7 @@ func fakeLoginHelper(t *testing.T, code string, states []string) string {
 			var resp helper.Response
 			switch req.Op {
 			case "login":
-				resp = helper.Response{OK: true, Code: code, LoginState: "pending"}
+				resp = helper.Response{OK: true, Code: code, LoginState: "pending", VerificationURI: verificationURI}
 			case "login-status":
 				idx := int(atomic.AddInt32(&calls, 1)) - 1
 				state := states[len(states)-1]
@@ -1073,6 +1079,24 @@ func TestMachineLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	}
 }
 
+// TestMachineLoginPrintsTheBrokersVerificationURI: with AGENT_SECRETS_APPROVE_URL unset, the
+// second line names the page the broker's device authorization named, which the helper relays;
+// with it set, that setting still wins.
+func TestMachineLoginPrintsTheBrokersVerificationURI(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock := fakeLoginHelperAt(t, "KQ7M-X4PZ", "https://dispatch.example/credentials/machine", []string{"issued"})
+	for _, tc := range []struct{ approve, want string }{
+		{"", "machine login code: KQ7M-X4PZ\nenter it at https://dispatch.example/credentials/machine — approve only if the code matches this terminal\n"},
+		{"https://other.example", "machine login code: KQ7M-X4PZ\nenter it at https://other.example/credentials/machine — approve only if the code matches this terminal\n"},
+	} {
+		stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+			[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=" + tc.approve}, "machine", "login")
+		if exit != 0 || stdout != tc.want {
+			t.Fatalf("AGENT_SECRETS_APPROVE_URL=%q: exit %d stdout %q stderr %q; want %q", tc.approve, exit, stdout, stderr, tc.want)
+		}
+	}
+}
+
 // TestMachineLoginExitsOneOnDenied pins the terminal-failure half of the poll loop: a
 // login-status answer of "denied" exits 1 and names the state, never retrying past it.
 func TestMachineLoginExitsOneOnDenied(t *testing.T) {
@@ -1115,7 +1139,7 @@ func TestMachineLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 	}{
 		{name: "issued", resp: helper.Response{LoginState: "issued"}, want: "issued\n", stderr: unknown},
 		{name: "issued with its expiry", resp: helper.Response{LoginState: "issued", CredentialHeld: true, CredentialExpiresAt: expiresAt}, want: "issued\n",
-			stderr: prefix + "the launcher credential expires at " + expiresAt + " (in 2d1h59m); the broker has no renewal, so a new machine login a human approves must replace it before then\n"},
+			stderr: prefix + "the machine login renews itself; without a refresh it lapses at " + expiresAt + " (in 2d1h59m)\n"},
 		{name: "pending", resp: helper.Response{LoginState: "pending"}, want: "pending\n", exit: 1},
 		{name: "denied", resp: helper.Response{LoginState: "denied"}, want: "denied\n", exit: 1, remedy: true},
 		{name: "expired", resp: helper.Response{LoginState: "expired"}, want: "expired\n", exit: 1, remedy: true},
@@ -1153,9 +1177,9 @@ func TestMachineLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 func TestCredentialExpiryLine(t *testing.T) {
 	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct{ expiresAt, want string }{
-		{"2026-10-10T11:59:30Z", "the launcher credential expires at 2026-10-10T11:59:30Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
-		{"2026-10-03T15:05:00Z", "the launcher credential expires at 2026-10-03T15:05:00Z (in 3h5m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
-		{"2026-10-03T12:00:40Z", "the launcher credential expires at 2026-10-03T12:00:40Z (in 0m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
+		{"2026-10-10T11:59:30Z", "the machine login renews itself; without a refresh it lapses at 2026-10-10T11:59:30Z (in 6d23h59m)"},
+		{"2026-10-03T15:05:00Z", "the machine login renews itself; without a refresh it lapses at 2026-10-03T15:05:00Z (in 3h5m)"},
+		{"2026-10-03T12:00:40Z", "the machine login renews itself; without a refresh it lapses at 2026-10-03T12:00:40Z (in 0m)"},
 		{"2026-10-03T12:00:00Z", "the launcher credential expired at 2026-10-03T12:00:00Z; run: agent-secrets machine login"},
 		{"", "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)"},
 		{"next tuesday", `the helper reported an unreadable launcher credential expiry "next tuesday"`},

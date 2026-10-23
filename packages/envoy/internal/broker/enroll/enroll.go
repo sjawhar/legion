@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -853,7 +854,88 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 	if revokedAt != nil {
 		return nil
 	}
+	if err := endCredential(ctx, tx, id, host, service, actor, "its machine login was revoked"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// RetireCredential ends launcher credential id as the login a newer login of its machine replaced,
+// in one transaction: its expiry becomes now, so its key enrolls nothing more and its refresh is
+// refused, and its OAuth access and refresh tokens are deleted, so a retired refresh token
+// presented later (an old copy of the machine file, a late answer to an abandoned refresh) is a
+// plain invalid_grant rather than a reuse that would revoke the credential. Unlike a revoke it
+// leaves every enrollment it made running: a session renews with its own proof, which an expired
+// credential's sessions already do. It writes one launcher_credential.retired audit row as actor.
+// A credential already revoked or past its expiry changes nothing; an unknown id is
+// ErrNoCredential. It takes the credential's row as a revoke does, so an enrollment Create holding
+// it for share commits first.
+func (s *Service) RetireCredential(ctx context.Context, id, actor string) error {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var host string
+	var service *string
+	var live bool
+	err = tx.QueryRow(ctx, `select host, service, revoked_at is null and expires_at > now() from launcher_credentials
+		where id = $1 for no key update`, id).Scan(&host, &service, &live)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNoCredential
+	}
+	if err != nil {
+		return err
+	}
+	if !live {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `update launcher_credentials set expires_at = now() where id = $1`, id); err != nil {
+		return err
+	}
+	if err := oauthstore.DeleteCredentialTokens(ctx, tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.retired',$1,
+		jsonb_strip_nulls(jsonb_build_object('credential_id',$2::text,'host',$3::text,'service',$4::text)))`, actor, id, host, service); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ReuseActor is the actor RevokeReusedCredential records: the broker, on finding a rotated
+// refresh token redeemed after its grace.
+const ReuseActor = "broker:refresh-token-reuse"
+
+// RevokeReusedCredential revokes launcher credential id in tx, as RevokeCredential does, because
+// a refresh token of its machine login was redeemed after it had been rotated and its grace had
+// passed: someone else holds a copy of the login, and the key it holds keeps enrolling sessions
+// until the credential itself ends. Every row it writes names ReuseActor. It takes the
+// credential's row first, as RevokeCredential does. A credential already revoked, or unknown,
+// changes nothing. It is the broker's oauthstore.Store.Reused.
+func RevokeReusedCredential(ctx context.Context, tx pgx.Tx, id string) error {
+	var host string
+	var service *string
+	var revokedAt *time.Time
+	err := tx.QueryRow(ctx, `select host, service, revoked_at from launcher_credentials where id = $1 for no key update`, id).Scan(&host, &service, &revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && revokedAt != nil {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return endCredential(ctx, tx, id, host, service, ReuseActor, "its machine login's refresh token was reused")
+}
+
+// endCredential revokes launcher credential id in tx, whose row the caller holds: it sets
+// revoked_at, ends its OAuth tokens, ends every enrollment it made that has not ended
+// (endEnrollment, reason), and writes one launcher_credential.revoked audit row, each as actor.
+func endCredential(ctx context.Context, tx pgx.Tx, id, host string, service *string, actor, reason string) error {
 	if _, err := tx.Exec(ctx, `update launcher_credentials set revoked_at=now() where id=$1`, id); err != nil {
+		return err
+	}
+	// A device login's tokens name the credential, so its next refresh is refused too.
+	if err := oauthstore.EndCredential(ctx, tx, id); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and revoked_at is null order by id for update`, id)
@@ -865,16 +947,14 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 		return err
 	}
 	for _, enrollment := range ended {
-		if _, _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", "its machine login was revoked"); err != nil {
+		if _, _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", reason); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.revoked',$1,
+	_, err = tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.revoked',$1,
 		jsonb_strip_nulls(jsonb_build_object('credential_id',$2::text,'host',$3::text,'service',$4::text,'enrollments',coalesce(to_jsonb($5::text[]),'[]'::jsonb))))`,
-		actor, id, host, service, ended); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+		actor, id, host, service, ended)
+	return err
 }
 
 // Lookup answers proof.Verifier's Lookup callback. id comes from an untrusted proof's eid claim,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -22,8 +23,9 @@ type wakeCall struct {
 
 // TestSweeperTickExpiresPendingRequestsAndMachineLogins exercises one Tick's whole contract: an
 // overdue pending agent_secret request is expired and its owner woken exactly once, a request
-// still inside its deadline is left alone and never woken, and an overdue pending machine login
-// gets its own 'expired' event.
+// still inside its deadline is left alone and never woken, an overdue pending machine login
+// gets its own 'expired' event, and spent OAuth state is deleted (oauthstore's own tests pin
+// which rows count as spent).
 func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
@@ -60,6 +62,10 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 		loginRecordID, fixtureOperator, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("insert overdue machine login: %v", err)
 	}
+	if _, err := m.Store.Pool.Exec(ctx, `insert into oauth_device_codes (signature, user_code_signature, request, expires_at)
+		values ($1, $1, '{}', now() - interval '2 hours')`, "device-"+t.Name()); err != nil {
+		t.Fatalf("insert a spent device code: %v", err)
+	}
 
 	machineLogins := &machine.Service{Store: m.Store}
 
@@ -69,6 +75,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 		Enrollments:   &enroll.Service{Store: m.Store},
 		Machine:       m,
 		MachineLogins: machineLogins,
+		OAuth:         oauthstore.New(m.Store.Pool),
 		Interval:      time.Hour,
 		Wake: func(_ context.Context, enrollmentID, requestID, state string) {
 			mu.Lock()
@@ -119,6 +126,10 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 	if loginEvent != "expired" {
 		t.Fatalf("machine login event = %q, want expired", loginEvent)
 	}
+	var devices int
+	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from oauth_device_codes where signature=$1`, "device-"+t.Name()).Scan(&devices); err != nil || devices != 0 {
+		t.Fatalf("spent device codes after the tick = %d (%v), want 0", devices, err)
+	}
 }
 
 // TestSweeperEndsLapsedEnrollments pins that one Tick ends an enrollment whose lease has lapsed,
@@ -154,7 +165,7 @@ func TestSweeperEndsLapsedEnrollments(t *testing.T) {
 	}
 
 	var woken []wakeCall
-	sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, Interval: time.Hour,
+	sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, OAuth: oauthstore.New(m.Store.Pool), Interval: time.Hour,
 		Wake: func(_ context.Context, enrollmentID, requestID, state string) {
 			woken = append(woken, wakeCall{enrollmentID, requestID, state})
 		}}
@@ -238,7 +249,7 @@ func TestCreateWritesNothingOnAnEnrollmentTheSweepEnded(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m, enr, key, _ := newFixture(t)
 			ctx := context.Background()
-			sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, Interval: time.Hour}
+			sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, OAuth: oauthstore.New(m.Store.Pool), Interval: time.Hour}
 			replay := m.Replay
 			// Create calls Replay after it reads the enrollment and before it writes.
 			m.Replay = func(ctx context.Context, jti string, expires time.Time) (bool, error) {

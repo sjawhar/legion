@@ -1,8 +1,8 @@
 // packages/envoy/cmd/agent-secrets/nocredential_linux_test.go
 //go:build linux
 
-// A machine session on a helper that holds no launcher credential has no broker identity: after a
-// reboot or helper restart the helper enrolls no one until the operator logs the machine in, so
+// A machine session on a helper that holds no launcher credential has no broker identity: a helper
+// never logged in, or whose login lapsed or was refused, enrolls no one until the operator logs the machine in, so
 // identity sends its callers to their other backend, and every command that meets the helper's
 // NO_CREDENTIAL answer says so in one line. Linux-only for the real helper's pidfd pinning.
 package main
@@ -82,13 +82,12 @@ func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
 // session stays unenrolled for the whole test.
 func TestIdentityWhileAHelperWithACredentialEnrolls(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/launcher-credentials", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{"pending_id":"pending-1","code":"ABCD-EFGH"}`))
+	mux.HandleFunc("POST /v1/oauth/device_authorization", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"device_code": "device-1", "user_code": "ABCD-EFGH", "verification_uri": "https://s", "expires_in": 900, "interval": 1})
 	})
-	mux.HandleFunc("GET /v1/launcher-credentials/pending-1", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]string{"state": "issued", "credential_id": "cred-1"})
+	mux.HandleFunc("POST /v1/oauth/token", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"access_token": "access-1", "token_type": "DPoP", "expires_in": 900, "refresh_token": "refresh-1",
+			"credential_id": "cred-1", "credential_expires_at": time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)})
 	})
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -72,8 +72,8 @@ type helperSigner struct {
 }
 
 // errNoCredential is what a machine session gets from a helper that holds no launcher credential
-// (NO_CREDENTIAL): after every reboot or helper restart, until the operator logs the machine in,
-// the helper enrolls no one, so the session has no broker identity. identity prints it, and
+// (NO_CREDENTIAL): never logged in, or its login lapsed or was refused, until the operator logs the
+// machine in again, the helper enrolls no one, so the session has no broker identity. identity prints it, and
 // reportError prints it the same way for every command that meets it.
 var errNoCredential = errors.New("this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets machine login)")
 

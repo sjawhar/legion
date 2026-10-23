@@ -161,8 +161,11 @@ echo "$APPROVER_LOGIN" >"$OPERATOR_FILE"
 # dying of SIGPIPE before it drained. tee ends once the broker exits and closes the pipe. ---
 echo "dev-broker: starting broker..." >&2
 : >"$BROKER_LOG"
+# BROKER_MACHINE_LOGIN_URL is a placeholder: no Dispatch runs here, and devrelay stands in for it
+# (it approves a login by its code without a page).
 BROKER_DATABASE_URL="$POSTGRES_URL" \
 BROKER_PUBLIC_URL="$PUBLIC_URL" \
+BROKER_MACHINE_LOGIN_URL="http://127.0.0.1/credentials/machine" \
 BROKER_UI_TOKEN="$UI_TOKEN" \
 BROKER_SECRETS_PREFIX="$SECRETS_PREFIX" \
 BROKER_SECRETS_KMS_KEY_ARN="$SECRETS_KMS_KEY_ARN" \
@@ -227,6 +230,7 @@ dev-broker: ready.
   export AGENT_SECRETS_APPROVER=$APPROVER_LOGIN
   export AGENT_SECRETS_HELPER_SOCK=$WORK_DIR/helper.sock
   export AGENT_SECRETS_OPERATOR_FILE=$OPERATOR_FILE
+  export AGENT_SECRETS_MACHINE_FILE=$WORK_DIR/machine.json
   export DEV_BROKER_DIR=$WORK_DIR
   export PATH=$BIN_DIR:\$PATH
 

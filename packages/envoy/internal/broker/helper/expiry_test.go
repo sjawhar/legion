@@ -6,9 +6,12 @@ package helper
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -59,59 +62,93 @@ func recordTime(t *testing.T, rec map[string]any) time.Time {
 	return at
 }
 
-const (
-	expiresSoonMsg = "the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets machine login, and have a human approve it"
-	expiredMsg     = dropExpired + "; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)"
-)
+const expiredMsg = dropExpired + "; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)"
 
-// TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen: the broker mints no
-// renewal, so the helper says ahead of time (a day, shortened here) that the credential needs a
-// new machine login, and at its expiry drops it as a refusal would and says so at ERROR:
-// login-status then reads expired rather than reporting a credential the broker will refuse.
+// expiryTimers stands in for watchExpiry's timers (Broker.testAfter): each timer a watch starts
+// is recorded with how long it was asked to wait, and fires only when the test fires it.
+type expiryTimers struct {
+	mu     sync.Mutex
+	timers []expiryTimer
+}
+
+type expiryTimer struct {
+	cred *machineCredential
+	d    time.Duration
+	ch   chan time.Time
+}
+
+func installExpiryTimers(b *Broker) *expiryTimers {
+	et := &expiryTimers{}
+	b.testAfter = func(cred *machineCredential, d time.Duration) <-chan time.Time {
+		et.mu.Lock()
+		defer et.mu.Unlock()
+		ch := make(chan time.Time, 1)
+		et.timers = append(et.timers, expiryTimer{cred, d, ch})
+		return ch
+	}
+	return et
+}
+
+// fire waits for cred's n-th timer (0: the warning, 1: the expiry), fires it, and returns how
+// long it was asked to wait.
+func (et *expiryTimers) fire(t *testing.T, cred *machineCredential, n int) time.Duration {
+	t.Helper()
+	var got *expiryTimer
+	waitFor(t, func() bool {
+		et.mu.Lock()
+		defer et.mu.Unlock()
+		i := 0
+		for k := range et.timers {
+			if et.timers[k].cred == cred {
+				if i == n {
+					got = &et.timers[k]
+					return true
+				}
+				i++
+			}
+		}
+		return false
+	})
+	got.ch <- time.Now()
+	return got.d
+}
+
+// TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen: with no refresh moving its
+// expiry (here the helper's refresh loop has not run), the helper says ahead of time (a day,
+// shortened here) that the credential lapses soon, and at the stored expiry drops it as a refusal
+// would and says so at ERROR: login-status then reads expired rather than reporting a credential
+// the broker will refuse. The watch's timers are the test's, so it checks how long each waits
+// instead of waiting for them.
 func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
-	f.mu.Lock()
-	f.loginLifetime = 3 * time.Second
-	f.mu.Unlock()
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client(),
-		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: 2 * time.Second}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
+		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: 2 * time.Hour}
+	timers := installExpiryTimers(b)
 
 	cred := expiryLogin(t, b)
 	status := b.LoginStatus()
-	if !status.CredentialHeld || !status.CredentialExpiresAt.Equal(cred.expiresAt) || time.Until(cred.expiresAt) > 3*time.Second {
-		t.Fatalf("login-status after the login: %+v; want the credential held, expiring within 3 s", status)
+	if !status.CredentialHeld || !status.CredentialExpiresAt.Equal(cred.expiresAt) {
+		t.Fatalf("login-status after the login: %+v; want the credential held until %s", status, cred.expiresAt)
 	}
-
-	deadline := cred.expiresAt.Add(5 * time.Second)
-	for b.HasCredential() {
-		if time.Now().After(deadline) {
-			t.Fatalf("the credential is still held 5 s past its expiry %s", cred.expiresAt)
-		}
-		time.Sleep(20 * time.Millisecond)
+	left := time.Until(cred.expiresAt)
+	if d := timers.fire(t, cred, 0); d > left-2*time.Hour+time.Second || d < left-2*time.Hour-time.Minute {
+		t.Fatalf("the warning waits %s; want %s less the 2 h warning", d, left)
 	}
+	warned := waitForRecord(t, &out, expiresSoonMsg)
 	expiresAt := cred.expiresAt.Format(time.RFC3339)
-	// drop clears the credential before it logs the drop, so the ERROR can land just after
-	// HasCredential turns false; the warning came before both.
+	if warned["level"] != "WARN" || warned["credential_id"] != cred.id || warned["expires_at"] != expiresAt {
+		t.Fatalf("the warning before the expiry: %v; want a WARN naming %s and %s", warned, cred.id, expiresAt)
+	}
+	if !b.HasCredential() {
+		t.Fatal("the warning dropped the credential")
+	}
+	if d := timers.fire(t, cred, 1); d > left+time.Second || d < left-time.Minute {
+		t.Fatalf("the expiry waits %s; want %s", d, left)
+	}
 	expired := waitForRecord(t, &out, expiredMsg)
-	var warned map[string]any
-	for _, rec := range logRecords(t, &out) {
-		if rec["msg"] == expiresSoonMsg {
-			warned = rec
-		}
-	}
-	if warned == nil || warned["level"] != "WARN" || warned["credential_id"] != cred.id || warned["expires_at"] != expiresAt {
-		t.Fatalf("the warning before the expiry: %v; want a WARN naming %s and %s (log: %s)", warned, cred.id, expiresAt, out.String())
-	}
-	// It comes no sooner than expiryWarning before the expiry (the JSON time is to the nanosecond).
-	if at := recordTime(t, warned); at.Before(cred.expiresAt.Add(-2*time.Second)) || !at.Before(cred.expiresAt) {
-		t.Fatalf("the warning came at %s; want within 2 s before the expiry %s", at, cred.expiresAt)
-	}
 	if expired["level"] != "ERROR" || expired["credential_id"] != cred.id || expired["expires_at"] != expiresAt {
 		t.Fatalf("the expiry line: %v; want an ERROR naming %s and %s (log: %s)", expired, cred.id, expiresAt, out.String())
-	}
-	if at := recordTime(t, expired); at.Before(cred.expiresAt) {
-		t.Fatalf("the credential was dropped at %s, before its expiry %s", at, cred.expiresAt)
 	}
 	if status := b.LoginStatus(); status.State != "expired" || !status.Refused || status.Dropped != dropExpired || status.CredentialHeld || !status.CredentialExpiresAt.IsZero() {
 		t.Fatalf("login-status after the expiry: %+v; want expired, dropped at its expiry, no credential and no expiry", status)
@@ -122,7 +159,7 @@ func TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen(t *testi
 }
 
 // TestTheHelperWarnsADayBeforeTheExpiry: with no lead set, as in production, the warning comes a
-// day before the credential expires. A credential with less than a day left warns at once; one
+// day before the credential lapses. A credential with less than a day left warns at once; one
 // with more than a day left does not warn yet.
 func TestTheHelperWarnsADayBeforeTheExpiry(t *testing.T) {
 	for _, tc := range []struct {
@@ -138,7 +175,7 @@ func TestTheHelperWarnsADayBeforeTheExpiry(t *testing.T) {
 			f.mu.Lock()
 			f.loginLifetime = tc.lifetime
 			f.mu.Unlock()
-			b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client(),
+			b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
 				Log: slog.New(slog.NewJSONHandler(&out, nil))}
 			expiryLogin(t, b)
 			warned := func() bool {
@@ -155,27 +192,30 @@ func TestTheHelperWarnsADayBeforeTheExpiry(t *testing.T) {
 	}
 }
 
-// TestANewerLoginSilencesTheExpiryOfTheCredentialItReplaces: the weekly re-login installs a fresh
-// credential before the old one expires; the old one's warning and expiry must then say nothing,
+// TestANewerLoginSilencesTheExpiryOfTheCredentialItReplaces: a re-login installs a fresh
+// credential before the old one lapses; the old one's warning and expiry must then say nothing,
 // and above all must not drop the credential that replaced it.
 func TestANewerLoginSilencesTheExpiryOfTheCredentialItReplaces(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
-	f.mu.Lock()
-	f.loginLifetime = 2 * time.Second
-	f.mu.Unlock()
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client(),
-		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: time.Second}
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
+		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: time.Hour}
+	timers := installExpiryTimers(b)
+	watchEnded := make(chan *machineCredential, 4)
+	b.testWatchEnded = func(cred *machineCredential) { watchEnded <- cred }
 
 	old := expiryLogin(t, b)
-	f.mu.Lock()
-	f.loginLifetime = 7 * 24 * time.Hour
-	f.mu.Unlock()
 	fresh := expiryLogin(t, b)
-	time.Sleep(time.Until(old.expiresAt.Add(time.Second)))
+	timers.fire(t, old, 0)
+	// The old credential's watch has said all it will once it ends.
+	for ended := range watchEnded {
+		if ended == old {
+			break
+		}
+	}
 
 	if b.cred.Load() != fresh {
-		t.Fatalf("the credential held past the old one's expiry is %+v; want the newer login's %s", b.cred.Load(), fresh.id)
+		t.Fatalf("the credential held after the old one's timers is %+v; want the newer login's %s", b.cred.Load(), fresh.id)
 	}
 	for _, rec := range logRecords(t, &out) {
 		if rec["msg"] == expiresSoonMsg || rec["msg"] == expiredMsg {
@@ -184,31 +224,29 @@ func TestANewerLoginSilencesTheExpiryOfTheCredentialItReplaces(t *testing.T) {
 	}
 }
 
-// TestABrokerThatNamesNoExpiryGetsAWarning: a broker from before expires_at issues a credential
-// without saying when it expires; the helper holds it, says once that it cannot warn before the
-// expiry, and login-status carries no expiry rather than a made-up one.
-func TestABrokerThatNamesNoExpiryGetsAWarning(t *testing.T) {
+// TestATokenAnswerWithoutTheCredentialIsNotKept: a token answer that does not name the launcher
+// credential's expiry is not a login the helper can keep or watch. It installs nothing, writes no
+// machine file, says so at ERROR, and the login reads expired, so `machine login` exits 1.
+func TestATokenAnswerWithoutTheCredentialIsNotKept(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
 	f.mu.Lock()
 	f.loginLifetime = 0
 	f.mu.Unlock()
-	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client(),
+	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
 		Log: slog.New(slog.NewJSONHandler(&out, nil))}
-	srv := &Server{Broker: b}
-
-	cred := expiryLogin(t, b)
-	if resp := srv.loginStatus(); !resp.CredentialHeld || resp.CredentialExpiresAt != "" {
-		t.Fatalf("login-status: %+v; want the credential held and no expiry", resp)
+	if _, err := b.Login(context.Background(), "example-host-devbox"); err != nil {
+		t.Fatal(err)
 	}
-	// pollLogin logs the warning after it installs the credential expiryLogin waited for.
-	warned := waitForRecord(t, &out, "the broker did not say when the launcher credential expires, so the helper cannot warn before it does")
-	if warned["level"] != "WARN" || warned["credential_id"] != cred.id {
-		t.Fatalf("the line saying the expiry is unknown: %v; want a WARN naming %s (log: %s)", warned, cred.id, out.String())
+	line := waitForRecord(t, &out, "machine login approved, but the helper could not keep it; run: agent-secrets machine login again")
+	if line["level"] != "ERROR" {
+		t.Fatalf("the line: %v; want an ERROR", line)
 	}
-	for _, rec := range logRecords(t, &out) {
-		if _, ok := rec["expires_at"]; ok {
-			t.Fatalf("a line names an expiry the broker never gave: %v", rec)
-		}
+	waitFor(t, func() bool { return b.LoginStatus().State == "expired" })
+	if b.HasCredential() {
+		t.Fatal("a login the helper cannot keep must not install a credential")
+	}
+	if _, err := LoadMachineFile(b.MachineFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a login the helper cannot keep wrote a machine file: %v", err)
 	}
 }

@@ -77,17 +77,33 @@ proved instead.
 A launcher (a person's machine helper, or the Legion daemon) cannot enroll anything until the
 broker has issued it a **launcher credential**: a credential bound to a key the launcher holds, never
 a token, which the launcher uses by signing with that key. A person's machine gets one when that
-person approves a **machine login**, which works like a device code:
+person approves a **machine login**, an OAuth 2.0 device authorization grant (RFC 8628) on the
+broker's own endpoints:
 
 1. The machine generates a fresh key and asks the broker to log in (`agent-secrets machine login`
-   asks the helper to), naming the person who should approve it (the helper reads that person's
-   Dispatch login from `AGENT_SECRETS_OPERATOR_FILE`).
+   asks the helper to, which calls `POST /v1/oauth/device_authorization`), naming the person who
+   should approve it (the helper reads that person's Dispatch login from
+   `AGENT_SECRETS_OPERATOR_FILE`).
 2. The broker answers with an eight-character confirmation code, `XXXX-XXXX`, which the machine
-   prints.
+   prints, and the machine polls `POST /v1/oauth/token` for the decision.
 3. The person types the code into Dispatch, sees which machine is asking, and approves or denies it.
    Only the typed code selects a machine login: no link can approve one, and anyone else is refused
    `NOT_APPROVER`, since the machine's sessions act as that person.
-4. On approval the broker mints the launcher credential bound to the machine's key.
+4. On approval the broker mints the launcher credential bound to the machine's key, and the
+   machine's next poll gets a refresh token for it, bound to the same key (DPoP, RFC 9449).
+
+The helper keeps the login (its key, the credential's id and expiry, and the current refresh
+token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` by default),
+readable only by its user, so a restarted helper resumes it. It refreshes the login when it starts,
+before it resumes it, and at most a day apart after: each refresh spends the refresh token for a new one and moves the
+credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from then. A refresh token it has
+replaced still works for five minutes, so a refresh the broker did not answer (its answer lost, a
+timeout, the broker unreachable) or answered with a 5xx is retried every 15 s for as long as that
+lasts. Spent after the five minutes, it is a reuse: the broker ends every refresh token of
+the login and revokes the machine's credential as a revoke does, ending every session it enrolled,
+and the helper holding it drops it at its next refresh. A newer login of the same machine instead
+retires the one it replaced: that login can no longer refresh or enroll a session, and the
+sessions it enrolled keep running.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
 token instead, and no person approves it: the broker verifies the token as it verifies a pod's,
@@ -99,18 +115,22 @@ service logs in again before then and at every restart; a running daemon proves 
 each login, and a restart brings a new one. A device-code login that names a service is refused
 `SERVICE_LOGS_IN_WITH_TOKEN`.
 
-A person's launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from
-Dispatch's machine-login page by the person who approved it and no one else, or from any of their
-machines under its machine login (`agent-secrets machine revoke`), before or after it expires,
-which also ends every session it enrolled
+A person's launcher credential lapses `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after its approval or
+its last refresh, so a machine whose helper keeps reaching the broker stays logged in. It may be
+revoked from Dispatch's machine-login page by the person who approved it and no one else, or from
+any of their machines under its machine login (`agent-secrets machine revoke`), before or after it
+expires, which also ends every session it enrolled and every refresh token it holds
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). Its
 sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
 credential, so a box keeps working after the machine's credential expires, and the page lists an
 expired login, marked as expired with sessions still running, until its last session ends. Whoever
-approved a person's machine login is its operator. The helper keeps its key in memory only, so a
-helper restart, like an expired or revoked credential, means logging the machine in again. A
-machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
-(`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A service's login has no
+approved a person's machine login is its operator. A lapsed or revoked login means logging the
+machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
+a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). The broker also
+serves the login helpers from earlier releases use, `POST /v1/launcher-credentials` and its poll
+`GET /v1/launcher-credentials/{pending}`: it mints the same credential but no refresh token, so
+that login lapses seven days after its approval, or `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after it
+when that is shorter. A service's login has no
 operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
 ends every pod it enrolled at once: a service login a person approved through a code before
 services logged in with their tokens, until it expires, and a service's token login, which names no

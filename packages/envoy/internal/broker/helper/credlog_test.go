@@ -32,7 +32,7 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 	var out syncBuffer
 	f := newFakeBroker(t)
 	operator := operatorFile(t, "ada@example.com")
-	b := &Broker{URL: f.srv.URL, OperatorFile: operator, HTTP: f.srv.Client(),
+	b := &Broker{URL: f.srv.URL, OperatorFile: operator, MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
 		Log: slog.New(slog.NewJSONHandler(&out, nil))}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
