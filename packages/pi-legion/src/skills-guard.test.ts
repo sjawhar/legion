@@ -151,20 +151,31 @@ test("the skip-checks recipe writes two empty lines before the trailer, everywhe
 // paragraph that defined it back into skills/legion-worker/references/pr-body.md with no conflict
 // for anyone to read: a merge keeps both sides by design, so a deletion is undone in silence. The
 // body carries no such line, and that reference is the file every worker reads before it touches a
-// body, so no staged skill may say what the line holds or tell anyone to write one.
+// body, so no staged skill and no daemon prompt may say what the line holds or tell anyone to
+// write one.
 //
-// The rule fires on the instruction, never on a mention, because an instruction puts the line in a
-// grammatical slot a mention cannot reach: as the subject of a verb that says what it contains
-// ("the `CI` line names the runs"), as the object of a verb that says to write one behind a
-// definite determiner ("writes the `CI` line", "cited from the `CI` line"), or as the template's
-// own field line (`**CI:**` opening a line). A sentence that names the line while saying it is
-// gone cannot take any of those shapes: it puts the negator in the determiner slot ("has no `CI:`
-// line", "carries no `CI:` line"), leaves the verb after the reference and passive ("wherever the
-// CI line is quoted", "no `CI:` line to fill"), or negates the verb ("never writes the `CI`
-// line"). What the rule does not catch is a pronoun — a sentence saying only "the implementer
-// writes it" passes — which is why the anchor is the defining sentence such a paragraph opens
-// with, not its later anaphora.
-test("no staged skill says what a pull request body `CI` line holds, or tells anyone to write one", () => {
+// What it pins is three shapes the regression took, not a class. First, the reference (`CI` line,
+// `CI:` line, `**CI**` line, `"CI"` line or bare CI line) as the subject of one of seven verbs
+// that say what it contains: `names`, `holds`, `carries`, `lists`, `records`, `shows`, `gives`.
+// Second, the reference as the object of one of ten spellings of seven verbs that say to write it
+// — `writes`/`written`, `fills`/`filled`, `updates`, `cites`/`cited`, `defines`, `quotes`,
+// `records`, each optionally `re-` prefixed — behind a definite determiner (`the`, `a`, `its`,
+// `this`, `each`) up to two words after the verb, with a lookbehind that drops `never`, `no
+// longer` and `not`. Third, the template's own `**CI:**` field line. The determiner and the
+// lookbehind are what let a sentence naming the line while saying it is gone pass: "has no `CI:`
+// line", "no `CI:` line to fill", "never writes the `CI` line".
+//
+// Four shapes it does not catch. The copular: "The body's CI line is the runs GitHub started for
+// the code head" uses no verb from either list. The nominalisation: "that reference is the sole
+// definition of the CI line", which is the sentence this branch deletes from
+// packages/daemon/internal/prompts/roles/implementer.md. A writing verb outside the list: "must
+// populate the CI line from one `gh run list`", "Keep the body's CI line current after every
+// push". And the anaphora: a sentence saying only "the implementer writes it" passes, which is
+// why the anchor is the defining sentence such a paragraph opens with, not its later pronouns.
+//
+// So this test pins those three shapes and closes no class: a reader who needs a new shape caught
+// adds it here rather than assuming it is covered.
+test("no staged skill or daemon prompt says what a pull request body `CI` line holds, or tells anyone to write one", () => {
   // `CI` line, `CI:` line, **CI** line, "CI" line, or bare CI line, wrapped across lines or not.
   const reference = String.raw`(?:\*\*|\`|")?CI:?(?:\*\*|\`|")?\s+line`;
   const instructions = [
@@ -182,15 +193,20 @@ test("no staged skill says what a pull request body `CI` line holds, or tells an
     // The template's own field line, which is an instruction to fill it in.
     /^\*\*CI:?\*\*/gm,
   ];
-  const instructing = files(staged)
+  const instructing = [staged, promptsRoot]
+    .flatMap(files)
     .filter((file) => file.endsWith(".md"))
     .flatMap((file) => {
       const text = readFileSync(file, "utf8");
+      // A hit in the staged partition reads as its own layout has it
+      // (`legion-worker/references/pr-body.md`); a hit in the prompts, which live in the
+      // repository, reads from the repository root.
+      const name = file.startsWith(staged)
+        ? path.relative(staged, file)
+        : path.relative(REPO_ROOT, file);
       return instructions
         .flatMap((instruction) => [...text.matchAll(instruction)])
-        .map(
-          ({ index }) => `${path.relative(staged, file)}:${text.slice(0, index).split("\n").length}`
-        );
+        .map(({ index }) => `${name}:${text.slice(0, index).split("\n").length}`);
     });
   expect(instructing).toEqual([]);
 });

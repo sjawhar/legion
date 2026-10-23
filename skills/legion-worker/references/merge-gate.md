@@ -46,10 +46,11 @@ it, and any other change to the head voids it.
   (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
   as passing for a required check). And the compare proving only `.legion/` changed since
-  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '[.files[].filename] | all(startswith(".legion/"))'`
-  prints `true`; `false` means code was pushed since CI ran, so wait for the new push's runs and
-  read the CI head again). GitHub's compare lists at most 300 files for the whole comparison, so
-  a `true` from a compare of 300 files decides nothing: do not approve on it. A required check
+  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[].filename] | all(startswith(".legion/"))), files: (.files | length)}'`
+  prints `handoffsOnly` `true`; `false` means code was pushed since CI ran, so wait for the new
+  push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
+  comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides
+  nothing: tell the architect and do not approve. A required check
   `queued` or `in_progress`: wait. One `completed` as
   `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
   check only a commit status reports, a workflow another repository defines), tell the architect
