@@ -334,6 +334,35 @@ func TestTheTokenEndpointWaitsUntilTheCodeIsApproved(t *testing.T) {
 	}
 }
 
+// TestAPollThatReadThePendingCodeBeforeTheApprovalKeepsTheApproval: the library records a pending
+// poll's time by writing back the device code it read. That write landing after an approval
+// committed leaves the approval in place, so the next poll is issued its tokens.
+func TestAPollThatReadThePendingCodeBeforeTheApprovalKeepsTheApproval(t *testing.T) {
+	f := newFixture(t)
+	key := newKey(t)
+	deviceCode, userCode := f.authorize(t, key)
+	ctx := context.Background()
+	store := oauthstore.New(f.pool)
+	var signature string
+	if err := f.pool.QueryRow(ctx, `select signature from oauth_device_codes`).Scan(&signature); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.GetDeviceCodeSession(ctx, signature, nil)
+	if err != nil {
+		t.Fatalf("read the pending code: %v", err)
+	}
+	if err := f.provider.ApproveDevice(ctx, userCode, true, map[string]any{"credential_id": f.newCredential(t)}); err != nil {
+		t.Fatalf("ApproveDevice: %v", err)
+	}
+	pending.SetLastChecked(time.Now())
+	if err := store.UpdateDeviceCodeSession(ctx, signature, pending); err != nil {
+		t.Fatalf("the poll's late write: %v", err)
+	}
+	if status, body := f.poll(t, deviceCode, key); status != http.StatusOK {
+		t.Fatalf("poll after the late write = %d %v, want 200", status, body)
+	}
+}
+
 func TestADeniedCodeAnswersAccessDenied(t *testing.T) {
 	f := newFixture(t)
 	key := newKey(t)

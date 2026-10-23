@@ -341,17 +341,27 @@ func (s *Store) CreateDeviceCodeSession(ctx context.Context, signature string, r
 }
 
 // UpdateDeviceCodeSession rewrites a stored device code's request (its status and last poll); an
-// unknown signature changes nothing, and an invalidated code stays invalidated.
+// unknown signature changes nothing. A code already decided (approved or denied) or invalidated
+// keeps its status and stored request, and only its last poll moves: the library records a
+// pending poll by writing back the code it read before the poll's transaction, so that write can
+// land after an approval committed, and it must not undo the approval.
 func (s *Store) UpdateDeviceCodeSession(ctx context.Context, signature string, request oauth2.DeviceAuthorizeRequester) error {
 	raw, session, err := deviceJSON(request)
 	if err != nil {
 		return err
 	}
-	_, err = s.db(ctx).Exec(ctx, `update oauth_device_codes
-		set user_code_signature = $2, request = $3, expires_at = $5,
-		    status = case when status = $6 then status else $4 end
+	lastChecked, err := json.Marshal(request.GetLastChecked())
+	if err != nil {
+		return fmt.Errorf("encode device code poll time: %w", err)
+	}
+	_, err = s.db(ctx).Exec(ctx, `update oauth_device_codes set
+		user_code_signature = case when status = $6 then $2 else user_code_signature end,
+		request = case when status = $6 then $3 else request || jsonb_build_object('last_checked', $7::jsonb) end,
+		expires_at = case when status = $6 then $5 else expires_at end,
+		status = case when status = $6 then $4 else status end
 		where signature = $1`,
-		signature, request.GetUserCodeSignature(), raw, int(request.GetStatus()), expiry(session, oauth2.DeviceCode), deviceInvalidated)
+		signature, request.GetUserCodeSignature(), raw, int(request.GetStatus()), expiry(session, oauth2.DeviceCode),
+		int(oauth2.DeviceAuthorizeStatusNew), lastChecked)
 	if err != nil {
 		return fmt.Errorf("update device code: %w", err)
 	}
