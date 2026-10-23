@@ -13,7 +13,11 @@ export interface DispatchToolSpec {
   readonly arguments: <E extends SchemaNode<E>>(z: SchemaApi<E>) => ToolArgumentsShape;
   readonly validation?: {
     readonly check: (value: unknown) => boolean;
+    /** The whole rule, as the tool's reference states it. */
     readonly message: string;
+    /** The refusal of a value `check` rejects, naming the part of the rule it breaks; `message`
+     *  when absent. */
+    readonly refusal?: (value: unknown) => string;
   };
   /** Tool has no extensible arguments; reject unknown keys in every host. */
   readonly strict?: boolean;
@@ -32,7 +36,12 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
   const schemaOptions = strict === undefined ? undefined : { strict };
   return spec.validation === undefined
     ? z.object(shape, schemaOptions)
-    : z.refineObject(shape, spec.validation.check, spec.validation.message, schemaOptions);
+    : z.refineObject(
+        shape,
+        spec.validation.check,
+        spec.validation.refusal ?? spec.validation.message,
+        schemaOptions
+      );
 }
 
 const ISSUE_REFERENCE =
@@ -108,6 +117,55 @@ const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
   },
   message: `${commentOwner.message} turn requires reply_to_ask.`,
 };
+
+const ISSUE_UPDATE_FIELDS_RULE =
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+const ISSUE_UPDATE_DONE_RULE =
+  "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
+const ISSUE_UPDATE_REASON_RULE = "reason goes only with status done";
+const ISSUE_UPDATE_RULE = `${ISSUE_UPDATE_FIELDS_RULE} ${ISSUE_UPDATE_DONE_RULE}; ${ISSUE_UPDATE_REASON_RULE}.`;
+
+/** The refusal of the part of dispatch_issue_update's rule `value` breaks, or undefined when it
+ *  keeps the rule: reason is the close's note, so it goes with status done and with nothing else,
+ *  and the update names at least one field to change. `check` and `refusal` both read this one
+ *  function, so the refusal never names a part the call kept. */
+function issueUpdateProblem(value: unknown): string | undefined {
+  const input = value as {
+    readonly status?: unknown;
+    readonly reason?: unknown;
+    readonly title?: unknown;
+    readonly labels?: unknown;
+    readonly priority?: unknown;
+    readonly external_links?: unknown;
+    readonly route?: unknown;
+    readonly parent?: unknown;
+    readonly blocked_by?: unknown;
+    readonly components?: unknown;
+    readonly repo?: unknown;
+  };
+  if (input.status === "done") {
+    if (typeof input.reason !== "string" || input.reason.trim() === "") {
+      return `${ISSUE_UPDATE_DONE_RULE}.`;
+    }
+  } else if (input.reason !== undefined) {
+    const status =
+      typeof input.status === "string" ? `status ${input.status}` : "an update without status done";
+    return `${ISSUE_UPDATE_REASON_RULE}: it is the note posted on the issue as it closes, and ${status} closes nothing. Drop reason, or set status done to close the issue.`;
+  }
+  const changesAField =
+    typeof input.status === "string" ||
+    typeof input.title === "string" ||
+    Array.isArray(input.labels) ||
+    typeof input.priority === "number" ||
+    input.priority === null ||
+    Array.isArray(input.external_links) ||
+    typeof input.route === "string" ||
+    typeof input.parent === "string" ||
+    Array.isArray(input.blocked_by) ||
+    (typeof input.components === "object" && input.components !== null) ||
+    typeof input.repo === "string";
+  return changesAField ? undefined : ISSUE_UPDATE_FIELDS_RULE;
+}
 
 /**
  * dispatch_message: `issue` is required for every message except the one kind that cannot have
@@ -309,7 +367,7 @@ export const dispatchToolSpecs = [
         .optional(),
       priority: z
         .number({ int: true, min: 0, max: 3 })
-        .describe("Optional coarse priority: P0 is highest and P3 is lowest.")
+        .describe("Optional coarse priority, a number from 0 to 3: 0 is highest and 3 is lowest.")
         .optional(),
       assignee: z
         .string()
@@ -409,42 +467,9 @@ export const dispatchToolSpecs = [
         .optional(),
     }),
     validation: {
-      check: (value) => {
-        const input = value as {
-          readonly status?: unknown;
-          readonly reason?: unknown;
-          readonly title?: unknown;
-          readonly labels?: unknown;
-          readonly priority?: unknown;
-          readonly external_links?: unknown;
-          readonly route?: unknown;
-          readonly parent?: unknown;
-          readonly blocked_by?: unknown;
-          readonly components?: unknown;
-          readonly repo?: unknown;
-        };
-        const reasonFits =
-          input.status === "done"
-            ? typeof input.reason === "string" && input.reason.trim() !== ""
-            : input.reason === undefined;
-        return (
-          reasonFits &&
-          (typeof input.status === "string" ||
-            typeof input.title === "string" ||
-            Array.isArray(input.labels) ||
-            typeof input.priority === "number" ||
-            input.priority === null ||
-            Array.isArray(input.external_links) ||
-            typeof input.route === "string" ||
-            typeof input.parent === "string" ||
-            Array.isArray(input.blocked_by) ||
-            (typeof input.components === "object" && input.components !== null) ||
-            typeof input.repo === "string")
-        );
-      },
-      message:
-        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo. " +
-        "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.",
+      check: (value) => issueUpdateProblem(value) === undefined,
+      message: ISSUE_UPDATE_RULE,
+      refusal: (value) => issueUpdateProblem(value) ?? ISSUE_UPDATE_RULE,
     },
     strict: true,
   },

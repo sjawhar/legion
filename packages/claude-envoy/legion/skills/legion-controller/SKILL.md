@@ -132,6 +132,8 @@ else:
    `issues.<KEY>.architect.state` is `failed` and whose `issues.<KEY>.phase` is not `done`, exactly
    as the matching wake below. A parked tree (root phase `done`: it lingers or is closed) needs
    nothing from you: a failed architect ignores the park and reads `failed` until the tree closes.
+   A root at phase `done` with a running tree's `status` (`in_progress`, `testing`, `needs_review`,
+   `retro`) is one Legion let go while someone else works it (`unslotted`): name it in your summary.
 2. List the project's triage issues handed to Legion with
    `dispatch issues --project <PROJECT> --status triage --label legion --limit 250 --offset 0`.
    When its first line ends `(showing 1-250 of N)`, read the next page with `--offset 250`, and so
@@ -164,18 +166,17 @@ tree's architect once its root is admitted. `set_status` to `todo` admits a root
 outside a live tree (admitted as a root of its own), only while it carries the label, so an issue
 you hand over or file for Legion to run carries it first (`--label` on `dispatch issue-update` or
 `dispatch issue`). Taking the label off a waiting root drops it from the waiting line; taking it
-off an admitted tree does not stop it.
+off an admitted tree does not stop it ([reading admission](skill://legion-controller/references/admission.md)).
 
 ## Trees waiting on a root claim (Go daemon)
 
-A Go root architect whose claim on its root issue was refused starts nothing and waits, holding
-its slot, until the claim is free; nothing tells it when a session holder lets go without
-replying. So every turn rechecks them ([Turn discipline](#turn-discipline)), the daemon's `tick`
-included, which comes on its interval even with every slot taken: read each root in
-`admission.active` whose `issues.<KEY>.phase` is still `admitted` with `dispatch read`. When its
-`Claimed by:` line is `nobody` or ends `· not running`, tell that tree's architect to claim again
-with `envoy_publish` to `notifications.role.` followed by its claim token,
-`issues.<KEY>.architect.locator.claim` in `read_state`. A claim that is its architect's
+A Go root architect whose claim on its root issue was refused starts nothing and waits, holding its slot,
+until the claim is free; nothing tells it when a session holder lets go without replying. So every turn
+rechecks them ([Turn discipline](#turn-discipline)), the daemon's `tick` included, which comes on its
+interval even with every slot taken: read each root in `admission.active` whose `issues.<KEY>.phase` is
+still `admitted` with `dispatch read`. When its `Claimed by:` line is `nobody` or ends `· not running`,
+tell that tree's architect to claim again with `envoy_publish` to `notifications.role.` followed by its
+claim token, `issues.<KEY>.architect.locator.claim` in `read_state`. A claim that is its architect's
 own, or one that still holds, needs nothing.
 
 ## Keeping the slots full (Go daemon)
@@ -217,22 +218,20 @@ skipped (the last row of the table below). With no scope stated, every issue of 
 scope.
 
 **How many.** Read the daemon's state with `read_state`. The free slots are `admission.cap` minus the roots in
-`admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything
-you add). With none free, stop.
+`admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything you add). With none free, stop.
 
 **Candidates.** The project's open `todo` issues, roots and children alike, that have no children
 at all and do not carry the `legion` label. Ready work is `todo` (`skill://dispatch`, "Choosing
 what to work on"): take the top ready issue, highest priority first, then board rank. An issue that
 waits on a deploy or a decision belongs in `backlog`, so the walk takes nothing from `backlog` or
-`triage`. The Go daemon runs
-only labelled roots, so every root it ran since the daemon required the label carries it: a
-labelled root in `todo` is the daemon's to admit or queue, one in `triage` is yours to triage
-(step 2 above), and one anywhere else was parked by Legion or by a person. A child you take becomes
-a root of its own: the daemon admits a labelled `todo` child whose tree Legion does not run as a
-new tree. The `dispatch issues` rows show no labels and no children, so the listing below filters
-neither: both are checked on each candidate (the table's first rows). List the `todo` issues one
-priority at a time, `--priority 0` first, then `1`, `2`, `3`, and `none` (no priority)
-last, keeping the listing's order within each, which is the board's rank:
+`triage`. The Go daemon runs only labelled roots, so every root it ran since the daemon required
+the label carries it: a labelled root in `todo` is the daemon's to admit or queue, one in `triage`
+is yours to triage (step 2 above), and one anywhere else was parked by Legion or by a person. A
+child you take becomes a root of its own: the daemon admits a labelled `todo` child whose tree
+Legion does not run as a new tree. The `dispatch issues` rows show no labels and no children, so
+the listing below filters neither: both are checked on each candidate (the table's first rows).
+List the `todo` issues one priority at a time, `--priority 0` first, then `1`, `2`, `3`, and
+`none` (no priority) last, keeping the listing's order within each, which is the board's rank:
 
 ```text
 dispatch issues --project <PROJECT> --status todo --priority 0 --limit 250 --offset 0
@@ -406,6 +405,7 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
 | New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: `set_status` to `todo` to admit, or to `backlog`/`icebox` to park |
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `read_state`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
+| `unslotted on <KEY>` from the Go daemon (payload `{kind: "unslotted", reason}`) | a root that held no slot and waited for none: a person or another session moved it from `todo` to the status `reason` names while it waited, so the daemon took it out of the workflow (`issues.<KEY>.phase` is `done`) and starts nothing for it ([reading admission](skill://legion-controller/references/admission.md)) | Re-admit nothing yourself: the move was someone else's, and `dispatch read` shows who claims it now. Name it in your summary to the human ("<KEY> left Legion's waiting line: it was set to <status> while it waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again") |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `read_state`, and the live capabilities a running session's check failed, each with the detail naming the session (pod or pane), role, issue and fact, and no `configLine` | Recheck the trees waiting on a claim, then walk if a slot is free — a gap never stops the walk; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides a deployment row; the operator or the issue's architect fixes a live row's session; you take no other action) |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch ask` only for a human to-do |
 | Mention | GitHub PR @mention text | Answer, or route to the owning issue's architect role |

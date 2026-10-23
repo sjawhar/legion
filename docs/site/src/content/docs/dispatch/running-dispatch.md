@@ -10,6 +10,27 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 `packages/dispatch`. The container image `ghcr.io/sjawhar/legion/envoy` carries it as
 `/usr/local/bin/envoy-dispatch`.
 
+Pin the image by digest. Each `ghcr.io/sjawhar/legion/envoy:<commit>` image that
+`.github/workflows/release-envoy-listener.yaml` publishes carries a GitHub artifact attestation
+from that workflow (images published before attestation began carry none), and a tag does not say
+which run pushed it (a run dispatched by hand from any branch pushes one too), so accept a digest
+only when a run on `main` built it:
+
+```bash
+gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+```
+
+`latest` is a separate image index with its own digest and no attestation. To start from it, read
+the commit it names and pin that commit's image instead:
+
+```bash
+docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest \
+  | jq -r '.annotations["org.opencontainers.image.revision"]'
+docker buildx imagetools inspect ghcr.io/sjawhar/legion/envoy:<that commit>   # its Digest is the one to pin
+```
+
 ## What it needs
 
 | Need | Setting | Notes |

@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- The `dispatch` command (`dist/dispatch.js`) ends a write's cadence advice (three or more
+  messages on an issue with no human response) with that line, opening `Posted.`, so a tail of
+  the output shows the write went through; `dispatch issue --help` says `--priority` takes a
+  number from 0 to 3, 0 highest, where it named P0 to P3.
+
 - The `dispatch` command (`dist/dispatch.js`) reads an issue's document as a document summary,
   including the links `dispatch search` returns, where it printed the issue's summary; refuses
   owner arguments that disagree or that a command would drop (a document `comment` posts past

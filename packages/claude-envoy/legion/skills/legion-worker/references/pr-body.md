@@ -48,6 +48,28 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
 
+The `CI` line names the runs GitHub started for the code head, by run id, with each run's state
+as GitHub shows it when the line is written: `success`, a failure, or `queued` / `in progress`
+at <head-sha>, or `no run yet` when GitHub has started none. The implementer writes it at its completion from one `gh run list --commit <head-sha>`
+and never waits for a run to finish to fill it in: the daemon reads every settlement itself, and a
+check or workflow the base branch requires that settles red sends the work back to `implementing`,
+before or after that completion. A later role that reads CI on GitHub updates the line's states to
+what it read.
+
+## Never waiting on CI
+
+The implementer runs the repository's fast local checks for the paths it changed before the push,
+then pushes and completes. It never waits for, watches or polls the pull request's remote CI
+(`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop.
+Under the Go daemon a check or workflow the base branch requires that settles red on the head,
+before the completion or after it, sends the work back to `implementing` with the failing checks
+named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
+failed on its own, it re-runs the failed jobs once (`gh run rerun <run-id> --failed`) and completes once
+the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Waiting for
+CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completion while that red
+still stands is sent back, at once for a required check and at the daemon's next read of the runs
+(within two minutes) for a required workflow.
+
 ## The brief for the human
 
 `## For the reviewer` is written for the person who merges; `## Verification` below it stays the
@@ -95,7 +117,9 @@ and the tester's proof below are both this proof.
   would catch the ways it breaks, writing the red test for one that none would, and
   read CI on GitHub at the head you are judging for everything static: lint, types and the unit
   and integration suites are CI's, read there and recorded for no later step, and no CI lane is
-  rerun as evidence.
+  rerun as evidence. A lane GitHub shows `queued` or `in progress` is read as such: the tester
+  never waits for it, since a required red that settles sends the work back from `testing` and
+  the reviewer reads the head's checks before it approves.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns

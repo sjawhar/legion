@@ -10,7 +10,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -60,10 +62,29 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 		t.Fatalf("open the daemon's database: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	putOutboxIssue(t, pool, record.NewStore(), record.Issue{
-		Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Project: cfg.Project, Title: "held", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U",
-	})
-	// The issue's tree is admitted, as every tree the workflow runs is: its lifecycle is open.
+	// The issue's tree is admitted, as every tree the workflow runs is: it holds its slot, recorded
+	// with the issue in one transaction as promotion records them (a root in planning with no slot
+	// is one admission takes out of the workflow), and its lifecycle is open. Slot indexes are unique
+	// across the shared database, so the tree takes the next free one.
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		records := record.NewStore()
+		if err := records.PutIssue(context.Background(), tx, record.Issue{
+			Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Project: cfg.Project, Title: "held", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U",
+		}); err != nil {
+			return err
+		}
+		taken, err := records.Slots(context.Background(), tx)
+		if err != nil {
+			return err
+		}
+		index := 0
+		for _, slot := range taken {
+			index = max(index, slot.Index+1)
+		}
+		return records.PutSlot(context.Background(), tx, record.Slot{Issue: issue, Index: index, AdmittedAt: time.Now()})
+	}); err != nil {
+		t.Fatalf("record the running tree: %v", err)
+	}
 	st, err := store.Open(context.Background(), cfg.PostgresDSN)
 	if err != nil {
 		t.Fatalf("open the daemon's store: %v", err)

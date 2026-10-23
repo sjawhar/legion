@@ -286,7 +286,7 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
       -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
@@ -583,6 +583,11 @@ for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do comman
 # The suspension waits are bounded by lib/workflow.sh's turn budget, and the lib sourced is ACCEPT_ROOT's.
 [ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
 real_gh=$(mise which gh) || fail "mise has no gh"
+# The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
+# pane allow-list alone, where a shimmed tmux finds mise's global config untrusted and exits 1.
+real_tmux=$(mise which tmux) || fail "mise has no tmux"
+mkdir -p "$work/realtmux"
+ln -sfn "$real_tmux" "$work/realtmux/tmux"
 require_proof_human
 gh api "repos/$repo" --jq .name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 head_commit=$(jj -R "$root" log -r @- --no-graph -T commit_id)

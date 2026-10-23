@@ -207,6 +207,11 @@ func (s *Postgres) OpenTreeLifecycle(ctx context.Context, tx pgx.Tx, project, tr
 	return treelifecycle.Open(ctx, tx, project, tree, authority)
 }
 
+// TreeLifecycle reads the tree's lifecycle without opening it.
+func (s *Postgres) TreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string) (treelifecycle.Lifecycle, bool, error) {
+	return treelifecycle.Read(ctx, tx, project, tree)
+}
+
 func scanIssue(row scanner) (*Issue, error) {
 	var issue Issue
 	var phaseValue string

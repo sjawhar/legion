@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
-import { PROJECT_KEY_RULE } from "@legion/contracts";
+import { DISPATCH_BODY_MAX, PROJECT_KEY_RULE } from "@legion/contracts";
 import { fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
@@ -406,6 +406,95 @@ describe("the dispatch CLI", () => {
     );
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual({ issue: "DSP-1", body: "line one\nline two\n" });
+    expect(requests).toEqual([]);
+  });
+
+  // --reason is the close's note: a reopen (or any update but a close) that carries one is
+  // refused by the argument check, in a dry run as in the call, naming that rule, before any
+  // request; never by a closed issue's refusal of the note it would have posted.
+  test("--reason without --status done is refused by the argument check, dry run included", async () => {
+    const argv = ["issue-update", "--issue", "DSP-1", "--status", "in_progress", "--reason", "x"];
+    const rule =
+      "- reason goes only with status done: it is the note posted on the issue as it closes, and status in_progress closes nothing. Drop reason, or set status done to close the issue.";
+    for (const call of [[...argv, "--dry-run"], argv]) {
+      const { code, stdout } = await run(call, omp);
+      expect(code, call.join(" ")).toBe(1);
+      expect(stdout.split("\n").slice(0, 2)).toEqual([
+        "dispatch issue-update was not called: 1 problem",
+        rule,
+      ]);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("--dry-run refuses a body over the cap the call would refuse", async () => {
+    const { code, stdout } = await run(
+      ["comment", "--dry-run", "--issue", "DSP-1", "--body-file", "-"],
+      omp,
+      "x".repeat(DISPATCH_BODY_MAX + 1)
+    );
+    expect(code).toBe(1);
+    expect(stdout).toContain(
+      `- --body is 1 characters over the ${DISPATCH_BODY_MAX}-character limit (${DISPATCH_BODY_MAX + 1}/${DISPATCH_BODY_MAX})`
+    );
+    expect(requests).toEqual([]);
+  });
+
+  // A dry run runs the call's own pre-send check, so a call it refuses is refused alike, before
+  // any request: the owner resolved from LEGION_ISSUE or left missing, a ref naming another
+  // owner, a picture file that is not there.
+  test("--dry-run refuses exactly what the call refuses before sending", async () => {
+    const cases: { argv: string[]; env?: Record<string, string> }[] = [
+      { argv: ["issue-update", "--status", "done"], env: { LEGION_ISSUE: "DSP-1" } },
+      { argv: ["issue-update", "--status", "done"] },
+      { argv: ["comment", "--issue", "DSP-2", "--ref", "dispatch://DSP-1", "--body", "x"] },
+      { argv: ["message", "--issue", "DSP-1", "--body", "x", "--image", "missing.png"] },
+    ];
+    for (const { argv, env } of cases) {
+      const call = await run(argv, { ...omp, ...env });
+      const dry = await run([...argv, "--dry-run"], { ...omp, ...env });
+      expect(call.code, argv.join(" ")).toBe(1);
+      expect(call.stdout, argv.join(" ")).toStartWith("dispatch ");
+      expect(dry, argv.join(" ")).toEqual(call);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  // What the call fills before its check (the issue from LEGION_ISSUE, the document a ref names,
+  // a dashboard URL on this server as its dispatch:// form) passes a dry run too, which prints
+  // the caller's own arguments.
+  test("--dry-run passes what the call resolves, printing the caller's arguments", async () => {
+    const dashboard = `http://127.0.0.1:${server.port}/issues/DSP-1/spec`;
+    const cases: { argv: string[]; env?: Record<string, string>; args: object }[] = [
+      { argv: ["message", "--body", "hi"], env: { LEGION_ISSUE: "DSP-1" }, args: { body: "hi" } },
+      ...["dispatch://DSP-1/spec", dashboard].map((ref) => ({
+        argv: ["comment", "--ref", ref, "--quote", "old", "--body", "why"],
+        args: { ref, quote: "old", body: "why" },
+      })),
+    ];
+    for (const { argv, env, args } of cases) {
+      const { code, stdout } = await run([...argv, "--dry-run"], { ...omp, ...env });
+      expect(code, `${argv.join(" ")}\n${stdout}`).toBe(0);
+      expect(JSON.parse(stdout)).toEqual(args);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  // A dry run reads nothing from Dispatch, so it checks and prints with Dispatch off too, and
+  // prints the JSON alone.
+  test("--dry-run checks and prints with Dispatch off", async () => {
+    const off = { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined };
+    const passed = await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], off);
+    expect(passed.code).toBe(0);
+    expect(JSON.parse(passed.stdout)).toEqual({ issue: "DSP-1", body: "hi" });
+    const refused = await run(
+      ["issue-update", "--issue", "DSP-1", "--status", "in_progress", "--reason", "x", "--dry-run"],
+      off
+    );
+    expect(refused.code).toBe(1);
+    expect(refused.stdout).toStartWith(
+      "dispatch issue-update was not called: 1 problem\n- reason goes only with status done"
+    );
     expect(requests).toEqual([]);
   });
 

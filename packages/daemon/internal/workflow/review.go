@@ -477,19 +477,58 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // head from the code head a .legion/-only push replaced, since that red stood before the READY and
 // says nothing new about the submitted head. The invariant is that the rule is applied by whichever
 // fact makes a red stand for the head, in whatever phase the issue is when it does, and never by a
-// review or a completion, which change nothing about the verdict and read none. A red comes to
-// stand by a settlement or a read of the required set, the facts that change the verdict
-// (decideChecks); by a push classified late, or a head arriving over a push already known, either
-// of which can complete the carry of a code head's settlement to the handoff head above it
-// (classify.SettlementFor; push, pullRequestSynchronized); and by a hold's retry, which restores a
-// phase a settlement reached while the issue was held, where nothing moves (retryOrEscalate). A
-// fact that finds no red standing applies nothing, so each applies the rule before whatever else
-// it does.
+// review, which changes nothing about the verdict and reads none. A red comes to stand by a
+// settlement or a read of the required set, the facts that change the verdict (decideChecks); by a
+// push classified late, or a head arriving over a push already known, either of which can complete
+// the carry of a code head's settlement to the handoff head above it (classify.SettlementFor; push,
+// pullRequestSynchronized); by a hold's retry, which restores a phase a settlement reached while the
+// issue was held, where nothing moves (retryOrEscalate); and by the implementer's completion, which
+// hands on a head a red may have come to stand for while it was implementing, where nothing moves
+// (implementationReady). A fact that finds no red standing applies nothing, so each applies the rule
+// before whatever else it does.
 func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
 	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
 		return false, nil
 	}
 	return e.sendBack(ctx, tx, issue, pr)
+}
+
+// implementationReady moves issue from implementing to testing on the implementer's completion of
+// the round that row records, once the pull request pr is known (TriggerImplementationReady), and
+// then applies the CI rule to the head it hands on (standingRed). A red in implementing sends
+// nothing back, since the implementer is at work there, so a required check that settled red after
+// the implementer's push and before its completion stands for the head with nothing acted on it:
+// the implementer pushes and completes without waiting for CI, and the settlement does not come
+// again. The completion is the fact that lets that red stand in testing, so the work goes back to
+// implementing at once, as a settlement arriving in testing would send it, rather than through a
+// tester round on code CI has already found broken.
+//
+// The rule is applied only when the record's head is the commit the completion reports
+// (row.HandoffCommit). The completion waits on no
+// webhook, so the record can still hold the head before the round's push, whose red the round may
+// have fixed; that head's arrival applies the rule to it (pullRequestSynchronized), and the round's
+// push does not judge the old head it has not yet replaced (push). A red only a required workflow
+// makes is left to the pass's next read of the runs: its result is as old as the last read, up to
+// two minutes, so a re-run gone green since would still read red. Clearing the head the runs were
+// read at makes that next read a change (record.RequiredReadUnchanged), which then sends the work
+// back if the run is still red, as decideChecks does for a READY.
+func (e *Engine) implementationReady(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest) error {
+	if err := e.transition(ctx, tx, issue, TriggerImplementationReady, "", row, pr, ""); err != nil {
+		return err
+	}
+	if pr == nil || pr.HeadSHA != row.HandoffCommit {
+		return nil
+	}
+	if classify.RedOnlyByWorkflows(*pr) {
+		pr.WorkflowsHead = ""
+		return e.store.PutPullRequest(ctx, tx, *pr)
+	}
+	handed, err := e.store.Issue(ctx, tx, issue.Key)
+	if err != nil || handed == nil {
+		return err
+	}
+	_, err = e.standingRed(ctx, tx, *handed, pr)
+	return err
 }
 
 // settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and

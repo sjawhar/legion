@@ -1038,6 +1038,221 @@ func checksRedNotice(t *testing.T, pool *pgxpool.Pool) (reason string, from phas
 	return reason, phase.Phase(stopped)
 }
 
+// The implementer pushes and completes without waiting for CI, so a required check can settle red
+// on its head while the issue is still in implementing, where a red sends nothing back, and the
+// settlement does not come again. The completion is then the fact that lets the red stand outside
+// implementing (implementationReady): the work goes back to implementing at once, the
+// implementer's task and the architect's checks-red naming the red as it would from testing, the
+// return counted as a round, and no tester round runs on code CI already found broken. A head CI
+// found green, or has not judged yet, goes on to testing, where a red that settles later sends the
+// work back as any red in testing does.
+func TestACompletionOnARedThatSettledWhileImplementingSendsTheWorkBack(t *testing.T) {
+	const required = "pr-checks-result"
+	for _, tc := range []struct {
+		name string
+		// seeded is the pull request's head before the facts; before is what reaches the issue
+		// before the implementer's completion at head.
+		seeded string
+		before []intake.Fact
+		want   phase.Phase
+	}{
+		{"red", "head", []intake.Fact{settledAt("head", required, 1, required)}, phase.Implementing},
+		// The usual shape: the code push's CI settles red, then the implementer's handoff-only push
+		// carries that red to the head it completes at.
+		{"red at the code head, carried across the handoff push", "code", []intake.Fact{settledAt("code", required, 1, required),
+			pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"), syncedTo("head")}, phase.Implementing},
+		{"green", "head", []intake.Fact{settledAt("head", required, 1)}, phase.Testing},
+		{"not settled yet", "head", nil, phase.Testing},
+		// The round's fix pushed, the completion arriving before GitHub's synchronize: the record
+		// still holds the red head the round fixed, and that red sends nothing back.
+		{"red at the head the round fixed, the completion before its synchronize", "red-head", []intake.Fact{settledAt("red-head", required, 1, required)}, phase.Testing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: tc.seeded, Required: []string{required}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			for i, fact := range tc.before {
+				applyRefusingNothing(t, pool, engine, fact)
+				if got := issuePhase(t, pool); got != phase.Implementing {
+					t.Fatalf("after fact %d (%T) the issue is in %s, want implementing: no verdict moves it there", i+1, fact, got)
+				}
+			}
+			assertOutboxCount(t, pool, "supervise", 0)
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", Summary: "implemented"})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the implementer's completion the issue is in %s, want %s", got, tc.want)
+			}
+			if tc.want == phase.Testing {
+				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
+					t.Fatalf("notices %v, want no checks-red", got)
+				}
+				if rounds := implementerRounds(t, pool); rounds != 0 {
+					t.Fatalf("rounds = %d, want none: nothing went back", rounds)
+				}
+				return
+			}
+			task, _ := implementerStart(t, pool)
+			reason, from := checksRedNotice(t, pool)
+			want := "CI is red at head: " + required
+			if !strings.Contains(task, want) || !strings.Contains(task, "Phase: implementing.") || !strings.Contains(reason, want) || from != phase.Testing {
+				t.Fatalf("implementer task %q, notice %q in %q; want both to say %q, the notice in testing", task, reason, from, want)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 1 {
+				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			}
+		})
+	}
+}
+
+// A round that fixed a red at "red" with one code push completes at once, before either webhook of
+// that push reaches the daemon. Whichever order the push and its synchronize then arrive in, the
+// only red is the one the round fixed, and the issue stays in testing: neither the completion nor
+// the push judges the head the push is replacing, and the fixed head's arrival finds no red.
+func TestACompletionBeforeItsPushesWebhooksIsNotSentBackOnTheRedItFixed(t *testing.T) {
+	const required = "pr-checks-result"
+	push := pushedFromTo("red", "fixed", "src/fix.go\n.legion/LEGION-208/implement.json", "legion-implementer[bot]")
+	for _, tc := range []struct {
+		name  string
+		after []intake.Fact
+	}{
+		{"push then synchronize", []intake.Fact{push, syncedTo("fixed")}},
+		{"synchronize then push", []intake.Fact{syncedTo("fixed"), push}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "red", Required: []string{required}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyRefusingNothing(t, pool, engine, settledAt("red", required, 1, required),
+				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "fixed", Summary: "fixed the red"})
+			for i, fact := range tc.after {
+				applyRefusingNothing(t, pool, engine, fact)
+				if got := issuePhase(t, pool); got != phase.Testing {
+					t.Fatalf("after fact %d (%T) the issue is in %s, want testing: the only red is the head the round fixed", i+1, fact, got)
+				}
+			}
+			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
+				t.Fatalf("notices %v, want no checks-red", got)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 0 {
+				t.Fatalf("rounds = %d, want none", rounds)
+			}
+		})
+	}
+}
+
+// A push webhook naming the head the record already holds can arrive after that head's own red
+// settled while implementing and after the completion handed the head on without judging it. The
+// push is then the first fact outside implementing to see the red, and sends the work back: a code
+// commit pushed above the handoff commit the completion reports, and a handoff push that started CI
+// of its own, whose late arrival takes back the fix attempt its synchronize counted, so the red at
+// the head is below max_fix_attempts again.
+func TestALatePushOfTheRecordedHeadActsOnItsRed(t *testing.T) {
+	const required = "pr-checks-result"
+	for _, tc := range []struct {
+		name     string
+		seeded   record.PullRequest
+		before   []intake.Fact
+		commit   string
+		latePush intake.Fact
+	}{
+		{
+			name: "a code commit above the handoff commit",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h0", Required: []string{required}},
+			before: []intake.Fact{pushedFromTo("h0", "handoff", "src/fix.go\n.legion/LEGION-208/implement.json", "legion-implementer[bot]"), syncedTo("handoff"),
+				syncedTo("c2"), settledAt("c2", required, 1, required)},
+			commit:   "handoff",
+			latePush: pushedFromTo("handoff", "c2", "src/lint.go", "legion-implementer[bot]"),
+		},
+		{
+			name: "a handoff push whose late arrival takes back the attempt that reached the cap",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c", Required: []string{required}, FixAttempts: 2},
+			before:   []intake.Fact{settledAt("c", required, 1, required), syncedTo("h"), settledAt("h", required, 2, required)},
+			commit:   "h",
+			latePush: pushedFromTo("c", "h", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, tc.seeded)
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyRefusingNothing(t, pool, engine, tc.before...)
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, Summary: "implemented"})
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("after the completion the issue is in %s, want testing: the completion judges no head it did not report, nor a red the cap holds", got)
+			}
+			applyRefusingNothing(t, pool, engine, tc.latePush)
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the late push the issue is in %s, want implementing: the red stands for the head and nothing else acts on it", got)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 1 {
+				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			}
+		})
+	}
+}
+
+// A red only a required workflow makes, which the completion leaves to the pass's next read of the
+// runs (its result may be two minutes old), still sends the work back: that read, returning the
+// same runs, is a change once the completion cleared the head they were read at, and acts on it.
+func TestAWorkflowOnlyRedTheCompletionDefersIsSentBackByTheNextRead(t *testing.T) {
+	const required, workflow = "pr-checks-result", ".github/workflows/review.yml"
+	redRun := []record.RequiredWorkflow{{Path: workflow, Result: "failure"}}
+	for _, tc := range []struct {
+		name   string
+		seeded record.PullRequest
+		before []intake.Fact
+		commit string
+		// after is applied after the completion; the issue is in testing until then.
+		after []intake.Fact
+	}{
+		{
+			name: "a workflow-only red, the next read unchanged",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}, Workflows: redRun, WorkflowsHead: "head"},
+			before: []intake.Fact{settledAt("head", required, 1)},
+			commit: "head",
+			after: []intake.Fact{intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{required},
+				Workflows: redRun, WorkflowsHead: "head"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, tc.seeded)
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyRefusingNothing(t, pool, engine, tc.before...)
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, Summary: "implemented"})
+			if len(tc.after) > 0 {
+				if got := issuePhase(t, pool); got != phase.Testing {
+					t.Fatalf("after the completion the issue is in %s, want testing: the completion leaves a workflow-only red to the next read", got)
+				}
+				applyRefusingNothing(t, pool, engine, tc.after...)
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("the issue is in %s, want implementing: a red standing for the head handed on was acted on by nothing", got)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 1 {
+				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			}
+		})
+	}
+}
+
 // Checks can flap: red, then green on a re-run, then red again. Below the cap the first red sends
 // the work back, counting one round and starting the implementer once; the issue is then in
 // implementing, where no CI verdict moves it, so the green and the second red open no second

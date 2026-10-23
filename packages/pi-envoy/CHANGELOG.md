@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- A Dispatch write's cadence advice (three or more messages on an issue with no human
+  response) opens with `Posted.` and is the result's last line, so a tail of the output shows the
+  write went through instead of reading as a refusal. `dispatch_issue`'s `priority` says it takes
+  a number from 0 to 3, 0 highest, where it named P0 to P3.
+
 - `dispatch read` of an issue's document prints the document's summary, including the links
   `dispatch search` returns, where it printed the issue's summary. Owner arguments that disagree
   or that a command would drop (a document `comment` posts past without `--quote`, `ask` without

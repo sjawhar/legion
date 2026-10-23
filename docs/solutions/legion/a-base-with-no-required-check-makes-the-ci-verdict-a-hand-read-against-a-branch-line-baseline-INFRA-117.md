@@ -7,7 +7,7 @@ tags:
   - merge-gate
   - long-lived-branch
 date: 2026-10-22
-status: active
+status: superseded by AGENTS.md "Deploys come only from main" — its case was a long-lived deployment branch, which no longer exists; the read of a base with no required check stands for any other unprotected base
 module: legion-worker
 related_issues:
   - "INFRA-117"
@@ -18,7 +18,9 @@ related_issues:
 
 Extends `docs/solutions/legion/controller-gate-2-required-checks-live-reads.md`: that document
 says how to read a base's required checks live. This is what the roles do when the read comes
-back empty, which is the normal case for a long-lived deployment branch nobody protected.
+back empty. It was written for a long-lived deployment branch nobody protected, which
+`AGENTS.md` ("Deploys come only from main") no longer allows; the steps stand for any base a
+pull request targets that requires no check.
 
 - **Read it, and say it on the pull request.** `gh api repos/<owner>/<repo>/rules/branches/<base>`
   returning `[]`, with no `protection.required_status_checks` either, means the daemon judges no

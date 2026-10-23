@@ -298,6 +298,8 @@ what the tester verifies, and the simplify pass.
 - **No deferrals.** A finding that changes
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
   or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
+- **The implementer pushes, then completes; it never waits for, watches or polls CI**, and never
+  sleeps in a loop: `skill://legion-worker/references/pr-body.md` (*Never waiting on CI*).
 - **A red CI job** that failed on its own is re-run with
   `gh run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a

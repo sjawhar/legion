@@ -85,6 +85,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   The notice is deleted rather than rewritten to a kind the older daemon knows: it says only that a
   merge is still waiting, and the nearest older kind, `merge-refused`, would tell an architect that
   a merge ended when it has not. Dropping it loses one telling; the row goes on submitting.
+- The implementer pushes and completes without waiting for CI: its role prompt, the
+  `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
+  request's remote CI and any `sleep` loop, and each role reads the head's CI on GitHub for itself
+  rather than from a line another role wrote (sjawhar/legion#2121 deletes that line). Under the Go
+  daemon, a required check that settled red while the issue was
+  still in `implementing` now sends the work back the moment the implementer completes, with a
+  `checks-red` naming it, instead of starting a tester round on that head; before, nothing acted on
+  that red until a later settlement or a reviewer read it.
+- The architect decides each `review_round_cap` notice in the turn it wakes, and posts the decision
+  on the issue: narrow the next rounds to named acceptance lines, split the part that cannot settle
+  into an issue of its own blocked by this one, or let rounds that each found less than the one before run on. The daemon's cap
+  still notifies only.
 - **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
   under `--check-config`, a host with any character outside ASCII in `advertise_host`, `bind`, an
   NFS volume's `server`, and the host of `daemon_url`, `envoy_url`, `dispatch_url`, each
@@ -489,6 +501,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
+  kubelet has met that answer on two pulls, within about half a minute, naming the image and
+  quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It
+  retried such a pull as transient across the probe's six attempts, each waited out to its budget
+  (about 40 minutes on a deployment with a six-minute budget) before a booting daemon refused. Only
+  containerd's answer that the registry has no manifest for the reference is refused — `rpc error:
+  code = NotFound … failed to resolve reference "<ref>": <ref>: not found` on a local pull, or
+  `… failed to resolve image: <ref>: not found` through containerd's transfer service, the default
+  pull from containerd 2.1 — and only on its second pull: containerd 2 also gives that answer for
+  one pull whose manifest request the network cut. A pull refused for credentials, a network
+  failure, a rate limit, a server error or any other not-found is still retried.
 - A reviewer no longer passes a `verdict` to `handoff_complete`, which the daemon refuses from
   every role but the tester (`VERDICT_ROLE_FORBIDDEN`). The reviewer's task names the tester's
   result as `Tester's verdict: pass` rather than `Handoff verdict: pass`; the `legion` tool's

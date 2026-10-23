@@ -73,6 +73,13 @@ cluster and the image:
   `legion-probe-<project>-<digest prefix>`, and quotes the probe's log. The causes it names:
   - the image's plugin speaks another daemon contract than this binary: run the `legion` binary
     from the same commit as the image ([Upgrade](/legion/legion/running-legion/#upgrade));
+  - the registry does not have the image (`… failed its probe: the registry does not have image
+    <image>: …`, quoting the kubelet's `rpc error: code = NotFound … not found`): the configured
+    digest was never pushed, or was pushed to another repository. Point the daemon at a digest the
+    registry holds (`docker manifest inspect <image>` answers for one it has); if it does, and your
+    nodes pull through a mirror, the mirror lacks it. The probe refuses this once the kubelet has
+    met that answer on two pulls, within about half a minute; a pull refused for credentials, a
+    network failure or a rate limit is retried instead;
   - an agent's model does not resolve (`task agent <name> … role <role> is not configured`), or its
     key does not work: name the role in your overlay's `modelRoles`, re-run `apply.sh`, and check
     the credential your `models.yml` reads;
@@ -499,7 +506,9 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 
 - **`Issue reached review_round_cap=3.`** The implementer's round count reached three
   ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
-  architect decides what happens next, often with a question to you.
+  architect decides in the same turn whether to narrow the next rounds, split work into an issue of its own, or
+  let rounds that are converging run, and posts that decision on the issue; it asks you only for a
+  decision that needs your authority.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
   counted head and every head pushed on top of it until a push lands on a head CI judged green) no

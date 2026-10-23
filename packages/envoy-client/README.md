@@ -307,8 +307,12 @@ hyphens for underscores (`issue-update`), one flag per field
 singular flag for a list (`--label a --label b`, `--option "Label: what it costs"`, split at the
 first `: `; a label holding `: ` goes in `--options-json`, which the generated command line uses
 for such a list), and `--<field>-json` for any other object. `dispatch --help` lists the
-commands, `dispatch <command> --help` its flags and an example, and `--dry-run` prints the
-arguments a command would send.
+commands, `dispatch <command> --help` its flags and an example, and `--dry-run` runs the call's
+own argument check (`checkDispatchCall`: the owner, the strict schema, the cross-field checks and
+the picture files), refusing the arguments the call would refuse with the call's message, and
+otherwise prints the arguments as given, not as the call fills them (an issue from LEGION_ISSUE or
+the ref). It reads neither Dispatch nor this session's state, so it runs with Dispatch off too,
+and a call it passed can still stop on either.
 
 `runDispatchCli` (`dispatch-cli.ts`) runs one call per process. The host plugin sets
 `DISPATCH_HOST` (`omp`, `claude` or `opencode`) and the session's id (`CLAUDE_CODE_SESSION_ID`

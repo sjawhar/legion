@@ -15,20 +15,26 @@ export interface SchemaApi<E extends SchemaNode<E>> {
   array(item: E, opts?: { min?: number; max?: number }): E;
   unknown(): E;
   object(shape: Record<string, E>, opts?: { strict?: boolean }): E;
+  /** `message` is the refusal, or builds it from the rejected value. */
   refineObject(
     shape: Record<string, E>,
     check: (value: unknown) => boolean,
-    message: string,
+    message: string | ((value: unknown) => string),
     opts?: { strict?: boolean }
   ): E;
 }
 
 export type ToolArgumentsShape = Readonly<Record<string, unknown>>;
 
+/** zod v4's `error` callback, given the issue with the rejected input. */
+interface ZodErrorParams {
+  error(issue: { input: unknown }): string;
+}
+
 type ZodNode = z.ZodType & {
   min(value: number): ZodNode;
   /** zod v4 accepts an `error` callback; the OMP `pi.zod` facade ignores the second argument. */
-  max(value: number, params?: { error: (issue: { input: unknown }) => string }): ZodNode;
+  max(value: number, params?: ZodErrorParams): ZodNode;
   int(): ZodNode;
 };
 
@@ -38,7 +44,7 @@ export function overCapMessage(length: number, max: number): string {
 }
 
 interface ZodObjectNode {
-  refine(check: (value: unknown) => unknown, params?: unknown): ZodNode;
+  refine(check: (value: unknown) => unknown, params?: string | ZodErrorParams): ZodNode;
   strict(): ZodObjectNode;
 }
 
@@ -94,7 +100,10 @@ export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
     refineObject: (shape, check, message, opts = {}) => {
       let schema = api.object(shape as unknown as Record<string, ZodNode>);
       if (opts.strict) schema = schema.strict();
-      return schema.refine(check, message) as z.ZodType;
+      return schema.refine(
+        check,
+        typeof message === "string" ? message : { error: (issue) => message(issue.input) }
+      ) as z.ZodType;
     },
   };
 }

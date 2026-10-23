@@ -35,7 +35,7 @@
 # for mise's own shim first and, under a HOME mise has no pin for, gets handed the call straight
 # back — jj is unusable inside a pane until this is worked around. A caller prepends this
 # directory to the daemon's own PATH before launching it, so the daemon and every pane it spawns
-# use it: `PATH="$(real_bin_path "$work/realbin" gh jj):$PATH"`. PATH reaches every pane
+# use it: `PATH="$(real_bin_path "$work/realbin" gh jj tmux):$PATH"`. PATH reaches every pane
 # (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go). gh still needs this
 # directory too: resolveTools runs in the daemon's own process, under the same relocated HOME, and
 # the dotfiles gh shim hits mise's own shim-recursion guard there the same way jj's shim loops —
@@ -43,7 +43,10 @@
 # wrapper (legion gh, LEGION_GH_PATH), which resolves "the real gh" by walking its own PATH the
 # same way (resolveTools, packages/daemon/internal/daemon/tools.go) — so this directory's gh is
 # what LEGION_GH_PATH ends up naming, one step removed from a pane's own PATH lookup, not instead
-# of it. jj has no such wrapper and keeps resolving through this directory directly.
+# of it. jj has no such wrapper and keeps resolving through this directory directly. tmux needs it
+# for the daemon itself: the tmux runtime looks tmux up on the pane PATH at boot and runs it with
+# the pane environment's allow-list alone, where a dotfiles or mise shim's tmux finds mise's global
+# config untrusted and exits 1, so the daemon never starts its server.
 real_bin_path() {
   local dest=$1 name target
   shift

@@ -189,11 +189,13 @@ Legion uses GitHub's own review mechanisms rather than labels:
   merging, or once the issue awaits its merge, send the issue back to the implementer, naming the
   failing checks. The tester, a reviewer whose round is not yet completed, or the merger has its
   turn interrupted; from retro the implementer keeps its turn and is handed the implementing task
-  after it. Once the issue awaits its merge, only a red of the head's own counts: a red carried
-  from the head a `.legion/`-only push replaced was already there when `READY` was accepted, and
-  says nothing new about the commit the daemon's submission names. Only what the base branch
-  requires counts, the set the daemon reads for itself: its rulesets' required status checks and
-  required workflows, and its branch protection's required
+  after it. The implementer pushes and completes without waiting for CI: a red that settled while
+  it was still implementing sends the work back the moment it completes, so no tester round runs
+  on code CI already found broken. Once the issue awaits its merge, only a red of the head's own
+  counts: a red carried from the head a `.legion/`-only push replaced was already there when
+  `READY` was accepted, and says nothing new about the commit the daemon's submission names. Only
+  what the base branch requires counts, the set the daemon reads for itself: its rulesets'
+  required status checks and required workflows, and its branch protection's required
   status checks. CI is red when one of those checks failed, or when the latest pull-request run of
   a required workflow on the head did not pass (it failed, was cancelled or timed out; a run that
   ended neutral or skipped passes). A required check that was cancelled, or that the head's checks
@@ -227,7 +229,9 @@ Legion uses GitHub's own review mechanisms rather than labels:
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
-  the issue and tells the architect; neither stops a worker. Every move back to an earlier phase
+  the issue and tells the architect; neither stops a worker. At the round cap the architect decides,
+  in the turn the notice wakes, whether to narrow the next rounds, split work into an issue of its own, or let
+  converging rounds run, and posts that decision on the issue. Every move back to an earlier phase
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
   daemon's own move when CI turns red or the head starts conflicting with its base. Once
   `max_fix_attempts` runs out, CI red within the attempt that ran it out - the head whose push was
