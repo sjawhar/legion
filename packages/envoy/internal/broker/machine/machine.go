@@ -426,6 +426,21 @@ func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time
 	return expires, err
 }
 
+// Live holds a launcher credential's row lock until the transaction ctx carries
+// (oauthstore.TxFrom) ends, leaving its expiry as it is; a credential revoked or past its expiry
+// is ErrNotLive. A revoke (enroll.Service.RevokeCredential locks the same row) either commits
+// first, so Live finds no live row, or waits for the device code grant's tokens to commit and then
+// ends them.
+func (s *Service) Live(ctx context.Context, credentialID string) error {
+	var one int
+	err := s.db(ctx).QueryRow(ctx, `select 1 from launcher_credentials
+		where id = $1 and revoked_at is null and expires_at > now() for no key update`, credentialID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotLive
+	}
+	return err
+}
+
 // db is the transaction ctx carries (oauthstore.TxFrom), else the pool.
 func (s *Service) db(ctx context.Context) interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -437,19 +452,23 @@ func (s *Service) db(ctx context.Context) interface {
 }
 
 // TokenHooks are the device login's token hooks, run in the token request's transaction: a
-// refresh moves its credential's expiry first (Refreshed), and is refused when the credential has
-// ended; every answer carries credential_id and credential_expires_at (RFC 3339) as the
-// credential's row holds it in that transaction: the minted expiry on the device code grant, the
-// one Refreshed moved it to on a refresh.
+// refresh moves its credential's expiry first (Refreshed), the device code grant locks the
+// credential's row as it is (Live), and either is refused when the credential has ended; every
+// answer carries credential_id and credential_expires_at (RFC 3339) as the credential's row holds
+// it in that transaction: the minted expiry on the device code grant, the one Refreshed moved it
+// to on a refresh.
 func (s *Service) TokenHooks() oauth.TokenHooks {
 	var hooks oauth.TokenHooks
-	hooks.BeforeRefresh = func(ctx context.Context, extra map[string]any) error {
+	hooks.Before = func(ctx context.Context, grant string, extra map[string]any) error {
 		id, err := credentialOf(extra)
 		if err != nil {
 			return err
 		}
-		_, err = s.Refreshed(ctx, id)
-		return err
+		if grant == "refresh_token" {
+			_, err = s.Refreshed(ctx, id)
+			return err
+		}
+		return s.Live(ctx, id)
 	}
 	hooks.After = func(ctx context.Context, _ string, extra map[string]any) (map[string]any, error) {
 		id, err := credentialOf(extra)

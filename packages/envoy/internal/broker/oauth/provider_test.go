@@ -33,7 +33,7 @@ var userCodePattern = regexp.MustCompile(`^[0-9A-Z]{4}-[0-9A-Z]{4}$`)
 // fixture is a provider on a fresh schema, mounted alone on an httptest.Server: its device
 // authorization endpoint at /device_authorization and its token endpoint at /token. onRequest
 // records each user code it is given and answers refuse (nil by default); the token hooks record
-// what they saw and answer beforeRefresh (nil by default).
+// what they saw and answer before (nil by default).
 type fixture struct {
 	url      string
 	pool     *pgxpool.Pool
@@ -43,7 +43,7 @@ type fixture struct {
 	userCodes     []string
 	sawTx         bool
 	refuse        error
-	beforeRefresh error
+	before        error
 	grants        []string
 	extras        []map[string]any
 }
@@ -71,10 +71,10 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f := &fixture{pool: pool, provider: provider}
 	hooks := oauth.TokenHooks{
-		BeforeRefresh: func(_ context.Context, _ map[string]any) error {
+		Before: func(_ context.Context, _ string, _ map[string]any) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			return f.beforeRefresh
+			return f.before
 		},
 		After: func(_ context.Context, grant string, extra map[string]any) (map[string]any, error) {
 			f.mu.Lock()
@@ -418,12 +418,12 @@ func TestReusingARotatedTokenEndsTheLogin(t *testing.T) {
 	}
 }
 
-func TestBeforeRefreshCanRefuse(t *testing.T) {
+func TestBeforeCanRefuse(t *testing.T) {
 	f := newFixture(t)
 	key := newKey(t)
 	refreshToken := f.login(t, key)
 	access, refresh := f.count(t, "oauth_access_tokens"), f.count(t, "oauth_refresh_tokens")
-	f.beforeRefresh = errors.New("the machine login has ended")
+	f.before = errors.New("the machine login has ended")
 	if status, body := f.refresh(t, refreshToken, key); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
 		t.Fatalf("refused refresh = %d %v, want invalid_grant", status, body)
 	}

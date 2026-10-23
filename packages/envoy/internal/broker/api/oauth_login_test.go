@@ -324,8 +324,8 @@ func TestAnUnrefreshedLoginLapses(t *testing.T) {
 	}
 }
 
-// TestARefreshOfALapsedCredentialIsRefused pins BeforeRefresh on its own: a credential past its
-// expiry is not revived by a refresh token that has not itself expired.
+// TestARefreshOfALapsedCredentialIsRefused pins the refresh's liveness check on its own: a
+// credential past its expiry is not revived by a refresh token that has not itself expired.
 func TestARefreshOfALapsedCredentialIsRefused(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	m, tok, credentialID := approvedLogin(t, rig)
@@ -335,6 +335,29 @@ func TestARefreshOfALapsedCredentialIsRefused(t *testing.T) {
 	_, err := m.refresh(tok)
 	if code, _ := oauthErrorCode(t, err); code != "invalid_grant" {
 		t.Fatalf("refresh of a lapsed credential = %s, want invalid_grant", code)
+	}
+}
+
+// TestADeviceCodeOfARevokedLoginIsRefused pins the device code grant's liveness check: a login
+// revoked between its approval and its poll issues no tokens.
+func TestADeviceCodeOfARevokedLoginIsRefused(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	m := newDeviceMachine(t, rig)
+	da := m.login(t)
+	credentialID := rig.DecideMachineLogin(t, da.UserCode, true)
+	status, body := rig.UI(t, http.MethodPost, "/v1/launcher-credentials/"+credentialID+"/revoke-by-approver", map[string]any{"approver": rig.Operator})
+	if status != http.StatusOK {
+		t.Fatalf("revoke = %d: %s", status, body)
+	}
+	da.Interval = 1
+	_, err := m.config.DeviceAccessToken(m.ctx, da)
+	if code, _ := oauthErrorCode(t, err); code != "invalid_grant" {
+		t.Fatalf("poll of a revoked login = %s, want invalid_grant", code)
+	}
+	var active int
+	if err := rig.Store.Pool.QueryRow(context.Background(), `select (select count(*) from oauth_refresh_tokens where credential_id=$1 and active)
+		+ (select count(*) from oauth_access_tokens where credential_id=$1 and active)`, credentialID).Scan(&active); err != nil || active != 0 {
+		t.Fatalf("active token rows of the revoked login = %d (%v), want 0", active, err)
 	}
 }
 

@@ -3138,7 +3138,9 @@ the machine's poll of `POST /v1/oauth/token` gets `access_denied` or, on approva
 token pair (RFC 9449) whose answer carries `credential_id` and `credential_expires_at`
 (`TokenHooks`). A refresh grant first moves the credential's expiry to
 `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from now (`Refreshed`, under the credential's row lock) and
-is refused `invalid_grant` when the credential is revoked or past its expiry. Refresh tokens
+is refused `invalid_grant` when the credential is revoked or past its expiry; the device code
+grant takes the same row lock without moving the expiry (`Live`) and is refused the same way, so
+a login revoked between its approval and its poll issues nothing. Refresh tokens
 rotate: a replaced one stays redeemable for 60 s (`oauthstore.refreshGrace`) so a lost answer can
 be retried, and one redeemed after that revokes its whole family. A revoke
 (`enroll.Service.RevokeCredential`) ends the credential's tokens in its own transaction

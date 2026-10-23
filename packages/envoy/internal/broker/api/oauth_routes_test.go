@@ -37,8 +37,8 @@ func withOAuth(t *testing.T, deviceLogin func(context.Context, url.Values, strin
 		d.OAuth = provider
 		d.DeviceLogin = deviceLogin
 		d.TokenHooks = oauth.TokenHooks{
-			BeforeRefresh: func(context.Context, map[string]any) error { return nil },
-			After:         func(context.Context, string, map[string]any) (map[string]any, error) { return nil, nil },
+			Before: func(context.Context, string, map[string]any) error { return nil },
+			After:  func(context.Context, string, map[string]any) (map[string]any, error) { return nil, nil },
 		}
 	}
 }
