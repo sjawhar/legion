@@ -208,9 +208,12 @@ which needs the NATS redelivery bucket the hub's Dispatch user is granted
 (`DispatchPermissions`): a pod whose NATS user lacks it exits at boot. With either group unset,
 nothing renders and the app's pod template is unchanged.
 
-Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
-names, tags, image references, sign-in domains, namespaces, allowed namespaces, missing inputs,
-and nkey seeds in its own name and in plain inputs before it registers a resource; it refuses an
+Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
+`ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
+[Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
+component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
+namespaces, allowed namespaces, missing inputs, and nkey seeds in its own name and in plain inputs
+before it registers a resource; it refuses an
 `agentSecretsUrl` or an `agentSecretsTokenSecret` whose partner input is missing, an `appClientId`,
 `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
 input named), an `appId` that is not digits or is 0, an `appPrivateKeySecretName` that is not a DNS
