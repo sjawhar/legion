@@ -7,8 +7,10 @@ package api_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -361,6 +363,69 @@ func TestReusingARotatedRefreshTokenRevokesTheMachine(t *testing.T) {
 	}
 	if n := activeTokens(t, rig, credentialID); n != 0 {
 		t.Fatalf("active tokens after the reuse = %d, want 0", n)
+	}
+}
+
+// rewriteTo is a RoundTripper that sends each request to the broker at base, keeping the Host
+// header and the rest of the request, as a proxy in front of the broker forwards it.
+type rewriteTo struct{ base *url.URL }
+
+func (r rewriteTo) RoundTrip(req *http.Request) (*http.Response, error) {
+	out := req.Clone(req.Context())
+	out.Host = req.URL.Host
+	if req.Host != "" {
+		out.Host = req.Host
+	}
+	out.URL.Scheme, out.URL.Host = r.base.Scheme, r.base.Host
+	return http.DefaultTransport.RoundTrip(out)
+}
+
+// refreshAt refreshes tok with a proof of m's key naming target's URL, sent through a proxy to the
+// rig with host as the Host header and headers set.
+func (m *deviceMachine) refreshAt(t *testing.T, tok *oauth2.Token, target, host string, headers map[string]string) (int, string) {
+	t.Helper()
+	base, err := url.Parse(m.rig.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok.RefreshToken}, "client_id": {oauthwire.ClientID}}
+	req, err := http.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Host = host
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := helper.NewDPoPTransport(m.key, rewriteTo{base: base}).RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&body)
+	return resp.StatusCode, body.Error
+}
+
+// TestTheTokenEndpointChecksDPoPAgainstThePublicURL: a token request's DPoP proof names the
+// broker's BROKER_PUBLIC_URL, as every other broker proof does, whatever Host and
+// X-Forwarded-Proto the hop in front of the broker sends.
+func TestTheTokenEndpointChecksDPoPAgainstThePublicURL(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	m, tok, _ := approvedLogin(t, rig)
+	// A proxy that rewrites Host, over plain http: the proof names the public URL.
+	if status, code := m.refreshAt(t, tok, rig.URL+"/v1/oauth/token", "broker.internal:8080", nil); status != http.StatusOK {
+		t.Fatalf("refresh with a proof of the public URL behind a Host-rewriting hop = %d %s, want 200", status, code)
+	}
+	m2, tok2, _ := approvedLogin(t, rig)
+	// A proof naming another host, with the headers that host's request would carry.
+	status, code := m2.refreshAt(t, tok2, "https://attacker.example/v1/oauth/token", "attacker.example",
+		map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-Host": "attacker.example"})
+	if status != http.StatusBadRequest || code != "invalid_dpop_proof" {
+		t.Fatalf("refresh with a proof of another host = %d %s, want 400 invalid_dpop_proof", status, code)
 	}
 }
 

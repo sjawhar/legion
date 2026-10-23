@@ -190,8 +190,13 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 ## Network and trust
 
 - Agents, their helpers and launchers, and Dispatch's server reach the broker at
-  `BROKER_PUBLIC_URL`. Every signed proof names that URL, so clients' `AGENT_SECRETS_URL` must be
-  exactly it, and a proxy in front of the broker must not change the host or path.
+  `BROKER_PUBLIC_URL`. Every signed proof names that URL plus the request's path, so clients'
+  `AGENT_SECRETS_URL` must be exactly it, and a proxy in front of the broker must not change the
+  path. The broker checks each proof against `BROKER_PUBLIC_URL`, never against the `Host`,
+  `X-Forwarded-Proto` or `X-Forwarded-Host` a request arrives with: a proxy may rewrite `Host` or
+  terminate TLS without setting `X-Forwarded-Proto`, and a client that sends those headers itself
+  changes nothing. That holds for the machine login's token endpoint (`POST /v1/oauth/token`)
+  too, whose DPoP proofs name `BROKER_PUBLIC_URL/v1/oauth/token`.
 - The UI token is an approval credential: whoever holds it can approve as anyone. Give it to
   Dispatch's server and nothing else, and never to an agent.
 - Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login and secret-reread
