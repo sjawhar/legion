@@ -35,7 +35,7 @@ it, and any other change to the head voids it.
   ```bash
   base=$(gh pr view <n> -R <o>/<r> --json baseRefName -q .baseRefName) && \
     base_path=$(jq -rn --arg b "$base" '$b | split("/") | map(@uri) | join("/")') && \
-    echo rulesets: && gh api "repos/<o>/<r>/rules/branches/$base_path" --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' && \
+    echo rulesets: && gh api --paginate "repos/<o>/<r>/rules/branches/$base_path" --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' && \
     echo protection: && gh api "repos/<o>/<r>/branches/$base_path" --jq '.protection.required_status_checks.checks[].context'
   ```
 
@@ -48,7 +48,9 @@ it, and any other change to the head voids it.
   as passing for a required check). And the compare proving only `.legion/` changed since
   (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '[.files[].filename] | all(startswith(".legion/"))'`
   prints `true`; `false` means code was pushed since CI ran, so wait for the new push's runs and
-  read the CI head again). A required check `queued` or `in_progress`: wait. One `completed` as
+  read the CI head again). GitHub's compare lists at most 300 files for the whole comparison, so
+  a `true` from a compare of 300 files decides nothing: do not approve on it. A required check
+  `queued` or `in_progress`: wait. One `completed` as
   `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
   check only a commit status reports, a workflow another repository defines), tell the architect
   and do not approve. `gh pr checks <n>` is not the read: it reads only the current head, which

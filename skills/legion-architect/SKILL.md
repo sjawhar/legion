@@ -313,7 +313,7 @@ The reviewer's approval of the head moves the issue to `accepting` (its Dispatch
 notice with an `APPROVED` review is the cue. Read the evidence against every acceptance line of the
 spec and the plan: the tester's handoff (`.legion/<issue>/test.json` at the approved head), the PR
 body's `E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of that head by SHA
-(`gh api repos/<o>/<r>/pulls/<n>/reviews`), and, for a parent, that every child is `done`
+(`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`), and, for a parent, that every child is `done`
 (section 3). Accept only when scope is fully met, integration evidence is current, corrective work
 is complete, review is clean, and no necessary work was silently deferred. Post the acceptance as a
 `dispatch comment` explicit about that evidence, then accept with `sign_off`, which runs only in
