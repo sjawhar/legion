@@ -57,6 +57,11 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			err:  []string{`hostname "Example-hub"`},
 		},
 		{
+			name: "a tailnet DNS name with an uppercase letter",
+			edit: func(a *gcp.NatsHubArgs) { a.TailnetDnsName = "Example-Tailnet.ts.net" },
+			err:  []string{"tailnetDnsName", "ts.net"},
+		},
+		{
 			name: "no tags",
 			edit: func(a *gcp.NatsHubArgs) { a.Tags = nil },
 			err:  []string{"tags", "at least one"},
@@ -345,12 +350,14 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 // A seed in any input the hub itself renders, registers or quotes in a refusal is refused naming
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
 // quote and the user data holds; the zone, machine type and disk type, which reach the group and
-// the template; the images, which reach the user data; and a user's machine id, which the hub turns
-// into that user's rules. The seed is found as bus.HoldsSeed finds it: any type, either case, whole,
-// inside a longer value, split by '.', '-', '_' or whitespace, or percent-encoded. A user's name and
-// rule entries are core's to refuse (TestNatsHubPassesOnCoresSeedRefusalOfUsers); a seed as a
-// user's nkey is core's to refuse, unquoted (the resolver table's "a user whose public key is a
-// seed"); and tailnetAuthKey, a secret Input, is checked once it resolves
+// the template; the images, which reach the user data; the tailnet DNS name and the listener's
+// allowed hosts, which the addresses its environment carries are built from; and a user's machine
+// id, which the hub turns into that user's rules. The seed is found as bus.HoldsSeed finds it: any
+// type, either case, whole, inside a longer value, split by '.', '-', '_' or whitespace, or
+// percent-encoded. A user's name and rule entries are core's to refuse
+// (TestNatsHubPassesOnCoresSeedRefusalOfUsers); a seed as a user's nkey is core's to refuse,
+// unquoted (the resolver table's "a user whose public key is a seed"); and tailnetAuthKey, a
+// secret Input, is checked once it resolves
 // (TestConstructRefusesASeedAsTheTailnetAuthKey).
 func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 	seed, _ := testnats.User(t)
@@ -361,6 +368,12 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = seed }},
 		{"a seed in a tag", "tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + seed} }},
 		{"a seed inside the zone", "zone", func(a *gcp.NatsHubArgs) { a.Zone = inside }},
+		{"a seed inside the tailnet DNS name", "tailnetDnsName", func(a *gcp.NatsHubArgs) {
+			a.TailnetDnsName = lower + ".ts.net"
+		}},
+		{"a seed in a listener allowed host", "listener.allowedHosts[0]", func(a *gcp.NatsHubArgs) {
+			a.Listener.AllowedHosts = []string{lower + ".example.com"}
+		}},
 		{"a seed inside the machine type", "machineType", func(a *gcp.NatsHubArgs) { a.MachineType = pulumi.StringRef(inside) }},
 		{"a seed inside the disk type", "diskType", func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef(inside) }},
 		{"a lowercase disk type", "diskType", func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef("pd-" + lower) }},

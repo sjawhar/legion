@@ -368,8 +368,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	// The tailnet node runs in a pod of its own now, so Serve proxies to the app's Service rather
 	// than to a container beside it. The Web key keeps the node's name and certificate domain.
-	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://%s:8766"}}}}}`,
-		s.hostname, s.tailnetDNSName, clusterLocal(s.hostname, s.namespace))
+	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s:443":{"Handlers":{"/":{"Proxy":"http://%s:8766"}}}}}`,
+		core.TailnetHostName(s.hostname, s.tailnetDNSName), clusterLocal(s.hostname, s.namespace))
 	return s, nil
 }
 
@@ -428,6 +428,6 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	comp.Kubeconfig = kube.kubeconfig
 	comp.Principal = cloud.principal
 	comp.AgentToken = cloud.agentToken.Result
-	comp.Url = pulumi.String("https://" + s.hostname + "." + s.tailnetDNSName).ToStringOutput()
+	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
 	return comp, nil
 }

@@ -140,7 +140,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount (and, with `agentSecretsTokenSecret`, a second SecretProviderClass, `<hostname>-agent-secrets-token`, for the broker token). |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
-| Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. |
+| Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. All three pod templates carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler evicts these pods whenever it consolidates a node, and the one-replica front door takes Dispatch off the tailnet until its replacement is ready. Autopilot honours the annotation as [extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods) protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute Engine maintenance and drains still evict), with each such pod on a node of its own whenever possible and raised to at least 500m CPU and 512Mi memory, so the front door and the listener each request 500m and 512Mi. |
 
 ### Inputs
 
@@ -208,9 +208,12 @@ which needs the NATS redelivery bucket the hub's Dispatch user is granted
 (`DispatchPermissions`): a pod whose NATS user lacks it exits at boot. With either group unset,
 nothing renders and the app's pod template is unchanged.
 
-Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
-names, tags, image references, sign-in domains, namespaces, allowed namespaces, missing inputs,
-and nkey seeds in its own name and in plain inputs before it registers a resource; it refuses an
+Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
+`ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command
+[Running Dispatch](https://sjawhar.github.io/legion/dispatch/running-dispatch/) gives. The
+component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
+namespaces, allowed namespaces, missing inputs, and nkey seeds in its own name and in plain inputs
+before it registers a resource; it refuses an
 `agentSecretsUrl` or an `agentSecretsTokenSecret` whose partner input is missing, an `appClientId`,
 `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
 input named), an `appId` that is not digits or is 0, an `appPrivateKeySecretName` that is not a DNS

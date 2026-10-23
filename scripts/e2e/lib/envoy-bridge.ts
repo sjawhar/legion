@@ -66,7 +66,7 @@ export function bridgeConfigFromEnvironment(
   if (!upstreamUrl) throw new Error("SMOKE_UPSTREAM_NATS is required");
   if (!upstreamNatsUrl.test(upstreamUrl)) {
     throw new Error(
-      "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
+      "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as the operator's envoy.json does (envoy.natsUrls, nats://<host>.<tailnet>.ts.net:4222)"
     );
   }
   const [owner, name] = repository.split("/");

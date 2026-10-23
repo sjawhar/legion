@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -275,6 +276,9 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	if err != nil || !u.IsAbs() || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return nil, fmt.Errorf("%s.url must be an absolute URL with no path, query, fragment or user; got %q", agentSecretsKey, block.URL)
 	}
+	if err := refuseNonASCIIHost(agentSecretsKey+".url host", u.Hostname()); err != nil {
+		return nil, err
+	}
 	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
 		return nil, fmt.Errorf("%s.url must use https unless the host is a loopback address; got %q", agentSecretsKey, block.URL)
 	}
@@ -377,6 +381,28 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// isASCII reports whether s holds no rune above unicode.MaxASCII.
+func isASCII(s string) bool {
+	for _, r := range s {
+		if r > unicode.MaxASCII {
+			return false
+		}
+	}
+	return true
+}
+
+// refuseNonASCIIHost refuses a host with any rune above unicode.MaxASCII. It runs before a host is
+// lower-cased for validation.IsDNS1123Subdomain or compared against loopback: strings.ToLower folds
+// `İ` (U+0130) to `i` and the Kelvin sign (U+212A) to `k`, so the lower-cased name would pass while
+// the value kept, as written, is one no node's resolver resolves; and an HTTP client maps `ſ`
+// (U+017F) or a full-width `ｌｏｃａｌｈｏｓｔ` to localhost (UTS-46) where no ASCII comparison does.
+func refuseNonASCIIHost(key, host string) error {
+	if !isASCII(host) {
+		return fmt.Errorf("%s must be an IP address or an ASCII DNS name; got %+q", key, host)
+	}
+	return nil
+}
+
 // isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`): no host at all, which only a
 // listener may bind.
 func isUnspecifiedHost(host string) bool {
@@ -393,6 +419,9 @@ func readAdvertiseHost(value *yaml.Node, key string) (*string, error) {
 	read, err := readNonEmptyString(value, key)
 	if err != nil || read == nil {
 		return read, err
+	}
+	if err := refuseNonASCIIHost(key, *read); err != nil {
+		return nil, err
 	}
 	if host := *read; net.ParseIP(host) == nil && len(validation.IsDNS1123Subdomain(strings.ToLower(host))) != 0 {
 		return nil, fmt.Errorf("%s must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself (%s)", key, host)
@@ -771,6 +800,9 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 	}
 	server, err := requiredString(fields["server"], key+".server", "")
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseNonASCIIHost(key+".server", server); err != nil {
 		return nil, err
 	}
 	if net.ParseIP(server) == nil && (len(validation.IsDNS1123Subdomain(strings.ToLower(server))) != 0 || numericLastLabel(server)) {
@@ -1350,9 +1382,13 @@ func checkKubernetesKeys(file fileConfig) error {
 // unspecified address, but not loopback, where no pod reaches the listener at all. Every Legion URL
 // a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must name
 // neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host at
-// all.
+// all. Bind and every one of those hosts must also be ASCII (refuseNonASCIIHost): a pod's HTTP
+// client maps a full-width `ｌｏｃａｌｈｏｓｔ` to localhost, which no check here would see.
 func checkPodReachable(cfg Config) error {
 	key, host, why := "bind", cfg.Bind, "bind the daemon host's own address when runtime is kubernetes"
+	if err := refuseNonASCIIHost("bind", cfg.Bind); err != nil {
+		return err
+	}
 	if cfg.AdvertiseHost != "" {
 		if isLoopbackHost(cfg.Bind) {
 			return fmt.Errorf("bind %s is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes", cfg.Bind)
@@ -1375,6 +1411,9 @@ func checkPodReachable(cfg Config) error {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
 		host := parsed.Hostname()
+		if err := refuseNonASCIIHost(address.key+" host", host); err != nil {
+			return err
+		}
 		var why string
 		switch {
 		case isLoopbackHost(host):

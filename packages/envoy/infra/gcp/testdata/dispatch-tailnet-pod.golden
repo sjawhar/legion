@@ -1,5 +1,8 @@
 {
   "metadata": {
+    "annotations": {
+      "cluster-autoscaler.kubernetes.io/safe-to-evict": "false"
+    },
     "labels": {
       "app": "example-dispatch-tailnet"
     }
@@ -68,12 +71,12 @@
         },
         "resources": {
           "limits": {
-            "cpu": "100m",
-            "memory": "128Mi"
+            "cpu": "500m",
+            "memory": "512Mi"
           },
           "requests": {
-            "cpu": "100m",
-            "memory": "128Mi"
+            "cpu": "500m",
+            "memory": "512Mi"
           }
         },
         "startupProbe": {

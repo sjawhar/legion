@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -117,7 +118,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	// stop every agent's Dispatch writes. Both sides hold to
 	// packages/contracts/fixtures/dispatch-public-url.json.
 	if value, set := pod.Env["DISPATCH_PUBLIC_URL"]; set && !dashboardURL(value) {
-		return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
+		return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %+q, which is not an http or https URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
 	}
 	volumes := legionVolumeNames()
 	for i, volume := range pod.Volumes {
@@ -197,10 +198,10 @@ func legionClaim(claim string) bool {
 // the URL standard's parser the agents' dispatch command reads the value with (envoy-client's
 // dispatchSettings), so boot accepts only values the agents accept, and refuses some they would
 // take (userinfo, a trailing dot, IPv4 shorthand, an internationalized name). It is http or https
-// with no userinfo; a plain host, which is a DNS name of letters, digits and hyphens (no label
-// empty, longer than 63 or starting `xn--`, and a last label neither all digits nor `0x`, which
-// the agents read as an IPv4 address), a four-octet dotted IPv4 address, or a bracketed IPv6
-// address with no zone; and, when it names one, a port from 1 to 65535.
+// with no userinfo; a plain host, which is a DNS name of ASCII letters, digits and hyphens (no
+// label empty, longer than 63 or starting `xn--`, and a last label neither all digits nor `0x`,
+// which the agents read as an IPv4 address), a four-octet dotted IPv4 address, or a bracketed
+// IPv6 address with no zone; and, when it names one, a port from 1 to 65535.
 func dashboardURL(value string) bool {
 	parsed, err := url.Parse(value)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Opaque != "" || parsed.User != nil {
@@ -229,6 +230,13 @@ func dashboardURL(value string) bool {
 func dashboardDNSName(host string) bool {
 	if host == "" || len(host) > 253 {
 		return false
+	}
+	// Lower-case only an ASCII host: strings.ToLower folds `İ` (U+0130) to `i` and the Kelvin sign
+	// (U+212A) to `k`, which would pass a non-ASCII name the agents may read as another host.
+	for _, r := range host {
+		if r > unicode.MaxASCII {
+			return false
+		}
 	}
 	labels := strings.Split(strings.ToLower(host), ".")
 	for _, label := range labels {

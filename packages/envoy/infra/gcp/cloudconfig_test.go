@@ -223,6 +223,27 @@ func TestCloudConfigRunsTheListenerBehindTailscaleServe(t *testing.T) {
 	require.Contains(t, tailscaled, " -e TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json ")
 }
 
+// Tailscale Serve answers at the hub's MagicDNS name, so that name is the address the listener
+// must serve for a client dialing the hub to be answered at all. The rendered entry is
+// core.TailnetHostName's, never a literal: a hostname and a tailnet name joined the other way
+// round, or without their dot, would read as plausibly in the golden and serve nobody. Every
+// further address the listener's allowedHosts names follows the hub's own, comma-joined and as
+// written.
+func TestCloudConfigServesTheHubsTailnetNameAndEveryFurtherAllowedHost(t *testing.T) {
+	args := exampleArgs()
+	own := core.TailnetHostName(args.Hostname, args.TailnetDnsName)
+	doc, _, err := gcp.CloudConfigOf(args)
+	require.NoError(t, err)
+	require.Contains(t, fileOf(t, doc, "/etc/systemd/system/envoy-listener.service"),
+		" -e ENVOY_ALLOWED_HOSTS="+own+" ")
+
+	args.Listener.AllowedHosts = []string{"hub.example.com", "192.0.2.7"}
+	doc, _, err = gcp.CloudConfigOf(args)
+	require.NoError(t, err)
+	require.Contains(t, fileOf(t, doc, "/etc/systemd/system/envoy-listener.service"),
+		" -e ENVOY_ALLOWED_HOSTS="+own+",hub.example.com,192.0.2.7 ")
+}
+
 // A hub without a listener starts none and writes an empty Serve configuration. Tailscale keeps
 // its state on the data disk, so TS_SERVE_CONFIG must name that empty configuration to clear a
 // forward a prior listener rendered.

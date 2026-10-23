@@ -236,7 +236,7 @@ start_daemon() {
     pick_port port_worker_stream
     write_legion_config
     offset=$(log_size daemon)
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$PATH" \
+    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$work/realtmux:$PATH" \
       LEGION_CLAUDE_PATH="$claude_bin" LEGION_BUN_PATH="$bun_bin" LEGION_CLAUDE_PLUGIN_DIR="$root/packages/claude-envoy" \
       env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE \
       -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
@@ -436,6 +436,11 @@ claude_bin=$(command -v claude)
 bun_bin=$(command -v bun)
 note "Claude Code: $claude_bin ($("$claude_bin" --version)); bun: $bun_bin"
 real_gh=$(mise which gh) || fail "mise has no gh"
+# The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
+# pane allow-list alone, where a shimmed tmux finds mise's global config untrusted and exits 1.
+real_tmux=$(mise which tmux) || fail "mise has no tmux"
+mkdir -p "$work/realtmux"
+ln -sfn "$real_tmux" "$work/realtmux/tmux"
 require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$state" "$work/xdg" "$work/tmux"

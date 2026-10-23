@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -27,12 +28,13 @@ func requireInputError(t *testing.T, err error, input, msg string) {
 // is the one table of those refusals: a component that calls Check tests only that it does, and
 // where its refusal goes.
 func TestListenerConfigCheck(t *testing.T) {
-	cases := []struct {
+	type checkCase struct {
 		name  string
 		in    core.ListenerConfig
 		input string // the input a refusal names
 		err   string
-	}{
+	}
+	cases := []checkCase{
 		{name: "the default port", in: core.ListenerConfig{MachineID: "m", Port: core.DefaultListenerPort}},
 		{name: "a host bridge", in: core.ListenerConfig{MachineID: "m", Port: core.DefaultListenerPort, HostBridge: "127.0.0.1"}},
 		{name: "no machine id", in: core.ListenerConfig{Port: 9020}, input: "machineId", err: "machineId is empty"},
@@ -55,6 +57,17 @@ func TestListenerConfigCheck(t *testing.T) {
 			in:    core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: strings.ToLower(readmeSeed[:29] + "." + readmeSeed[29:])},
 			input: "listenHost", err: "listenHost holds an nkey seed (not echoed)",
 		},
+		{name: "the allowed hosts an operator writes", in: core.ListenerConfig{MachineID: "m", Port: 9020, AllowedHosts: acceptedAllowedHosts}},
+	}
+	// The listener refuses each of these at boot, so a config carrying one deploys a listener
+	// that never serves; the entry is refused by its index, beside an entry that is fine.
+	for _, entry := range refusedAllowedHosts {
+		cases = append(cases, checkCase{
+			name:  "an allowed host " + entry,
+			in:    core.ListenerConfig{MachineID: "m", Port: 9020, AllowedHosts: []string{"ok.internal.example", entry}},
+			input: "allowedHosts",
+			err:   fmt.Sprintf("allowedHosts[1] is %q: want a host name or address with no port, scheme or path", entry),
+		})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -106,6 +119,18 @@ func TestListenerConfigEnv(t *testing.T) {
 			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", HostBridge: "127.0.0.1"},
 			urls: []string{"nats://hub.internal.example:4222"},
 			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_HOST_BRIDGE=127.0.0.1"},
+		},
+		{
+			name: "allowed hosts, right after the listen host and as written",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", AllowedHosts: acceptedAllowedHosts},
+			urls: []string{"nats://127.0.0.1:4222"},
+			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_ALLOWED_HOSTS=Hub.Internal.Example.,192.0.2.7,[2001:db8::1]", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222"},
+		},
+		{
+			name: "no allowed host leaves ENVOY_ALLOWED_HOSTS unset",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0"},
+			urls: []string{"nats://127.0.0.1:4222"},
+			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222"},
 		},
 		{name: "no URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, err: "natsUrls needs at least one URL"},
 		{name: "a comma in a URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, urls: []string{"nats://a:1,nats://b:2"}, err: "natsUrls[0] contains a comma"},

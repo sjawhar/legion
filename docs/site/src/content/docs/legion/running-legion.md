@@ -234,7 +234,7 @@ What each part is for:
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
-  only) is an IP address or a DNS name, such as the Service that fronts a daemon whose own pod
+  only) is an IP address or an ASCII DNS name, such as the Service that fronts a daemon whose own pod
   restarts onto a new IP. Beside it, `bind` is only where the daemon listens: it may be `0.0.0.0`,
   but not loopback, where no pod reaches it.
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),

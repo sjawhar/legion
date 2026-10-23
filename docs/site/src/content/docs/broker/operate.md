@@ -13,7 +13,8 @@ Cloud Secret Manager, and it starts nothing else.
 
 The broker ships as `envoy-broker` in the Envoy image, `ghcr.io/sjawhar/legion/envoy:<commit>`,
 which every push to `main` that touches the image's sources publishes (the image's default
-entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). To build it yourself:
+entrypoint is the Envoy listener, so run it with `--entrypoint envoy-broker`). Pin it by digest
+and verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows. To build it yourself:
 
 ```sh
 cd packages/envoy

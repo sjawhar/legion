@@ -24,10 +24,10 @@ func listenerEnv(c core.ListenerConfig, urls ...string) (string, error) {
 // Where a value enters core, a value holding an nkey seed (bus.HoldsSeed) is refused naming
 // the field by its path, never quoting it, and nothing is rendered: the authorization's names,
 // rule entries and noAuthUser, Render's and StartScript's header lines, StartScript's server
-// arguments and config path, and the listener's machineId, hostBridge and NATS URLs. Otherwise
-// each would reach a refusal's %q, the rendered authorization, the start script or the
-// environment a watchdog writes as root. Each row's clean value, in the same place, is accepted and
-// reaches that output.
+// arguments and config path, and the listener's machineId, hostBridge, allowed hosts and NATS
+// URLs. Otherwise each would reach a refusal's %q, the rendered authorization, the start script
+// or the environment a watchdog writes as root. Each row's clean value, in the same place, is
+// accepted and reaches that output.
 func TestASeedInAnInputIsRefusedUnechoed(t *testing.T) {
 	const path = "/tmp/nats-server.conf"
 	const url = "nats://127.0.0.1:4222"
@@ -156,6 +156,11 @@ func TestASeedInAnInputIsRefusedUnechoed(t *testing.T) {
 			c.HostBridge = "bridge-" + v + ".example"
 			return listenerEnv(c, url)
 		}, "hostBridge holds an nkey seed (not echoed)", "hostBridge", "example"},
+		{"the listener's allowed hosts", func(v string) (string, error) {
+			c := listener
+			c.AllowedHosts = []string{"ok.internal.example", v + ".example"}
+			return listenerEnv(c, url)
+		}, "allowedHosts[1] holds an nkey seed (not echoed)", "allowedHosts", "cleanname"},
 		{"a NATS URL", func(v string) (string, error) {
 			return listenerEnv(listener, url, "nats://example:"+v+"@hub.internal.example:4222")
 		}, "natsUrls[1] holds an nkey seed (not echoed)", "natsUrls", "password"},

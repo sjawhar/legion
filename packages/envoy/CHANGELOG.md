@@ -74,6 +74,12 @@
 - The secrets broker's sweeper deletes spent machine-login OAuth state each tick: device codes an
   hour past their expiry, expired DPoP proofs, nonces and access tokens, and refresh token
   families none of whose tokens can still be redeemed, at most 10,000 rows of each per tick.
+- Each `ghcr.io/sjawhar/legion/envoy:<commit>` image published from now on carries a GitHub
+  artifact attestation of its index digest, signed by `release-envoy-listener.yaml`, so `gh
+  attestation verify --repo sjawhar/legion` with `--cert-identity
+  …/release-envoy-listener.yaml@refs/heads/main --source-ref refs/heads/main
+  --deny-self-hosted-runners` accepts an image only when a run on `main` built it. `latest` is a
+  separate index with no attestation; pin the `<commit>` image its revision annotation names.
 - The secrets broker serves a minted secret: a GCP secret with no version tagged
   `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
   its name with that account and its owner and the secret is human-tier. Each release mints a

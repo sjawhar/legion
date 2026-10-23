@@ -154,6 +154,7 @@ func exampleArgs() *gcp.NatsHubArgs {
 		},
 		TailnetAuthKey: pulumi.String(authKey),
 		Hostname:       "example-hub",
+		TailnetDnsName: "example-tailnet.ts.net",
 		Tags:           []string{"tag:example-host"},
 		Zone:           "us-central1-a",
 		NatsImage:      natsImage,

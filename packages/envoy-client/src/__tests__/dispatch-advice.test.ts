@@ -342,7 +342,7 @@ describe("Dispatch write advice", () => {
     const result = await executeWrite(tool, args, rawAdvice);
 
     expect(result.text).toEndWith(
-      'You\'ve sent 3 messages on DSP-42 with no human response. Progress ledger or scratchpad? If so, stop. See the `dispatch` skill, "Structure over stream".'
+      'Posted. You\'ve sent 3 messages on DSP-42 with no human response. Progress ledger or scratchpad? If so, stop. See the `dispatch` skill, "Structure over stream".'
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });
@@ -356,7 +356,7 @@ describe("Dispatch write advice", () => {
     );
 
     expect(result.text).toEndWith(
-      'You\'ve sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. See the `dispatch` skill, "Structure over stream".'
+      'Posted. You\'ve sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. See the `dispatch` skill, "Structure over stream".'
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });
@@ -606,6 +606,21 @@ describe("Dispatch write advice", () => {
       "A past decision may already answer this: DSP-9 [done] Transport choice, answered by alice on 2026-09-12T13:20:00Z → http://dispatch.test/issues/DSP-9#ask-ask-old"
     );
     expect(result.details.advice).toEqual(rawAdvice);
+  });
+
+  test("dispatch_ask ends with the cadence line after its suggestions", async () => {
+    const rawAdvice = advice({
+      session_writes_since_human: 3,
+      suggestions: { related: [], missing: "the search behind it did not answer within 300ms" },
+    });
+    const result = await executeWrite(
+      "dispatch_ask",
+      { issue: "DSP-42", question: "What should we do?" },
+      rawAdvice
+    );
+
+    expect(result.text).toContain("Related-item search was skipped");
+    expect(result.text.split("\n").at(-1)).toStartWith("Posted. You've sent 3 messages on DSP-42");
   });
 
   test("dispatch_issue reports why suggestions are missing instead of blocking the write", async () => {

@@ -78,6 +78,27 @@ func read(ctx context.Context, tx pgx.Tx, project, tree string) (Lifecycle, erro
 		cleanup_confirmed_at from tree_lifecycles where project = $1 and tree = $2 for update`, project, tree))
 }
 
+// Read returns the tree's lifecycle as the table holds it now, and whether it has a row at all. It
+// opens, reserves and confirms nothing.
+func Read(ctx context.Context, tx pgx.Tx, project, tree string) (Lifecycle, bool, error) {
+	lifecycle, err := scan(tx.QueryRow(ctx, `select project, tree, epoch, authority, cleanup_started,
+		cleanup_confirmed_at from tree_lifecycles where project = $1 and tree = $2`, project, tree))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Lifecycle{}, false, nil
+	}
+	if err != nil {
+		return Lifecycle{}, false, fmt.Errorf("read tree lifecycle %s: %w", tree, err)
+	}
+	return lifecycle, true, nil
+}
+
+// HeldByOperator says whether the operator owns this lifetime of the tree: it opened it and its
+// cleanup has not confirmed, so the workflow may record nothing that acts on the tree's claims or
+// its pod.
+func (l Lifecycle) HeldByOperator() bool {
+	return l.Authority == AuthorityOperator && l.CleanupConfirmedAt.IsZero()
+}
+
 // Open starts a fresh authorized lifetime or returns its current open epoch. It is called in the
 // admission fact transaction or before an explicit operator root is created; a cleanup reservation
 // is a named wait, never an implicit zero authority.

@@ -1052,6 +1052,16 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.pod.volumes[0].nfs.server :: is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
 		},
 		{
+			name: "an NFS server with a dotted capital I",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"nas.\u0130nternal.example\", path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an IP address or an ASCII DNS name; got "nas.\u0130nternal.example"`,
+		},
+		{
+			name: "an NFS server with a Kelvin sign",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: \"\u212Aube.example\", path: /share}}]\n",
+			want: `runtime.kubernetes.pod.volumes[0].nfs.server must be an IP address or an ASCII DNS name; got "\u212aube.example"`,
+		},
+		{
 			name: "an NFS server as an IPv4-mapped IPv6 address",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::ffff:10.0.0.2', path: /share}}]\n",
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "::ffff:10.0.0.2" is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write 10.0.0.2`,
@@ -1387,6 +1397,45 @@ func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n"+agentSecretsTokenFile), noEnv)
 			if err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A mixed-case ASCII name passes: DNS names compare without regard to ASCII case.
+func TestNFSServerMayBeMixedCaseASCII(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n      volumes: [{name: nas, nfs: {server: NAS.Internal.Example, path: /share}}]\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Runtime.Kubernetes.Pod.Volumes[0].NFS.Server; got != "NAS.Internal.Example" {
+		t.Errorf("server = %q, want it as written", got)
+	}
+}
+
+// A URL a pod is handed, and bind, are refused unless their host is ASCII: a pod's HTTP client maps
+// a full-width name to localhost (UTS-46), past the loopback refusal.
+func TestPodURLHostMustBeASCII(t *testing.T) {
+	for name, tc := range map[string]struct{ body, want string }{
+		"daemon_url with a long s": {kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localho\u017Ft:13370"),
+			`daemon_url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+		"envoy_url full-width": {kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: http://\uFF4C\uFF4F\uFF43\uFF41\uFF4C\uFF48\uFF4F\uFF53\uFF54:9020"),
+			`envoy_url host must be an IP address or an ASCII DNS name; got "\uff4c\uff4f\uff43\uff41\uff4c\uff48\uff4f\uff53\uff54"`},
+		"nats_urls with a Kelvin sign": {kubernetesWith("nats_urls: [nats://nats.internal.example:4222]", "nats_urls: [\"nats://\u212Aube.example:4222\"]"),
+			`nats_urls host must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
+		"dispatch_url with a long s": {kubernetesWith("dispatch_url: https://dispatch.internal.example", "dispatch_url: https://localho\u017Ft"),
+			`dispatch_url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+		"bind with a Kelvin sign": {kubernetesWith("bind: 10.0.0.5", "bind: \"\u212Aube.example\""),
+			`bind must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
+		"bind with a Kelvin sign beside advertise_host": {kubernetesWith("bind: 10.0.0.5", "bind: \"\u212Aube.example\"\nadvertise_host: legion-daemon.legion.svc"),
+			`bind must be an IP address or an ASCII DNS name; got "\u212aube.example"`},
+		"agent_secrets.url with a long s": {kubernetesFile + "    agent_secrets:\n      url: http://localho\u017Ft:13380\n" + agentSecretsTokenFile,
+			`runtime.kubernetes.agent_secrets.url host must be an IP address or an ASCII DNS name; got "localho\u017ft"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("LoadForValidation error = %v, want %q", err, tc.want)
 			}
 		})
 	}

@@ -66,8 +66,8 @@ type Config struct {
 	// AdvertiseHost is `advertise_host`: the host every pod's shim dials the worker stream at in
 	// Bind's place, so Bind can be the unspecified address a daemon running as a pod listens on; ""
 	// (the default) has pods dial Bind. Only runtime: kubernetes accepts it, and readAdvertiseHost
-	// holds it to an IP address or a DNS name. `daemon_url` names the pod-facing API address on its
-	// own.
+	// holds it to an IP address or an ASCII DNS name. `daemon_url` names the pod-facing API
+	// address on its own.
 	AdvertiseHost string
 	PostgresDSN   string
 	StateDir      string

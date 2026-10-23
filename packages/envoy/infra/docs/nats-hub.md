@@ -44,9 +44,10 @@ and `instanceGroup`, the group's name.
 | `diskSizeGb` | `20` | The size, in GB, of that disk: at most 252 for `pd-balanced` and 506 for `pd-ssd`, the largest whose first-boot read fits the group's initial delay. |
 | `natsImage` | required | The NATS server image, pinned by digest: `<name>@sha256:<64 lowercase hex digits>`. Its entrypoint takes nats-server's arguments, as the official `nats` image's does. |
 | `tailscaleImage` | required | Tailscale's image, pinned the same way. The unit configures it through containerboot's `TS_*` variables, as Tailscale's own image reads them. |
+| `tailnetDnsName` | unset | The tailnet's DNS name, one label under `ts.net` (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ts\.net$`), such as `example-tailnet.ts.net`. Required for a hub with a `listener`, since the hub renders the address that listener answers on, `<h>.<tailnetDnsName>`, from it into the listener's `ENVOY_ALLOWED_HOSTS`; a hub without a listener may leave it unset. A plain value the program knows when it runs, never another resource's output. |
 | `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address and takes the network's rules for all its instances, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, its sshd is reachable from the internet: see [The VM's external address](#the-vms-external-address). May come from another resource or stack. |
 | `subnetwork` | unset | The VM's subnetwork, for a network with custom subnetworks: one in `zone`'s region. Only with `network`. May come from another resource or stack. |
-| `listener` | unset | The hub's own Envoy listener: `image`, the listener's image pinned as the images above are; `seedSecret`, the id of a Secret Manager secret in the hub's project holding its NATS user's seed; and `nkey`, that seed's public key. See [The hub's listener](#the-hubs-listener). |
+| `listener` | unset | The hub's own Envoy listener: `image`, the listener's image pinned as the images above are; `seedSecret`, the id of a Secret Manager secret in the hub's project holding its NATS user's seed; `nkey`, that seed's public key; and `allowedHosts`, any further address a client dials this hub by, beyond the hub's own `<h>.<tailnetDnsName>`, which it always serves. Each `allowedHosts` entry is a plain host name or IP address, rendered as written into the listener's `ENVOY_ALLOWED_HOSTS`. See [The hub's listener](#the-hubs-listener). |
 | `sessionUser` | unset | `name` and `nkey`, the NATS user a client presenting no credential becomes, granted `SessionPermissions`. See [The hub's users](#the-hubs-users). |
 
 Only `tailnetAuthKey`, `network` and `subnetwork` may come from another resource's output. Every
@@ -57,10 +58,11 @@ The hub refuses these before it registers anything, with an error naming the inp
 
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in the
-  hub's own name or an input it carries into the user data, a child or a refusal: `hostname`, a
-  tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId` or `dispatchMachineId`,
-  or the listener's `image` or `seedSecret`. The error names the input by its path and never its
-  value, as `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
+  hub's own name or an input it carries into the user data, a child or a refusal: `hostname`,
+  `tailnetDnsName`, a tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId` or
+  `dispatchMachineId`, or the listener's `image`, `seedSecret` or one of its `allowedHosts`. The
+  error names the input by its path and never its value, as
+  `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
   seed in the hub's own name as `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed
   (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another resource, so a
   seed in any of them fails the preview or update once it resolves, with the same error, before
@@ -70,6 +72,7 @@ The hub refuses these before it registers anything, with an error naming the inp
   says, and a seed as a user's `nkey` is refused as an `nkey` that is no public key, without
   quoting it;
 - a `hostname` outside the rule above;
+- a `tailnetDnsName` outside the rule above, whenever it is set;
 - no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
   hyphens, Tailscale's rule for a tag;
 - an empty `zone`;
@@ -90,6 +93,17 @@ The hub refuses these before it registers anything, with an error naming the inp
   (`^[A-Za-z0-9_-]{1,255}$`, Secret Manager's rule, so a resource path such as
   `projects/<p>/secrets/<s>` is refused) or is the hub's own `<h>-tailnet-auth-key`, or whose
   `nkey` is empty;
+- a `listener` on a hub with no `tailnetDnsName`, since the hub renders the address its listener
+  answers on from it, as `tailnetDnsName is required for a hub with a listener: …`. Pulumi
+  refuses the hub while it previews it, before anything is registered;
+- a `listener.allowedHosts` entry that is not a plain host name or IP address, named by its own
+  index in that list, as `listener.allowedHosts[0] is "hub.internal.example:9020": want a host
+  name or address with no port, scheme or path`: an entry carrying a port, a scheme, a path or a
+  wildcard such as `*.example-tailnet.ts.net`. The listener refuses every such entry in its own
+  `ENVOY_ALLOWED_HOSTS` when it boots, so a hub whose listener could not serve is refused before
+  anything registers; the plugin additionally refuses an entry that is empty or carries
+  surrounding whitespace, which the listener would have trimmed and served, since the entry is
+  rendered into a comma-joined `docker run` argument where a space would split it;
 - a `sessionUser` whose `nkey` is empty;
 - a missing provider (see [Providers](../README.md#providers)).
 
@@ -191,12 +205,28 @@ otherwise post to it: a browser sends a cross-site form without asking. The list
 request body whose `Content-Type` is not `application/json`, which a page can send cross-site only
 after a CORS preflight the listener never grants (`apiauth.go`). That refusal shipped in
 legion-envoy-v13.9.0, so pin `listener.image` to that release or a later one; an older image
-leaves 9020 open to any page a tailnet user visits. The refusal does not stop DNS rebinding: a
-page whose own name an attacker repoints at the hub's tailnet address is same-origin with it, so
-it sends JSON with no preflight, reads the replies, and has the whole API, since the listener does
-not check the request's `Host`. A browser that asks before a public page reaches a private or
-tailnet address (Chrome's Local Network Access) blocks that; any other browser on a device the
-policy admits to 9020 is a way in, which is one more reason to grant 9020 narrowly.
+leaves 9020 open to any page a tailnet user visits. The `Content-Type` refusal alone would not
+stop DNS rebinding, so the listener checks the request's `Host` too: a listener whose `/v1` takes
+no bearer and no OIDC verifier serves loopback and the names in `ENVOY_ALLOWED_HOSTS` alone,
+which the hub renders from `tailnetDnsName` and `listener.allowedHosts`, and answers every other
+`Host`, an empty one included, with 421 (`packages/envoy/cmd/listener/apiauth.go`, `apiAuth` and
+`servesHost`; `/healthz`, `/metrics` and the `/webhook/` routes are exempt). A page whose own
+name an attacker repoints at the hub's tailnet address sends that name as the `Host`, so it is
+refused with the rest. A client that dials the hub by any other address, its bare MagicDNS label
+`<h>` or its tailnet IP among them, is refused the same way unless that address is in
+`listener.allowedHosts`. The guard is in no release yet: its entry stands under `## [Unreleased]`
+in `packages/envoy/CHANGELOG.md`, so an image older than it checks no `Host` at all, and on such
+an image a rebinding page still has the whole API. A browser that asks before a public page
+reaches a private or tailnet address (Chrome's Local Network Access) blocks that; any other
+browser on a device the policy admits to 9020 is a way in, which is one more reason to grant 9020
+narrowly.
+
+The deployment that builds this hub hands its clients `http://<h>.<tailnetDnsName>:9020`, the
+address the hub renders into `ENVOY_ALLOWED_HOSTS`, so those clients are served as they stand.
+Whoever moves a hub's listener to an image carrying the guard should check what its clients
+actually dial before the move — a bare MagicDNS label, a tailnet IP address, a name of their
+own — and put everything but the hub's own `<h>.<tailnetDnsName>` in `listener.allowedHosts`:
+an address left out of both is answered 421 from the moment the new VM boots.
 
 The listener connects as the listener's user (see [The hub's users](#the-hubs-users)) with the
 seed `listener.seedSecret` holds. The hub's service account gets
@@ -255,7 +285,7 @@ order. They are started and never enabled, since `/etc` does not outlive the boo
 | `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it empties the key file, which stays for the container's bind mount, and only once that has succeeded writes the marker. A simple service, so its start returns at once; a run that fails, as one whose key drop fails does, is run again 10 seconds later. |
 | `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
-| `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the seed to that env file; then `docker run --name envoy-listener` of `listener.image` on the host's network, with `--env-file /run/envoy/listener.env`, `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`. `TimeoutStartSec=600` exceeds the fetcher's 590-second maximum: six attempts, each with three 30-second curl limits, separated by five 10-second waits. A seed that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
+| `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the seed to that env file; then `docker run --name envoy-listener` of `listener.image` on the host's network, with `--env-file /run/envoy/listener.env`, `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_ALLOWED_HOSTS=<h>.<tailnetDnsName>` and each of `listener.allowedHosts` after it, comma-separated, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`, in that order, as `gcp/testdata/cloud-config.golden` shows. `TimeoutStartSec=600` exceeds the fetcher's 590-second maximum: six attempts, each with three 30-second curl limits, separated by five 10-second waits. A seed that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
 
 The container units require `docker.service`, refuse to start unless `/mnt/disks/data` is a mount
 point, so that their state never lands on the tmpfs beneath, and restart 10 seconds after their
@@ -467,17 +497,27 @@ e2fsck's repair, on a real disk, leaves what JetStream needs are for a first dep
 An instance template cannot change once it is created
 ([instance templates](https://cloud.google.com/compute/docs/instance-templates)), and the hub's
 holds the cloud-config, so a change to anything the cloud-config is rendered from (`users`,
-`listener`, `sessionUser`, `tags`, `natsImage`, `tailscaleImage`) or to `machineType`,
-`diskType`, `diskSizeGb`, `network` or `subnetwork` makes a new template. So does a plugin release
-that changes the rendering itself: the release that added `listener` and `sessionUser` renamed the
-secret fetcher and gives every hub a Serve configuration, so upgrading to it replaces every
-existing hub's VM once, with the outage below, even a hub that sets neither input. The group then
-replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting it before it creates the
-next (`RECREATE`, no surge, at most one unavailable). NATS is down from the old VM's stop until the
-new one's `nats` unit starts, and its clients reconnect then. The new VM gets the same data disk,
-so it keeps the stream and rejoins the tailnet as the same node. Its boot disk comes from the
-`cos-stable` family as it is then, so a new template also brings whichever COS release the family
-names at that moment.
+`listener` and its `allowedHosts`, `sessionUser`, `tags`, `tailnetDnsName`, `natsImage`,
+`tailscaleImage`) or to `machineType`, `diskType`, `diskSizeGb`, `network` or `subnetwork` makes a
+new template. So does a plugin release that changes the rendering itself: the release that added
+`listener` and `sessionUser` renamed the secret fetcher and gives every hub a Serve configuration,
+so upgrading to it replaces every existing hub's VM once, with the outage below, even a hub that
+sets neither input. This release renders `ENVOY_ALLOWED_HOSTS` into the listener's unit, so moving
+to it replaces the VM of every hub that runs a listener, once, with that same outage, and replaces
+no hub without one: the cloud-config is the instance template's `user-data`, and a template cannot
+change. The group then replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting
+it before it creates the next (`RECREATE`, no surge, at most one unavailable). NATS is down from
+the old VM's stop until the new one's `nats` unit starts, and its clients reconnect then. The new
+VM gets the same data disk, so it keeps the stream and rejoins the tailnet as the same node. Its
+boot disk comes from the `cos-stable` family as it is then, so a new template also brings
+whichever COS release the family names at that moment. Once the new VM is up, check what its
+listener serves, which the replacement itself does not prove: its `listener API hosts:` boot line
+(`docker logs envoy-listener` on the VM, or the serial output) must name `<h>.<tailnetDnsName>` as
+the clients dial it, or a `/v1` route at `http://<h>.<tailnetDnsName>:9020` must answer 200 from a
+device on the tailnet. The group's autohealing check reads NATS's `/healthz` on 8222 and nothing
+dials 9020, so a `tailnetDnsName` that passes the shape rule without being this tailnet's name, or
+a MagicDNS collision that gave the node `<h>-1` rather than `<h>`, leaves a healthy group whose
+listener answers 421 to every client.
 
 Three inputs work otherwise:
 
@@ -611,6 +651,7 @@ resources:
     type: envoy-infra:gcp:NatsHub
     properties:
       hostname: example-hub
+      tailnetDnsName: example-tailnet.ts.net
       zone: us-central1-a
       tags:
         - tag:example-host

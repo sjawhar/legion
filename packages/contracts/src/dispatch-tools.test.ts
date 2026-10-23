@@ -117,9 +117,12 @@ function schemaFor(name: keyof typeof validCalls) {
   return dispatchToolSchema(specFor(name), schemaApi);
 }
 
-const ISSUE_UPDATE_RULES =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo. " +
-  "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.";
+const ISSUE_UPDATE_FIELDS_RULE =
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+const ISSUE_UPDATE_DONE_RULE =
+  "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts.";
+const reasonOnlyWithDone = (status: string): string =>
+  `reason goes only with status done: it is the note posted on the issue as it closes, and ${status} closes nothing. Drop reason, or set status done to close the issue.`;
 
 describe("zodSchemaApi", () => {
   test("rejects fractional values when integers are required", () => {
@@ -447,7 +450,7 @@ describe("dispatchToolSpecs", () => {
     const bare = schema.safeParse({ issue: "DSP-1" });
     expect(bare.success).toBe(false);
     if (bare.success) return;
-    expect(bare.error.issues.map((issue) => issue.message)).toEqual([ISSUE_UPDATE_RULES]);
+    expect(bare.error.issues.map((issue) => issue.message)).toEqual([ISSUE_UPDATE_FIELDS_RULE]);
 
     for (const args of [
       { issue: "DSP-1", title: "Renamed" },
@@ -497,24 +500,32 @@ describe("dispatchToolSpecs", () => {
   // A closed issue refuses messages, comments, and artifacts, so the reason an issue closed can
   // only be written before the close: the tool takes it in the same call and refuses the close
   // without it.
+  // Each refusal names the part of the rule the call broke, so a reopen that also passed reason
+  // is told reason is the close's, never that it named no field.
   test("dispatch_issue_update closes only with a reason, and takes a reason only to close", () => {
     const schema = schemaFor("dispatch_issue_update");
 
-    for (const args of [
-      { issue: "DSP-1", status: "done" },
-      { issue: "DSP-1", status: "done", reason: "" },
-      { issue: "DSP-1", status: "done", reason: "  \n" },
-      { issue: "DSP-1", status: "done", title: "Renamed" },
-      { issue: "DSP-1", status: "in_progress", reason: "Starting." },
-      { issue: "DSP-1", title: "Renamed", reason: "Renaming." },
-      { issue: "DSP-1", reason: "Why." },
-    ]) {
+    for (const [args, refusal] of [
+      [{ issue: "DSP-1", status: "done" }, ISSUE_UPDATE_DONE_RULE],
+      [{ issue: "DSP-1", status: "done", reason: "" }, ISSUE_UPDATE_DONE_RULE],
+      [{ issue: "DSP-1", status: "done", reason: "  \n" }, ISSUE_UPDATE_DONE_RULE],
+      [{ issue: "DSP-1", status: "done", title: "Renamed" }, ISSUE_UPDATE_DONE_RULE],
+      [
+        { issue: "DSP-1", status: "in_progress", reason: "Starting." },
+        reasonOnlyWithDone("status in_progress"),
+      ],
+      [
+        { issue: "DSP-1", title: "Renamed", reason: "Renaming." },
+        reasonOnlyWithDone("an update without status done"),
+      ],
+      [{ issue: "DSP-1", reason: "Why." }, reasonOnlyWithDone("an update without status done")],
+    ] as const) {
       const result = schema.safeParse(args);
       expect(result.success, JSON.stringify(args)).toBe(false);
       expect(
         result.error?.issues.map((issue) => issue.message),
         JSON.stringify(args)
-      ).toEqual([ISSUE_UPDATE_RULES]);
+      ).toEqual([refusal]);
     }
     expect(
       schema.safeParse({

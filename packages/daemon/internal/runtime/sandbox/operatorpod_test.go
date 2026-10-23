@@ -153,9 +153,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		// in-cluster DISPATCH_URL the runtime hands every agent.
 		{name: "Dispatch's public dashboard", pod: env("DISPATCH_PUBLIC_URL", "https://dispatch.example.org")},
 		{name: "a public dashboard with no scheme", pod: env("DISPATCH_PUBLIC_URL", "dispatch.example.org"),
-			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
 		{name: "a public dashboard on another scheme", pod: env("DISPATCH_PUBLIC_URL", "ftp://dispatch.example.org"),
-			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "ftp://dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "ftp://dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
@@ -193,7 +193,7 @@ func TestCheckPodHoldsDispatchPublicURLToTheAgentsRule(t *testing.T) {
 		}
 	}
 	for _, value := range append(fixture.Invalid, fixture.AgentsOnly...) {
-		want := fmt.Sprintf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
+		want := fmt.Sprintf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %+q, which is not an http or https URL with no userinfo, a host that is a DNS name of ASCII letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
 		if err := check(value); err == nil || err.Error() != want {
 			t.Errorf("CheckPod(%q) = %v, want %q", value, err, want)
 		}
