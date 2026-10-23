@@ -446,6 +446,10 @@
 
 ### Changed
 
+- **Breaking:** the secrets broker needs `BROKER_MACHINE_LOGIN_URL`, the absolute http(s) URL of
+  Dispatch's machine-login page (`https://<dispatch>/credentials/machine`), and refuses to start
+  without it. The device authorization answer's `verification_uri` names that page, where the
+  person types the machine's code.
 - **Breaking:** `agent-secrets-helper` logs a machine in only through the broker's OAuth routes
   (`POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`), so it needs a secrets
   broker of this release: against an earlier broker, `agent-secrets machine login` fails. Upgrade

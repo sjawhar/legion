@@ -2739,6 +2739,8 @@ never the URL; `cmd/broker` then loads the AWS config once, before `store.Open`,
 imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new connection),
 `BROKER_PUBLIC_URL` (required; absolute URL, no path —
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
+`BROKER_MACHINE_LOGIN_URL` (required; absolute http(s) URL — Dispatch's `/credentials/machine`
+page, the device grant's `verification_uri`, where a person types a machine login's code),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
 `BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
@@ -2797,7 +2799,8 @@ literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
-absolute URL with no path; a `BROKER_SECRETS_STORE` that is neither store's name; with the AWS
+absolute URL with no path; a `BROKER_MACHINE_LOGIN_URL` that isn't an absolute http(s) URL; a
+`BROKER_SECRETS_STORE` that is neither store's name; with the AWS
 store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or holds white space,
 and a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed elsewhere, and a
 bare key id names no account); with the GCP store, a prefix not of its form (a project id in place

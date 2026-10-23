@@ -189,11 +189,10 @@ func main() {
 	oauthStore := oauthstore.New(st.Pool)
 	oauthSecret, err := oauthStore.Secret(ctx)
 	fatal(err)
-	// The person types the code on Dispatch's machine-login page, whose address the broker does not
-	// know; the helper builds that link itself, so verification_uri names the broker.
+	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
 		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, RefreshLifetime: credentialLifetime,
-		VerificationURL: cfg.PublicURL,
+		VerificationURL: cfg.MachineLoginURL,
 	}, oauthStore)
 	fatal(err)
 	mach := &machine.Service{

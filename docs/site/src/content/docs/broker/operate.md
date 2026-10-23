@@ -28,6 +28,7 @@ configuration is:
 ```sh
 BROKER_LISTEN_ADDR=0.0.0.0:13380
 BROKER_PUBLIC_URL=https://secrets.internal.example
+BROKER_MACHINE_LOGIN_URL=https://dispatch.internal.example/credentials/machine
 BROKER_DATABASE_URL='postgres://broker:<password>@db.internal.example:5432/broker'
 BROKER_UI_TOKEN_FILE=/run/secrets/broker-ui-token
 BROKER_SECRETS_PREFIX=production/agent-secrets/

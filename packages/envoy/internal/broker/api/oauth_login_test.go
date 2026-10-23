@@ -142,8 +142,8 @@ func TestADeviceLoginIsApprovedThroughDispatchsRoutesAndIssuesACredential(t *tes
 	rig := brokertest.NewRig(t)
 	m := newDeviceMachine(t, rig)
 	da := m.login(t)
-	if da.VerificationURIComplete != "" {
-		t.Fatalf("verification_uri_complete = %q, want none", da.VerificationURIComplete)
+	if da.VerificationURIComplete != "" || da.VerificationURI != brokertest.MachineLoginURL {
+		t.Fatalf("verification_uri = %q, verification_uri_complete = %q; want %q and none", da.VerificationURI, da.VerificationURIComplete, brokertest.MachineLoginURL)
 	}
 
 	status, body := rig.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": da.UserCode})

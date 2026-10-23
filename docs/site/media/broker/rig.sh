@@ -163,12 +163,17 @@ EOF
 chmod 600 "$work/fake-secrets.json"
 # The broker's UI bearer, which Dispatch sends it, reaches both through a file, never an argv.
 (umask 077 && openssl rand -hex 32 >"$work/broker-ui-token")
+# Dispatch's port is picked before the broker starts, since the broker names Dispatch's
+# machine-login page to every machine that logs in.
+pick_port dispatch_port
+dispatch_url="http://127.0.0.1:${dispatch_port}"
 
 note "starting the broker"
 start_process broker setsid env -i PATH="$PATH" \
   BROKER_DATABASE_URL="$broker_database_url" \
   BROKER_LISTEN_ADDR=127.0.0.1:0 \
   BROKER_PUBLIC_URL=http://127.0.0.1:0 \
+  BROKER_MACHINE_LOGIN_URL="$dispatch_url/credentials/machine" \
   BROKER_UI_TOKEN_FILE="$work/broker-ui-token" \
   BROKER_SECRETS_PREFIX="$secrets_prefix" \
   BROKER_SECRETS_KMS_KEY_ARN="$secrets_key" \
@@ -185,14 +190,12 @@ if [ ! -f "$root/packages/dispatch/web/dist/index.html" ]; then
   (cd "$root" && bun install --frozen-lockfile >/dev/null)
   (cd "$root/packages/dispatch" && bun run build:web >/dev/null)
 fi
-pick_port dispatch_port
 pick_port fake_envoy_port
 pick_port fake_github_port
 export DISPATCH_E2E_PORT=$dispatch_port FAKE_ENVOY_PORT=$fake_envoy_port FAKE_GITHUB_PORT=$fake_github_port
 # The harness's broker switch (packages/dispatch/e2e/harness-broker.ts), exported so seed.ts's
 # reset reads it as run-server.sh does and leaves alone the fake broker this rig never starts.
 export DISPATCH_E2E_AGENT_SECRETS_URL="$broker_url" DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE="$work/broker-ui-token"
-dispatch_url="http://127.0.0.1:${dispatch_port}"
 note "starting Dispatch at $dispatch_url"
 start_process fake_envoy setsid bun "$root/packages/dispatch/e2e/fake-envoy.ts"
 start_process fake_github setsid bun "$root/packages/dispatch/e2e/fake-github.ts"
