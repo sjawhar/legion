@@ -418,10 +418,13 @@ func (s *Service) decideDevice(ctx context.Context, tx pgx.Tx, code string, appr
 
 // Refreshed moves a live launcher credential's expiry to CredentialLifetime from now, as its
 // device login refreshes, and answers the new expiry. A credential revoked or already past its
-// expiry is ErrNotLive and is left as it is. It runs only in the transaction ctx carries
-// (oauthstore.TxFrom), and its update holds the credential's row lock until that transaction
-// ends: a revoke (enroll.Service.RevokeCredential locks the same row) either commits first, so the
-// update finds no live row, or waits for the refresh's tokens to commit and then ends them.
+// expiry is ErrNotLive and is left as it is. Expiry is compared with clock_timestamp(), the
+// statement's own moment, not now(), the transaction's start, so a retire (expires_at set to its
+// now) that commits after the token request's transaction began still ends the login for it. It
+// runs only in the transaction ctx carries (oauthstore.TxFrom), and its update holds the
+// credential's row lock until that transaction ends: a revoke (enroll.Service.RevokeCredential
+// locks the same row) either commits first, so the update finds no live row, or waits for the
+// refresh's tokens to commit and then ends them.
 func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time, error) {
 	tx, err := tokenTx(ctx)
 	if err != nil {
@@ -429,7 +432,7 @@ func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time
 	}
 	var expires time.Time
 	err = tx.QueryRow(ctx, `update launcher_credentials set expires_at = now() + make_interval(secs => $2)
-		where id = $1 and revoked_at is null and expires_at > now() returning expires_at`, credentialID, s.CredentialLifetime.Seconds()).Scan(&expires)
+		where id = $1 and revoked_at is null and expires_at > clock_timestamp() returning expires_at`, credentialID, s.CredentialLifetime.Seconds()).Scan(&expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, ErrNotLive
 	}
@@ -438,9 +441,9 @@ func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time
 
 // Live holds a launcher credential's row lock until the transaction ctx carries
 // (oauthstore.TxFrom) ends, leaving its expiry as it is; a credential revoked or past its expiry
-// is ErrNotLive. A revoke (enroll.Service.RevokeCredential locks the same row) either commits
-// first, so Live finds no live row, or waits for the device code grant's tokens to commit and then
-// ends them.
+// (against clock_timestamp(), as in Refreshed) is ErrNotLive. A revoke
+// (enroll.Service.RevokeCredential locks the same row) either commits first, so Live finds no live
+// row, or waits for the device code grant's tokens to commit and then ends them.
 func (s *Service) Live(ctx context.Context, credentialID string) error {
 	tx, err := tokenTx(ctx)
 	if err != nil {
@@ -448,7 +451,7 @@ func (s *Service) Live(ctx context.Context, credentialID string) error {
 	}
 	var one int
 	err = tx.QueryRow(ctx, `select 1 from launcher_credentials
-		where id = $1 and revoked_at is null and expires_at > now() for no key update`, credentialID).Scan(&one)
+		where id = $1 and revoked_at is null and expires_at > clock_timestamp() for no key update`, credentialID).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotLive
 	}

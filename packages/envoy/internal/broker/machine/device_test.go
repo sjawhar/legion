@@ -174,6 +174,37 @@ func TestRefreshedMovesALiveCredentialAndRefusesAnEndedOne(t *testing.T) {
 	})
 }
 
+// TestTheTokenHooksSeeARetireCommittedAfterTheirTransactionBegan: a retire (expires_at set to
+// its own now) that commits after a token request's transaction began ends the login for that
+// request too: the hooks compare expiry with the clock, not with the transaction's start, so
+// Refreshed and Live answer ErrNotLive (invalid_grant at the token endpoint).
+func TestTheTokenHooksSeeARetireCommittedAfterTheirTransactionBegan(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	_, credentialID := approvedCredential(t, svc)
+	for name, hook := range map[string]func(context.Context) error{
+		"Refreshed": func(ctx context.Context) error { _, err := svc.Refreshed(ctx, credentialID); return err },
+		"Live":      func(ctx context.Context) error { return svc.Live(ctx, credentialID) },
+	} {
+		if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() + interval '1 hour' where id=$1`, credentialID); err != nil {
+			t.Fatal(err)
+		}
+		inTx(t, svc, func(txCtx context.Context) {
+			tx, _ := oauthstore.TxFrom(txCtx)
+			if _, err := tx.Exec(txCtx, `select now()`); err != nil { // the transaction has begun
+				t.Fatal(err)
+			}
+			// The retire commits on another connection; its now() is later than the transaction's.
+			if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() where id=$1`, credentialID); err != nil {
+				t.Fatal(err)
+			}
+			if err := hook(txCtx); !errors.Is(err, ErrNotLive) {
+				t.Fatalf("%s after a retire committed mid-transaction = %v, want ErrNotLive", name, err)
+			}
+		})
+	}
+}
+
 // TestRefreshedAndLiveRunOnlyInATransaction: their row lock is what serializes a refresh with a
 // revoke, and on the pool it would end with the statement, so without a transaction they refuse.
 func TestRefreshedAndLiveRunOnlyInATransaction(t *testing.T) {
