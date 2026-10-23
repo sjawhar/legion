@@ -504,18 +504,25 @@ func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue,
 // implementing at once, as a settlement arriving in testing would send it, rather than through a
 // tester round on code CI has already found broken.
 //
-// The rule is applied only to the head the completion reports (row.HandoffCommit). The completion
-// waits on no webhook, so the record can still hold the head before the round's push, whose red the
-// round may have fixed; that head's arrival applies the rule to it (pullRequestSynchronized, push).
-// A red only a required workflow makes is left to the pass's next read of the runs as well: its
-// result is as old as the last read, up to two minutes, so a re-run gone green since would still
-// read red (decideChecks guards a READY the same way).
+// The rule is applied only when the record's head is the commit the completion reports
+// (row.HandoffCommit). The completion waits on no
+// webhook, so the record can still hold the head before the round's push, whose red the round may
+// have fixed; that head's arrival applies the rule to it (pullRequestSynchronized), and the round's
+// push does not judge the old head it has not yet replaced (push). A red only a required workflow
+// makes is left to the pass's next read of the runs: its result is as old as the last read, up to
+// two minutes, so a re-run gone green since would still read red. Clearing the head the runs were
+// read at makes that next read a change (record.RequiredReadUnchanged), which then sends the work
+// back if the run is still red, as decideChecks does for a READY.
 func (e *Engine) implementationReady(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest) error {
 	if err := e.transition(ctx, tx, issue, TriggerImplementationReady, "", row, pr, ""); err != nil {
 		return err
 	}
-	if pr == nil || pr.HeadSHA != row.HandoffCommit || classify.RedOnlyByWorkflows(*pr) {
+	if pr == nil || pr.HeadSHA != row.HandoffCommit {
 		return nil
+	}
+	if classify.RedOnlyByWorkflows(*pr) {
+		pr.WorkflowsHead = ""
+		return e.store.PutPullRequest(ctx, tx, *pr)
 	}
 	handed, err := e.store.Issue(ctx, tx, issue.Key)
 	if err != nil || handed == nil {
