@@ -52,7 +52,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 
 The `CI` line names the runs GitHub started for the code head, by run id, with each run's state
 as GitHub shows it when the line is written: `success`, a failure, or `queued` / `in progress`
-at <head-sha>. The implementer writes it at its completion from `gh run list --commit <head-sha>`
+at <head-sha>, or `no run yet` when GitHub has started none. The implementer writes it at its completion from one `gh run list --commit <head-sha>`
 and never waits for a run to finish to fill it in: the daemon reads every settlement itself, and a
 check or workflow the base branch requires that settles red sends the work back to `implementing`,
 before or after that completion. A later role that reads CI on GitHub updates the line's states to
@@ -66,7 +66,7 @@ then pushes and completes. It never waits for, watches or polls the pull request
 Under the Go daemon a check or workflow the base branch requires that settles red on the head,
 before the completion or after it, sends the work back to `implementing` with the failing checks
 named. The one CI result an implementer waits for is a re-run: when its task names a red that
-failed on its own, it re-runs the failed jobs (`gh run rerun <run-id> --failed`) and completes once
+failed on its own, it re-runs the failed jobs once (`gh run rerun <run-id> --failed`) and completes once
 the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Waiting for
 CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completion while that red
 still stands is sent straight back.
