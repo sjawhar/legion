@@ -561,10 +561,12 @@ func TestTheListenerBacksOffFromOneSecondToThirtyWithJitter(t *testing.T) {
 }
 
 // A caller whose wake is sooner than its idle wait is woken then, on the listener's own
-// goroutine, and a wait the wake ended is not pinged: the ping is for a connection that has been
-// idle for ListenIdle, which such a wait was not. That caller is the document rooms' evictor,
-// whose work has to stay on this goroutine (docs/stale_room.go). A notification that arrives
-// first is still reported.
+// goroutine, and nothing is pinged for it here: the ping falls due on the time since the
+// connection last proved a round trip (listener.go), and the three wakes below are over well
+// inside one ListenIdle of the LISTEN that proved this one, so none is owed. Wakes that run on
+// until that point are pinged all the same, which is the row below this one. That caller is the
+// document rooms' evictor, whose work has to stay on this goroutine (docs/stale_room.go). A
+// notification that arrives first is still reported.
 func TestTheListenerWakesItsCallerBeforeItsIdleWait(t *testing.T) {
 	database := storetest.Open(t)
 	probe := newListenerProbe()
@@ -606,7 +608,7 @@ func TestTheListenerWakesItsCallerBeforeItsIdleWait(t *testing.T) {
 		t.Fatalf("read the listener's backend: %v", err)
 	}
 	if query == "-- ping" {
-		t.Fatal("the listener pinged for a wait its caller's wake ended, not one its connection had been idle through")
+		t.Fatal("the listener pinged within one idle period of the LISTEN that proved this connection: the ping falls due on the time since the last proven round trip, which these wakes are short of")
 	}
 
 	notifyChannel(t, database, "dispatch_events", "woken")

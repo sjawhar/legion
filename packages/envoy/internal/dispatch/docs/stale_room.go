@@ -195,7 +195,8 @@ func (e *staleRoomEvictor) connected(ctx context.Context) func() {
 // A room whose re-examination reaches no verdict - a read that failed, an eviction that did not
 // happen, a write of this process still landing - does not leave it either: dueRooms has spent
 // that room's window, and armRetry gives it another, further out for each attempt in a row, so
-// the next wake tries it again and the listener still gets its idle period back.
+// the next wake tries it again, and a room that goes on getting no answer is tried once a minute
+// rather than every window for the life of the process (staleRoomRetryBackoffMax).
 func (e *staleRoomEvictor) woke(ctx context.Context) func() {
 	return func() {
 		for _, room := range e.dueRooms() {
@@ -501,11 +502,14 @@ func staleRoomRetryBackoff(attempt int) time.Duration {
 // re-armed at that moment would have the listener re-run the whole decision as fast as it loops
 // for as long as whatever failed keeps failing. On the interval, a room that goes on failing is
 // retried as often as a burst's notifications are refused and no oftener. Each attempt in a row
-// after the first is further out than the last (staleRoomRetryBackoff), to a ceiling past the
-// listener's idle period, which hands the wait back to the listener so its ping can prove the
-// connection (staleRoomRetryBackoffMax). The count is the room's own and ends at that room's next
-// verdict (reachedVerdict), so the ordinary case - one read that failed, answered at the next
-// window - is armed one interval out every time.
+// after the first is further out than the last (staleRoomRetryBackoff), to a ceiling that bounds
+// one room's retry rate and nothing besides: a room that keeps getting no answer costs one wake a
+// minute instead of one every staleRoomEvictInterval for the life of the process
+// (staleRoomRetryBackoffMax). It carries nothing for the listener's ping, which hangs on the time
+// since that connection last proved a round trip, cuts any wake short where it falls due and
+// fires there whatever ended the wait (pglisten.Listener.waitFor, listen). The count is the
+// room's own and ends at that room's next verdict (reachedVerdict), so the ordinary case - one
+// read that failed, answered at the next window - is armed one interval out every time.
 //
 // Through the evictor's one mutex, on the listener's own goroutine, like every other decision
 // here: nothing is armed from a timer or a goroutine of its own.

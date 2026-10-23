@@ -224,8 +224,13 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from: each is hijacked as soon
-// as it is opened, so the pool never holds one, and one is all it ever opens at a time.
+// listenerPoolSize bounds the pool Listener takes its connections from. Three permanent
+// listeners dial through it - the delivery hub, the event stream relay and the stale-room
+// evictor - and each connection is hijacked as soon as it is opened, so it leaves with its
+// caller and the pool holds none between dials: what one bounds is dials in flight, not
+// connections held. A listener redialling while another dials waits that dial out, which is
+// what a loop that dials and then waits for notifications for the life of the process can
+// afford.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the

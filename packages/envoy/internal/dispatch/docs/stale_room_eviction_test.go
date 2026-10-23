@@ -431,21 +431,24 @@ func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }
 
-// A room whose re-examinations keep reaching no verdict is re-armed further out each time, as far
-// as a window past the listener's idle period, so the idle ping fires again. The listener's wait
-// is the sooner of the caller's wake and its idle period (pglisten.Listener.waitFor), so while
-// the evictor asks for a wake inside that period - which a fixed interval does for ever, with no
-// notification arriving to drain the room out of the deferred set - every wait the listener makes
-// ends at a wake and the ping never runs. That ping is the only thing that finds a half-open
-// LISTEN connection: WaitForNotification on such a socket returns deadline-exceeded rather than
-// an error and pgx keeps the connection open, so a listener that hears no notification at all -
-// the very failure this file acts on - would go unnoticed for the life of the process.
+// A room whose re-examinations keep reaching no verdict is re-armed further out each time, as
+// far as staleRoomRetryBackoffMax, and what that ceiling bounds is the rate: such a room is
+// re-examined once a minute rather than every staleRoomEvictInterval for the life of the
+// process, and each re-examination re-reads the head through the pool and, while the room is
+// still behind, reads it again under the document's lock. Nothing ends the run on its own - no
+// notification arrives to drain the room out of the deferred set, since the write that
+// announced this one can be the last - so without the ceiling that cadence is for ever.
+//
+// The ceiling carries nothing for the listener's idle ping, which is the listener's own and
+// depends on no caller: pglisten holds the ping to the time since the connection last proved a
+// round trip, cuts a wake short where it falls due and pings there whatever ended the wait
+// (pglisten.Listener.waitFor, listen).
 //
 // The reads here get no answer the way TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow
 // arranges it: the head read is made through a context that already holds one of the pool's
 // connections, which the pool refuses (store.ErrNestedAcquire). The first window and the ceiling
 // are what this asserts, not the steps between them: the first is the cadence the ordinary case
-// converges on, and the ceiling is what hands the wait back to the listener.
+// converges on, and the ceiling is the rate the backoff climbs to and stays at.
 func TestARoomThatKeepsGettingNoAnswerBacksOffPastTheListenersIdlePeriod(t *testing.T) {
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)
@@ -491,7 +494,7 @@ func TestARoomThatKeepsGettingNoAnswerBacksOffPastTheListenersIdlePeriod(t *test
 		t.Fatalf("the first re-arm after an attempt that got no answer waits %s, not the %s the ordinary case - one read that failed, answered at the next window - converges on", first, staleRoomEvictInterval)
 	}
 	if wake < pglisten.DefaultListenIdle {
-		t.Fatalf("after %d re-examinations that reached no verdict the room is still re-armed %s out, inside the listener's %s idle period: waitFor returns that wake on every round (0 < wake < idle), so the ping that is the only thing that finds a half-open LISTEN connection never fires", attempts, wake, pglisten.DefaultListenIdle)
+		t.Fatalf("after %d re-examinations that reached no verdict the room is still re-armed %s out, under the listener's %s idle period and so under the ceiling of twice it: the backoff is not climbing to its bound, so a room nothing writes to again goes on re-reading its head through the pool - and, while it is still behind, under the document's lock - at that rate for the life of the process", attempts, wake, pglisten.DefaultListenIdle)
 	}
 	if wake != staleRoomRetryBackoffMax {
 		t.Fatalf("the backoff settled at %s rather than its %s ceiling", wake, staleRoomRetryBackoffMax)
