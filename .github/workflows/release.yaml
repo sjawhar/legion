@@ -541,7 +541,10 @@ jobs:
   # tags the version bump, creates the GitHub release and pushes the bump to main.
   envoy_plugin_build:
     needs: changes
-    if: needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch'
+    # Only main publishes: a workflow_dispatch from another branch skips this job and the publish
+    # job after it, so no branch build ever reaches npm or moves `latest` (AGENTS.md, "Deploys come
+    # only from main").
+    if: github.ref == 'refs/heads/main' && (needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
@@ -720,7 +723,8 @@ jobs:
   # above is. The build jobs run beside each other; only the publish jobs are chained.
   pi_envoy_build:
     needs: changes
-    if: needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch'
+    # Only main publishes, as envoy_plugin_build says.
+    if: github.ref == 'refs/heads/main' && (needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
@@ -907,7 +911,8 @@ jobs:
   # The Legion Oh My Pi plugin, @sjawhar/pi-legion, built and published as @sjawhar/pi-envoy is.
   pi_legion_build:
     needs: changes
-    if: needs.changes.outputs.pi_legion == 'true' || github.event_name == 'workflow_dispatch'
+    # Only main publishes, as envoy_plugin_build says.
+    if: github.ref == 'refs/heads/main' && (needs.changes.outputs.pi_legion == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
