@@ -2584,18 +2584,23 @@ helper writes them with the key to `AGENT_SECRETS_MACHINE_FILE` (default
 `~/.config/agent-secrets/machine.json`, mode 0600, its directory 0700, written through a fresh
 `os.CreateTemp` file renamed over it, so no planted path is followed; `helper.MachineFile`, whose
 `validate` both load and save check) before it installs the credential, so the file always names
-the credential in memory. `serve` refuses to start while another helper answers on its socket,
-removing only a stale one, then runs `Broker.Start` before it listens: a kept file is refreshed
+the credential in memory. `serve` first takes an exclusive flock on `<socket>.lock` (0600, beside
+the socket; `claimSocket`) and holds it for its lifetime, so a second `serve` on the socket exits
+2 naming it, before any refresh; with the lock held it refuses a path at the socket that is not a
+unix socket or that a helper still answers on, and removes a socket only when a dial is refused.
+It then runs `Broker.Start` before it listens: a kept file is refreshed
 once before it is installed, so a revoked machine never resumes as `issued` (answered: saved and
-installed `issued` with no code; `invalid_grant`: dropped and the file deleted; an outcome the
-helper did not learn: the kept login installed, retried by the loop). A file that is there but is
+installed `issued` with no code, the first refresh 15 s later when the save failed; `invalid_grant`:
+dropped and the file deleted; an outcome the helper did not learn: the kept login installed, retried by the loop). A file that is there but is
 not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
 credential is installed; a refresh whose outcome it did not learn is retried after 15 s (inside
 the broker's 60 s rotation grace, so a lost answer keeps the login), doubling to an hour. A 401
 `LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
 dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
-since that 401 can also be a proof the broker could not verify. Each refresh spends the refresh token
+since that 401 can also be a proof the broker could not verify; an answer whose save fails is
+installed, so the helper keeps working, and the loop retries its refresh and save after 15 s.
+Each refresh spends the refresh token
 for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
 the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)
 drops the login and deletes the file. The helper no longer speaks the earlier

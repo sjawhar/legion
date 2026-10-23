@@ -117,7 +117,7 @@ func main() {
 }
 
 // serve runs the daemon: it always listens and serves, whether or not a machine credential has
-// ever been installed. It refuses to start while another helper answers on its socket
+// ever been installed. It refuses to start while another helper holds or answers on its socket
 // (claimSocket). It then resumes the machine login kept at MachineFile, if there is one,
 // refreshing it before it installs it and then at least daily (Broker.Start); a machine file that is there but does not parse stops it,
 // naming the file. There is no startup gate on OperatorFile: a login is a separate ceremony
@@ -147,14 +147,16 @@ func serve(cfg config) error {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	// The socket is claimed before the kept login is resumed, so a second helper never spends the
-	// refresh token the running one holds.
+	// The socket is claimed, and held until the process exits, before the kept login is resumed,
+	// so a second helper never spends the refresh token the running one holds.
 	if err := os.MkdirAll(filepath.Dir(cfg.Socket), 0o700); err != nil {
 		return err
 	}
-	if err := claimSocket(cfg.Socket); err != nil {
+	lock, err := claimSocket(cfg.Socket)
+	if err != nil {
 		return err
 	}
+	defer lock.Close()
 	if err := srv.Broker.Start(ctx); err != nil {
 		return err
 	}
@@ -184,18 +186,54 @@ func serve(cfg config) error {
 	return srv.Serve(ctx, ln)
 }
 
-// claimSocket clears the way for serve to listen at sock: a socket another helper answers on
-// refuses the start, naming it, since unlinking it would leave that helper's sessions on a helper
-// nobody reaches; one nothing answers (a helper that died) is stale and removed.
-func claimSocket(sock string) error {
-	if conn, err := net.DialTimeout("unix", sock, time.Second); err == nil {
+// claimSocket takes the helper's claim on sock: an exclusive flock on sock+".lock" (0600, beside
+// it), which the returned file holds until it is closed or the process exits. Another helper
+// holding it refuses the start, naming the socket. With the claim held, a path at sock that is
+// not a unix socket is refused, naming it and left as it is; a socket a helper still answers on
+// (one started before helpers took the claim) is refused the same way, since unlinking it would
+// leave that helper's sessions on a helper nobody reaches; and a socket that refuses connections
+// (a helper that died) is stale and removed. Any other dial failure (a timeout, a full accept
+// queue) refuses too: only a definite refusal proves nothing listens.
+func claimSocket(sock string) (*os.File, error) {
+	lock, err := os.OpenFile(sock+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another agent-secrets-helper already holds %s; stop it first", sock)
+		}
+		return nil, fmt.Errorf("claiming %s: %w", sock, err)
+	}
+	if err := clearStaleSocket(sock); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return lock, nil
+}
+
+// clearStaleSocket removes sock when it is a unix socket nothing listens on, and refuses anything
+// else there, naming it; nothing there is fine.
+func clearStaleSocket(sock string) error {
+	info, err := os.Lstat(sock)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	case info.Mode().Type() != os.ModeSocket:
+		return fmt.Errorf("%s is there and is not a unix socket (%s); move it, or set AGENT_SECRETS_HELPER_SOCK elsewhere", sock, info.Mode().Type())
+	}
+	conn, err := net.DialTimeout("unix", sock, time.Second)
+	switch {
+	case err == nil:
 		_ = conn.Close()
 		return fmt.Errorf("another agent-secrets-helper already answers at %s; stop it first", sock)
+	case !errors.Is(err, syscall.ECONNREFUSED):
+		return fmt.Errorf("cannot tell whether a helper still listens at %s: %w", sock, err)
 	}
-	if err := os.Remove(sock); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+	return os.Remove(sock)
 }
 
 func printSessions(sock string) error {

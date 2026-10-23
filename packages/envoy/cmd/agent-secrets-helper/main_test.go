@@ -5,6 +5,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -281,7 +284,8 @@ func TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claimSocket(sock); err == nil || !strings.Contains(err.Error(), sock) {
+	if lock, err := claimSocket(sock); err == nil || !strings.Contains(err.Error(), sock) {
+		lock.Close()
 		t.Fatalf("claimSocket on a live socket: %v; want an error naming %s", err, sock)
 	}
 	if conn, err := net.Dial("unix", sock); err != nil {
@@ -294,10 +298,65 @@ func TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket(t *testing.T) {
 	if _, err := os.Stat(sock); err != nil {
 		t.Fatalf("the stale socket is not there to clear: %v", err)
 	}
-	if err := claimSocket(sock); err != nil {
+	lock, err := claimSocket(sock)
+	if err != nil {
 		t.Fatalf("claimSocket on a stale socket: %v", err)
 	}
+	defer lock.Close()
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
 		t.Fatalf("the stale socket is still there: %v", err)
+	}
+	if info, err := os.Stat(sock + ".lock"); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("the socket's lock file: %v %v; want it there, 0600", info, err)
+	}
+}
+
+// TestClaimSocketRefusesWhatIsNotASocket: a regular file at the socket's path (a misconfigured
+// AGENT_SECRETS_HELPER_SOCK) is refused, naming it, and left as it was.
+func TestClaimSocketRefusesWhatIsNotASocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "h.sock")
+	if err := os.WriteFile(sock, []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if lock, err := claimSocket(sock); err == nil || !strings.Contains(err.Error(), sock) {
+		lock.Close()
+		t.Fatalf("claimSocket on a regular file: %v; want an error naming %s", err, sock)
+	}
+	if data, err := os.ReadFile(sock); err != nil || string(data) != "mine" {
+		t.Fatalf("the regular file now reads %q (%v); want it untouched", data, err)
+	}
+}
+
+// TestASecondServeNeverSpendsTheRefreshToken: while one helper holds the socket's claim (before
+// it has even listened), a second serve on the same socket exits with an error naming the socket,
+// and never reaches the broker, so it never spends the refresh token the first one holds.
+func TestASecondServeNeverSpendsTheRefreshToken(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineFile := filepath.Join(dir, "machine.json")
+	kept := &helper.MachineFile{Key: key, CredentialID: "lcred-1", ExpiresAt: time.Now().Add(time.Hour), RefreshToken: "refresh-1"}
+	if err := kept.Save(machineFile); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{URL: srv.URL, Socket: dir + "/h.sock", OperatorFile: dir + "/none", MachineFile: machineFile, StatePath: dir + "/s.json"}
+	first, err := claimSocket(cfg.Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if err := serve(cfg); err == nil || !strings.Contains(err.Error(), cfg.Socket) {
+		t.Fatalf("a second serve: %v; want an error naming %s", err, cfg.Socket)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("the second serve made %d broker calls; want none", n)
 	}
 }

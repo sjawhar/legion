@@ -29,8 +29,11 @@
   already in the directory is followed. It refreshes that login before it resumes it at start, so
   a restart, a reboot or an upgrade keeps the machine logged in while a revoked machine resumes
   nothing, and deletes the file when the broker refuses the login's refresh, within seconds of a
-  launcher call the broker refuses `LAUNCHER_INVALID`. `serve` refuses to start while another
-  helper answers on its socket. A file that is there but is not a machine login stops the helper at start,
+  launcher call the broker refuses `LAUNCHER_INVALID`. A refreshed login it cannot save is held
+  and its refresh and save retried 15 s later. `serve` holds an exclusive lock on
+  `<socket>.lock` for its lifetime and refuses to start, naming the socket, while another helper
+  holds it, before it spends any refresh token; it refuses a path at the socket that is not a
+  unix socket. A file that is there but is not a machine login stops the helper at start,
   naming the file.
 - `agent-secrets-helper install [--url URL] [--restart-with-sessions]` writes the helper's
   `systemd --user` unit (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`, by default
