@@ -2599,8 +2599,10 @@ daemon-reload` and `enable --now`, and restarts a helper that was already answer
 `enroll-session-key` `DRAINING` until it exits, so none starts between the check and the restart)
 or `--restart-with-sessions` is given; with sessions it prints them and
 `not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
---restart-with-sessions.` and exits 0. A helper older than `drain` answers it `unknown op`, and
-`install` falls back to a `sessions` snapshot. `agent-secrets` reads that unit file as "the
+--restart-with-sessions.` and exits 0. A helper older than `drain` answers it `unknown op`; it
+cannot refuse a register before the restart, so `install` never restarts it without
+`--restart-with-sessions`: it prints its `sessions`, then `not restarted: the running
+agent-secrets-helper predates drain, …`, and exits 0. `agent-secrets` reads that unit file as "the
 helper is installed" (`helperInstalled`).
 
 `agent-secrets renew --pod-token-file FILE` is the pod renewer: it re-reads and trims the

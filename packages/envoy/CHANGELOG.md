@@ -33,7 +33,9 @@
   registered; a restart ends their grants. Re-run with --restart-with-sessions.`, and exits 0. The
   helper's new `drain` op is that check: it answers the registered sessions and, with none, refuses
   every later register `DRAINING` until the helper exits, so no session starts between the check
-  and the restart.
+  and the restart. A running helper from before `drain` is never restarted without
+  `--restart-with-sessions`: install lists its sessions and says to re-run with that flag at a
+  quiet moment.
 - The secrets broker serves a minted secret: a GCP secret with no version tagged
   `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
   its name with that account and its owner and the secret is human-tier. Each release mints a

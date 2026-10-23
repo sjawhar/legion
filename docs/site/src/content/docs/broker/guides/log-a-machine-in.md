@@ -44,7 +44,10 @@ not restarted: 1 sessions are registered; a restart ends their grants. Re-run wi
 
 Once those sessions end, run it again, or pass `--restart-with-sessions` to restart it anyway. A
 helper with no sessions refuses new ones from the moment `install` checks until it restarts, so
-none starts in between.
+none starts in between. A running helper from a release before that refusal (`drain`) cannot
+hold new sessions off, so `install` never restarts it on its own: it lists its sessions and
+prints `not restarted: the running agent-secrets-helper predates drain, …`. Re-run with
+`--restart-with-sessions` at a quiet moment.
 
 Put `export AGENT_SECRETS_URL=https://secrets.internal.example` in the profile your shells and
 agents start from, so every agent session gets it: every `agent-secrets` form that calls the

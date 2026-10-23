@@ -182,20 +182,37 @@ func TestInstallDrainsAndRestartsAHelperWithNoSessions(t *testing.T) {
 	}
 }
 
-// TestInstallFallsBackToSessionsOnAnOlderHelper: a helper without the drain op is checked with
-// `sessions`, the one-time upgrade path.
-func TestInstallFallsBackToSessionsOnAnOlderHelper(t *testing.T) {
-	r := newInstallRig(t)
-	ops := r.fakeHelper(t, nil, false)
-	if err := r.run("--url", "https://secrets.example"); err != nil {
-		t.Fatal(err)
-	}
-	calls := r.systemctlCalls(t)
-	if len(calls) != 3 || calls[2] != "--user restart agent-secrets-helper.service" {
-		t.Fatalf("systemctl calls: %q", calls)
-	}
-	if strings.Join(*ops, ",") != "sessions,drain,sessions" {
-		t.Fatalf("ops asked: %q", *ops)
+// TestInstallNeverRestartsAHelperThatCannotDrain: a helper without the drain op cannot refuse a
+// register between install's check and the restart, so install lists its sessions (none here, or
+// two) and says to restart at a quiet moment, never restarting it itself.
+func TestInstallNeverRestartsAHelperThatCannotDrain(t *testing.T) {
+	const notice = "not restarted: the running agent-secrets-helper predates drain, so a session could start between the check and the restart. Re-run with --restart-with-sessions at a quiet moment.\n"
+	for _, tc := range []struct {
+		name     string
+		sessions []helper.SessionInfo
+		want     string
+	}{
+		{name: "no sessions", want: notice},
+		{name: "sessions", sessions: []helper.SessionInfo{{PID: 41, RuntimeID: "rt-a"}, {PID: 42, RuntimeID: "rt-b"}}, want: "41\trt-a\t\t\n42\trt-b\t\t\n" + notice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newInstallRig(t)
+			ops := r.fakeHelper(t, tc.sessions, false)
+			if err := r.run("--url", "https://secrets.example"); err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range r.systemctlCalls(t) {
+				if strings.Contains(c, "restart") {
+					t.Fatalf("restarted a helper that cannot drain: %q", c)
+				}
+			}
+			if strings.Join(*ops, ",") != "sessions,drain,sessions" {
+				t.Fatalf("ops asked: %q", *ops)
+			}
+			if out := r.stdout.String(); out != tc.want {
+				t.Fatalf("output:\n%s\nwant:\n%s", out, tc.want)
+			}
+		})
 	}
 }
 

@@ -24,6 +24,9 @@ import (
 // the new unit. One that was is restarted only when `drain` finds it has no sessions (the helper
 // then refuses new ones until it exits) or restartWithSessions is set; a restart ends the
 // sessions' grants, so with sessions it prints them and why it did not restart, and returns nil.
+// A helper older than `drain` cannot refuse a register between the check and the restart, so
+// without restartWithSessions it is never restarted: install prints its sessions and that it
+// predates drain, and returns nil.
 func install(args []string, getenv func(string) string, exe string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	url := fs.String("url", "", "the broker's base URL (default $AGENT_SECRETS_URL)")
@@ -86,14 +89,18 @@ WantedBy=default.target
 		return nil
 	}
 	if !*restartWithSessions {
-		sessions, err := drainHelper(cfg.Socket)
+		sessions, drained, err := drainHelper(cfg.Socket)
 		if err != nil {
 			return err
 		}
+		for _, s := range sessions {
+			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State)
+		}
+		if !drained {
+			fmt.Fprintln(stdout, "not restarted: the running agent-secrets-helper predates drain, so a session could start between the check and the restart. Re-run with --restart-with-sessions at a quiet moment.")
+			return nil
+		}
 		if n := len(sessions); n > 0 {
-			for _, s := range sessions {
-				fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State)
-			}
 			fmt.Fprintf(stdout, "not restarted: %d sessions are registered; a restart ends their grants. Re-run with --restart-with-sessions.\n", n)
 			return nil
 		}
@@ -103,21 +110,22 @@ WantedBy=default.target
 
 // drainHelper asks the helper at sock to drain: it answers its sessions and, with none, refuses
 // every later register until it exits, so none can start between the answer and the restart.
-// A helper older than the drain op answers it as an unknown op; for that one-time upgrade from
-// an older release, drainHelper falls back to a `sessions` snapshot, which a register racing the
-// restart can still slip past.
-func drainHelper(sock string) ([]helper.SessionInfo, error) {
+// A helper older than the drain op answers it as an unknown op; drainHelper then answers that
+// helper's `sessions` and drained false.
+func drainHelper(sock string) (sessions []helper.SessionInfo, drained bool, err error) {
 	resp, err := helper.Call(sock, helper.Request{Op: "drain"}, 2*time.Second)
+	drained = true
 	if err == nil && resp.Code == helper.CodeBadRequest && strings.HasPrefix(resp.Error, "unknown op") {
+		drained = false
 		resp, err = helper.Call(sock, helper.Request{Op: "sessions"}, 2*time.Second)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("agent-secrets-helper stopped answering at %s: %w", sock, err)
+		return nil, false, fmt.Errorf("agent-secrets-helper stopped answering at %s: %w", sock, err)
 	}
 	if !resp.OK {
-		return nil, fmt.Errorf("agent-secrets-helper: %s: %s", resp.Code, resp.Error)
+		return nil, false, fmt.Errorf("agent-secrets-helper: %s: %s", resp.Code, resp.Error)
 	}
-	return resp.Sessions, nil
+	return resp.Sessions, drained, nil
 }
 
 func writeFileAtomic(path string, data []byte) error {
