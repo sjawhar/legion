@@ -1038,6 +1038,67 @@ func checksRedNotice(t *testing.T, pool *pgxpool.Pool) (reason string, from phas
 	return reason, phase.Phase(stopped)
 }
 
+// The implementer pushes and completes without waiting for CI, so a required check can settle red
+// on its head while the issue is still in implementing, where a red sends nothing back, and the
+// settlement does not come again. The completion is then the fact that lets the red stand outside
+// implementing (implementationReady): the work goes back to implementing at once, the
+// implementer's task and the architect's checks-red naming the red as it would from testing, the
+// return counted as a round, and no tester round runs on code CI already found broken. A head CI
+// found green, or has not judged yet, goes on to testing, where a red that settles later sends the
+// work back as any red in testing does.
+func TestACompletionOnARedThatSettledWhileImplementingSendsTheWorkBack(t *testing.T) {
+	const required = "pr-checks-result"
+	for _, tc := range []struct {
+		name string
+		// settled is the head's settlement before the completion, nil for none yet.
+		settled intake.Fact
+		want    phase.Phase
+	}{
+		{"red", settledAt("head", required, 1, required), phase.Implementing},
+		{"green", settledAt("head", required, 1), phase.Testing},
+		{"not settled yet", nil, phase.Testing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			if tc.settled != nil {
+				applyRefusingNothing(t, pool, engine, tc.settled)
+				if got := issuePhase(t, pool); got != phase.Implementing {
+					t.Fatalf("after the settlement the issue is in %s, want implementing: no verdict moves it there", got)
+				}
+				assertOutboxCount(t, pool, "supervise", 0)
+			}
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "head", Summary: "implemented"})
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the implementer's completion the issue is in %s, want %s", got, tc.want)
+			}
+			if tc.want == phase.Testing {
+				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
+					t.Fatalf("notices %v, want no checks-red", got)
+				}
+				if rounds := implementerRounds(t, pool); rounds != 0 {
+					t.Fatalf("rounds = %d, want none: nothing went back", rounds)
+				}
+				return
+			}
+			task, _ := implementerStart(t, pool)
+			reason, from := checksRedNotice(t, pool)
+			want := "CI is red at head: " + required
+			if !strings.Contains(task, want) || !strings.Contains(task, "Phase: implementing.") || !strings.Contains(reason, want) || from != phase.Testing {
+				t.Fatalf("implementer task %q, notice %q in %q; want both to say %q, the notice in testing", task, reason, from, want)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 1 {
+				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			}
+		})
+	}
+}
+
 // Checks can flap: red, then green on a re-run, then red again. Below the cap the first red sends
 // the work back, counting one round and starting the implementer once; the issue is then in
 // implementing, where no CI verdict moves it, so the green and the second red open no second

@@ -77,7 +77,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	if err != nil || row.HandoffCommit == "" {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, &pr, "")
+	return intake.Result{}, e.implementationReady(ctx, tx, *issue, row, &pr)
 }
 
 // pullRequestSynchronized records the pull request's new head and what the move leaves standing
@@ -142,7 +142,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		if err != nil || row.HandoffCommit == "" {
 			return intake.Result{}, err
 		}
-		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, pr, "")
+		return intake.Result{}, e.implementationReady(ctx, tx, *issue, row, pr)
 	}
 	return intake.Result{}, nil
 }
