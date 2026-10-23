@@ -44,6 +44,12 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		if issue.Lingers() {
 			return nil
 		}
+		if held, err := e.operatorHoldsTree(ctx, tx, issue); err != nil || held {
+			if err != nil {
+				return err
+			}
+			return e.leaveUnderOperator(ctx, tx, issue, status)
+		}
 		if err := e.beginLinger(ctx, tx, issue); err != nil {
 			return err
 		}
@@ -108,6 +114,34 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		return err
 	}
 	return e.openCheck(ctx, tx, issue, *pr, lingers)
+}
+
+// operatorHoldsTree says whether the operator opened the lifetime of root's tree (an operator root
+// spawn under the root's key) and its cleanup has not confirmed. Only a root waiting for its slot
+// can meet one: promotion waits on the operator's lifetime (treelifecycle.ErrAuthorityHeld) and
+// never opens a workflow tree under it.
+func (e *Engine) operatorHoldsTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bool, error) {
+	project, err := claim.ProjectToken(root.Project)
+	if err != nil {
+		return false, err
+	}
+	lifecycle, found, err := e.store.TreeLifecycle(ctx, tx, project, root.Tree)
+	if err != nil {
+		return false, err
+	}
+	return found && lifecycle.HeldByOperator(), nil
+}
+
+// leaveUnderOperator takes a waiting root out of the workflow while the operator runs a tree under
+// its key: its record's phase is done, so todo with the label re-admits it as a closed root's does,
+// and nothing else is written. Its claims, its pod and its tree's cleanup are the operator's, which
+// share the root's tokens and names, so no suspend, IssueSuspend, linger close or disarm is queued
+// for the workflow's record, and the workflow never ran a phase of it to check in production.
+func (e *Engine) leaveUnderOperator(ctx context.Context, tx pgx.Tx, root record.Issue, status string) error {
+	e.logOnCommit(ctx, "workflow: a waiting root left the workflow while the operator runs a tree under its key; the operator's tree is left alone",
+		"issue", root.Key, "tree", root.Tree, "status", status)
+	root.Phase, root.Hold, root.ReadyPendingVersion = phase.Done, nil, nil
+	return e.store.PutIssue(ctx, tx, root)
 }
 
 // LeaveUnslotted takes out of the workflow a root admission found in it with neither a slot nor a
