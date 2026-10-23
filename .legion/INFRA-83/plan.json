@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-83",
+  "completed": "2026-10-23T06:33:50Z",
+  "plan": "dispatch://INFRA-83/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the implementer is a Legion phase worker in a shared issue workspace; it defines the push procedure, the handoff and the completion gate this change's own pull request goes through.",
+      "skill://legion-worker/references/cleanup-deletion.md: this issue deletes code, a refusal code and documentation across the tree, which is exactly what that reference governs.",
+      "skill://legion-worker/references/pr-body.md: the change edits the pull request body template itself (it deletes the CI line at :27 and rewrites :98-99 and :127-128), so the implementer must hold the template's rules while changing them.",
+      "skill://legion-worker/references/merge-gate.md: the change edits the merge gate's own text (the READY refusal list, the packet's gate facts, the merge-row bounds), and the implementer's own READY runs through it.",
+      "skill://legion-worker/references/review-threads.md and conflicts-and-rewrites.md: two of the four list reads the change fixes live there, and the implementer answers and resolves this pull request's threads with the first.",
+      "skill://ce-simplify-code: the body rules require one simplify pass at the first implementing round on a diff that touches runtime code, which this one does (packages/daemon Go)."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase charter, its handoff fields (implementerProof, failures, proof) and the rule that it runs the application rather than CI again.",
+      "skill://legion-worker/references/pr-body.md: what a proof is, what the tester verifies of the implementer's proof, and the E2E (tester) line it writes - and the file whose tester rules this change rewrites, so the tester must read the new text it is being held to.",
+      "skill://legion-worker/references/merge-gate.md: the gate the change alters, which the tester reads to judge whether the implementer's evidence covers the altered path."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase charter and the order of a review round (read the code commit's checks, push the handoff, review the head, complete).",
+      "skill://legion-worker/references/merge-gate.md: the review round's order, the approval by SHA, and the gate text this change edits - the reviewer must check the edited text against what the daemon now does.",
+      "skill://legion-worker/references/review-threads.md: one disposition reply per thread, the node ids handed to the implementer, and the paginated GraphQL read this change introduces, which the reviewer is the first role to use.",
+      "skill://legion-worker/references/pr-body.md: the Look at first and Not proven / risk lines the reviewer writes, in a body whose template this change edits."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The rule 'no text left in the tree says Legion refuses a merge over a check' cannot be proved by the spec's four-string search: four texts state the rule carrying none of those strings (classify/required.go:20-27, requiredchecks/requiredchecks.go:4-7, docs/site/.../legion/using-legion.md:118-120, walkthrough.md:67-68) and eleven more carry a banned string but are not on the spec's edit list.",
+        "answer": "Plan decision D1 and task F: the plan names every known file (F3) and replaces the four literal strings with a wider sweep set (F2) whose every hit is resolved and whose output is recorded in the pull request body. The rule is restated as: no text outside CHANGELOG.md, docs/plans/ and docs/solutions/ asserts that Legion, rather than GitHub, decides a merge on a check."
+      },
+      {
+        "finding": "The spec's proof for deliverables 3 and 5 asks one test for two end states that cannot both happen: a failing required check on an accepted READY head moves the issue out of awaiting_merge (engine.go:794-795), which ends the merge row (auto_merge.go:75-82), so that row never reaches an hour and never warns.",
+        "answer": "Recorded as spec departure 1 and split in the plan: task A/B tests 3 and 5 separately. The warning is proven on a head that waits without being red - a required check the head has no result for, which classify.Standing.Red() excludes (classify/required.go:20-27) and which is exactly what the deleted READY_CHECKS_NOT_GREEN used to catch."
+      },
+      {
+        "finding": "The one-hour warning has no contract: what starts the hour, whether a reopen restarts it, what the notice kind is called, whether it fires for a by-hand READY, and which waits count.",
+        "answer": "Plan decisions D2, D4, D5 and task B: the hour runs from outbox.created_at (the only durable timestamp; ReadyMerge carries no time, record/outbox.go:404-419); a reopen at the same head clears the payload flag and so warns again, a READY at a new head is a new row; the kind is merge-waiting; a by-hand READY queues no row and is out of scope (D5); every wait counts except a cause permanentRefusal already reports, which ends the row and tells the architect itself."
+      },
+      {
+        "finding": "Deleting the CI line leaves the tester's duty and the simplify pass with no source: pr-body.md:98-99 ('cited from the CI line'), :127-128 ('re-cites the CI line') and prompts/roles/core/tester.md:5, none of which the spec lists.",
+        "answer": "Plan decision D6 and tasks C4 and D1: the duty stays and the source becomes GitHub, read at the head the role is judging, and neither role records what it read for a later step. core/tester.md:5, SKILL.md:284-291 and pi-legion/scripts/skill-scenarios/rig.sh:619 are added to the edit list."
+      },
+      {
+        "finding": "A new notice kind has a blast radius the spec does not name: validNoticeKind (record/outbox.go:693-695) refuses an unregistered kind, and four prose surfaces enumerate the merge notices an architect can receive.",
+        "answer": "Tasks B1, B4, B5 and D3: register merge-waiting in the allowlist, add the architect-common.md paragraph beside merge-stalled, add the row to the architect's wake-routing table (skills/legion-architect/SKILL.md:451-453), and name both bounds in merge-gate.md:188-191 and AGENTS.md. Contracts enumerate no notice kind, so nothing there changes."
+      },
+      {
+        "finding": "After the deletion, a repository whose base branch requires nothing has no defence at all, and the checks-red scheduling the spec keeps is inert there (classify/required.go:140-160: a base that requires nothing reads green).",
+        "answer": "Escalated as architect decision A3 and recorded in the plan's Risks. The plan adds no signal of its own, because adding one is Legion judging again; the documentation it already touches states the consequence plainly. Measured today: theorem-labs/agent-infra main returns an empty ruleset, sjawhar/legion-smoke main requires the check 'gate'."
+      },
+      {
+        "finding": "Deliverable 3 calls the kept behaviour unchanged, but the justification of RedWithdrawsReady and PlannedRed (classify/decisions.go:285-297, repeated to users at concepts.md:191-193) is the deleted READY read.",
+        "answer": "Task F3: both conditions stay and both texts are rewritten - GitHub refuses to merge a head whose required check is red, so Legion needs no second refusal, and a merge that waits on one is now told by the hour warning. Neither text carries a swept string, so the plan names them explicitly."
+      },
+      {
+        "finding": "The production-like-surface rule and the spec's evidence contradict each other, and no surface a Legion pod can reach exercises the red-head half.",
+        "answer": "Plan decision D9 and architect decision A2, with the pod measured today: no Docker, no Postgres, no root (id -u is 1000; apt-get -s install postgresql answers 'Unable to locate package'). The daemon's real-process harness with real migrations exists only in CI's test job (pr-and-main.yaml:207), which the plan names as the surface and cites by run id; the agent-facing halves are proven on their real artifacts and on gh against GitHub."
+      },
+      {
+        "finding": "The INFRA-142 ordering constraint has no mechanism: INFRA-142 is todo, unclaimed, unlabelled, on another repository, and needs a human administrator, while nothing in INFRA-83's own phases blocks on it.",
+        "answer": "Escalated as architect decision A1 and sent to the architect by Envoy: planning, implementing, testing and reviewing may run now; acceptance must wait on INFRA-142's record carrying the administrator's confirmation and a read of GET /repos/theorem-labs/agent-infra/rules/branches/main showing the rule. Nothing will ask the administrator while INFRA-142 is unlabelled and unclaimed, which the architect is told."
+      },
+      {
+        "finding": "Deliverable 4 names four reads, but other list reads decide things too, and the spec does not fix the shape of the GraphQL fix, so four copies could diverge.",
+        "answer": "Task E: one shape written once and copied verbatim into both GraphQL sites, --paginate on both REST reads and on merge-gate.md:38's rules/branches read, the 300-file compare cap stated at merge-gate.md:50-52, and two reads named as deliberately out of scope (the newest-first actions/runs read and the e2e harness, which has its own hasNextPage guard)."
+      },
+      {
+        "finding": "Deliverable 2's second half is decided today only by a human reading prose; the proposed tree search is a one-off a reviewer runs, not a check that stops the rule coming back.",
+        "answer": "Plan decision D8 and task C6: the repository's own idiom (prompts_test.go:166-198's retired-phrase list) is extended to cover the composed role prompts, the text a worker actually receives. No new standing text test over the whole tree: that would pin prose that will legitimately be rewritten. The sweep's recorded output is the evidence for the rest."
+      },
+      {
+        "finding": "The deletion leaves a dead parameter, dead imports, a dead struct field and a doc comment that is mostly the deleted rule, none of which the spec names.",
+        "answer": "Task A1: drop the repository parameter of readyChecks and update its caller at handoff.go:264, drop the ghrepo, classify and requiredchecks imports and the pull struct's Base.Repo.ID, and rewrite the doc comment at ready.go:36-70 to describe what READY still does."
+      },
+      {
+        "finding": "packages/contracts/fixtures/daemon-api/handoff-complete.json is generated by a golden test (state_golden_test.go:661), so editing the JSON alone either fails that test or is overwritten.",
+        "answer": "Task A5: change the golden's input to the already-merged note and regenerate the fixture through the test, keeping a note in it so the fixture still proves note is served on the wire."
+      },
+      {
+        "finding": "Two role-facing texts promise that a wrong skip-checks trailer is refused at READY (skills/legion-worker/SKILL.md:402-403, prompts/go/worker-common.md:19); after the deletion nothing catches it, since the head's standing is Missing, which Standing.Red() excludes.",
+        "answer": "Tasks C5 and D2: both become 'a wrong trailer leaves the head with no CI, so GitHub will not merge it; the merge waits and the daemon tells your architect once it has waited an hour', which is also the clearest scenario for the hour warning."
+      },
+      {
+        "finding": "The spec's documentation list names docs/site/src/content/docs/legion/how-it-fits.md, a path that does not exist, and four sibling pages state the rule unlisted.",
+        "answer": "Task F3 corrects the path to docs/site/src/content/docs/how-it-fits.md and adds using-legion.md:118-120, walkthrough.md:67-68, running-legion.md:64-65 and troubleshooting.md's three spans (:503-508, :537-552, :554-566, :572-576)."
+      },
+      {
+        "finding": "A by-hand READY has no bound at all, before or after this change: it queues no ready_merge row (workflow/ready.go:36-41), so nothing can tell the architect that nobody merged it.",
+        "answer": "Plan decision D5, spec departure 3 and architect decision A4: out of scope for INFRA-83 and said so in the plan, since bounding it is a bound on the awaiting_merge phase rather than on an outbox row."
+      },
+      {
+        "finding": "Four claims in the briefing rested on live state the analyst could not read: the approved spec text and comments, INFRA-142's status, the two repositories' branch rules, and the run-duration measurements.",
+        "answer": "All four read by the planner today with this session's credential and recorded in the plan: spec v25 and the comments through dispatch; INFRA-142 todo, unclaimed, unlabelled, child_of INFRA-83; theorem-labs/agent-infra main ruleset empty; sjawhar/legion-smoke main requires the check 'gate'; sjawhar/legion main requires lint, typecheck, test and pr-title, whose durations are in plan decision D3."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "How it is proven, item by item: 'For the third and the fifth, a daemon test puts a failing required check on an accepted readiness head and asserts the end state it records: the issue back with its implementing agent, and a wait that tells the architect rather than one that says nothing.'",
+      "plan": "Two tests, not one. The third deliverable keeps today's assertion (a failing required check on an accepted READY head sends the issue back to implementing and withdraws the submitted merge). The fifth is proven on a head that waits without being red: a required check the head has no result for.",
+      "evidence": "A red on an accepted READY head leaves awaiting_merge (workflow/engine.go:794-795 calls withdrawReady on TriggerChecksRed), after which daemon/auto_merge.go:75-82's keep reads awaitedREADY, finds no awaited head, and ends the ready_merge row; the row therefore never reaches an hour and never warns. classify/required.go:20-27 shows Standing.Red() excludes Missing and Pending, so a required check with no result is the standing that actually waits.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "The proof of deliverables three and five is two daemon tests rather than one: one for the red send-back and withdrawal, one for the hour warning on a head whose required check reported nothing."
+        ]
+      }
+    },
+    {
+      "spec": "'a merge Legion submitted and GitHub has not completed within an hour tells the issue's architect once'",
+      "plan": "The hour is measured from the moment the ready_merge outbox row was queued (outbox.created_at), which is READY's acceptance, not from the moment GitHub was first asked.",
+      "evidence": "record.ReadyMerge carries Number, Head and Armed only (record/outbox.go:404-419) and nothing in the daemon records the submission time. outbox.created_at (store/migrations/0004_record.up.sql:80, record.OutboxRow.CreatedAt) is the only durable timestamp, and it survives retries, the arm-remembering write and a reopen's upsert (record/store.go:716-718 sets attempts, payload and lease_token only). The first attempt runs within seconds of the queue, so the two differ only when a GitHub rate limit defers the row.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "The warning fires an hour after the merge row was queued at READY's acceptance, not an hour after the first submission to GitHub."
+        ]
+      }
+    },
+    {
+      "spec": "'Fifth, a merge that waits is bounded and said out loud.'",
+      "plan": "Every merge Legion submits is bounded. A READY a person merges by hand gains no bound, and the plan says so as a non-goal.",
+      "evidence": "workflow/ready.go:36-41 returns before enqueuing when the merger's MergeNote is set, so a by-hand READY has no ready_merge row to warn about; workflow/ready_test.go:74 asserts that absence, and daemon/auto_merge.go:164-171's awaitedREADY excludes a by-hand READY by name. Bounding how long a person takes is a bound on the awaiting_merge phase, not on an outbox row.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "A pull request a person merges by hand is explicitly outside this issue: nothing tells the architect that nobody has merged it. Covering it needs a bound on the awaiting_merge phase and belongs in its own issue."
+      }
+    }
+  ]
+}
