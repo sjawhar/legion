@@ -2630,7 +2630,10 @@ export async function executeDispatchTool(
   // picture files; the call is refused once with every problem listed, or proceeds with arguments
   // the schema has fully validated (unknown keys and wrong types are impossible below, so
   // structured arguments only need the contract's shape named).
-  const checked = await checkDispatchCall({ ...input, serverUrls: dispatchServerUrls(input.config) });
+  const checked = await checkDispatchCall({
+    ...input,
+    serverUrls: dispatchServerUrls(input.config),
+  });
   if (checked.problems.length > 0) throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;

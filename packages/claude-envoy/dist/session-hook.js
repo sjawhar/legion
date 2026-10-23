@@ -17720,7 +17720,10 @@ async function executeDispatchTool(input) {
   }, { preconnect: baseFetch.preconnect });
   const env = input.env ?? process.env;
   const exec = input.exec ?? defaultExec;
-  const checked = await checkDispatchCall({ ...input, serverUrls: dispatchServerUrls(input.config) });
+  const checked = await checkDispatchCall({
+    ...input,
+    serverUrls: dispatchServerUrls(input.config)
+  });
   if (checked.problems.length > 0)
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
