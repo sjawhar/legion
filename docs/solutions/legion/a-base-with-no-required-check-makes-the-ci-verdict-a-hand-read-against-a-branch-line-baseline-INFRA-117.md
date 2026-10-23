@@ -40,6 +40,21 @@ back empty, which is the normal case for a long-lived deployment branch nobody p
   `jj diff --from <code head> --to <handoff head> --git '~.legion'` being empty. Say both SHAs
   wherever the CI line is quoted, or the next role reads "no checks" as "not run".
 
+**Superseded 2026-10-23 (dispatch://INFRA-83):** only the clause that has you say both SHAs
+wherever the CI line is quoted is gone, because that line is: the pull request body carries no
+`CI:` line (`skills/legion-worker/references/pr-body.md`), and no role records a check result for a
+later step to trust — the tester and the reviewer each read CI on GitHub at the head they are
+judging and record none of it (the reviewer's own four GitHub reads are in
+`skills/legion-worker/references/merge-gate.md`). The hand-read this learning is about is now what
+each role does for itself instead of reading it off a body line: at the head it is judging it reads
+every job with its conclusion and run id, and when that head is a handoff-only one with zero check
+runs it reads the code head's runs and proves the join itself with
+`jj diff --from <code head> --to <handoff head> --git '~.legion'` being empty. The rest of the
+finding stands: the empty `rules/branches/<base>` read and what it means for the daemon's verdict
+and for READY, naming the whole job list in the plan, classifying a red job-by-job and
+step-by-step against a baseline head on the same branch line, and a handoff-only head having no
+checks at all.
+
 ## Evidence
 
 INFRA-117 merged onto `envoy-infra-integration`.
