@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	// DefaultListenIdle is how long a listener waits for a notification before it pings its
-	// connection. A connection that went half-open (a dropped NAT entry, a failover that left the
-	// socket up) delivers nothing and reports no error; only a round trip finds it.
+	// DefaultListenIdle is how long a listener goes without a proven round trip - the LISTEN that
+	// opened its connection, a notification, a ping - before it pings that connection. A
+	// connection that went half-open (a dropped NAT entry, a failover that left the socket up)
+	// delivers nothing and reports no error; only a round trip finds it.
 	DefaultListenIdle = 30 * time.Second
 	// DefaultPingTimeout bounds that ping, the LISTEN statement on a new connection, and the
 	// close of a connection the listener gives up.
@@ -65,12 +66,22 @@ type Listener struct {
 	// goroutine: the evictor of stale document rooms decides everything inside OnNotify, so it
 	// cannot put the work it defers on a time.AfterFunc, which would run it on a goroutine of its
 	// own, beside a notification being decided. NextWake is asked, each time round the wait loop,
-	// how long until that caller next wants waking; zero - or a nil field - is never. When that is
-	// sooner than ListenIdle the wait ends there and OnWake is called on this goroutine instead of
-	// the idle ping, which is for a connection that has been idle for ListenIdle and so says
-	// nothing about one that has not. A notification that arrives first is reported as any other
-	// is, and the wake is asked again on the next round. A caller that leaves both nil - the
-	// delivery hub and the event stream relay - waits exactly as it did before.
+	// how long until that caller next wants waking; zero - or a nil field - is never. When that
+	// is sooner than the next ping is due the wait ends there and OnWake is called on this
+	// goroutine; a wake reaching past the ping is cut short at it (waitFor), because a wake is a
+	// timer on this goroutine and proves nothing about the socket. A notification that arrives
+	// first is reported as any other is, and the wake is asked again on the next round.
+	//
+	// A caller that leaves both nil - the delivery hub and the event stream relay - asks for no
+	// wake at all, so its last proven round trip is its last notification or ping and it waits
+	// and pings exactly as it did before there were wakes.
+	//
+	// listen holds the ping to the time of the last proven round trip rather than to the length
+	// of the wait that just ended, and that invariant lives here, with the connection, rather
+	// than in the caller that asks for the wakes: a caller's wake is the minimum over everything
+	// it has deferred, so items staggered inside one idle period hand the listener an unbroken
+	// run of short wakes however tightly each item's own re-arm is bounded, and a second NextWake
+	// caller could re-open that hole with one item each.
 	//
 	// The two go together or not at all: a NextWake with no OnWake is a wake nothing would run,
 	// so waitFor treats the pair as absent and the wait stays the idle period (ListenIdle), ping
@@ -125,17 +136,26 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("listen: %w", err)
 	}
+	// The last round trip this connection proved it could make: the LISTEN above, a notification
+	// it carried, a ping it answered. The ping in the loop below hangs on this stamp and not on
+	// what ended the wait, so no run of wakes - local timers, not round trips - can hold it off.
+	proven := time.Now()
 	if l.OnConnected != nil {
 		l.OnConnected()
 	}
 	for {
-		wait, waking := l.waitFor()
+		wait, waking := l.waitFor(proven)
 		waitCtx, cancel := context.WithTimeout(ctx, wait)
 		notification, err := conn.WaitForNotification(waitCtx)
 		reached := errors.Is(waitCtx.Err(), context.DeadlineExceeded)
 		cancel()
-		if notification != nil && l.OnNotify != nil {
-			l.OnNotify(notification.Channel, notification.Payload)
+		if notification != nil {
+			// The connection carried it, which is a round trip of its own; stamped before
+			// OnNotify, whose work is the caller's and proves nothing further.
+			proven = time.Now()
+			if l.OnNotify != nil {
+				l.OnNotify(notification.Channel, notification.Payload)
+			}
 		}
 		if err == nil {
 			continue
@@ -147,9 +167,12 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 			return true, fmt.Errorf("wait for a notification: %w", err)
 		}
 		if waking {
-			// The caller's wake, not ListenIdle: this connection has been waiting for as long as
-			// the caller asked for and no longer, so there is nothing for the ping to find.
+			// The wake is this goroutine's own timer: it says the caller asked to be woken now,
+			// and nothing about the socket. So it runs here, and whether the connection is owed
+			// a ping is still the proven stamp's to answer.
 			l.OnWake()
+		}
+		if time.Since(proven) < l.idle() {
 			continue
 		}
 		// pgx keeps the connection open when a wait ends at its deadline, so the same connection
@@ -163,6 +186,7 @@ func (l *Listener) listen(ctx context.Context) (listened bool, err error) {
 			}
 			return true, fmt.Errorf("ping an idle connection: %w", err)
 		}
+		proven = time.Now()
 	}
 }
 
@@ -191,21 +215,25 @@ func (l *Listener) idle() time.Duration {
 }
 
 // waitFor is how long the next wait for a notification runs, and whether its deadline is the
-// caller's wake rather than the idle period: the sooner of the two, so a caller is woken on time
-// however long ListenIdle is, and the ping stays with the wait that really was idle for all of it.
+// caller's wake rather than the ping that falls due once the connection has gone idle() without
+// a proven round trip: the sooner of the two, so a caller is woken on time however long
+// ListenIdle is, and no run of wakes can push the ping out - a wake that would reach past it is
+// cut short there, and listen pings at that point whatever ended the wait.
 //
 // A caller that set only one of the pair has asked for nothing this can give it: an OnWake
 // nothing asks for never runs, and a NextWake with no OnWake would end a wait at a wake the
-// listener cannot make. Both nil to listen's eye, so that caller waits the idle period out and
-// is pinged on it.
-func (l *Listener) waitFor() (time.Duration, bool) {
+// listener cannot make. Both nil to listen's eye, so that caller waits the idle period out from
+// its last proven round trip - which is where the wait started, since it takes no wakes - and is
+// pinged on it.
+func (l *Listener) waitFor(proven time.Time) (time.Duration, bool) {
 	idle := l.idle()
 	if l.NextWake == nil || l.OnWake == nil {
 		return idle, false
 	}
+	untilPing := idle - time.Since(proven)
 	wake := l.NextWake()
-	if wake <= 0 || wake >= idle {
-		return idle, false
+	if wake <= 0 || wake >= untilPing {
+		return untilPing, false
 	}
 	return wake, true
 }

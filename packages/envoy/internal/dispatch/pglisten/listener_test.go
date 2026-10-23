@@ -615,6 +615,58 @@ func TestTheListenerWakesItsCallerBeforeItsIdleWait(t *testing.T) {
 	}
 }
 
+// A caller whose wake is always sooner than the idle period is pinged all the same: the ping
+// hangs on the time since this connection last proved a round trip, not on what ended the last
+// wait, so waitFor cuts such a wake short at the moment the ping falls due and listen pings there
+// (listener.go). That shape is the evictor's own in steady state - wakeIn is the minimum over
+// every deferred room, and rooms entering at their own times keep that minimum under the idle
+// period for ever, whatever ceiling each room's re-arm has (docs/stale_room.go) - and before the
+// stamp the listener took its wake branch for ever, so a connection that had gone half-open sat
+// in the loop silent with nothing left to find it.
+func TestAListenerWokenShorterThanItsIdlePeriodIsStillPinged(t *testing.T) {
+	database := storetest.Open(t)
+	probe := newListenerProbe()
+	listener := probe.listener(database.Pool.Listener)
+	listener.ListenIdle, listener.PingTimeout = 300*time.Millisecond, time.Second
+	// Sooner than the idle period every time it is asked, and never zero: that is what wakeIn
+	// returns once three rooms twenty seconds apart are each armed on their own window.
+	const wake = 80 * time.Millisecond
+	var wakes atomic.Int32
+	listener.NextWake = func() time.Duration { return wake }
+	listener.OnWake = func() { wakes.Add(1) }
+	runListener(t, probe, listener)
+	probe.waitConnected(t, 5*time.Second, "first connection")
+	pid := probe.lastConn(t).PgConn().PID()
+
+	// The ping is due one idle period after the LISTEN; ten of them to find it, so a loaded
+	// machine that runs the wakes late still passes while a listener that never pings fails.
+	started := time.Now()
+	deadline := started.Add(10 * listener.ListenIdle)
+	var query string
+	for {
+		if err := database.Pool.QueryRow(context.Background(), `select query from pg_stat_activity where pid = $1`, int(pid)).Scan(&query); err != nil {
+			t.Fatalf("read the listener's backend: %v", err)
+		}
+		if query == "-- ping" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener's last statement after %v of wakes %v apart = %q, want its ping: a wake is a local timer and proves nothing about the socket, so it must not hold the ping off", time.Since(started), wake, query)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if woken := wakes.Load(); woken < 2 {
+		t.Fatalf("wakes before the ping = %d, want at least two: this row has to be a listener taking its wake branch, not one ignoring NextWake", woken)
+	}
+	if dials := probe.dials.Load(); dials != 1 {
+		t.Fatalf("dials = %d, want 1: the ping was owed on the connection the listener already had", dials)
+	}
+	notifyChannel(t, database, "dispatch_events", "pinged")
+	if note := probe.waitNote(t, 5*time.Second, "a notification after the ping"); note != (listenerNote{channel: "dispatch_events", payload: "pinged"}) {
+		t.Fatalf("notification after the ping = %+v, want dispatch_events with payload pinged", note)
+	}
+}
+
 // A caller that sets NextWake and leaves OnWake nil is not woken, and the listener lives: the
 // pair is absent unless both are set (waitFor), so the wake is not even asked for, the wait
 // stays the idle period, and the ping that belongs to that wait still runs. Without the pairing
