@@ -270,9 +270,9 @@ Three things the run had to learn about its surface:
 ## stage3-devbox-workflow.sh
 
 ```sh
-LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
-LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # the same, for a devbox with no Hawk gateway
 ```
 
@@ -294,8 +294,9 @@ the agents reach Anthropic, independently of which devbox this runs on:
   ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 
 `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
-NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet
-(`nats://envoy-nats.<tailnet>.ts.net:4222`), never a bare alias, which only a resolver's search
+NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet, the
+`nats://<host>.<tailnet>.ts.net:4222` URL the operator's `envoy.json` names as `envoy.natsUrls`
+(the hub's host changes when the hub moves), never a bare alias, which only a resolver's search
 domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
 `prerequisites` refuses a run without it, and refuses a value that is not one NATS URL naming a
 host with a dot. `STAGE3_PRODUCTION_ENVOY_URL` (default `http://127.0.0.1:9020`, a standing local
@@ -587,7 +588,7 @@ a model key, and still exits 1. The trap still closes the run's pull requests in
 ## stage3-4b13b-acceptance.sh
 
 ```sh
-LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
 ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_NATS_BIN=<nats-server> \
   bash scripts/e2e/stage3-4b13b-acceptance.sh     # → "acceptance 4b.13b: PASS at <head>", exit 0
 ```
