@@ -160,6 +160,28 @@ func TestTheTokenRouteIsTheProvidersTokenEndpoint(t *testing.T) {
 	}
 }
 
+// TestTheOAuthRoutesCapTheirBodies: a form past 64 KiB is refused 400 invalid_request at both
+// OAuth routes before the provider parses or stores it, and the device login never runs.
+func TestTheOAuthRoutesCapTheirBodies(t *testing.T) {
+	ran := false
+	ts := newTestServerWith(t, withOAuth(t, func(context.Context, url.Values, string) error { ran = true; return nil }))
+	for _, c := range []struct {
+		path string
+		form url.Values
+	}{{"/v1/oauth/device_authorization", signedDeviceForm(t, ts)}, {"/v1/oauth/token", url.Values{
+		"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": {"no-such-code"}, "client_id": {oauthwire.ClientID},
+	}}} {
+		c.form.Set("padding", strings.Repeat("a", 64<<10))
+		status, _, body := postForm(t, ts.URL+c.path, c.form)
+		if status != http.StatusBadRequest || body["error"] != "invalid_request" {
+			t.Errorf("POST %s with a form past 64 KiB = %d %v, want 400 invalid_request", c.path, status, body)
+		}
+	}
+	if ran {
+		t.Error("the device login ran for an oversized form")
+	}
+}
+
 // tokenForm is a device code grant for a code no login issued, which the provider answers 400.
 var tokenForm = url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": {"no-such-code"}, "client_id": {oauthwire.ClientID}}
 

@@ -201,13 +201,18 @@ func TestANewerLoginSilencesTheExpiryOfTheCredentialItReplaces(t *testing.T) {
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
 		Log: slog.New(slog.NewJSONHandler(&out, nil)), expiryWarning: time.Hour}
 	timers := installExpiryTimers(b)
+	watchEnded := make(chan *machineCredential, 4)
+	b.testWatchEnded = func(cred *machineCredential) { watchEnded <- cred }
 
 	old := expiryLogin(t, b)
 	fresh := expiryLogin(t, b)
 	timers.fire(t, old, 0)
-	// A watch that is gone has stopped; the old one's expiry timer is never started, or fires to
-	// nobody.
-	time.Sleep(50 * time.Millisecond)
+	// The old credential's watch has said all it will once it ends.
+	for ended := range watchEnded {
+		if ended == old {
+			break
+		}
+	}
 
 	if b.cred.Load() != fresh {
 		t.Fatalf("the credential held after the old one's timers is %+v; want the newer login's %s", b.cred.Load(), fresh.id)

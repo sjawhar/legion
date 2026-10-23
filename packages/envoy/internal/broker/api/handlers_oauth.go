@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -25,6 +26,9 @@ import (
 func (s *server) deviceAuthorization(w http.ResponseWriter, r *http.Request) {
 	if !s.launcherLimiter.addressAllows(r) {
 		oauth.WriteRefusal(w, rateLimitedRefusal(s.launcherLimiter.perAddress.Every()))
+		return
+	}
+	if !readOAuthForm(w, r) {
 		return
 	}
 	s.deps.OAuth.DeviceAuthorize(w, r, func(ctx context.Context, form url.Values, userCode string) error {
@@ -97,7 +101,28 @@ func (s *server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if !readOAuthForm(w, r) {
+		return
+	}
 	s.deps.OAuth.Token(w, s.atPublicURL(r), s.deps.TokenHooks)
+}
+
+// maxOAuthFormBytes caps an OAuth route's form body: a device authorization or token request is
+// a few KiB, and the provider stores the whole form.
+const maxOAuthFormBytes = 64 << 10
+
+// readOAuthForm parses r's form under maxOAuthFormBytes before the provider sees it, so the
+// provider reads the parsed form rather than a body of up to its library's 10 MiB. A body past the
+// cap, or a form that does not parse, is refused 400 invalid_request REQUEST_INVALID. It reports
+// whether the form parsed.
+func readOAuthForm(w http.ResponseWriter, r *http.Request) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
+	if err := r.ParseForm(); err != nil {
+		oauth.WriteRefusal(w, &oauth.Refusal{Status: http.StatusBadRequest, Code: "REQUEST_INVALID",
+			Message: fmt.Sprintf("the form must parse and be at most %d bytes: %v", maxOAuthFormBytes, err)})
+		return false
+	}
+	return true
 }
 
 // atPublicURL is r as if it had reached BROKER_PUBLIC_URL directly: its URL's scheme and host and

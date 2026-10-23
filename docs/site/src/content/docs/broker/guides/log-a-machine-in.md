@@ -156,7 +156,9 @@ A login lapses `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after its last refresh (the
 [configuration reference](/legion/broker/reference/config/) gives its default), so a machine whose
 helper keeps running and reaching the broker stays logged in. Log in again after the helper went
 that long without a refresh, after you revoke the machine's login, or when its machine file is
-gone. `agent-secrets machine login-status` exits 1 and says why when the machine needs it:
+gone. A new login retires the login it replaces and leaves the sessions running on the machine
+alone: they keep their enrollments and grants. `agent-secrets machine login-status` exits 1 and
+says why when the machine needs it:
 
 ```console
 $ agent-secrets machine login-status

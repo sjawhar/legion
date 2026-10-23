@@ -97,9 +97,12 @@ token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` b
 readable only by its user, so a restarted helper resumes it. It refreshes the login when it starts,
 before it resumes it, and at most a day apart after: each refresh spends the refresh token for a new one and moves the
 credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from then. A refresh token it has
-replaced still works for five minutes, so a refresh whose answer was lost is retried, 15 s later; spent after
-that, it ends every refresh token of the login, so the login can no longer be refreshed, and the
-helper holding it drops it at its next refresh.
+replaced still works for five minutes, so a refresh whose answer was lost is retried every 15 s
+inside those five minutes. Spent after that, it is a reuse: the broker ends every refresh token of
+the login and revokes the machine's credential as a revoke does, ending every session it enrolled,
+and the helper holding it drops it at its next refresh. A newer login of the same machine instead
+retires the one it replaced: that login can no longer refresh or enroll a session, and the
+sessions it enrolled keep running.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
 token instead, and no person approves it: the broker verifies the token as it verifies a pod's,

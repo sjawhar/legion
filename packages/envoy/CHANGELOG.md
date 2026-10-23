@@ -10,8 +10,10 @@
   types into Dispatch's machine-login page as before; on approval the helper gets a refresh token
   bound to the machine's key (DPoP, RFC 9449), and refreshes the login when it starts and then at
   half the time left before the credential's expiry, at most every 24 hours; a refresh whose
-  answer is lost or that the broker cannot serve is retried 15 s later, inside the five minutes
-  a rotated token stays redeemable. `machine login` names the page the broker's `verification_uri`
+  answer is lost or that the broker cannot serve is retried every 15 s until five minutes (the time
+  a rotated token stays redeemable) after the first attempt, then after a minute, doubling to an
+  hour, so an outage longer than five minutes right after a lost answer makes the next retry a
+  reuse. Both OAuth routes refuse a form past 64 KiB, `400 invalid_request`. `machine login` names the page the broker's `verification_uri`
   names when `AGENT_SECRETS_APPROVE_URL` is unset. Each refresh moves the credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
   from then and rotates the refresh token. A rotated token redeemed again within five minutes of
   its replacement ends the tokens its earlier redemption issued, so the login never forks; one
@@ -46,7 +48,11 @@
   launcher call the broker refuses `LAUNCHER_INVALID`. A refresh the broker rate-limits (429)
   keeps the login and is retried no sooner than its `Retry-After`. A refreshed login it cannot save is held
   and its refresh and save retried 15 s later. A machine login that replaces a credential the
-  helper held revokes the old one at the broker, best effort. `serve` holds exclusive locks on
+  helper held retires the old one at the broker, best effort, through the new
+  `POST /v1/operator/machines/{id}/retire`, signed with that credential's own launcher proof and
+  accepted only for the calling credential: the old login can no longer refresh or enroll a
+  session, and the sessions it enrolled keep running, so a new login leaves the machine's running
+  sessions and their grants alone. `serve` holds exclusive locks on
   `<socket>.lock` and `<machine file>.lock` for its lifetime and refuses to start, naming the
   socket or the machine file, while another helper holds either, before it spends any refresh
   token; it refuses a path at the socket that is not a
@@ -57,7 +63,8 @@
   under `~/.config`), running this binary's `serve` with `AGENT_SECRETS_URL` from `--url` or the
   environment, each of `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and
   `AGENT_SECRETS_MACHINE_FILE` that is set in install's environment, and `Restart=always`, then runs `systemctl --user daemon-reload` and
-  `enable --now`. An unchanged unit that is running changes nothing; one that is not is started.
+  `enable --now`; it refuses a relative path in any of those three variables, naming it, since the
+  unit's helper runs in another directory. An unchanged unit that is running changes nothing; one that is not is started.
   A helper answering on the socket that the unit does not run is refused, even when the unit file
   already matches: install lists its sessions, says to stop it, exits 2, and writes and starts
   nothing. A helper that was already running is restarted after a unit change
@@ -70,7 +77,8 @@
   and the restart; a restart that fails sends the new `undrain` op, so the helper takes sessions
   again. A running helper from before `drain` is never restarted without
   `--restart-with-sessions`: install lists its sessions and says to re-run with that flag at a
-  quiet moment.
+  quiet moment. `agent-secrets register` retries a `DRAINING` answer within its `--wait` (at least
+  10 s), so a session launched during the restart registers with the restarted helper.
 - The secrets broker's sweeper deletes spent machine-login OAuth state each tick: device codes an
   hour past their expiry, expired DPoP proofs, nonces and access tokens, and refresh token
   families none of whose tokens can still be redeemed, at most 10,000 rows of each per tick.

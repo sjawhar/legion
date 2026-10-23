@@ -1,11 +1,13 @@
-// handlers_operator.go: GET /v1/operator/machines, POST /v1/operator/machines/{id}/revoke, GET
-// /v1/operator/grants and POST /v1/operator/grants/{id}/revoke — a person's own machine logins and
-// live grants, listed and ended from their machine under its machine login (launcherAuth). The
-// grant routes answer as Dispatch's Live grants page does through the UI routes; the machine
-// routes cover the person's own machines' logins alone, a subset of Dispatch's machine-logins page,
-// which also lists every service's login, so ending the Legion daemon's login stays a Dispatch
-// sign-in's. Each acts for the calling credential's operator, and each revoke records that machine
-// login as its actor, since its launcher proof, not a Dispatch sign-in, is what authenticated it.
+// handlers_operator.go: GET /v1/operator/machines, POST /v1/operator/machines/{id}/revoke,
+// POST /v1/operator/machines/{id}/retire, GET /v1/operator/grants and
+// POST /v1/operator/grants/{id}/revoke — a person's own machine logins and live grants, listed and
+// ended from their machine under its machine login (launcherAuth). The grant routes answer as
+// Dispatch's Live grants page does through the UI routes; the machine routes cover the person's
+// own machines' logins alone, a subset of Dispatch's machine-logins page, which also lists every
+// service's login, so ending the Legion daemon's login stays a Dispatch sign-in's. Each acts for
+// the calling credential's operator, and each revoke records that machine login as its actor,
+// since its launcher proof, not a Dispatch sign-in, is what authenticated it. A retire is the
+// calling login ending itself after its machine logged in again, leaving its sessions running.
 package api
 
 import (
@@ -50,6 +52,27 @@ func (s *server) revokeOperatorMachine(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 	s.revokeCredentialAs(w, r, s.deps.Enroll.RevokeOwnCredential, id, operator, record.LauncherActor(cred.ID.String()))
+}
+
+// retireOperatorMachine retires the calling credential, the login a newer login of its machine
+// replaced (enroll.Service.RetireCredential): it enrolls nothing more and cannot refresh, while the
+// sessions it enrolled keep running. {id} must name the calling credential (403
+// NOT_CALLING_CREDENTIAL otherwise), so a machine retires only its own login. 204 on success,
+// retiring one already ended included.
+func (s *server) retireOperatorMachine(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
+	id, ok := pathUUID(w, r, "id", "CREDENTIAL_ID_INPUT", "launcher credential")
+	if !ok {
+		return
+	}
+	if id != cred.ID.String() {
+		writeError(w, http.StatusForbidden, "NOT_CALLING_CREDENTIAL", "a machine login retires only itself: sign with the credential the path names")
+		return
+	}
+	if err := s.deps.Enroll.RetireCredential(r.Context(), id, record.LauncherActor(id)); err != nil {
+		writeInternal(w, "retire launcher credential", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // listOperatorGrants lists the live grants of the calling credential's operator's sessions and

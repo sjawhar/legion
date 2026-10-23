@@ -860,6 +860,46 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 	return tx.Commit(ctx)
 }
 
+// RetireCredential ends launcher credential id as the login a newer login of its machine replaced,
+// in one transaction: its expiry becomes now, so its key enrolls nothing more and its refresh is
+// refused, and its OAuth access and refresh tokens end. Unlike a revoke it leaves every enrollment
+// it made running: a session renews with its own proof, which an expired credential's sessions
+// already do. It writes one launcher_credential.retired audit row as actor. A credential already
+// revoked or past its expiry changes nothing; an unknown id is ErrNoCredential. It takes the
+// credential's row as a revoke does, so an enrollment Create holding it for share commits first.
+func (s *Service) RetireCredential(ctx context.Context, id, actor string) error {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var host string
+	var service *string
+	var live bool
+	err = tx.QueryRow(ctx, `select host, service, revoked_at is null and expires_at > now() from launcher_credentials
+		where id = $1 for no key update`, id).Scan(&host, &service, &live)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNoCredential
+	}
+	if err != nil {
+		return err
+	}
+	if !live {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `update launcher_credentials set expires_at = now() where id = $1`, id); err != nil {
+		return err
+	}
+	if err := oauthstore.EndCredential(ctx, tx, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.retired',$1,
+		jsonb_strip_nulls(jsonb_build_object('credential_id',$2::text,'host',$3::text,'service',$4::text)))`, actor, id, host, service); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // ReuseActor is the actor RevokeReusedCredential records: the broker, on finding a rotated
 // refresh token redeemed after its grace.
 const ReuseActor = "broker:refresh-token-reuse"

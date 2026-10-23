@@ -654,3 +654,71 @@ func TestARefreshQueuedBehindARevokeIsRefused(t *testing.T) {
 		t.Fatalf("active tokens of the revoked login = %d, want 0", n)
 	}
 }
+
+// TestARetiredMachineLoginKeepsItsSessions: a machine that logs in again retires the login it
+// replaced with that login's own launcher proof. The retired login enrolls nothing more and its
+// refresh is refused, while the session it enrolled stays live and renews with its own key.
+func TestARetiredMachineLoginKeepsItsSessions(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	m, tok, credentialID := approvedLogin(t, rig)
+	sessionKey := newSigningKey(t)
+	sessionThumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := proof.SignLauncher(m.key, credentialID, http.MethodPost, rig.URL+"/v1/enrollments", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := rig.Req(t, http.MethodPost, "/v1/enrollments", map[string]string{"Proof": p}, map[string]any{
+		"kind": "session", "runtime_id": "session-" + uuid.NewString(), "operator": rig.Operator, "thumbprint": sessionThumbprint,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("enroll = %d: %s", status, body)
+	}
+	enrollmentID := decode[struct {
+		ID string `json:"enrollment_id"`
+	}](t, body).ID
+
+	retire := func(key *ecdsa.PrivateKey, signer, target string) (int, []byte) {
+		t.Helper()
+		p, err := proof.SignLauncher(key, signer, http.MethodPost, rig.URL+"/v1/operator/machines/"+target+"/retire", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rig.Req(t, http.MethodPost, "/v1/operator/machines/"+target+"/retire", map[string]string{"Proof": p}, nil)
+	}
+	// Another live login of the same person cannot retire this one.
+	other, _, otherID := approvedLogin(t, rig)
+	if status, body := retire(other.key, otherID, credentialID); status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_CALLING_CREDENTIAL" {
+		t.Fatalf("retire of another credential = %d %s, want 403 NOT_CALLING_CREDENTIAL", status, body)
+	}
+	if status, body := retire(m.key, credentialID, credentialID); status != http.StatusNoContent {
+		t.Fatalf("retire = %d %s, want 204", status, body)
+	}
+
+	if status, body := enrollSession(t, rig, m.key, credentialID); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
+		t.Fatalf("enroll after the retire = %d %s, want 401 LAUNCHER_INVALID", status, body)
+	}
+	_, err = m.refresh(tok)
+	if err == nil {
+		t.Fatal("refresh after the retire succeeded")
+	}
+	if code, _ := oauthErrorCode(t, err); code != "invalid_grant" {
+		t.Fatalf("refresh after the retire = %s, want invalid_grant", code)
+	}
+	if n := activeTokens(t, rig, credentialID); n != 0 {
+		t.Fatalf("active tokens of the retired login = %d, want 0", n)
+	}
+	sp, err := proof.Sign(sessionKey, enrollmentID, http.MethodPost, rig.URL+"/v1/enrollments/"+enrollmentID+"/renew", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, body := rig.Req(t, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", map[string]string{"Proof": sp}, nil); status != http.StatusOK {
+		t.Fatalf("the session's renew after its login retired = %d %s, want 200", status, body)
+	}
+	var revoked bool
+	if err := rig.Store.Pool.QueryRow(context.Background(), `select revoked_at is not null from launcher_credentials where id=$1`, credentialID).Scan(&revoked); err != nil || revoked {
+		t.Fatalf("retired credential revoked = %v (%v), want not revoked", revoked, err)
+	}
+}

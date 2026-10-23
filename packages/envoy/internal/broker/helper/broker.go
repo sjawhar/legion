@@ -45,7 +45,13 @@ var errNoCredential = errors.New(noCredentialMsg)
 const (
 	defaultRefreshEvery = 24 * time.Hour
 	defaultRefreshRetry = 15 * time.Second
-	maxRefreshRetry     = time.Hour
+	// defaultRefreshGrace is the broker's rotation grace (oauthstore's five minutes): a refresh
+	// token rotated by a redemption whose answer was lost stays redeemable that long.
+	defaultRefreshGrace = 5 * time.Minute
+	// defaultRefreshBackoff is the first wait once a run of unlearned refreshes outlasts the grace,
+	// doubling to maxRefreshRetry.
+	defaultRefreshBackoff = time.Minute
+	maxRefreshRetry       = time.Hour
 	// defaultStartRefreshBound bounds Start's refresh of the kept login, so serve listens well
 	// inside the 10 s `agent-secrets register` waits for the socket.
 	defaultStartRefreshBound = 5 * time.Second
@@ -139,9 +145,11 @@ type Broker struct {
 	// has moved it; zero means a day. Only tests shorten it.
 	expiryWarning time.Duration
 	// refreshEvery is the longest the refresh loop waits after a refresh that reached the broker
-	// or a login's install (nextRefresh), and refreshRetry its first wait after one whose outcome
-	// it did not learn (doubling to an hour); zero means a day and 15 s. Only tests shorten them.
-	refreshEvery, refreshRetry time.Duration
+	// or a login's install (nextRefresh); refreshRetry its fixed wait after one whose outcome it did
+	// not learn while inside refreshGrace of the first such attempt; refreshBackoff its first wait
+	// once that grace has passed (doubling to an hour). Zero means a day, 15 s, five minutes and a
+	// minute. Only tests shorten them.
+	refreshEvery, refreshRetry, refreshGrace, refreshBackoff time.Duration
 	// startRefreshBound is how long Start waits on its refresh of the kept login; zero means
 	// defaultStartRefreshBound. Only tests shorten it.
 	startRefreshBound time.Duration
@@ -424,9 +432,10 @@ func (b *Broker) pollLogin(key *ecdsa.PrivateKey, cfg *oauth2.Config, da *oauth2
 // keepLogin keeps the login an approved device grant issued at MachineFile and only then installs
 // it, under credMu, so no refresh runs between the two; it logs the credential with operator, the
 // login_hint the login was signed with, whatever the operator file says by then. A credential the
-// new login replaced is then revoked at the broker (revokeReplaced). An approval the helper cannot
-// keep (a token answer without the credential's extras, or a machine file it cannot write) is
-// logged at ERROR and recorded "expired", leaving cred untouched.
+// new login replaced is then retired at the broker (retireReplaced), which leaves the sessions it
+// enrolled running. An approval the helper cannot keep (a token answer without the credential's
+// extras, or a machine file it cannot write) is logged at ERROR and recorded "expired", leaving
+// cred untouched.
 func (b *Broker) keepLogin(key *ecdsa.PrivateKey, tok *oauth2.Token, code, operator string) {
 	f, err := machineFileFrom(key, tok)
 	var replaced *machineCredential
@@ -445,17 +454,18 @@ func (b *Broker) keepLogin(key *ecdsa.PrivateKey, tok *oauth2.Token, code, opera
 	b.logger().Info("machine login issued; the helper holds a launcher credential",
 		"credential_id", f.CredentialID, "operator", operator, "expires_at", f.ExpiresAt.Format(time.RFC3339))
 	if replaced != nil && replaced.id != f.CredentialID {
-		b.revokeReplaced(replaced)
+		b.retireReplaced(replaced)
 	}
 }
 
-// revokeReplaced ends old, the credential a new machine login replaced, at the broker: POST
-// /v1/operator/machines/{id}/revoke signed with old's own launcher proof, the route a person's
-// machine ends its own login with. Nothing uses old again, and revoking it means no old copy of
-// the machine file can refresh it. It is best effort: a failure is logged at WARN, never retried,
-// and changes nothing the helper holds.
-func (b *Broker) revokeReplaced(old *machineCredential) {
-	url := b.URL + "/v1/operator/machines/" + old.id + "/revoke"
+// retireReplaced ends old, the credential a new machine login replaced, at the broker: POST
+// /v1/operator/machines/{id}/retire signed with old's own launcher proof. The broker sets its
+// expiry to now and ends its OAuth tokens, so no old copy of the machine file can refresh it or
+// enroll with it, and leaves every session it enrolled running: they renew with their own proofs.
+// It is best effort: a failure is logged at WARN, never retried, and changes nothing the helper
+// holds.
+func (b *Broker) retireReplaced(old *machineCredential) {
+	url := b.URL + "/v1/operator/machines/" + old.id + "/retire"
 	err := func() error {
 		compact, err := proof.SignLauncher(old.key, old.id, http.MethodPost, url, time.Now())
 		if err != nil {
@@ -466,28 +476,29 @@ func (b *Broker) revokeReplaced(old *machineCredential) {
 			return err
 		}
 		req.Header.Set("Proof", compact)
-		return b.do(req, []int{http.StatusOK}, nil)
+		return b.do(req, []int{http.StatusNoContent}, nil)
 	}()
 	if err != nil {
-		b.logger().Warn("the helper could not revoke the machine login a new one replaced; revoke it with agent-secrets machine revoke",
+		b.logger().Warn("the helper could not retire the machine login a new one replaced; it lapses at its expiry, or end it and its sessions with agent-secrets machine revoke",
 			"credential_id", old.id, "error", err)
 		return
 	}
-	b.logger().Info("the helper revoked the machine login a new one replaced", "credential_id", old.id)
+	b.logger().Info("the helper retired the machine login a new one replaced", "credential_id", old.id)
 }
 
 // Start resumes the machine login kept at MachineFile, if there is one, and starts the refresh
 // loop (refreshLoop) until ctx ends; serve runs it before it listens, holding the machine file's
 // claim. It first removes the temporary files an interrupted save left beside the file
 // (RemoveLeftoverMachineTemps), logging a failure. A kept login is refreshed once before it is
-// installed, within startRefreshBound (5 s), so a restarted helper never reports a login the
-// broker has ended and still listens within `register`'s wait: a refresh the broker answers is
-// saved and installed as an issued login with no code; one it refuses (invalid_grant: revoked,
-// lapsed or reused) drops the login (dropRefreshRefused) and deletes the file; one whose outcome
+// installed, within startRefreshBound (5 s), so the socket still listens within `register`'s wait:
+// a refresh the broker answers is saved and installed as an issued login with no code; one it
+// refuses (invalid_grant: revoked, lapsed or reused) drops the login (dropRefreshRefused) and
+// deletes the file, so a login the broker answered as ended is never resumed; one whose outcome
 // the helper did not learn (the broker unreachable or rate-limiting, a lost or late answer, a 5xx)
-// installs the kept login and leaves the refresh loop to retry it, no sooner than a Retry-After
-// the broker named. A file that is there but is not a machine login, or that others can read, is
-// an error naming it.
+// installs the kept login as issued, though the broker may have ended it, and leaves the refresh
+// loop to retry it (refreshLoop: every refreshRetry inside the grace, then backing off), no sooner
+// than a Retry-After the broker named. A file that is there but is not a machine login, or that
+// others can read, is an error naming it.
 func (b *Broker) Start(ctx context.Context) error {
 	if err := RemoveLeftoverMachineTemps(b.MachineFile); err != nil {
 		b.logger().Error("removing the temporary files an interrupted machine file save left", "machine_file", b.MachineFile, "error", err)
@@ -495,17 +506,19 @@ func (b *Broker) Start(ctx context.Context) error {
 	f, err := LoadMachineFile(b.MachineFile)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		go b.refreshLoop(ctx, b.refreshEveryOrDefault())
+		go b.refreshLoop(ctx, b.refreshEveryOrDefault(), time.Time{})
 		return nil
 	case err != nil:
 		return err
 	}
 	kept := f.credential()
 	b.credMu.Lock()
+	attempt := time.Now()
 	bounded, cancel := context.WithTimeout(ctx, b.startRefreshBoundOrDefault())
 	next, refusal, err := b.redeem(bounded, kept)
 	cancel()
 	first := time.Duration(0)
+	var unlearned time.Time
 	switch {
 	case refusal != "":
 		b.installCredential(kept, &loginState{State: "issued"})
@@ -514,6 +527,7 @@ func (b *Broker) Start(ctx context.Context) error {
 	case err != nil:
 		b.installCredential(kept, &loginState{State: "issued"})
 		first = max(b.refreshRetryOrDefault(), retryAfter(err))
+		unlearned = attempt
 	default:
 		if err := next.Save(b.MachineFile); err != nil {
 			b.logger().Error("the helper could not keep the machine login's refresh on disk; retrying",
@@ -531,7 +545,7 @@ func (b *Broker) Start(ctx context.Context) error {
 	if first == 0 {
 		first = b.nextRefresh(b.refreshEveryOrDefault())
 	}
-	go b.refreshLoop(ctx, first)
+	go b.refreshLoop(ctx, first, unlearned)
 	return nil
 }
 
@@ -590,6 +604,20 @@ func (b *Broker) refreshRetryOrDefault() time.Duration {
 	return b.refreshRetry
 }
 
+func (b *Broker) refreshGraceOrDefault() time.Duration {
+	if b.refreshGrace == 0 {
+		return defaultRefreshGrace
+	}
+	return b.refreshGrace
+}
+
+func (b *Broker) refreshBackoffOrDefault() time.Duration {
+	if b.refreshBackoff == 0 {
+		return defaultRefreshBackoff
+	}
+	return b.refreshBackoff
+}
+
 // nextRefresh is how long the refresh loop waits before refreshing the held credential: half the
 // time left until its expiry, at most every, so a credential the broker mints for less than two
 // days is still refreshed well before it lapses.
@@ -602,20 +630,25 @@ func (b *Broker) nextRefresh(every time.Duration) time.Duration {
 }
 
 // refreshLoop refreshes the held machine login after first, then at nextRefresh after each
-// refresh that reached the broker and each install of a credential; one whose outcome it did not
-// learn is retried refreshRetry later (15 s), the wait doubling to an hour, and never sooner than
-// a Retry-After the broker answered it with (retryAfter). A credential a launcher call's refusal
-// dropped is settled at once (settleRefused), and retried the same way until it is. It ends with
-// ctx.
-func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
+// refresh that reached the broker and each install of a credential. A refresh whose outcome it did
+// not learn (the broker unreachable, a timeout, a 5xx) is retried at the fixed refreshRetry (15 s)
+// until the first such attempt's start plus refreshGrace (the broker's five-minute rotation grace)
+// has passed, so a lost answer's rotated token is redeemed while the broker still takes it however
+// long the outage inside the grace; after that the wait starts at refreshBackoff (a minute) and
+// doubles to an hour. No wait is sooner than a Retry-After the broker answered with (retryAfter).
+// unlearned is when such a run began before the loop started (Start's own refresh), zero for none.
+// A credential a launcher call's refusal dropped is settled at once (settleRefused), and retried
+// the same way until it is. It ends with ctx.
+func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned time.Time) {
 	every, retry := b.refreshEveryOrDefault(), b.refreshRetryOrDefault()
+	grace, backoffStart := b.refreshGraceOrDefault(), b.refreshBackoffOrDefault()
 	sig := b.refreshSignals()
 	// An install before the loop started asked for a reschedule first already accounts for.
 	select {
 	case <-sig.reschedule:
 	default:
 	}
-	backoff := retry
+	backoff := backoffStart
 	timer := time.NewTimer(first)
 	defer timer.Stop()
 	var settle *machineCredential
@@ -625,7 +658,7 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
 			return
 		case <-sig.reschedule:
 			if settle == nil {
-				backoff = retry
+				backoff, unlearned = backoffStart, time.Time{}
 				timer.Reset(b.nextRefresh(every))
 			}
 			continue
@@ -634,6 +667,7 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
 			continue
 		case <-timer.C:
 		}
+		attempt := time.Now()
 		var err error
 		if settle != nil {
 			err = b.settleRefused(ctx, settle)
@@ -651,11 +685,18 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration) {
 			err = b.refresh(ctx)
 		}
 		if err != nil {
+			if unlearned.IsZero() {
+				unlearned = attempt
+			}
+			if time.Now().Before(unlearned.Add(grace)) {
+				timer.Reset(max(retry, retryAfter(err)))
+				continue
+			}
 			timer.Reset(max(backoff, retryAfter(err)))
 			backoff = min(2*backoff, maxRefreshRetry)
 			continue
 		}
-		backoff = retry
+		backoff, unlearned = backoffStart, time.Time{}
 		timer.Reset(b.nextRefresh(every))
 	}
 }

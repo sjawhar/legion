@@ -62,8 +62,8 @@ ends, or for the `--ttl` its request names. Every command below runs in that sec
 ## Run a helper and log it in
 
 Start the helper in the background, with its log in the workdir, and log it in. It runs from this
-shell rather than through `agent-secrets-helper install`, since a `systemd --user` unit would not
-carry the exports above and would replace your own helper's unit:
+shell rather than through `agent-secrets-helper install`, since installing would rewrite your own
+helper's `systemd --user` unit to point at the development broker:
 
 ```sh
 agent-secrets-helper serve 2>"$DEV_BROKER_DIR/helper.log" &

@@ -61,6 +61,10 @@ func install(args []string, getenv func(string) string, exe string, stdout io.Wr
 		if strings.ContainsAny(value, needsEscaping) {
 			return fmt.Errorf("%s %q holds characters a unit's Environment= line would need escaped", name, value)
 		}
+		// The unit's helper runs in another working directory than install does.
+		if !filepath.IsAbs(value) {
+			return fmt.Errorf("%s %q is a relative path, which the unit's helper would resolve from another directory; set it to an absolute path", name, value)
+		}
 		environment += "Environment=" + name + "=" + value + "\n"
 	}
 	resolved, err := filepath.EvalSymlinks(exe)

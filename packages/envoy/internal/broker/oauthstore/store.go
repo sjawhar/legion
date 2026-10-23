@@ -612,8 +612,11 @@ func (s *Store) RotateRefreshToken(ctx context.Context, requestID string, signat
 // (which shares the request id), and ends the launcher credential the family names (Reused). The
 // library calls it only when a refresh presents a rotated token past its grace (its reuse
 // response, in its own transaction): this provider mounts no revocation endpoint and issues no
-// authorization code. Reused runs first, so it takes the credential's row before any token row,
-// in the order a revoke and a refresh take them.
+// authorization code. The library has already deleted the presented token's row in this
+// transaction before it calls here, so Reused locks the credential's row after a token row, the
+// reverse of the order a revoke or a refresh takes them. A revoke, or a second redemption inside
+// the grace, racing this can therefore deadlock with it: Postgres aborts one of them, which
+// answers 500 and clears on a retry, and the credential ends revoked either way.
 func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error {
 	state, err := txOf(ctx)
 	if err != nil {

@@ -152,6 +152,10 @@ func routes() []apiRoute {
 		// and every session it enrolled ends. A service's login is not found here, like an unknown
 		// id. Revoking the calling machine's own login ends this machine's access.
 		{http.MethodPost, "/v1/operator/machines/{id}/revoke", launcherAuth((*server).revokeOperatorMachine)},
+		// Retire the calling machine login after its machine logged in again: it enrolls nothing
+		// more and cannot refresh, while the sessions it enrolled keep running and renewing with their
+		// own keys. {id} must be the calling credential.
+		{http.MethodPost, "/v1/operator/machines/{id}/retire", launcherAuth((*server).retireOperatorMachine)},
 		// List the live grants of the operator's sessions and those the operator approved, exactly as
 		// Dispatch's Live grants page lists them.
 		{http.MethodGet, "/v1/operator/grants", launcherAuth((*server).listOperatorGrants)},

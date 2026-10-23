@@ -126,7 +126,7 @@ func TestARefreshThatDoesNotReachTheBrokerKeepsTheLogin(t *testing.T) {
 	b.refreshEvery, b.refreshRetry = time.Hour, 50*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go b.refreshLoop(ctx, 0)
+	go b.refreshLoop(ctx, 0, time.Time{})
 	waitFor(t, func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -141,6 +141,36 @@ func TestARefreshThatDoesNotReachTheBrokerKeepsTheLogin(t *testing.T) {
 	waitFor(t, func() bool { cred := b.cred.Load(); return cred != nil && cred != held && cred.id == held.id })
 	if ls := b.LoginStatus(); ls.State != "issued" || !ls.CredentialHeld {
 		t.Fatalf("login-status after the retried refresh: %+v; want issued and held", ls)
+	}
+}
+
+// TestAnUnlearnedRefreshIsRetriedAtTheFixedIntervalInsideTheGrace: after a refresh whose outcome
+// the helper did not learn, the loop retries at the fixed retry interval until the first attempt's
+// start plus the broker's rotation grace has passed, so a lost answer is redeemed inside the grace
+// however long the outage; only then does it back off, from refreshBackoff (shortened here from a
+// minute and an hour's cap, the grace from five minutes).
+func TestAnUnlearnedRefreshIsRetriedAtTheFixedIntervalInsideTheGrace(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "ada@example.com")
+	f.mu.Lock()
+	f.refreshOutcome = "unavailable"
+	f.mu.Unlock()
+	count := func() int { f.mu.Lock(); defer f.mu.Unlock(); return f.refreshes }
+	b.refreshEvery, b.refreshRetry, b.refreshGrace, b.refreshBackoff = time.Hour, 20*time.Millisecond, 600*time.Millisecond, time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	start := time.Now()
+	go b.refreshLoop(ctx, 0, time.Time{})
+	// Doubling from 20 ms would make about five attempts inside 600 ms; the fixed interval many more.
+	time.Sleep(500 * time.Millisecond)
+	if n := count(); n < 12 {
+		t.Fatalf("%d refreshes in the first 500 ms of a 600 ms grace at a 20 ms retry; want a retry every 20 ms", n)
+	}
+	waitFor(t, func() bool { return time.Since(start) > 900*time.Millisecond })
+	settled := count()
+	time.Sleep(400 * time.Millisecond)
+	if n := count(); n != settled {
+		t.Fatalf("%d refreshes after the grace passed, within 400 ms of a backoff of an hour; want none", n-settled)
 	}
 }
 
@@ -551,7 +581,7 @@ func TestARateLimitedRefreshKeepsTheLoginAndWaitsItsRetryAfter(t *testing.T) {
 	before := f.refreshes
 	f.mu.Unlock()
 	start := time.Now()
-	go b.refreshLoop(ctx, 0)
+	go b.refreshLoop(ctx, 0, time.Time{})
 	waitFor(t, func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()

@@ -125,9 +125,11 @@ const (
 	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
 	CodeNotEnrolled = "NOT_ENROLLED"
 	// CodeNoCredential answers sign, sign-request or sign-launcher while the helper holds no
-	// launcher credential, from every restart until the operator logs the machine in: it enrolls no
-	// one, so a session has no broker identity, and the operator's shell has no machine login to
-	// act as. A register reply for such a session carries it too, beside OK.
+	// launcher credential: the machine was never logged in, its machine file is gone, or the broker
+	// refused its login (revoked, lapsed, or a reused refresh token), until the operator logs the
+	// machine in. A restart resumes a kept login, so it alone does not cause this. The helper then
+	// enrolls no one, so a session has no broker identity, and the operator's shell has no machine
+	// login to act as. A register reply for such a session carries it too, beside OK.
 	CodeNoCredential = "NO_CREDENTIAL"
 	// CodeInSession answers sign-launcher from a process inside a registered session's process
 	// tree, or one whose ancestry the helper cannot follow to init (a parent it cannot read, a

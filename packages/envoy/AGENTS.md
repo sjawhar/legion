@@ -2594,17 +2594,21 @@ any socket, exits 2 naming it, before any refresh; with the socket lock held it 
 the socket that is not a unix socket or that a helper still answers on, and removes a socket only
 when a dial is refused. It then runs `Broker.Start` before it listens: Start first removes any
 `.machine-*.json.tmp` an interrupted save left beside the file, and a kept file is refreshed once,
-within 5 s, before it is installed, so a revoked machine never resumes as `issued` and the socket
-still listens inside `register`'s 10 s wait (answered: saved and installed `issued` with no code,
-the first refresh 15 s later when the save failed; `invalid_grant`: dropped and the file deleted;
-an outcome the helper did not learn, the 5 s bound passing among them: the kept login installed,
-retried by the loop). A file that is there but is
+within 5 s, before it is installed, so the socket still listens inside `register`'s 10 s wait
+(answered: saved and installed `issued` with no code, the first refresh 15 s later when the save
+failed; `invalid_grant`: dropped and the file deleted, so a login the broker answered as ended is
+never resumed; an outcome the helper did not learn, the 5 s bound passing among them: the kept
+login installed as `issued`, though the broker may have ended it, and retried by the loop). A file
+that is there but is
 not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
-credential is installed; a refresh whose outcome it did not learn is retried after 15 s (inside
-the broker's five-minute rotation grace, so a lost answer keeps the login), doubling to an hour,
-and never sooner than the `Retry-After` of a 429 (the token endpoint's rate limit), which keeps
-the login like any other unlearned outcome. A 401
+credential is installed; a refresh whose outcome it did not learn is retried every 15 s until the
+first such attempt's start plus the broker's five-minute rotation grace has passed, then after a
+minute, doubling to an hour, and never sooner than the `Retry-After` of a 429 (the token
+endpoint's rate limit), which keeps the login like any other unlearned outcome. A lost answer
+keeps the login only while a retry lands inside the grace: an outage longer than the grace right
+after a lost answer makes the next retry a reuse, which revokes the machine and ends its sessions.
+A 401
 `LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
 dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
 since that 401 can also be a proof the broker could not verify; an answer whose save fails is
@@ -2613,8 +2617,10 @@ Each refresh spends the refresh token
 for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
 the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)
 drops the login and deletes the file. A machine login installed while the helper held another
-credential revokes the replaced one (`revokeReplaced`: `POST /v1/operator/machines/{id}/revoke`
-signed with that credential's own launcher proof), best effort, logging a failure at WARN. The
+credential retires the replaced one (`retireReplaced`: `POST /v1/operator/machines/{id}/retire`
+signed with that credential's own launcher proof, `enroll.Service.RetireCredential`: its expiry set
+to now and its OAuth tokens ended in one transaction, its sessions left running and renewing with
+their own proofs), best effort, logging a failure at WARN. The
 helper no longer speaks the earlier
 `POST /v1/launcher-credentials` login, so it needs a broker that serves the OAuth routes.
 `agent-secrets-helper install [--url URL] [--restart-with-sessions]` (`install.go`) writes the
@@ -2623,7 +2629,8 @@ else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`,
 `Environment=AGENT_SECRETS_URL=<url>`, an `Environment=` line for each of
 `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE` set in
 its environment, and `Restart=always`, refusing a URL, value or path a unit line
-would split or expand. First, a helper answering on the socket while `systemctl --user
+would split or expand, and a relative path in any of those three variables (naming it: the
+unit's helper runs in another working directory). First, a helper answering on the socket while `systemctl --user
 is-active agent-secrets-helper.service` is not `active` was started some other way: `install`
 lists its sessions and exits 2 (`stop it, then re-run install`), writing and starting nothing,
 whether or not the unit file already matches. Then it writes the unit when its bytes differ, and
@@ -2632,7 +2639,9 @@ active. Last, it restarts a helper that was already answering when `--restart-wi
 given, even with the unit unchanged, or, without it, only when the unit changed and the
 `drain` op finds it has no sessions (it then refuses every later register and
 `enroll-session-key` `DRAINING` until it exits or is sent `undrain`, so none starts between the
-check and the restart; a restart that fails after a drain sends `undrain` and exits with the
+check and the restart; `agent-secrets register` retries `DRAINING` every 250 ms until the larger
+of its 10 s connect patience and `--wait` has passed, so a session launched then registers with the
+restarted helper; a restart that fails after a drain sends `undrain` and exits with the
 restart's error). An unchanged, active unit without the flag does nothing. With sessions it prints them and
 `not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
 --restart-with-sessions.` and exits 0. A helper older than `drain` answers it `unknown op`; it
@@ -3257,7 +3266,13 @@ is refused every one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an oper
 names the calling machine login, `record.LauncherActor(<credential id>)`, whose own row names its
 operator, since no Dispatch sign-in vouched for it; a UI revoke names `record.HumanActor(<login>)`.
 Revoking the calling credential itself ends that machine's access: its next launcher proof is
-`401 LAUNCHER_INVALID`.
+`401 LAUNCHER_INVALID`. `POST /v1/operator/machines/{id}/retire` (`retireOperatorMachine`) is the
+helper's after a new login replaced the calling one: `{id}` must be the calling credential (`403
+NOT_CALLING_CREDENTIAL` otherwise; it needs no operator, so it is the one machine route a service's
+login is not refused), and `enroll.Service.RetireCredential` sets its `expires_at` to now and ends
+its OAuth tokens in one transaction, writing one `launcher_credential.retired` audit row, while its
+enrollments keep running: a session renews with its own proof, as an expired credential's
+sessions do. It answers `204`, also for a credential already expired or revoked.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

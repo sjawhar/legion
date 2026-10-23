@@ -77,13 +77,16 @@ const usage = `usage:
 
 environment:
   AGENT_SECRETS_URL            the broker's base URL; serve needs it, install writes it into the unit
-  AGENT_SECRETS_HELPER_SOCK    the helper's socket
+  AGENT_SECRETS_HELPER_SOCK    the helper's socket; install writes it into the unit when set
                                (default $XDG_RUNTIME_DIR/agent-secrets/helper.sock)
   AGENT_SECRETS_OPERATOR_FILE  a file holding the operator's Dispatch login, which a machine login
-                               names as its approver (default ~/.config/agent-secrets/operator)
+                               names as its approver; install writes it into the unit when set
+                               (default ~/.config/agent-secrets/operator)
   AGENT_SECRETS_MACHINE_FILE   where the helper keeps this machine's login (its key and refresh
-                               token, mode 0600), so a restart resumes it
-                               (default ~/.config/agent-secrets/machine.json)
+                               token, mode 0600), so a restart resumes it; install writes it into
+                               the unit when set (default ~/.config/agent-secrets/machine.json)
+
+install refuses a relative path in any of these variables: the unit's helper runs elsewhere.
 `
 
 func main() {

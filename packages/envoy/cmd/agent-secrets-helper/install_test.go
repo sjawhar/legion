@@ -210,6 +210,23 @@ func TestInstallWritesTheHelpersEnvironmentIntoTheUnit(t *testing.T) {
 	}
 }
 
+// TestInstallRefusesARelativeHelperPath: the unit's helper runs in another working directory than
+// install, so a relative path in any variable install writes would name another file; install
+// refuses it, naming the variable, and writes nothing.
+func TestInstallRefusesARelativeHelperPath(t *testing.T) {
+	for _, name := range []string{"AGENT_SECRETS_HELPER_SOCK", "AGENT_SECRETS_OPERATOR_FILE", "AGENT_SECRETS_MACHINE_FILE"} {
+		r := newInstallRig(t)
+		r.env[name] = "relative/" + strings.ToLower(name)
+		err := r.run("--url", "https://secrets.example")
+		if err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "absolute") {
+			t.Errorf("install with a relative %s: %v; want a refusal naming it and asking for an absolute path", name, err)
+		}
+		if _, err := os.Stat(r.unit); !os.IsNotExist(err) {
+			t.Errorf("an install refused for a relative %s wrote the unit: %v", name, err)
+		}
+	}
+}
+
 func TestInstallIsANoOpWhenNothingChanged(t *testing.T) {
 	r := newInstallRig(t)
 	if err := r.run("--url", "https://secrets.example"); err != nil {

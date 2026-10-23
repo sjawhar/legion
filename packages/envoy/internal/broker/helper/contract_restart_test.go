@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 )
 
 // failingTokenTransport fails every request to the broker's token endpoint as an unreachable
@@ -264,39 +266,64 @@ func TestContractAReLoginReplacesTheKeptLogin(t *testing.T) {
 	}
 }
 
-// TestContractAReLoginRevokesTheCredentialItReplaces: once a re-login is installed, the helper
-// revokes the credential it replaced at the broker, signing with that credential's own launcher
-// proof, so no old copy of the machine file can refresh it; the new login keeps working.
-func TestContractAReLoginRevokesTheCredentialItReplaces(t *testing.T) {
-	cr := newContractRig(t)
+// TestContractAReLoginRetiresTheCredentialItReplaces: once a re-login is installed, the helper
+// retires the credential it replaced at the broker, signing with that credential's own launcher
+// proof: no old copy of the machine file can refresh it, and the session it enrolled keeps its
+// enrollment and renews it; the new login keeps working.
+func TestContractAReLoginRetiresTheCredentialItReplaces(t *testing.T) {
+	cr := newContractRig(t, brokertest.WithLease(3*time.Second))
 	first := cr.login(t)
+	reg := cr.call(t, Request{Op: "register", WaitSeconds: 10})
+	if !reg.OK || reg.State != "enrolled" || reg.EnrollmentID == "" {
+		t.Fatalf("register: %+v", reg)
+	}
 	code, err := cr.srv.Broker.Login(context.Background(), cr.srv.Hostname)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second := cr.broker.DecideMachineLogin(t, code, true)
 	deadline := time.Now().Add(20 * time.Second)
-	for {
-		var revoked bool
-		if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select revoked_at is not null from launcher_credentials where id = $1`, first).Scan(&revoked); err != nil {
-			t.Fatal(err)
-		}
-		if revoked {
-			break
-		}
+	for !strings.Contains(cr.logBuf.String(), "retired the machine login a new one replaced") {
 		if time.Now().After(deadline) {
-			t.Fatalf("the replaced credential %s was never revoked; status %+v", first, cr.srv.Broker.LoginStatus())
+			t.Fatalf("the replaced credential %s was never retired; log:\n%s", first, cr.logBuf.String())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	var revoked, expired bool
+	if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select revoked_at is not null, expires_at <= now() from launcher_credentials where id = $1`, first).Scan(&revoked, &expired); err != nil || revoked || !expired {
+		t.Fatalf("replaced credential revoked %v, expired %v (%v); want retired: expired, not revoked", revoked, expired, err)
+	}
+	var lease time.Time
+	if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select lease_expires_at from enrollments where id = $1`, reg.EnrollmentID).Scan(&lease); err != nil {
+		t.Fatal(err)
+	}
+	// The session renews its enrollment with its own proof after its login retired.
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		var live bool
+		var now time.Time
+		if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select revoked_at is null, lease_expires_at from enrollments where id = $1`, reg.EnrollmentID).Scan(&live, &now); err != nil {
+			t.Fatal(err)
+		}
+		if !live {
+			t.Fatalf("the session's enrollment %s ended when its login was retired", reg.EnrollmentID)
+		}
+		if now.After(lease) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the session's enrollment %s never renewed after its login retired", reg.EnrollmentID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if s := cr.call(t, Request{Op: "sessions"}); len(s.Sessions) != 1 || s.Sessions[0].EnrollmentID != reg.EnrollmentID {
+		t.Fatalf("sessions after the retire = %+v; want the one session on enrollment %s", s.Sessions, reg.EnrollmentID)
+	}
 	if cred := cr.srv.Broker.cred.Load(); cred == nil || cred.id != second {
-		t.Fatalf("after the revoke the helper holds %+v; want the new login %s", cred, second)
+		t.Fatalf("after the retire the helper holds %+v; want the new login %s", cred, second)
 	}
 	if err := cr.srv.Broker.refresh(context.Background()); err != nil || !cr.srv.Broker.HasCredential() {
-		t.Fatalf("the new login's refresh after the revoke: %v, held %v; want it refreshed", err, cr.srv.Broker.HasCredential())
-	}
-	if !strings.Contains(cr.logBuf.String(), "revoked the machine login a new one replaced") {
-		t.Fatalf("no line names the revoke:\n%s", cr.logBuf.String())
+		t.Fatalf("the new login's refresh after the retire: %v, held %v; want it refreshed", err, cr.srv.Broker.HasCredential())
 	}
 }
 

@@ -29,7 +29,8 @@ create table oauth_refresh_tokens (
   request jsonb not null,
   active boolean not null default true,
   -- A rotated token stays redeemable until this moment, so a response lost in transit can be
-  -- retried once instead of revoking the whole login (RotateRefreshToken's grace period).
+  -- retried any number of times inside the grace instead of revoking the whole login
+  -- (RotateRefreshToken's grace period).
   grace_until timestamptz,
   expires_at timestamptz not null
 );
