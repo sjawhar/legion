@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -51,9 +52,10 @@ var (
 	// already holds a live launcher credential under another record: a machine signed two logins
 	// with one key and the first was approved. The record stays pending.
 	ErrKeyHoldsLiveCredential = errors.New("this machine login's key already holds a live launcher credential")
-	// ErrNotLive is Refreshed's refusal for a launcher credential that is revoked or past its
-	// expiry: a refresh never revives a login that has ended.
-	ErrNotLive = errors.New("this machine login's credential is revoked or expired")
+	// ErrNotLive is Refreshed's and Live's refusal for a launcher credential that is revoked or
+	// past its expiry: a refresh never revives a login that has ended. It is an
+	// oauth.ErrLoginEnded, so the token endpoint refuses it invalid_grant.
+	ErrNotLive = fmt.Errorf("%w: this machine login's credential is revoked or expired", oauth.ErrLoginEnded)
 )
 
 type Service struct {
@@ -304,7 +306,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return "", "", err
 	}
-	if code != storedCode {
+	if oauth.NormalizeUserCode(code) != storedCode {
 		return "", "", ErrCodeMismatch
 	}
 
@@ -397,7 +399,7 @@ func (s *Service) decideDevice(ctx context.Context, tx pgx.Tx, code string, appr
 	}
 	extra := map[string]any{"record_id": recordID, "operator": login, "host": host}
 	if credID != nil {
-		extra["credential_id"] = *credID
+		extra[oauthwire.ExtraCredentialID] = *credID
 	}
 	err := s.OAuth.ApproveDevice(oauthstore.WithTx(ctx, tx), code, approve, extra)
 	switch {
@@ -411,14 +413,17 @@ func (s *Service) decideDevice(ctx context.Context, tx pgx.Tx, code string, appr
 
 // Refreshed moves a live launcher credential's expiry to CredentialLifetime from now, as its
 // device login refreshes, and answers the new expiry. A credential revoked or already past its
-// expiry is ErrNotLive and is left as it is. It runs in the transaction ctx carries
-// (oauthstore.TxFrom) when it carries one, and its update holds the credential's row lock until
-// that transaction ends: a revoke (enroll.Service.RevokeCredential locks the same row) either
-// commits first, so the update finds no live row, or waits for the refresh's tokens to commit and
-// then ends them.
+// expiry is ErrNotLive and is left as it is. It runs only in the transaction ctx carries
+// (oauthstore.TxFrom), and its update holds the credential's row lock until that transaction
+// ends: a revoke (enroll.Service.RevokeCredential locks the same row) either commits first, so the
+// update finds no live row, or waits for the refresh's tokens to commit and then ends them.
 func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time, error) {
+	tx, err := tokenTx(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
 	var expires time.Time
-	err := s.db(ctx).QueryRow(ctx, `update launcher_credentials set expires_at = now() + make_interval(secs => $2)
+	err = tx.QueryRow(ctx, `update launcher_credentials set expires_at = now() + make_interval(secs => $2)
 		where id = $1 and revoked_at is null and expires_at > now() returning expires_at`, credentialID, s.CredentialLifetime.Seconds()).Scan(&expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, ErrNotLive
@@ -432,8 +437,12 @@ func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time
 // first, so Live finds no live row, or waits for the device code grant's tokens to commit and then
 // ends them.
 func (s *Service) Live(ctx context.Context, credentialID string) error {
+	tx, err := tokenTx(ctx)
+	if err != nil {
+		return err
+	}
 	var one int
-	err := s.db(ctx).QueryRow(ctx, `select 1 from launcher_credentials
+	err = tx.QueryRow(ctx, `select 1 from launcher_credentials
 		where id = $1 and revoked_at is null and expires_at > now() for no key update`, credentialID).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotLive
@@ -441,14 +450,14 @@ func (s *Service) Live(ctx context.Context, credentialID string) error {
 	return err
 }
 
-// db is the transaction ctx carries (oauthstore.TxFrom), else the pool.
-func (s *Service) db(ctx context.Context) interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-} {
-	if tx, ok := oauthstore.TxFrom(ctx); ok {
-		return tx
+// tokenTx is the token request's transaction ctx carries (oauthstore.TxFrom): the row locks the
+// token hooks take hold only within it, so there is no running without one.
+func tokenTx(ctx context.Context) (pgx.Tx, error) {
+	tx, ok := oauthstore.TxFrom(ctx)
+	if !ok {
+		return nil, errors.New("machine: the token hooks run in the provider's transaction")
 	}
-	return s.Store.Pool
+	return tx, nil
 }
 
 // TokenHooks are the device login's token hooks, run in the token request's transaction: a
@@ -459,36 +468,45 @@ func (s *Service) db(ctx context.Context) interface {
 // to on a refresh.
 func (s *Service) TokenHooks() oauth.TokenHooks {
 	var hooks oauth.TokenHooks
-	hooks.Before = func(ctx context.Context, grant string, extra map[string]any) error {
+	hooks.Before = func(ctx context.Context, grant oauth2.GrantType, extra map[string]any) error {
 		id, err := credentialOf(extra)
 		if err != nil {
 			return err
 		}
-		if grant == "refresh_token" {
+		switch grant {
+		case oauth2.GrantTypeRefreshToken:
 			_, err = s.Refreshed(ctx, id)
 			return err
+		case oauth2.GrantTypeDeviceCode:
+			return s.Live(ctx, id)
+		default:
+			return fmt.Errorf("machine: a device login has no %q grant", grant)
 		}
-		return s.Live(ctx, id)
 	}
-	hooks.After = func(ctx context.Context, _ string, extra map[string]any) (map[string]any, error) {
+	hooks.After = func(ctx context.Context, _ oauth2.GrantType, extra map[string]any) (map[string]any, error) {
 		id, err := credentialOf(extra)
+		if err != nil {
+			return nil, err
+		}
+		tx, err := tokenTx(ctx)
 		if err != nil {
 			return nil, err
 		}
 		var expires time.Time
-		if err := s.db(ctx).QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, id).Scan(&expires); err != nil {
+		if err := tx.QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, id).Scan(&expires); err != nil {
 			return nil, err
 		}
-		return map[string]any{"credential_id": id, "credential_expires_at": expires.UTC().Format(time.RFC3339)}, nil
+		return map[string]any{oauthwire.ExtraCredentialID: id, oauthwire.ExtraCredentialExpiresAt: expires.UTC().Format(time.RFC3339)}, nil
 	}
 	return hooks
 }
 
-// credentialOf is the launcher credential a device login's session extra names.
+// credentialOf is the launcher credential a device login's session extra names. A session naming
+// none has no login to refresh, so it is an oauth.ErrLoginEnded.
 func credentialOf(extra map[string]any) (string, error) {
-	id, ok := extra["credential_id"].(string)
+	id, ok := extra[oauthwire.ExtraCredentialID].(string)
 	if !ok || id == "" {
-		return "", errors.New("machine: the login's session names no credential")
+		return "", fmt.Errorf("%w: the login's session names no credential", oauth.ErrLoginEnded)
 	}
 	return id, nil
 }
@@ -554,7 +572,7 @@ func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, er
 	var id, canonical, approver string
 	var createdAt, expiresAt time.Time
 	err := s.Store.Pool.QueryRow(ctx, `select id, body, approver, created_at, expires_at from credential_requests
-		where code=$1 and kind='launcher_credential' order by created_at desc limit 1`, code).
+		where code=$1 and kind='launcher_credential' order by created_at desc limit 1`, oauth.NormalizeUserCode(code)).
 		Scan(&id, &canonical, &approver, &createdAt, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RecordView{}, ErrNotFound

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -25,32 +26,79 @@ func newStore(t *testing.T) (*oauthstore.Store, *pgxpool.Pool) {
 	return oauthstore.New(pool), pool
 }
 
+// newCredential inserts a live launcher credential and answers its id, which every token session
+// names.
+func newCredential(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	id := uuid.NewString()
+	if _, err := pool.Exec(context.Background(), `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
+		values ($1, 'ada@example.com', 'example-host', $2, '{}'::jsonb, now() + interval '30 days')`, id, "thumbprint-"+id); err != nil {
+		t.Fatalf("insert launcher_credentials: %v", err)
+	}
+	return id
+}
+
 // tokenRequest is a token session for requestID carrying credentialID ("" for none) in its
 // session's extra claims, its tokens expiring in an hour.
 func tokenRequest(t *testing.T, s *oauthstore.Store, requestID, credentialID string) *oauth2.Request {
 	t.Helper()
-	client, err := s.GetClient(context.Background(), oauthstore.ClientID)
+	client, err := s.GetClient(context.Background(), oauthwire.ClientID)
 	if err != nil {
 		t.Fatalf("GetClient: %v", err)
 	}
 	session := &oauth2.DefaultSession{Extra: map[string]any{}}
 	if credentialID != "" {
-		session.Extra["credential_id"] = credentialID
+		session.Extra[oauthwire.ExtraCredentialID] = credentialID
 	}
 	session.SetExpiresAt(oauth2.AccessToken, time.Now().Add(time.Hour))
 	session.SetExpiresAt(oauth2.RefreshToken, time.Now().Add(time.Hour))
 	request := oauth2.NewRequest()
 	request.SetID(requestID)
 	request.Client = client
-	request.GrantScope("machine")
+	request.GrantScope(oauthwire.Scope)
 	request.SetSession(session)
 	return request
 }
 
+// TestATokenSessionMustNameItsCredential: a token is issued only after an approval, which names
+// the credential, so a session naming none (or not as a string) is refused rather than stored
+// with no credential a revoke could end it by.
+func TestATokenSessionMustNameItsCredential(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t)
+	if err := s.CreateAccessTokenSession(ctx, "access-1", tokenRequest(t, s, "request-1", "")); err == nil {
+		t.Error("CreateAccessTokenSession with no credential_id = nil, want an error")
+	}
+	if err := s.CreateRefreshTokenSession(ctx, "refresh-1", "", tokenRequest(t, s, "request-1", "")); err == nil {
+		t.Error("CreateRefreshTokenSession with no credential_id = nil, want an error")
+	}
+	wrong := tokenRequest(t, s, "request-2", "")
+	wrong.Session.(*oauth2.DefaultSession).Extra[oauthwire.ExtraCredentialID] = 7
+	if err := s.CreateRefreshTokenSession(ctx, "refresh-2", "", wrong); err == nil {
+		t.Error("CreateRefreshTokenSession with a numeric credential_id = nil, want an error")
+	}
+}
+
+// TestReadingIntoAnotherSessionTypeIsRefused: the store keeps *oauth2.DefaultSession sessions, so
+// a read into any other session type is an error, never a silent partial decode.
+func TestReadingIntoAnotherSessionTypeIsRefused(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newStore(t)
+	if err := s.CreateRefreshTokenSession(ctx, "refresh-1", "", tokenRequest(t, s, "request-1", newCredential(t, pool))); err != nil {
+		t.Fatalf("CreateRefreshTokenSession: %v", err)
+	}
+	if _, err := s.GetRefreshTokenSession(ctx, "refresh-1", &otherSession{}); err == nil {
+		t.Fatal("GetRefreshTokenSession into another session type = nil, want an error")
+	}
+}
+
+// otherSession is an oauth2.Session that is not an *oauth2.DefaultSession.
+type otherSession struct{ oauth2.DefaultSession }
+
 func TestDeviceCodeRoundTripsAndIsFoundByUserCode(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t)
-	client, err := s.GetClient(ctx, oauthstore.ClientID)
+	client, err := s.GetClient(ctx, oauthwire.ClientID)
 	if err != nil {
 		t.Fatalf("GetClient: %v", err)
 	}
@@ -85,8 +133,8 @@ func TestDeviceCodeRoundTripsAndIsFoundByUserCode(t *testing.T) {
 		if form := got.GetRequestForm().Get("request"); form != "signed-request-object" {
 			t.Errorf("%s: form request = %q", name, form)
 		}
-		if got.GetID() != request.GetID() || got.GetClient().GetID() != oauthstore.ClientID {
-			t.Errorf("%s: id %q client %q, want %q %q", name, got.GetID(), got.GetClient().GetID(), request.GetID(), oauthstore.ClientID)
+		if got.GetID() != request.GetID() || got.GetClient().GetID() != oauthwire.ClientID {
+			t.Errorf("%s: id %q client %q, want %q %q", name, got.GetID(), got.GetClient().GetID(), request.GetID(), oauthwire.ClientID)
 		}
 		if got.GetDeviceCodeSignature() != "device-signature" || got.GetUserCodeSignature() != "user-signature" {
 			t.Errorf("%s: signatures %q %q", name, got.GetDeviceCodeSignature(), got.GetUserCodeSignature())
@@ -123,7 +171,7 @@ func TestDeviceCodeRoundTripsAndIsFoundByUserCode(t *testing.T) {
 func TestARotatedRefreshTokenIsRedeemableOnlyWithinItsGrace(t *testing.T) {
 	ctx := context.Background()
 	s, pool := newStore(t)
-	request := tokenRequest(t, s, "request-1", "")
+	request := tokenRequest(t, s, "request-1", newCredential(t, pool))
 	if err := s.CreateRefreshTokenSession(ctx, "refresh-1", "access-1", request); err != nil {
 		t.Fatalf("CreateRefreshTokenSession: %v", err)
 	}
@@ -154,10 +202,11 @@ func TestARotatedRefreshTokenIsRedeemableOnlyWithinItsGrace(t *testing.T) {
 
 func TestRevokeRefreshTokenEndsTheWholeFamily(t *testing.T) {
 	ctx := context.Background()
-	s, _ := newStore(t)
+	s, pool := newStore(t)
+	credential := newCredential(t, pool)
 	signatures := []string{"refresh-1", "refresh-2", "refresh-3"}
 	for i, signature := range signatures {
-		if err := s.CreateRefreshTokenSession(ctx, signature, "", tokenRequest(t, s, "request-1", "")); err != nil {
+		if err := s.CreateRefreshTokenSession(ctx, signature, "", tokenRequest(t, s, "request-1", credential)); err != nil {
 			t.Fatalf("CreateRefreshTokenSession %s: %v", signature, err)
 		}
 		if i < len(signatures)-1 {
@@ -166,7 +215,7 @@ func TestRevokeRefreshTokenEndsTheWholeFamily(t *testing.T) {
 			}
 		}
 	}
-	if err := s.CreateRefreshTokenSession(ctx, "other-family", "", tokenRequest(t, s, "request-2", "")); err != nil {
+	if err := s.CreateRefreshTokenSession(ctx, "other-family", "", tokenRequest(t, s, "request-2", credential)); err != nil {
 		t.Fatalf("CreateRefreshTokenSession other: %v", err)
 	}
 
@@ -186,12 +235,8 @@ func TestRevokeRefreshTokenEndsTheWholeFamily(t *testing.T) {
 func TestEndCredentialEndsItsTokensAndNoOthers(t *testing.T) {
 	ctx := context.Background()
 	s, pool := newStore(t)
-	ended, kept := uuid.NewString(), uuid.NewString()
+	ended, kept := newCredential(t, pool), newCredential(t, pool)
 	for _, id := range []string{ended, kept} {
-		if _, err := pool.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
-			values ($1, 'ada@example.com', 'example-host', $2, '{}'::jsonb, now() + interval '30 days')`, id, "thumbprint-"+id); err != nil {
-			t.Fatalf("insert launcher_credentials: %v", err)
-		}
 		if err := s.CreateAccessTokenSession(ctx, "access-"+id, tokenRequest(t, s, "request-"+id, id)); err != nil {
 			t.Fatalf("CreateAccessTokenSession: %v", err)
 		}
@@ -204,7 +249,7 @@ func TestEndCredentialEndsItsTokensAndNoOthers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := s.EndCredential(ctx, tx, ended); err != nil {
+	if err := oauthstore.EndCredential(ctx, tx, ended); err != nil {
 		t.Fatalf("EndCredential: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -310,8 +355,8 @@ func TestSweepDeletesOnlySpentState(t *testing.T) {
 	}
 }
 
-// TestSweepDeletesABacklogOfSeveralBatches: a backlog larger than one batch is all deleted in one
-// Sweep, and a live family survives it.
+// TestSweepDeletesABacklogOfSeveralBatches: a backlog of several batches, within the per-call cap,
+// is all deleted in one Sweep, and a live family survives it.
 func TestSweepDeletesABacklogOfSeveralBatches(t *testing.T) {
 	ctx := context.Background()
 	s, pool := newStore(t)
@@ -337,6 +382,44 @@ func TestSweepDeletesABacklogOfSeveralBatches(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select concat_ws(',', (select count(*) from oauth_device_codes), (select count(*) from oauth_dpop_proofs),
 		(select count(*) from oauth_dpop_nonces), (select count(*) from oauth_access_tokens), (select string_agg(signature, ',') from oauth_refresh_tokens))`).Scan(&left); err != nil || left != "0,0,0,0,live" {
 		t.Fatalf("rows left after the sweep = %q (%v), want 0,0,0,0,live", left, err)
+	}
+}
+
+// TestSweepWorkIsBoundedPerCall: one Sweep runs at most sweepMaxBatches batches of each kind and
+// leaves the rest to the next; a refresh token family larger than a batch is deleted row by row
+// over several Sweeps, and a live family is never touched.
+func TestSweepWorkIsBoundedPerCall(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newStore(t)
+	oauthstore.SetSweepBatch(t, 3)
+	oauthstore.SetSweepMaxBatches(t, 2)
+	for _, q := range []string{
+		`insert into oauth_dpop_proofs (jti, htu, expires_at) select 'p'||i, 'h', now() - interval '1 second' from generate_series(1, 10) i`,
+		`insert into oauth_refresh_tokens (signature, request_id, request, active, expires_at)
+			select 'dead-'||i, 'dead', '{}', false, now() + interval '1 day' from generate_series(1, 10) i`,
+		`insert into oauth_refresh_tokens (signature, request_id, request, active, grace_until, expires_at)
+			select 'live-'||i, 'live', '{}', true, now() - interval '1 second', now() + interval '1 day' from generate_series(1, 4) i`,
+		`insert into oauth_refresh_tokens (signature, request_id, request, expires_at) values ('live-newest', 'live', '{}', now() + interval '1 day')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	left := func() (proofs, dead, live int) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `select (select count(*) from oauth_dpop_proofs), (select count(*) from oauth_refresh_tokens where request_id = 'dead'),
+			(select count(*) from oauth_refresh_tokens where request_id = 'live')`).Scan(&proofs, &dead, &live); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return proofs, dead, live
+	}
+	for i, want := range [][3]int{{4, 4, 5}, {0, 0, 5}} {
+		if err := s.Sweep(ctx); err != nil {
+			t.Fatalf("Sweep %d: %v", i+1, err)
+		}
+		if p, d, l := left(); [3]int{p, d, l} != want {
+			t.Fatalf("after Sweep %d: %d proofs, %d dead-family and %d live-family rows, want %v", i+1, p, d, l, want)
+		}
 	}
 }
 
@@ -366,9 +449,9 @@ func TestAuthorizeCodeSessionsAreRefused(t *testing.T) {
 func TestOnlyTheOneClientExists(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t)
-	client, err := s.GetClient(ctx, oauthstore.ClientID)
-	if err != nil || !client.IsPublic() || client.GetID() != oauthstore.ClientID {
-		t.Fatalf("GetClient(%q) = (%#v, %v)", oauthstore.ClientID, client, err)
+	client, err := s.GetClient(ctx, oauthwire.ClientID)
+	if err != nil || !client.IsPublic() || client.GetID() != oauthwire.ClientID {
+		t.Fatalf("GetClient(%q) = (%#v, %v)", oauthwire.ClientID, client, err)
 	}
 	if _, err := s.GetClient(ctx, "someone-else"); !errors.Is(err, oauth2.ErrNotFound) {
 		t.Fatalf("GetClient(other) = %v, want ErrNotFound", err)
@@ -388,7 +471,7 @@ func TestBeginTXJoinsTheCallersTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTX: %v", err)
 	}
-	if err := s.CreateRefreshTokenSession(inner, "refresh-1", "", tokenRequest(t, s, "request-1", "")); err != nil {
+	if err := s.CreateRefreshTokenSession(inner, "refresh-1", "", tokenRequest(t, s, "request-1", newCredential(t, pool))); err != nil {
 		t.Fatalf("CreateRefreshTokenSession: %v", err)
 	}
 	if err := s.Commit(inner); err != nil {
@@ -408,7 +491,7 @@ func TestBeginTXJoinsTheCallersTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTX without a transaction: %v", err)
 	}
-	if err := s.CreateRefreshTokenSession(owned, "refresh-2", "", tokenRequest(t, s, "request-2", "")); err != nil {
+	if err := s.CreateRefreshTokenSession(owned, "refresh-2", "", tokenRequest(t, s, "request-2", newCredential(t, pool))); err != nil {
 		t.Fatalf("CreateRefreshTokenSession: %v", err)
 	}
 	if err := s.Commit(owned); err != nil {

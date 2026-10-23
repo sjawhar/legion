@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
@@ -39,13 +41,13 @@ type fixture struct {
 	pool     *pgxpool.Pool
 	provider *oauth.Provider
 
-	mu            sync.Mutex
-	userCodes     []string
-	sawTx         bool
-	refuse        error
-	before        error
-	grants        []string
-	extras        []map[string]any
+	mu        sync.Mutex
+	userCodes []string
+	sawTx     bool
+	refuse    error
+	before    error
+	grants    []oauth2.GrantType
+	extras    []map[string]any
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -71,12 +73,12 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f := &fixture{pool: pool, provider: provider}
 	hooks := oauth.TokenHooks{
-		Before: func(_ context.Context, _ string, _ map[string]any) error {
+		Before: func(_ context.Context, _ oauth2.GrantType, _ map[string]any) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			return f.before
 		},
-		After: func(_ context.Context, grant string, extra map[string]any) (map[string]any, error) {
+		After: func(_ context.Context, grant oauth2.GrantType, extra map[string]any) (map[string]any, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.grants = append(f.grants, grant)
@@ -163,7 +165,7 @@ func thumbprint(t *testing.T, key *ecdsa.PrivateKey) string {
 func (f *fixture) authorize(t *testing.T, key *ecdsa.PrivateKey) (deviceCode, userCode string) {
 	t.Helper()
 	status, _, body := f.post(t, "/device_authorization", url.Values{
-		"client_id": {oauthstore.ClientID}, "scope": {"machine"}, "dpop_jkt": {thumbprint(t, key)},
+		"client_id": {oauthwire.ClientID}, "scope": {"machine"}, "dpop_jkt": {thumbprint(t, key)},
 	}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("device authorization = %d %v, want 200", status, body)
@@ -181,7 +183,7 @@ func (f *fixture) poll(t *testing.T, deviceCode string, key *ecdsa.PrivateKey) (
 		t.Fatalf("clear last poll: %v", err)
 	}
 	status, _, body := f.post(t, "/token", url.Values{
-		"grant_type": {deviceGrant}, "device_code": {deviceCode}, "client_id": {oauthstore.ClientID},
+		"grant_type": {deviceGrant}, "device_code": {deviceCode}, "client_id": {oauthwire.ClientID},
 	}, key)
 	return status, body
 }
@@ -189,7 +191,7 @@ func (f *fixture) poll(t *testing.T, deviceCode string, key *ecdsa.PrivateKey) (
 func (f *fixture) refresh(t *testing.T, refreshToken string, key *ecdsa.PrivateKey) (int, map[string]any) {
 	t.Helper()
 	status, _, body := f.post(t, "/token", url.Values{
-		"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}, "client_id": {oauthstore.ClientID},
+		"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}, "client_id": {oauthwire.ClientID},
 	}, key)
 	return status, body
 }
@@ -244,7 +246,7 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 func TestDeviceAuthorizationOmitsTheCompleteURI(t *testing.T) {
 	f := newFixture(t)
 	status, header, body := f.post(t, "/device_authorization", url.Values{
-		"client_id": {oauthstore.ClientID}, "scope": {"machine"}, "dpop_jkt": {thumbprint(t, newKey(t))},
+		"client_id": {oauthwire.ClientID}, "scope": {"machine"}, "dpop_jkt": {thumbprint(t, newKey(t))},
 	}, nil)
 	if status != http.StatusOK {
 		t.Fatalf("device authorization = %d %v, want 200", status, body)
@@ -277,7 +279,7 @@ func TestDeviceAuthorizationOmitsTheCompleteURI(t *testing.T) {
 func TestARefusedDeviceRequestStoresNothing(t *testing.T) {
 	f := newFixture(t)
 	f.refuse = &oauth.Refusal{Status: http.StatusBadRequest, Code: "REQUEST_INVALID", Message: "the request object does not verify"}
-	status, _, body := f.post(t, "/device_authorization", url.Values{"client_id": {oauthstore.ClientID}, "scope": {"machine"}}, nil)
+	status, _, body := f.post(t, "/device_authorization", url.Values{"client_id": {oauthwire.ClientID}, "scope": {"machine"}}, nil)
 	if status != http.StatusBadRequest || body["error"] != "invalid_request" ||
 		body["error_description"] != "REQUEST_INVALID: the request object does not verify" {
 		t.Fatalf("refused request = %d %v, want 400 invalid_request naming REQUEST_INVALID", status, body)
@@ -287,7 +289,7 @@ func TestARefusedDeviceRequestStoresNothing(t *testing.T) {
 	}
 
 	f.refuse = errors.New("the database is down")
-	if status, _, body := f.post(t, "/device_authorization", url.Values{"client_id": {oauthstore.ClientID}}, nil); status != http.StatusInternalServerError || body["error"] != "server_error" {
+	if status, _, body := f.post(t, "/device_authorization", url.Values{"client_id": {oauthwire.ClientID}}, nil); status != http.StatusInternalServerError || body["error"] != "server_error" {
 		t.Fatalf("an unknown onRequest error = %d %v, want 500 server_error", status, body)
 	}
 }
@@ -295,7 +297,7 @@ func TestARefusedDeviceRequestStoresNothing(t *testing.T) {
 func TestARateLimitRefusalNamesItsRetryAfter(t *testing.T) {
 	f := newFixture(t)
 	f.refuse = &oauth.Refusal{Status: http.StatusTooManyRequests, Code: "RATE_LIMITED", Message: "too many", RetryAfter: 30}
-	status, header, body := f.post(t, "/device_authorization", url.Values{"client_id": {oauthstore.ClientID}}, nil)
+	status, header, body := f.post(t, "/device_authorization", url.Values{"client_id": {oauthwire.ClientID}}, nil)
 	if status != http.StatusTooManyRequests || header.Get("Retry-After") != "30" || body["error_description"] != "RATE_LIMITED: too many" {
 		t.Fatalf("rate-limited request = %d Retry-After=%q %v", status, header.Get("Retry-After"), body)
 	}
@@ -448,7 +450,7 @@ func TestBeforeCanRefuse(t *testing.T) {
 	key := newKey(t)
 	refreshToken := f.login(t, key)
 	access, refresh := f.count(t, "oauth_access_tokens"), f.count(t, "oauth_refresh_tokens")
-	f.before = errors.New("the machine login has ended")
+	f.before = fmt.Errorf("the credential is revoked: %w", oauth.ErrLoginEnded)
 	if status, body := f.refresh(t, refreshToken, key); status != http.StatusBadRequest || body["error"] != "invalid_grant" {
 		t.Fatalf("refused refresh = %d %v, want invalid_grant", status, body)
 	}
@@ -457,6 +459,39 @@ func TestBeforeCanRefuse(t *testing.T) {
 	}
 	if len(f.grants) != 1 {
 		t.Fatalf("After ran for grants %v, want only the login's", f.grants)
+	}
+}
+
+// TestABeforeFailureIsAServerError: only ErrLoginEnded refuses invalid_grant, which a client
+// takes as the login's end; any other Before error (a lost database connection) is a 500
+// server_error the client retries, and the refresh token stays redeemable.
+func TestABeforeFailureIsAServerError(t *testing.T) {
+	f := newFixture(t)
+	key := newKey(t)
+	refreshToken := f.login(t, key)
+	f.before = errors.New("the database is down")
+	if status, body := f.refresh(t, refreshToken, key); status != http.StatusInternalServerError || body["error"] != "server_error" {
+		t.Fatalf("refresh with a failing Before = %d %v, want 500 server_error", status, body)
+	}
+	f.before = nil
+	if status, body := f.refresh(t, refreshToken, key); status != http.StatusOK {
+		t.Fatalf("refresh once Before succeeds = %d %v, want 200", status, body)
+	}
+	if got := f.grants; len(got) != 2 || got[0] != oauth2.GrantTypeDeviceCode || got[1] != oauth2.GrantTypeRefreshToken {
+		t.Fatalf("After saw grants %v, want the device code then the refresh grant", got)
+	}
+}
+
+func TestNewRefusesLifetimesThatAreNotPositive(t *testing.T) {
+	secret := make([]byte, 32)
+	for _, c := range []oauth.Config{
+		{Secret: secret, DeviceLifetime: 0, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine"},
+		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: 0, VerificationURL: "https://dispatch.example/credentials/machine"},
+		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: -1, VerificationURL: "https://dispatch.example/credentials/machine"},
+	} {
+		if _, err := oauth.New(c, nil); err == nil {
+			t.Errorf("oauth.New(device %v, refresh %v) = nil, want an error", c.DeviceLifetime, c.RefreshLifetime)
+		}
 	}
 }
 

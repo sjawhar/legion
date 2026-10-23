@@ -22,6 +22,7 @@ import (
 	"authelia.com/provider/oauth2/compose"
 
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
 // Config is what the provider is built with.
@@ -44,14 +45,20 @@ type Provider struct {
 	strategy *codeStrategy
 }
 
+// ErrLoginEnded is the TokenHooks.Before error (wrapped or not) that refuses a token request
+// invalid_grant: the machine login has ended, so its client stops using it. Any other Before error
+// is a 500 server_error, which a client retries.
+var ErrLoginEnded = errors.New("the machine login has ended")
+
 // TokenHooks are the broker's own steps around a token request the library has validated.
 type TokenHooks struct {
 	// Before runs before either grant issues anything, with the grant type and the login's session
-	// extra; an error refuses the request invalid_grant.
-	Before func(ctx context.Context, grant string, extra map[string]any) error
+	// extra; ErrLoginEnded refuses the request invalid_grant, and any other error answers
+	// server_error.
+	Before func(ctx context.Context, grant oauth2.GrantType, extra map[string]any) error
 	// After runs once tokens are issued, with the grant type and the session extra; its map is
 	// merged into the token response.
-	After func(ctx context.Context, grant string, extra map[string]any) (map[string]any, error)
+	After func(ctx context.Context, grant oauth2.GrantType, extra map[string]any) (map[string]any, error)
 }
 
 // Refusal is an onRequest error the device authorization endpoint answers as
@@ -74,6 +81,9 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 	}
 	if _, err := url.ParseRequestURI(c.VerificationURL); err != nil {
 		return nil, fmt.Errorf("oauth: verification URL: %w", err)
+	}
+	if c.DeviceLifetime <= 0 || c.RefreshLifetime <= 0 {
+		return nil, fmt.Errorf("oauth: the device lifetime (%v) and refresh lifetime (%v) must both be positive", c.DeviceLifetime, c.RefreshLifetime)
 	}
 	cfg := &oauth2.Config{
 		GlobalSecret:                c.Secret,
@@ -170,7 +180,7 @@ func (p *Provider) ApproveDevice(ctx context.Context, userCode string, approved 
 	status := oauth2.DeviceAuthorizeStatusDenied
 	if approved {
 		status = oauth2.DeviceAuthorizeStatusApproved
-		request.GrantScope("machine")
+		request.GrantScope(oauthwire.Scope)
 	}
 	request.SetStatus(status)
 	operator, _ := extra["operator"].(string)
@@ -184,7 +194,8 @@ func (p *Provider) ApproveDevice(ctx context.Context, userCode string, approved 
 }
 
 // Token is the token endpoint: the device code grant and the refresh grant, each with a DPoP proof
-// from the key the device request named. Either grant runs hooks.Before first; every issued pair
+// from the key the device request named. Either grant runs hooks.Before first (ErrLoginEnded
+// refuses it invalid_grant, any other error is server_error); every issued pair
 // runs hooks.After, whose fields the answer carries. The hooks and the issued tokens share one
 // transaction (their ctx carries it: oauthstore.TxFrom), committed only once the answer is built,
 // so a row Before locks stays locked until the new tokens are stored. Validating the request stays
@@ -197,7 +208,7 @@ func (p *Provider) Token(w http.ResponseWriter, r *http.Request, hooks TokenHook
 		p.writeError(ctx, w, request, err)
 		return
 	}
-	grant := request.GetGrantTypes()[0]
+	grant := oauth2.GrantType(request.GetGrantTypes()[0])
 	var extra map[string]any
 	if session, ok := request.GetSession().(*oauth2.DefaultSession); ok {
 		extra = session.Extra
@@ -214,7 +225,11 @@ func (p *Provider) Token(w http.ResponseWriter, r *http.Request, hooks TokenHook
 		}
 	}()
 	if err := hooks.Before(txCtx, grant, extra); err != nil {
-		p.writeError(ctx, w, request, oauth2.ErrInvalidGrant.WithHint("The machine login has ended.").WithWrap(err).WithDebugError(err))
+		refusal := oauth2.ErrServerError
+		if errors.Is(err, ErrLoginEnded) {
+			refusal = oauth2.ErrInvalidGrant.WithHint("The machine login has ended.")
+		}
+		p.writeError(ctx, w, request, refusal.WithWrap(err).WithDebugError(err))
 		return
 	}
 	resp, err := p.oauth.NewAccessResponse(txCtx, request)

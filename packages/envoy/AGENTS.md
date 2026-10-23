@@ -3106,7 +3106,8 @@ authorization detail naming no service, and a `login_hint`, the approving operat
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
-pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
+pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`,
+which, like the decision's code check, takes the code as typed: `oauth.NormalizeUserCode`)
 — never the machine's opaque pending id — and this is the *only* route that selects a machine
 record (ruling 13: a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
@@ -3145,7 +3146,10 @@ token pair (RFC 9449) whose answer carries `credential_id` and `credential_expir
 `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from now (`Refreshed`, under the credential's row lock) and
 is refused `invalid_grant` when the credential is revoked or past its expiry; the device code
 grant takes the same row lock without moving the expiry (`Live`) and is refused the same way, so
-a login revoked between its approval and its poll issues nothing. Refresh tokens
+a login revoked between its approval and its poll issues nothing. Only that ending
+(`oauth.ErrLoginEnded`, which `machine.ErrNotLive` wraps) is `invalid_grant`; any other failure
+of those steps (a lost database connection) is `500 server_error`, which the helper retries.
+Both run only in the token request's transaction, refusing without one. Refresh tokens
 rotate: a replaced one stays redeemable for 60 s (`oauthstore.refreshGrace`) so a lost answer can
 be retried, and one redeemed after that revokes its whole family. A revoke
 (`enroll.Service.RevokeCredential`) ends the credential's tokens in its own transaction
@@ -3153,7 +3157,8 @@ be retried, and one redeemed after that revokes its whole family. A revoke
 (`requests.Sweeper`) runs `oauthstore.Store.Sweep`: it deletes device codes an hour past their
 expiry (a late poll still answers `expired_token`), DPoP proofs, nonces and access tokens past
 theirs, and a refresh token family only once none of its rows is still redeemable, so a replay
-of a rotated token still finds its family while any descendant lives.
+of a rotated token still finds its family while any descendant lives. Each kind goes row by row
+in batches of 1,000, at most 10 batches per tick; a larger backlog finishes on later ticks.
 
 `GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person may revoke that
 can still reach a secret (id, host, service, `approved_by`, issued, expires, `expired`): every

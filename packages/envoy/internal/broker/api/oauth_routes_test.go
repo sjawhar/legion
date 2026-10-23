@@ -10,10 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"authelia.com/provider/oauth2"
+
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
@@ -37,8 +40,8 @@ func withOAuth(t *testing.T, deviceLogin func(context.Context, url.Values, strin
 		d.OAuth = provider
 		d.DeviceLogin = deviceLogin
 		d.TokenHooks = oauth.TokenHooks{
-			Before: func(context.Context, string, map[string]any) error { return nil },
-			After:  func(context.Context, string, map[string]any) (map[string]any, error) { return nil, nil },
+			Before: func(context.Context, oauth2.GrantType, map[string]any) error { return nil },
+			After:  func(context.Context, oauth2.GrantType, map[string]any) (map[string]any, error) { return nil, nil },
 		}
 	}
 }
@@ -57,13 +60,13 @@ func postForm(t *testing.T, target string, form url.Values) (int, http.Header, m
 	return resp.StatusCode, resp.Header, body
 }
 
-var deviceForm = url.Values{"client_id": {oauthstore.ClientID}, "scope": {"machine"}}
+var deviceForm = url.Values{"client_id": {oauthwire.ClientID}, "scope": {"machine"}}
 
 // signedDeviceForm is deviceForm carrying a person's fresh signed login request for ts, which the
 // route verifies to spend that person's bucket before the device login runs.
 func signedDeviceForm(t *testing.T, ts *testServer) url.Values {
 	t.Helper()
-	form := url.Values{"client_id": {oauthstore.ClientID}, "scope": {"machine"}}
+	form := url.Values{"client_id": {oauthwire.ClientID}, "scope": {"machine"}}
 	form.Set("request", signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", ""))
 	return form
 }
@@ -74,6 +77,35 @@ func TestTheOAuthRoutesNeedTheProvider(t *testing.T) {
 		if status, _, _ := postForm(t, ts.URL+path, deviceForm); status != http.StatusNotFound {
 			t.Errorf("POST %s without a provider = %d, want 404", path, status)
 		}
+	}
+}
+
+// TestRegisterRefusesAProviderWithoutItsSteps: an OAuth provider wired without DeviceLogin or
+// either token hook would answer every request with a nil call, so Register refuses it at wiring.
+func TestRegisterRefusesAProviderWithoutItsSteps(t *testing.T) {
+	provider, err := oauth.New(oauth.Config{
+		Secret: make([]byte, 32), DeviceLifetime: time.Minute, RefreshLifetime: time.Hour,
+		VerificationURL: "https://dispatch.example/credentials/machine",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := func(context.Context, url.Values, string) error { return nil }
+	before := func(context.Context, oauth2.GrantType, map[string]any) error { return nil }
+	after := func(context.Context, oauth2.GrantType, map[string]any) (map[string]any, error) { return nil, nil }
+	for name, deps := range map[string]api.Deps{
+		"no DeviceLogin":       {OAuth: provider, TokenHooks: oauth.TokenHooks{Before: before, After: after}},
+		"no TokenHooks.Before": {OAuth: provider, DeviceLogin: login, TokenHooks: oauth.TokenHooks{After: after}},
+		"no TokenHooks.After":  {OAuth: provider, DeviceLogin: login, TokenHooks: oauth.TokenHooks{Before: before}},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Register with %s did not panic", name)
+				}
+			}()
+			api.Register(http.NewServeMux(), deps)
+		}()
 	}
 }
 
@@ -116,7 +148,7 @@ func TestADeviceLoginsRefusalNamesItsBrokerCode(t *testing.T) {
 func TestTheTokenRouteIsTheProvidersTokenEndpoint(t *testing.T) {
 	ts := newTestServerWith(t, withOAuth(t, func(context.Context, url.Values, string) error { return nil }))
 	status, _, body := postForm(t, ts.URL+"/v1/oauth/token", url.Values{
-		"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": {"no-such-code"}, "client_id": {oauthstore.ClientID},
+		"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": {"no-such-code"}, "client_id": {oauthwire.ClientID},
 	})
 	if status != http.StatusBadRequest || body["error"] == nil {
 		t.Fatalf("token with an unknown device code = %d %v, want a 400 OAuth error", status, body)

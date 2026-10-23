@@ -19,7 +19,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/helper"
-	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 )
 
@@ -38,7 +38,7 @@ func newDeviceMachine(t *testing.T, rig *brokertest.Rig) *deviceMachine {
 	return &deviceMachine{
 		rig: rig, key: key,
 		config: &oauth2.Config{
-			ClientID: oauthstore.ClientID, Scopes: []string{"machine"},
+			ClientID: oauthwire.ClientID, Scopes: []string{"machine"},
 			Endpoint: oauth2.Endpoint{
 				DeviceAuthURL: rig.URL + "/v1/oauth/device_authorization",
 				TokenURL:      rig.URL + "/v1/oauth/token",
@@ -185,6 +185,28 @@ func TestADeviceLoginIsApprovedThroughDispatchsRoutesAndIssuesACredential(t *tes
 
 	if status, body := enrollSession(t, rig, m.key, *approved.CredentialID); status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments with the login's credential = %d: %s", status, body)
+	}
+}
+
+// TestADeviceLoginsCodeIsTypedAsAPersonTypesIt: Dispatch's lookup and approval take the code as a
+// person types it, in lower case with a space for the dash, and find and approve the login.
+func TestADeviceLoginsCodeIsTypedAsAPersonTypesIt(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	m := newDeviceMachine(t, rig)
+	da := m.login(t)
+	typed := strings.ToLower(strings.Replace(da.UserCode, "-", " ", 1))
+	status, body := rig.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": typed})
+	if status != http.StatusOK {
+		t.Fatalf("lookup(%q) = %d: %s", typed, status, body)
+	}
+	looked := decode[wireRecord](t, body)
+	status, body = rig.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
+		map[string]any{"approver": rig.Operator, "code": typed})
+	if status != http.StatusOK {
+		t.Fatalf("approve(%q) = %d: %s", typed, status, body)
+	}
+	if tok := m.poll(t, da); tok.RefreshToken == "" {
+		t.Fatalf("token after approving %q = %+v, want a refresh token", typed, tok)
 	}
 }
 

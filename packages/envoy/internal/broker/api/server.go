@@ -62,7 +62,8 @@ type Deps struct {
 	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
 	// OAuth is the machine login's OAuth provider. POST /v1/oauth/device_authorization and POST
-	// /v1/oauth/token are mounted only when it is set, with DeviceLogin and TokenHooks.
+	// /v1/oauth/token are mounted only when it is set, with DeviceLogin and both TokenHooks, which
+	// it then requires (Register panics without them).
 	OAuth *oauth.Provider
 	// DeviceLogin opens a device login's record from the device authorization request's form and
 	// the user code the provider minted, in the provider's transaction (oauthstore.TxFrom on ctx);
@@ -83,6 +84,9 @@ type server struct {
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
+	if deps.OAuth != nil && (deps.DeviceLogin == nil || deps.TokenHooks.Before == nil || deps.TokenHooks.After == nil) {
+		panic("api: Deps.OAuth needs DeviceLogin and both TokenHooks")
+	}
 	limits := DefaultLauncherLimits
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits

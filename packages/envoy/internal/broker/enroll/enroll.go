@@ -858,7 +858,7 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 		return err
 	}
 	// A device login's tokens name the credential, so its next refresh is refused too.
-	if err := oauthstore.New(s.Store.Pool).EndCredential(ctx, tx, id); err != nil {
+	if err := oauthstore.EndCredential(ctx, tx, id); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `select id from enrollments where launcher_credential_id=$1 and revoked_at is null order by id for update`, id)

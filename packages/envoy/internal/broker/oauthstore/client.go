@@ -5,23 +5,23 @@ import (
 	"time"
 
 	"authelia.com/provider/oauth2"
+
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
-// ClientID is the provider's one client: the agent-secrets helper logging a machine in. It is a
-// public client, so it authenticates with no secret; the DPoP key its device request names binds
-// every token it is issued.
-const ClientID = "agent-secrets-helper"
-
-// GetClient returns the helper's client for ClientID and oauth2.ErrNotFound for any other id.
+// GetClient returns the provider's one client for oauthwire.ClientID, and oauth2.ErrNotFound for
+// any other id: the agent-secrets helper logging a machine in. It is a public client, so it
+// authenticates with no secret; the DPoP key its device request names binds every token it is
+// issued.
 func (s *Store) GetClient(_ context.Context, id string) (oauth2.Client, error) {
-	if id != ClientID {
+	if id != oauthwire.ClientID {
 		return nil, oauth2.ErrNotFound
 	}
 	return &oauth2.DefaultClient{
-		ID:         ClientID,
+		ID:         oauthwire.ClientID,
 		Public:     true,
-		GrantTypes: []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
-		Scopes:     []string{"machine"},
+		GrantTypes: []string{string(oauth2.GrantTypeDeviceCode), string(oauth2.GrantTypeRefreshToken)},
+		Scopes:     []string{oauthwire.Scope},
 	}, nil
 }
 

@@ -23,11 +23,7 @@ import (
 // one naming a service SERVICE_LOGS_IN_WITH_TOKEN.
 func (s *server) deviceAuthorization(w http.ResponseWriter, r *http.Request) {
 	if !s.launcherLimiter.addressAllows(r) {
-		oauth.WriteRefusal(w, &oauth.Refusal{
-			Status: http.StatusTooManyRequests, Code: "RATE_LIMITED",
-			Message:    "too many launcher credential requests; try again later",
-			RetryAfter: retryAfterSeconds(s.launcherLimiter.perAddress.Every()),
-		})
+		oauth.WriteRefusal(w, rateLimitedRefusal(s.launcherLimiter.perAddress.Every()))
 		return
 	}
 	s.deps.OAuth.DeviceAuthorize(w, r, func(ctx context.Context, form url.Values, userCode string) error {
@@ -50,11 +46,7 @@ func (s *server) spendDeviceLoginBucket(form url.Values) error {
 		return machine.ErrServiceLogsInWithToken
 	}
 	if !s.launcherLimiter.perLogin.AllowAt(launcherLoginKey(obj), time.Now()) {
-		return &oauth.Refusal{
-			Status: http.StatusTooManyRequests, Code: "RATE_LIMITED",
-			Message:    "too many launcher credential requests; try again later",
-			RetryAfter: retryAfterSeconds(s.launcherLimiter.perLogin.Every()),
-		}
+		return rateLimitedRefusal(s.launcherLimiter.perLogin.Every())
 	}
 	return nil
 }
@@ -73,6 +65,16 @@ func deviceLoginRefusal(err error) error {
 		return &oauth.Refusal{Status: http.StatusBadRequest, Code: "REQUEST_INVALID", Message: err.Error()}
 	default:
 		return err
+	}
+}
+
+// rateLimitedRefusal is a device login's 429 RATE_LIMITED refusal from a bucket refilling one
+// request every every.
+func rateLimitedRefusal(every time.Duration) *oauth.Refusal {
+	return &oauth.Refusal{
+		Status: http.StatusTooManyRequests, Code: "RATE_LIMITED",
+		Message:    "too many launcher credential requests; try again later",
+		RetryAfter: retryAfterSeconds(every),
 	}
 }
 

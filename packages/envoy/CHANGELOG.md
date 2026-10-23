@@ -16,7 +16,10 @@
   logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
   token was reused` at ERROR, and `machine login-status` prints it. While a login is held,
   `machine login-status`'s stderr says `the machine login renews itself; without a refresh it
-  lapses at <time> (in <duration>)`.
+  lapses at <time> (in <duration>)`. Only an ended login answers a refresh `invalid_grant`; a
+  refresh the broker cannot serve (its database unreachable) answers `500 server_error`, which
+  the helper retries. The machine-login page takes the code as a person types it, in lower case
+  or with a space for the dash.
 - The helper keeps its machine login in `AGENT_SECRETS_MACHINE_FILE` (default
   `~/.config/agent-secrets/machine.json`, mode 0600): the machine key, the credential's id and
   expiry and the current refresh token. It resumes that login when it starts, so a restart, a
@@ -38,7 +41,7 @@
   quiet moment.
 - The secrets broker's sweeper deletes spent machine-login OAuth state each tick: device codes an
   hour past their expiry, expired DPoP proofs, nonces and access tokens, and refresh token
-  families none of whose tokens can still be redeemed.
+  families none of whose tokens can still be redeemed, at most 10,000 rows of each per tick.
 - The secrets broker serves a minted secret: a GCP secret with no version tagged
   `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
   its name with that account and its owner and the secret is human-tier. Each release mints a

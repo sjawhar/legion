@@ -6,7 +6,7 @@
 //
 // A stored request is the JSON of its oauth2.Request fields plus its client's id; reading it back
 // re-hydrates the client with GetClient and the session into an *oauth2.DefaultSession. Every
-// session row names the launcher credential its session's Extra["credential_id"] carries, so
+// token row names the launcher credential its session's Extra["credential_id"] carries, so
 // EndCredential ends a revoked credential's tokens in the revoke's own transaction.
 //
 // Every method runs in the transaction the context carries (WithTx, or BeginTX), and on the pool
@@ -30,6 +30,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
 var (
@@ -45,9 +47,13 @@ var (
 // response was lost in transit can retry with the token it still holds.
 const refreshGrace = 60 * time.Second
 
-// sweepBatch bounds how many rows (for refresh tokens, families) one of Sweep's statements
-// deletes; a variable so tests can sweep a backlog of several batches.
+// sweepBatch bounds how many rows one of Sweep's statements deletes; a variable so tests can sweep
+// a backlog of several batches.
 var sweepBatch = 1000
+
+// sweepMaxBatches bounds how many statements one Sweep runs per kind, so a backlog takes several
+// sweeper ticks rather than one long one; a variable so tests can exceed it.
+var sweepMaxBatches = 10
 
 // Sweep deletes spent OAuth state: device codes an hour past their expiry (so a helper still
 // polling one is answered expired_token, not invalid_grant as for an unknown code), DPoP proofs
@@ -55,7 +61,8 @@ var sweepBatch = 1000
 // sharing request_id) none of whose rows is still redeemable (active, unexpired, and in its
 // rotation's grace or never rotated). A family with a redeemable row keeps all its rows, so
 // replaying one of its rotated tokens still finds it and revokes the family. Each kind is deleted
-// in batches of sweepBatch, each its own statement, until a batch comes up short.
+// by row in batches of sweepBatch, each its own statement, until a batch comes up short or
+// sweepMaxBatches have run; what is left waits for the next Sweep.
 func (s *Store) Sweep(ctx context.Context) error {
 	db := s.db(ctx)
 	for _, q := range []struct{ what, sql string }{
@@ -64,14 +71,12 @@ func (s *Store) Sweep(ctx context.Context) error {
 		{"DPoP proofs", `delete from oauth_dpop_proofs where ctid in (select ctid from oauth_dpop_proofs where expires_at <= now() limit $1)`},
 		{"DPoP nonces", `delete from oauth_dpop_nonces where ctid in (select ctid from oauth_dpop_nonces where expires_at <= now() limit $1)`},
 		{"access tokens", `delete from oauth_access_tokens where ctid in (select ctid from oauth_access_tokens where expires_at <= now() limit $1)`},
-		// A batch of families deletes at least as many rows as families, so a short batch of rows
-		// means a short batch of families.
-		{"refresh token families", `delete from oauth_refresh_tokens where request_id in (select distinct f.request_id from oauth_refresh_tokens f
+		{"refresh token families", `delete from oauth_refresh_tokens where signature in (select f.signature from oauth_refresh_tokens f
 			where not exists (select 1 from oauth_refresh_tokens r
 			where r.request_id = f.request_id and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))
 			limit $1)`},
 	} {
-		for {
+		for range sweepMaxBatches {
 			tag, err := db.Exec(ctx, q.sql, sweepBatch)
 			if err != nil {
 				return fmt.Errorf("sweep %s: %w", q.what, err)
@@ -217,11 +222,14 @@ func flatten(request oauth2.Requester, session *oauth2.DefaultSession) (storedRe
 }
 
 // hydrate decodes raw into stored.Request, which the caller points at the request to fill, with its
-// session decoded into session (a new *oauth2.DefaultSession when nil) and its client re-hydrated
-// by id.
+// session decoded into session (a new *oauth2.DefaultSession when nil; any other type is an error,
+// since that is the only kind the store writes) and its client re-hydrated by id.
 func (s *Store) hydrate(ctx context.Context, raw []byte, session oauth2.Session, stored *storedRequest) error {
 	if session == nil {
 		session = &oauth2.DefaultSession{}
+	}
+	if _, ok := session.(*oauth2.DefaultSession); !ok {
+		return fmt.Errorf("oauthstore reads *oauth2.DefaultSession sessions, got %T", session)
 	}
 	stored.Session = session
 	if err := json.Unmarshal(raw, stored); err != nil {
@@ -235,16 +243,15 @@ func (s *Store) hydrate(ctx context.Context, raw []byte, session oauth2.Session,
 	return nil
 }
 
-// credentialOf is the launcher credential id the session's Extra names, or nil (SQL null) for none.
-func credentialOf(session *oauth2.DefaultSession) (any, error) {
-	switch v := session.Extra["credential_id"].(type) {
-	case nil:
-		return nil, nil
-	case string:
-		return v, nil
-	default:
-		return nil, fmt.Errorf("oauthstore: session credential_id is a %T, want a string", v)
+// credentialOf is the launcher credential id a token session's Extra names. Tokens are issued only
+// after an approval, which names the credential, so a session naming none is an error: its row
+// would hold no credential a revoke could end it by.
+func credentialOf(session *oauth2.DefaultSession) (string, error) {
+	id, ok := session.Extra[oauthwire.ExtraCredentialID].(string)
+	if !ok || id == "" {
+		return "", fmt.Errorf("oauthstore: a token session's %s is %#v, want a credential id", oauthwire.ExtraCredentialID, session.Extra[oauthwire.ExtraCredentialID])
 	}
+	return id, nil
 }
 
 // expiry is the session's expiry for kind; a token with none (zero) never expires.
@@ -387,22 +394,22 @@ func (s *Store) InvalidateAuthorizeCodeSession(context.Context, string) error {
 	return oauth2.ErrNotFound
 }
 
-func sessionJSON(request oauth2.Requester) ([]byte, *oauth2.DefaultSession, any, error) {
+func sessionJSON(request oauth2.Requester) ([]byte, *oauth2.DefaultSession, string, error) {
 	session, err := sessionOf(request)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, "", err
 	}
 	credentialID, err := credentialOf(session)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, "", err
 	}
 	flat, err := flatten(request, session)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, "", err
 	}
 	raw, err := json.Marshal(flat)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("encode token request: %w", err)
+		return nil, nil, "", fmt.Errorf("encode token request: %w", err)
 	}
 	return raw, session, credentialID, nil
 }
@@ -520,7 +527,7 @@ func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error 
 
 // EndCredential deactivates, in tx, every access and refresh token whose session names the
 // launcher credential, so revoking the credential also ends the machine login's tokens.
-func (s *Store) EndCredential(ctx context.Context, tx pgx.Tx, credentialID string) error {
+func EndCredential(ctx context.Context, tx pgx.Tx, credentialID string) error {
 	if _, err := tx.Exec(ctx, `update oauth_refresh_tokens set active = false where credential_id = $1 and active`, credentialID); err != nil {
 		return fmt.Errorf("end the credential's refresh tokens: %w", err)
 	}
@@ -533,14 +540,10 @@ func (s *Store) EndCredential(ctx context.Context, tx pgx.Tx, credentialID strin
 // CheckAndSetDPoPProofUsed records a DPoP proof as used until exp, keyed on its jti and target URI
 // (htu), and reports whether it already was. The insert, or the takeover of an expired record of
 // the same key, is one statement, so two requests presenting the same proof cannot both see it
-// unused. Expired records of other proofs are swept first.
+// unused. Sweep deletes expired records.
 func (s *Store) CheckAndSetDPoPProofUsed(ctx context.Context, jti, _, _, _, htu string, exp time.Time) (bool, error) {
-	db := s.db(ctx)
-	if _, err := db.Exec(ctx, `delete from oauth_dpop_proofs where expires_at <= now() and not (jti = $1 and htu = $2)`, jti, htu); err != nil {
-		return false, fmt.Errorf("sweep expired DPoP proofs: %w", err)
-	}
 	var recorded bool
-	err := db.QueryRow(ctx, `insert into oauth_dpop_proofs (jti, htu, expires_at) values ($1, $2, $3)
+	err := s.db(ctx).QueryRow(ctx, `insert into oauth_dpop_proofs (jti, htu, expires_at) values ($1, $2, $3)
 		on conflict (jti, htu) do update set expires_at = excluded.expires_at
 		where oauth_dpop_proofs.expires_at <= now()
 		returning true`, jti, htu, exp).Scan(&recorded)
@@ -553,13 +556,9 @@ func (s *Store) CheckAndSetDPoPProofUsed(ctx context.Context, jti, _, _, _, htu 
 	return false, nil
 }
 
-// CreateDPoPNonce stores a nonce the provider issued, valid until exp, sweeping expired nonces.
+// CreateDPoPNonce stores a nonce the provider issued, valid until exp; Sweep deletes expired ones.
 func (s *Store) CreateDPoPNonce(ctx context.Context, nonce string, exp time.Time) error {
-	db := s.db(ctx)
-	if _, err := db.Exec(ctx, `delete from oauth_dpop_nonces where expires_at <= now()`); err != nil {
-		return fmt.Errorf("sweep expired DPoP nonces: %w", err)
-	}
-	if _, err := db.Exec(ctx, `insert into oauth_dpop_nonces (nonce, expires_at) values ($1, $2)
+	if _, err := s.db(ctx).Exec(ctx, `insert into oauth_dpop_nonces (nonce, expires_at) values ($1, $2)
 		on conflict (nonce) do update set expires_at = excluded.expires_at`, nonce, exp); err != nil {
 		return fmt.Errorf("store DPoP nonce: %w", err)
 	}
