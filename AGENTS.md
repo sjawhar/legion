@@ -196,9 +196,14 @@ suspends the role, keeping its session, which the new tree then resumes. A child
 after hand-over; reopening the old root later does not take it back. A root reopened inside its
 linger instead keeps its children. Taking the label off a waiting root drops it from the waiting
 line, as a status that leaves `todo` does; taking it off a root already admitted does not stop its
-tree. The mark is a label rather than the issue's `route` because Dispatch publishes every event of
-a routed issue to the route's topic, where a label only marks the issue; it carries no workflow
-state.
+tree. A waiting root moved to a status only a running tree has (`in_progress`, `testing`,
+`needs_review`, `retro`), by a person or by a session outside its tree, leaves the workflow as a
+parked root does, since no slot would ever reach it: the daemon records it `done`, starts nothing
+for it, and tells the controller (`unslotted`), and `todo` with the label queues it again. Each
+admission pass (a live event, the boot read, a tick) releases such a root, one an earlier release
+left behind included. The mark is a label rather than the issue's `route` because Dispatch
+publishes every event of a routed issue to the route's topic, where a label only marks the issue;
+it carries no workflow state.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's

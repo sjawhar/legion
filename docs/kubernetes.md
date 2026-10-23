@@ -822,8 +822,9 @@ That holds whether the new tree's start or the old tree's cleanup comes first: a
 the issue already belongs to another tree hands its Sandbox over rather than deleting it (above),
 and the orphan sweep keeps a Sandbox while its home is the tree it is labelled with. A Sandbox's home
 ends when its issue can no longer be admitted into that tree. For a tree admission has not opened,
-a child set to `backlog`, `icebox` or `done` leaves the waiting line and lingers like any root, so
-its Sandbox stays until its linger expires; one whose label is taken off leaves the line with no
+a child set to `backlog`, `icebox` or `done`, or to a status only a running tree has (`in_progress`,
+`testing`, `needs_review`, `retro`), leaves the waiting line and lingers like any root, so its
+Sandbox stays until its linger expires; one whose label is taken off leaves the line with no
 linger, so its Sandbox goes at the next sweep. Taken out by its label, once it is `todo` with the
 label again it waits in the line and is admitted into the phase it stood in, continuing its run on a
 new volume from the issue's branch if the sweep has taken the old one: under `session_store:
