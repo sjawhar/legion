@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- The `dispatch` command (`dist/dispatch.js`) waits at most 1 s for tmux to name the session's
+  pane, then kills the tmux client and sends the call without the pane. A tmux client waiting to
+  connect to a tmux server too busy to accept caught the SIGTERM of the lookup's 5 s timeout and
+  kept waiting, and the command waited for it, so a `dispatch` call from a pane of a loaded shared
+  tmux server took up to 85 s.
+
 - The README and Dispatch's Agents page guide say to restart Claude Code once after its first
   launch on a new profile and to check that its banner says the channel is loaded: a first launch
   can come up with `--channels ignored` (all four new profiles tried whose key came only from an

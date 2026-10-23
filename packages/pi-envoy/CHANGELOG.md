@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
+  client and sends the call without the pane. A tmux client waiting to connect to a tmux server too
+  busy to accept caught the SIGTERM of the lookup's 5 s timeout and kept waiting, and the command
+  waited for it, so a `dispatch` call from a pane of a loaded shared tmux server took up to 85 s.
+
 - A Dispatch write's cadence advice (three or more messages on an issue with no human
   response) opens with `Posted.` and is the result's last line, so a tail of the output shows the
   write went through instead of reading as a refusal. `dispatch_issue`'s `priority` says it takes
