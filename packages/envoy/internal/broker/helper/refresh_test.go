@@ -197,16 +197,18 @@ func TestAnUnlearnedRefreshIsRetriedAtTheFixedIntervalInsideTheGrace(t *testing.
 }
 
 // TestOnlyAnAttemptThatCouldHaveRotatedStartsTheGrace: the broker's grace starts at a rotation, so
-// an attempt that never reached it (a refused dial, a DNS failure, no route) or that it answered
-// 429 neither starts nor extends the fixed-retry window; a timeout after the request was sent, a
-// lost answer or a 5xx does. The clock is the test's.
+// an attempt that never got a connection to it (a refused dial, a DNS failure, no route, a connect
+// that timed out: redeem's notSentError) or that it answered 429 neither starts nor extends the
+// fixed-retry window; a timeout after the connection was made, a lost answer or a 5xx does. The
+// clock is the test's.
 func TestOnlyAnAttemptThatCouldHaveRotatedStartsTheGrace(t *testing.T) {
-	dial := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token",
-		Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}
-	dns := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token",
-		Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "broker.internal.example", IsNotFound: true}}}
-	noRoute := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token",
-		Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}}
+	unsent := func(err error) error {
+		return &notSentError{err: &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: err}}
+	}
+	dial := unsent(&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED})
+	dns := unsent(&net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "broker.internal.example", IsNotFound: true}})
+	noRoute := unsent(&net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH})
+	connectTimeout := unsent(context.DeadlineExceeded)
 	limited := &oauth2.RetrieveError{Response: &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"1"}}}}
 	timeout := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: context.DeadlineExceeded}
 	lost := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: io.ErrUnexpectedEOF}
@@ -215,7 +217,7 @@ func TestOnlyAnAttemptThatCouldHaveRotatedStartsTheGrace(t *testing.T) {
 	fresh := func() unlearnedRetry {
 		return unlearnedRetry{retry: defaultRefreshRetry, grace: defaultRefreshGrace, backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
 	}
-	for name, err := range map[string]error{"a refused dial": dial, "a DNS failure": dns, "no route": noRoute, "a 429": limited} {
+	for name, err := range map[string]error{"a refused dial": dial, "a DNS failure": dns, "no route": noRoute, "a connect that timed out": connectTimeout, "a 429": limited} {
 		s := fresh()
 		s.next(start, start.Add(time.Second), err)
 		if !s.since.IsZero() {
@@ -248,6 +250,95 @@ func TestOnlyAnAttemptThatCouldHaveRotatedStartsTheGrace(t *testing.T) {
 	past := rotated.Add(defaultRefreshGrace + time.Second)
 	if wait := s.next(past, past, dial); wait != defaultRefreshBackoff {
 		t.Fatalf("wait past the grace = %s; want the backoff's %s", wait, defaultRefreshBackoff)
+	}
+}
+
+// blockingDialClient's connections never complete: its dial waits until its context ends or the
+// test does, as a connect to an address that drops every packet does.
+func blockingDialClient(t *testing.T, timeout time.Duration) *http.Client {
+	released := make(chan struct{})
+	t.Cleanup(func() { close(released) })
+	return &http.Client{Timeout: timeout, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-released:
+				return nil, errors.New("the test ended")
+			}
+		},
+	}}
+}
+
+// TestOnlyARefreshThatWasSentStartsTheGrace: a refresh whose connection never completed was never
+// written, so the broker cannot have rotated the token and the attempt opens no grace window,
+// whether the helper's client timeout or Start's bound ended it; a refresh written to the broker
+// and then timed out unanswered may have rotated it, and opens the window at its start. The
+// schedule's clock is the test's.
+func TestOnlyARefreshThatWasSentStartsTheGrace(t *testing.T) {
+	f := newFakeBroker(t)
+	b := loggedInBroker(t, f, "ada@example.com")
+	cred := b.cred.Load()
+	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	since := func(ctx context.Context) time.Time {
+		t.Helper()
+		b.credMu.Lock()
+		_, refusal, err := b.redeem(ctx, cred)
+		b.credMu.Unlock()
+		if err == nil || refusal != "" {
+			t.Fatalf("redeem = refusal %q, error %v; want an outcome it did not learn", refusal, err)
+		}
+		s := unlearnedRetry{retry: defaultRefreshRetry, grace: defaultRefreshGrace, backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
+		s.next(start, start.Add(time.Second), err)
+		return s.since
+	}
+
+	b.HTTP = blockingDialClient(t, 100*time.Millisecond)
+	if got := since(context.Background()); !got.IsZero() {
+		t.Errorf("a connect the client timeout ended started the grace at %s; want none", got)
+	}
+	b.HTTP = blockingDialClient(t, 0)
+	bounded, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	got := since(bounded)
+	cancel()
+	if !got.IsZero() {
+		t.Errorf("a connect Start's bound ended started the grace at %s; want none", got)
+	}
+
+	// The broker reads the refresh and holds its answer: the request was written.
+	gate := make(chan struct{})
+	f.mu.Lock()
+	f.refreshGate = gate
+	f.mu.Unlock()
+	t.Cleanup(func() { close(gate) })
+	b.HTTP = &http.Client{Transport: f.srv.Client().Transport, Timeout: 2 * time.Second}
+	if got := since(context.Background()); !got.Equal(start) {
+		t.Errorf("a written refresh the client timeout ended: grace from %s; want %s", got, start)
+	}
+	b.HTTP = f.srv.Client()
+	f.mu.Lock()
+	arrived := f.refreshArrivals
+	f.mu.Unlock()
+	held, cancelHeld := context.WithCancel(context.Background())
+	defer cancelHeld()
+	go func() {
+		for {
+			f.mu.Lock()
+			n := f.refreshArrivals
+			f.mu.Unlock()
+			if n > arrived {
+				cancelHeld()
+				return
+			}
+			select {
+			case <-held.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}()
+	if got := since(held); !got.Equal(start) {
+		t.Errorf("a written refresh Start's bound ended: grace from %s; want %s", got, start)
 	}
 }
 

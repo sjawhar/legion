@@ -2603,9 +2603,10 @@ that is there but is
 not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
 credential is installed; a refresh whose outcome it did not learn is retried every 15 s until the
-broker's five-minute rotation grace, counted from the first such attempt that may have reached the
-broker and rotated the token (a timeout after the request was sent, a lost answer, a 5xx; a failed
-dial or a 429 neither opens nor extends it), has passed, otherwise after a minute, doubling to an
+broker's five-minute rotation grace, counted from the first such attempt that got a connection to
+the broker and so may have rotated the token (a timeout once connected, a lost answer, a 5xx; an
+attempt that never got a connection, its dial refused, unanswered or unresolved or its TLS
+handshake failed, or a 429, neither opens nor extends it), has passed, otherwise after a minute, doubling to an
 hour, and never sooner than the `Retry-After` of a 429 (the token
 endpoint's rate limit), which keeps the login like any other unlearned outcome. A lost answer
 keeps the login only while a retry lands inside the grace: an outage longer than the grace right

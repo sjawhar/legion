@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"slices"
 	"strconv"
@@ -40,10 +40,12 @@ var errNoCredential = errors.New(noCredentialMsg)
 
 // The refresh loop's defaults: a refresh a day at most, and after a refresh whose outcome the
 // helper did not learn (its answer was lost, a timeout, a 5xx) a retry every 15 s until the
-// broker's five-minute rotation grace, counted from the first such attempt that may have rotated
-// the token, has passed, so the refresh token the helper still holds is redeemed again while the
-// broker takes it even if the lost answer had rotated it; after that, or for an attempt that
-// cannot have rotated (a failed dial, a 429), a minute, doubling to an hour.
+// broker's five-minute rotation grace, counted from the first such attempt that got a connection to
+// the broker and so may have rotated the token, has passed, so the refresh token the helper still
+// holds is redeemed again while the broker takes it even if the lost answer had rotated it; after
+// that, or for an attempt that cannot have rotated (one that never got a connection: a refused or
+// unanswered dial, a DNS failure, a TLS handshake that failed; or a 429), a minute, doubling to an
+// hour.
 const (
 	defaultRefreshEvery = 24 * time.Hour
 	defaultRefreshRetry = 15 * time.Second
@@ -629,10 +631,11 @@ func (b *Broker) nextRefresh(every time.Duration) time.Duration {
 // refresh that reached the broker and each install of a credential. A refresh whose outcome it did
 // not learn (the broker unreachable, a timeout, a 5xx) is retried on the unlearnedRetry schedule:
 // at the fixed refreshRetry (15 s) until the broker's five-minute rotation grace, counted from the
-// first such attempt that could have reached the broker and rotated the token, has passed, so a
-// lost answer's rotated token is redeemed while the broker still takes it however long the outage
-// inside the grace; outside that window the wait starts at a minute and doubles to an hour. An
-// attempt that cannot have rotated (a dial that failed, a 429) neither opens nor moves the window.
+// first such attempt that got a connection to the broker and so may have rotated the token, has
+// passed, so a lost answer's rotated token is redeemed while the broker still takes it however long
+// the outage inside the grace; outside that window the wait starts at a minute and doubles to an
+// hour. An attempt that cannot have rotated (one that never got a connection, or a 429) neither
+// opens nor moves the window.
 // No wait is sooner than a Retry-After the broker answered with. unlearned is when such a window
 // opened before the loop started (Start's own refresh), zero for none.
 // A credential a launcher call's refusal dropped is settled at once (settleRefused), and retried
@@ -723,31 +726,45 @@ func (u *unlearnedRetry) reset() {
 }
 
 // mayHaveRotated reports whether a refresh that failed with err may have reached the broker's
-// token endpoint and rotated the token: false for a connection never made (a refused dial, a DNS
-// failure, no route: every error of the dial) and for the broker's 429, which rotates nothing;
-// true for anything else, a timeout after the request was sent, a lost answer or a 5xx among them.
+// token endpoint and rotated the token: false for one that never got a connection to the broker
+// (notSentError: a refused or unanswered dial, a DNS failure, a failed TLS handshake, a connect the
+// client timeout or the caller's bound ended) and for the broker's 429, which rotates nothing; true
+// for anything else, a timeout after the connection was made, a lost answer or a 5xx among them.
 func mayHaveRotated(err error) bool {
+	var unsent *notSentError
+	if errors.As(err, &unsent) {
+		return false
+	}
 	var re *oauth2.RetrieveError
-	if errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == http.StatusTooManyRequests {
-		return false
-	}
-	var op *net.OpError
-	if errors.As(err, &op) && op.Op == "dial" {
-		return false
-	}
-	var dns *net.DNSError
-	return !errors.As(err, &dns)
+	return !errors.As(err, &re) || re.Response == nil || re.Response.StatusCode != http.StatusTooManyRequests
 }
+
+// notSentError is a refresh's error when no connection to the broker was ever made for it
+// (redeem), so no byte of its request can have reached the broker.
+type notSentError struct{ err error }
+
+func (e *notSentError) Error() string { return e.err.Error() }
+func (e *notSentError) Unwrap() error { return e.err }
 
 // redeem spends cred's refresh token for the rotated login: the machine file the broker's answer
 // names, or refusal, the broker's invalid_grant code, when it has ended the login (revoked, lapsed
 // or reused), or another error, logged, when the helper did not learn the outcome or cannot keep
 // the answer. The broker's 429 (its token endpoint's rate limit) is one of those: the login is
-// kept and retried after its Retry-After (retryAfter). The caller holds credMu.
+// kept and retried after its Retry-After (retryAfter). An error from an attempt that never got a
+// connection to the broker is a notSentError: the trace's GotConn, which the transport calls on the
+// request's own goroutine before it writes a byte, is the bound, since a write can still land after
+// a cancelled round trip has returned. The caller holds credMu.
 func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *MachineFile, refusal string, err error) {
-	tok, err := b.oauthConfig().TokenSource(b.tokenContext(ctx, cred.key),
+	var connected atomic.Bool
+	traced := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	})
+	tok, err := b.oauthConfig().TokenSource(b.tokenContext(traced, cred.key),
 		&oauth2.Token{RefreshToken: cred.refreshToken, Expiry: time.Unix(1, 0)}).Token()
 	if err != nil {
+		if !connected.Load() {
+			err = &notSentError{err: err}
+		}
 		var re *oauth2.RetrieveError
 		switch {
 		case errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == http.StatusTooManyRequests:
