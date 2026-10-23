@@ -45,24 +45,40 @@ var (
 // response was lost in transit can retry with the token it still holds.
 const refreshGrace = 60 * time.Second
 
+// sweepBatch bounds how many rows (for refresh tokens, families) one of Sweep's statements
+// deletes; a variable so tests can sweep a backlog of several batches.
+var sweepBatch = 1000
+
 // Sweep deletes spent OAuth state: device codes an hour past their expiry (so a helper still
 // polling one is answered expired_token, not invalid_grant as for an unknown code), DPoP proofs
 // and nonces past theirs, access tokens past theirs, and every refresh token of a family (rows
 // sharing request_id) none of whose rows is still redeemable (active, unexpired, and in its
 // rotation's grace or never rotated). A family with a redeemable row keeps all its rows, so
-// replaying one of its rotated tokens still finds it and revokes the family.
+// replaying one of its rotated tokens still finds it and revokes the family. Each kind is deleted
+// in batches of sweepBatch, each its own statement, until a batch comes up short.
 func (s *Store) Sweep(ctx context.Context) error {
 	db := s.db(ctx)
 	for _, q := range []struct{ what, sql string }{
-		{"device codes", `delete from oauth_device_codes where expires_at < now() - interval '1 hour'`},
-		{"DPoP proofs", `delete from oauth_dpop_proofs where expires_at <= now()`},
-		{"DPoP nonces", `delete from oauth_dpop_nonces where expires_at <= now()`},
-		{"access tokens", `delete from oauth_access_tokens where expires_at <= now()`},
-		{"refresh token families", `delete from oauth_refresh_tokens f where not exists (select 1 from oauth_refresh_tokens r
-			where r.request_id = f.request_id and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))`},
+		{"device codes", `delete from oauth_device_codes where ctid in (select ctid from oauth_device_codes
+			where expires_at < now() - interval '1 hour' limit $1)`},
+		{"DPoP proofs", `delete from oauth_dpop_proofs where ctid in (select ctid from oauth_dpop_proofs where expires_at <= now() limit $1)`},
+		{"DPoP nonces", `delete from oauth_dpop_nonces where ctid in (select ctid from oauth_dpop_nonces where expires_at <= now() limit $1)`},
+		{"access tokens", `delete from oauth_access_tokens where ctid in (select ctid from oauth_access_tokens where expires_at <= now() limit $1)`},
+		// A batch of families deletes at least as many rows as families, so a short batch of rows
+		// means a short batch of families.
+		{"refresh token families", `delete from oauth_refresh_tokens where request_id in (select distinct f.request_id from oauth_refresh_tokens f
+			where not exists (select 1 from oauth_refresh_tokens r
+			where r.request_id = f.request_id and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))
+			limit $1)`},
 	} {
-		if _, err := db.Exec(ctx, q.sql); err != nil {
-			return fmt.Errorf("sweep %s: %w", q.what, err)
+		for {
+			tag, err := db.Exec(ctx, q.sql, sweepBatch)
+			if err != nil {
+				return fmt.Errorf("sweep %s: %w", q.what, err)
+			}
+			if tag.RowsAffected() < int64(sweepBatch) {
+				break
+			}
 		}
 	}
 	return nil

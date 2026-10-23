@@ -310,6 +310,36 @@ func TestSweepDeletesOnlySpentState(t *testing.T) {
 	}
 }
 
+// TestSweepDeletesABacklogOfSeveralBatches: a backlog larger than one batch is all deleted in one
+// Sweep, and a live family survives it.
+func TestSweepDeletesABacklogOfSeveralBatches(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newStore(t)
+	oauthstore.SetSweepBatch(t, 3)
+	for _, q := range []string{
+		`insert into oauth_device_codes (signature, user_code_signature, request, expires_at)
+			select 'd'||i, 'u'||i, '{}', now() - interval '2 hours' from generate_series(1, 10) i`,
+		`insert into oauth_dpop_proofs (jti, htu, expires_at) select 'p'||i, 'h', now() - interval '1 second' from generate_series(1, 10) i`,
+		`insert into oauth_dpop_nonces (nonce, expires_at) select 'n'||i, now() - interval '1 second' from generate_series(1, 10) i`,
+		`insert into oauth_access_tokens (signature, request_id, request, expires_at) select 'a'||i, 'r', '{}', now() - interval '1 second' from generate_series(1, 10) i`,
+		`insert into oauth_refresh_tokens (signature, request_id, request, active, expires_at)
+			select 'f'||i||'-'||j, 'family-'||i, '{}', false, now() + interval '1 day' from generate_series(1, 10) i, generate_series(1, 2) j`,
+		`insert into oauth_refresh_tokens (signature, request_id, request, expires_at) values ('live', 'live', '{}', now() + interval '1 day')`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if err := s.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	var left string
+	if err := pool.QueryRow(ctx, `select concat_ws(',', (select count(*) from oauth_device_codes), (select count(*) from oauth_dpop_proofs),
+		(select count(*) from oauth_dpop_nonces), (select count(*) from oauth_access_tokens), (select string_agg(signature, ',') from oauth_refresh_tokens))`).Scan(&left); err != nil || left != "0,0,0,0,live" {
+		t.Fatalf("rows left after the sweep = %q (%v), want 0,0,0,0,live", left, err)
+	}
+}
+
 func TestTheSecretIsCreatedOnceAndKept(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t)
