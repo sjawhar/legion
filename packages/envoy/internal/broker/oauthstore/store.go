@@ -55,6 +55,31 @@ var sweepBatch = 1000
 // sweeper ticks rather than one long one; a variable so tests can exceed it.
 var sweepMaxBatches = 10
 
+// sweepStatements are Sweep's statements, $1 the batch. Each selects its batch by primary key
+// through an index on the predicate it sweeps by (0016's *_expires indexes, and for refresh
+// tokens the partial inactive and grace indexes), oldest first, so a table of mostly live rows is
+// never read whole. A refresh family is found from its rows that are themselves not redeemable
+// (expired, revoked or past their grace), each checked against its family through the request_id
+// index; a live family's rotated rows are among those, so each tick re-reads them, a few per
+// machine for each day it has been logged in.
+var sweepStatements = []struct{ what, sql string }{
+	{"device codes", `delete from oauth_device_codes where signature in (select signature from oauth_device_codes
+		where expires_at < now() - interval '1 hour' order by expires_at limit $1)`},
+	{"DPoP proofs", `delete from oauth_dpop_proofs where (jti, htu) in (select jti, htu from oauth_dpop_proofs
+		where expires_at <= now() order by expires_at limit $1)`},
+	{"DPoP nonces", `delete from oauth_dpop_nonces where nonce in (select nonce from oauth_dpop_nonces
+		where expires_at <= now() order by expires_at limit $1)`},
+	{"access tokens", `delete from oauth_access_tokens where signature in (select signature from oauth_access_tokens
+		where expires_at <= now() order by expires_at limit $1)`},
+	{"refresh token families", `delete from oauth_refresh_tokens where signature in (select f.signature from (
+			select signature, request_id from oauth_refresh_tokens where expires_at <= now()
+			union select signature, request_id from oauth_refresh_tokens where not active
+			union select signature, request_id from oauth_refresh_tokens where grace_until < now()) f
+		where not exists (select 1 from oauth_refresh_tokens r
+			where r.request_id = f.request_id and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))
+		limit $1)`},
+}
+
 // Sweep deletes spent OAuth state: device codes an hour past their expiry (so a helper still
 // polling one is answered expired_token, not invalid_grant as for an unknown code), DPoP proofs
 // and nonces past theirs, access tokens past theirs, and every refresh token of a family (rows
@@ -65,17 +90,7 @@ var sweepMaxBatches = 10
 // sweepMaxBatches have run; what is left waits for the next Sweep.
 func (s *Store) Sweep(ctx context.Context) error {
 	db := s.db(ctx)
-	for _, q := range []struct{ what, sql string }{
-		{"device codes", `delete from oauth_device_codes where ctid in (select ctid from oauth_device_codes
-			where expires_at < now() - interval '1 hour' limit $1)`},
-		{"DPoP proofs", `delete from oauth_dpop_proofs where ctid in (select ctid from oauth_dpop_proofs where expires_at <= now() limit $1)`},
-		{"DPoP nonces", `delete from oauth_dpop_nonces where ctid in (select ctid from oauth_dpop_nonces where expires_at <= now() limit $1)`},
-		{"access tokens", `delete from oauth_access_tokens where ctid in (select ctid from oauth_access_tokens where expires_at <= now() limit $1)`},
-		{"refresh token families", `delete from oauth_refresh_tokens where signature in (select f.signature from oauth_refresh_tokens f
-			where not exists (select 1 from oauth_refresh_tokens r
-			where r.request_id = f.request_id and r.active and r.expires_at > now() and (r.grace_until is null or r.grace_until >= now()))
-			limit $1)`},
-	} {
+	for _, q := range sweepStatements {
 		for range sweepMaxBatches {
 			tag, err := db.Exec(ctx, q.sql, sweepBatch)
 			if err != nil {

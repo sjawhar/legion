@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -419,6 +420,47 @@ func TestSweepWorkIsBoundedPerCall(t *testing.T) {
 		}
 		if p, d, l := left(); [3]int{p, d, l} != want {
 			t.Fatalf("after Sweep %d: %d proofs, %d dead-family and %d live-family rows, want %v", i+1, p, d, l, want)
+		}
+	}
+}
+
+// TestEverySweepStatementHasAnIndexPath: each of Sweep's statements can find its rows through an
+// index on the predicate it sweeps by, so a table of mostly live rows is not read whole every
+// tick. The seeded tables are small enough that the planner would pick a sequential scan on its
+// own, so the plan is read with sequential scans priced out: one that remains has no index to
+// use. The refresh family statement reads only rows that are themselves not redeemable (expired,
+// revoked or past their grace), and each one's family through the request_id index.
+func TestEverySweepStatementHasAnIndexPath(t *testing.T) {
+	ctx := context.Background()
+	_, pool := newStore(t)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `set local enable_seqscan = off`); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range oauthstore.SweepStatements() {
+		rows, err := tx.Query(ctx, "explain "+q.SQL, 1000)
+		if err != nil {
+			t.Fatalf("explain %s: %v", q.What, err)
+		}
+		var plan []string
+		for rows.Next() {
+			var line string
+			if err := rows.Scan(&line); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, line)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("explain %s: %v", q.What, err)
+		}
+		joined := strings.Join(plan, "\n")
+		if strings.Contains(joined, "Seq Scan") {
+			t.Errorf("sweeping %s reads a table whole:\n%s", q.What, joined)
 		}
 	}
 }
