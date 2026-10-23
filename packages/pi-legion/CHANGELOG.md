@@ -66,6 +66,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The implementer pushes and completes without waiting for CI: its role prompt, the
+  `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
+  request's remote CI and any `sleep` loop, and the `CI` line names each run's state as GitHub shows
+  it at the completion. Under the Go daemon, a required check that settled red while the issue was
+  still in `implementing` now sends the work back the moment the implementer completes, with a
+  `checks-red` naming it, instead of starting a tester round on that head; before, nothing acted on
+  that red until a later settlement or a reviewer read it.
+- The architect decides each `review_round_cap` notice in the turn it wakes, and posts the decision
+  on the issue: narrow the next rounds to named acceptance lines, split the part that cannot settle
+  into an issue of its own blocked by this one, or let rounds that each found less than the one before run on. The daemon's cap
+  still notifies only.
+
 - **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
   under `--check-config`, a host with any character outside ASCII in `advertise_host`, `bind`, an
   NFS volume's `server`, and the host of `daemon_url`, `envoy_url`, `dispatch_url`, each
