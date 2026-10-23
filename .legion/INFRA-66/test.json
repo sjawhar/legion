@@ -2,55 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-66",
-  "completed": "2026-10-23T04:13:57Z",
-  "round": 9,
-  "reviewRound": 4,
+  "completed": "2026-10-23T07:09:02Z",
+  "round": 10,
+  "reviewRound": 5,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 4's code change is the arming of a re-examination that reaches no verdict (6696644b), with the two rows I landed last round strengthened by the implementer (fd8c7fde) and comment corrections above it. I re-drove the rows that are mine at this head rather than taking them back on trust, verified the implementer's own arming row four times over and drove its control myself by removing the three armRetry calls, and re-ran the whole two-process package and the browser suite here. CI at the code head 180ae628 has every required lane green; its one red job is read below rather than inherited.",
-    "whatTheProofDidNotCover": "I could not isolate the arming from outside the process. My own induction — terminating every backend of the test's database while the wake was due — did recover the room, at 2.688 s against the usual 1.95 s, but it also forces the listener's redial, whose reconnect sweep is a different path to the same outcome, and no `read the head of a document that changed` warning appeared, so the no-verdict branch may not have been entered at all. The arming therefore rests on the implementer's package row, which refuses the head read at the seam with store.ErrNestedAcquire, and on the control I ran against it."
+    "how": "Review round 5's change is two things in the evictor (006069a2): the re-arm of a room whose re-examination reached no verdict now backs off per attempt in a row, and a write of this process still in flight is an attempt rather than a verdict. Both are pinned by rows of the implementer's, and I drove the control for each myself — flattening the backoff to one interval, and turning the in-flight branch back into a verdict — rather than taking either from its report. The evictor rows ran four consecutive times green here, the whole two-process package and the browser suite were re-taken at this head, and CI's every lane is green at the code head f37678f7, which also clears the red the last round carried.",
+    "whatTheProofDidNotCover": "The same boundary as last round, unchanged: neither of these two paths can be induced from outside the process. The in-flight branch needs a write of that process held between its operations, and the backoff needs a re-examination that keeps getting no answer; both are reached at seams inside the service, and an induction from outside (terminating the database's backends) also forces the listener's redial, whose reconnect sweep reaches the same outcome by another path. So both rest on the package rows at their seams plus my controls against them, and not on a two-process drive."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review round 4's change: a re-examination that reaches no verdict keeps the room's window, so a room whose read or eviction got no answer is tried again rather than dropped with its window spent.",
-      "surface": "The docs package against the real Postgres, driving the evictor through its own run loop, with the unlocked head read refused at the seam it fails at (store.ErrNestedAcquire).",
-      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -count=4 -timeout 1800s -run 'TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow|TestTheLastWriteOfABurstEvicts|TestARoomLeftBehindWhileTheListenerWasDown' ./internal/dispatch/docs/",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 18.687s — the arming row and the two rows beside it, four consecutive runs each.",
-      "headSha": "cb3071c3e074d9e0fbce6335da3133c5a4c83924",
-      "negativeControl": "Driven by me rather than taken from the implementer's report: on a scratch clone of this head with all three armRetry calls removed and nothing else changed, the row fails with `the re-examination that got no answer spent the room's window (wakeIn = 0s): the room is behind the head with a reader in it and nothing will look at it again`. So the arming is what the row holds, and the row is red without it."
+      "criterion": "Review round 5, first half: a room whose re-examinations keep reaching no verdict backs off, so the listener still gets its idle period back and its ping can find a half-open LISTEN connection.",
+      "surface": "The docs package against the real Postgres, driving the evictor through its own run loop.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -count=4 -timeout 1800s -run 'TestARoomThatKeepsGettingNoAnswerBacksOffPastTheListenersIdlePeriod|TestARoomReExaminedWithAWriteInFlightKeepsItsWindow|TestAStaleRoomWhoseReExaminationGetsNoAnswer|TestTheLastWriteOfABurstEvicts|TestARoomLeftBehindWhileTheListenerWasDown' ./internal/dispatch/docs/",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 28.060s — the five evictor rows, four consecutive runs each.",
+      "headSha": "6e4d06d706c42259a9926b4e319075130a2f770b",
+      "negativeControl": "Driven by me on a scratch clone of this head: staleRoomRetryBackoff flattened to one interval, nothing else changed, and the row fails — `after 8 re-examinations that reached no verdict the room is still re-armed 2s out, inside the listener's 30s idle period: waitFor returns that wake on every round (0 < wake < idle), so the ping that is the only thing that finds a half-open LISTEN connection never fires`."
     },
     {
-      "criterion": "The two deferred-re-examination rows still measure what they are named for after the implementer strengthened them, in both branches.",
-      "surface": "Two real envoy-dispatch processes on one Postgres 17 and one nats-server 2.10 in this issue's pod, with a document websocket holding the room on A and the burst made through B's HTTP API.",
-      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 35m ./cmd/dispatch",
-      "observed": "Both green in the package run at this head: the room that owes a settlement (14.98s) and the room no settlement will fail (13.61s). The rows now assert what my construction only logged — that the trailing write lands inside the eviction interval — and credit the close to the window rather than to whatever closed the room. That assertion is the implementer's (fd8c7fde), it closes the vacuous-pass class my own rejected construction fell into, and I record it as its change rather than mine.",
-      "headSha": "cb3071c3e074d9e0fbce6335da3133c5a4c83924",
-      "negativeControl": "Round 8's controls stand for the branches themselves and were driven then: wake unwired, the room that owes a settlement closes at 6.018 s by the durable gate's three refusals, and the room no settlement will fail never closes at all. What this round adds is that the rows refuse to measure the wrong scenario: a run whose setup overran the two-second window now fails with its own message instead of reporting an immediate eviction as a deferred one."
+      "criterion": "Review round 5, second half: a re-examination that finds a write of this process still in flight is an attempt, not a verdict, so the room keeps a window and is looked at again.",
+      "surface": "The same package and loop, with a write of the process held between its operations.",
+      "command": "cd packages/envoy && . /legion/harness/env.sh && go test -count=4 -timeout 1800s -run TestARoomReExaminedWithAWriteInFlightKeepsItsWindow ./internal/dispatch/docs/",
+      "observed": "Green four consecutive times in the run above.",
+      "headSha": "6e4d06d706c42259a9926b4e319075130a2f770b",
+      "negativeControl": "Driven by me on the same scratch clone: the in-flight branch turned back into a verdict (reachedVerdict in place of armRetry, nothing else changed), and the row fails — `the re-examination that found a write in flight spent the room's window (wakeIn = 0s): the room is behind the head with a reader in it and nothing - not even a write that appends nothing - will look at it again`."
     },
     {
-      "criterion": "Acceptance 1 and 2 at this head: the two-process package and the reader-facing half, with the evictor changed under them.",
-      "surface": "Two real envoy-dispatch binaries on one Postgres 17 and one nats-server 2.10 with JetStream; and Dispatch's own browser suite in this pod with real Chromium and the real server.",
+      "criterion": "Acceptance 1 and 2 at this head: the two-process package, the two deferred rows among it, and the reader-facing half, with the evictor changed under them again.",
+      "surface": "Two real envoy-dispatch binaries on one Postgres 17 (pgvector, UTF8/ICU) and one nats-server 2.10 with JetStream in this issue's pod; and Dispatch's own browser suite with real Chromium and the real server.",
       "command": "cd packages/envoy && . /legion/harness/env.sh && go test -tags multiprocess -count=1 -timeout 35m ./cmd/dispatch; bash /legion/harness/e2e.sh e2e/inbox.e2e.ts e2e/attention.e2e.ts e2e/doc.e2e.ts e2e/agent-view.e2e.ts e2e/agents.e2e.ts --project=chromium --reporter=line",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 317.151s, every row green — the standby and takeover, the outbox across both processes, both lease rows, the live stream, the stale-room close, the shared signing key and the two deferred rows. Browser suite: 83 passed, 4 skipped (6.0m).",
-      "headSha": "cb3071c3e074d9e0fbce6335da3133c5a4c83924",
-      "negativeControl": "Each row of the package carries its own, unchanged since round 1. The browser suite is run here rather than inherited because this round changes docs/, which it exercises, even though the branch touches no file under packages/dispatch."
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 371.531s, every row green — the standby and takeover, the outbox across both processes, both lease rows, the live stream, the stale-room close, the shared signing key, and the two deferred-re-examination rows (15.87s and 13.91s). Browser suite: 83 passed, 4 skipped (5.9m).",
+      "headSha": "6e4d06d706c42259a9926b4e319075130a2f770b",
+      "negativeControl": "Each row carries its own, unchanged. Round 8's controls stand for the two deferred rows' branches — wake unwired, the room that owes a settlement closes at 6.018 s by the durable gate and the room no settlement will fail never closes — and the rows themselves now refuse to measure the wrong scenario, which is the implementer's assertion from round 9 and still in place here."
     },
     {
-      "criterion": "Everything static is CI's work, read rather than re-run — including the one job that is red.",
-      "surface": "GitHub's checks on the pull request's code head, and the failing job's own archived log.",
-      "command": "gh api \"repos/sjawhar/legion/commits/180ae6287e7a14a617f502ecfca7f34de0f886a8/check-runs?per_page=100\" --jq '.check_runs[]|\"\\(.name) \\(.conclusion)\"'; gh run view 39886285004 --log-failed",
-      "observed": "Every required lane green at the code head 180ae628 — lint, typecheck, test, pr-title — with changes, build, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke and pi-legion also green. The `dispatch` job is red, on one row: `[iphone] e2e/phone.e2e.ts:393:1 an inline link keeps its line and grows its hit box without covering its neighbours`, `1 failed` beside 1,392 passing rows in run 39886285004. That is dispatch://INFRA-95's known-random row, the job is not in main's required set (the architect's ruling of 2026-10-23 03:57Z, measured from the forge), and this branch changes zero files under packages/dispatch — measured here, `jj diff --stat --from 'fork_point(main@origin | 180ae628)' --to 180ae628 -- packages/dispatch` reports `0 files changed`. I read the archived log rather than re-running the job, since a green re-run would delete the evidence the record needs.",
-      "headSha": "180ae6287e7a14a617f502ecfca7f34de0f886a8",
-      "negativeControl": "Not applicable to a read. The unrelatedness is the measurement above rather than an assertion: a branch that touches no file of the suite's package cannot have changed the row that failed in it."
+      "criterion": "Everything static is CI's work, read rather than re-run, and the red job the last round carried is gone.",
+      "surface": "GitHub's checks on the pull request's code head.",
+      "command": "gh api \"repos/sjawhar/legion/commits/f37678f751d7a7900ea311bec61d53dbd9cdfded/check-runs?per_page=100\" --jq '.check_runs[]|\"\\(.name) \\(.conclusion)\"'",
+      "observed": "Every lane green at the code head f37678f7, the four required among them: lint, typecheck, test and pr-title, with changes, build, dispatch, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke and pi-legion also success. The `dispatch` job is green here, so the known-random iphone row (dispatch://INFRA-95) that made the last code head red did not recur, and that head's red travels no further. One `pr-title` run at 06:01:42Z is `cancelled`, superseded by the one at 06:01:54Z that succeeded; six other pr-title runs on this commit succeeded.",
+      "headSha": "f37678f751d7a7900ea311bec61d53dbd9cdfded",
+      "negativeControl": "Not applicable to a read. The required set is the one thing in this argument that can move, so it is read at each head rather than carried: it is the same four here as at the last two code heads."
     }
   ],
   "notes": [
-    "The two rows I landed in round 8 were edited by the implementer this round (fd8c7fde). It strengthened them: it asserts that the trailing write lands inside the eviction interval, which my construction depended on and only logged, and it credits the close to the window explicitly. A run whose setup overran the window would previously have measured an immediate eviction under a deferred row's name. I re-drove both rather than accept them, and the authorship is recorded here because a row of the tester's rewritten by another role is a row the record should say who wrote.",
-    "What I could not isolate, named rather than implied: the no-verdict arming from outside the process. Terminating every backend of the test's database while the wake was due recovered the room at 2.688 s (against 1.95 s in the ordinary case), but that induction also forces the listener's redial, whose reconnect sweep reaches the same outcome by another path, and no head-read warning appeared for that room. The arming rests on the package row and on my control against it.",
-    "The red `dispatch` job travels with this change to READY under the architect's three conditions: the failure is demonstrably unrelated (zero files under packages/dispatch, measured above), the occurrence is for dispatch://INFRA-95 with the attempt archive read before any further re-run, and the READY packet must say in its own words that the head is red on a known-random row in a job main does not require, naming both attempts and both run ids. Round 7's note that the check-runs endpoint's default page hides the required lanes behind this commit's pr-title rows still applies; read it with per_page=100.",
-    "Round 5's three bounds on the period gate and round 8's severity table are unchanged at this head.",
+    "The proof boundary for the evictor's error paths is the same as round 9's and has not widened: the arming, the backoff and the in-flight branch are all pinned at their own seams in the docs package, each with a control I drove, and none of them is reachable from outside the process — an induction from outside also forces the listener's redial, whose sweep reaches the same outcome by another path. Anyone quoting a two-process proof of those three would be quoting something no round delivered.",
+    "The red `dispatch` job of round 9 is not inherited: it is green at this code head, so the three conditions the architect attached to carrying a red head to READY do not apply to this one. Round 9's record of run 39886285004 stands as the account of that occurrence for dispatch://INFRA-95.",
+    "Round 7's instrument note still applies to anyone reading these checks: the endpoint's default page is thirty and this commit carries seven pr-title rows, so read it with per_page=100.",
+    "Round 5's three bounds on the period gate and round 8's severity table for the deferred re-examination are unchanged at this head.",
     "Production: nothing deploys Dispatch automatically (dispatch://INFRA-64), so the production check after the merge will be a record of which build production runs, as dispatch://INFRA-62's was."
   ]
 }
