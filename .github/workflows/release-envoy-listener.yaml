@@ -37,9 +37,9 @@ on:
       - ".github/agent-secrets-client-targets.json"
   workflow_dispatch:
 
-# Every job declares its own permissions (targets, build, docker, release_build, release_publish
-# below); nothing runs under this workflow-level default, so it stays empty rather than becoming an
-# unreviewed grant to a job added later with no block of its own.
+# Every job declares its own permissions (targets, build, docker, attest, release_build,
+# release_publish below); nothing runs under this workflow-level default, so it stays empty rather
+# than becoming an unreviewed grant to a job added later with no block of its own.
 #
 # The release is split into build jobs and a publish job. build, docker and release_build run the
 # module's code and every third-party module it links, so they hold no secret and no write scope
@@ -235,6 +235,39 @@ jobs:
             ghcr.io/sjawhar/legion/envoy:${{ github.sha }}
       - name: Check this job holds no credential (tripwire)
         run: .github/scripts/release-push.sh no-credential
+
+  # A GitHub artifact attestation of the image docker pushed, stored with GitHub. The `envoy:<sha>`
+  # tag alone cannot say which run published an image: a workflow_dispatch from any branch pushes
+  # one too. The attestation's Sigstore certificate carries this workflow file's identity, ref and
+  # commit from the run's OIDC token, which no workflow edit can change, so a consumer accepts a
+  # digest only when a run of this file on main built it:
+  #   gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
+  #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  #     --source-ref refs/heads/main --deny-self-hosted-runners
+  # and adds `--source-digest <the commit its tag names>` to pin the commit as well. The certificate
+  # names the workflow whose job signed, so this job stays in this file: moved into a called
+  # workflow, it would name that file and every consumer's check would refuse it. The subject is
+  # the image index's digest (build-push-action's `digest` output for a multi-platform push), the
+  # one a deployment pins; a per-platform manifest's attestation would not verify against it. This
+  # statement is GitHub's, separate from the BuildKit provenance docker attaches inside the index
+  # (`provenance: mode=min`). A branch dispatch attests too, and its certificate names
+  # `refs/heads/<branch>`, which the command above refuses.
+  attest:
+    needs: docker
+    runs-on: ubuntu-24.04
+    # id-token: write is the OIDC token Sigstore issues the signing certificate for; attestations:
+    # write stores the attestation with GitHub. The attestation stays with GitHub, not the
+    # registry, so this job needs no packages scope.
+    permissions:
+      id-token: write
+      attestations: write
+    # No cache is restored in a job that holds a credential.
+    cache-mode: none
+    steps:
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/sjawhar/legion/envoy
+          subject-digest: ${{ needs.docker.outputs.digest }}
 
   # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
   # (packages/envoy/cmd/agent-secrets-helper): the same legion-envoy-v* release also ships these

@@ -3203,7 +3203,8 @@ runs in CI's `envoy-go` job.
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
 image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,
 smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
-`org.opencontainers.image.revision` with that sha. Its `release_build` and `release_publish`
+`org.opencontainers.image.revision` with that sha, and its `attest` job attests the pushed image
+index's digest with `actions/attest-build-provenance`. Its `release_build` and `release_publish`
 jobs run only on `refs/heads/main`, so a branch dispatch publishes one immutable image, for a dev
 slot to pin before merge, and moves no tag. `release_build` holds no secret: it computes the
 version with `release-push.sh version` and builds and checks the agent-secrets binaries
@@ -3213,6 +3214,24 @@ inside its concurrency group (`release-push.sh version --expect`, which fails wh
 took the tag first; the remedy is re-running the whole run, not `--failed`), checks the hand-over
 (`release-push.sh handed`), tags with `release-push.sh push-tag` (the deploy key reaches only that
 step's `env`), attests the `agent-secrets-*.tar.gz` archives and creates the GitHub release.
+
+The image's attestation is what says which run built a digest: a branch dispatch pushes an
+`envoy:<sha>` tag too, and its certificate names `refs/heads/<branch>`. Accept a digest only when a
+run of the workflow on `main` built it, as for the worker image (`docs/kubernetes.md`, "Pin by
+digest, never by tag"):
+
+```bash
+gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+```
+
+Add `--source-digest <the commit its tag names>` to pin the commit too. The certificate names the
+workflow whose job signed, so the `attest` job stays in `release-envoy-listener.yaml`; in a called
+workflow it would name that file and this command would refuse every image. Its subject is the
+index digest a deployment pins, not a per-platform manifest. It is separate from the BuildKit
+provenance the `docker` job attaches inside the index (`provenance: mode=min`), which a
+deployment reads to map a digest to its commit.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux

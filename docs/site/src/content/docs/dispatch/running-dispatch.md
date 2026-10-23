@@ -10,6 +10,17 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 `packages/dispatch`. The container image `ghcr.io/sjawhar/legion/envoy` carries it as
 `/usr/local/bin/envoy-dispatch`.
 
+Pin the image by digest. Each image the release workflow publishes carries a GitHub artifact
+attestation from that workflow (images published before attestation began carry none), and a tag
+does not say which run pushed it (a run dispatched by hand from any branch pushes one too), so
+accept a digest only when a run on `main` built it:
+
+```bash
+gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+```
+
 ## What it needs
 
 | Need | Setting | Notes |
