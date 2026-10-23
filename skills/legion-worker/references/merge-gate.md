@@ -18,10 +18,10 @@ it, and any other change to the head voids it.
 
 ## The reviewer
 
-- The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
+- The reviewer reads CI on GitHub and verifies the `Threads` and `E2E` facts there directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
-  and records the verdict. The `CI` fact is the checks that stand for the code under review:
+  and records the verdict. The CI it reads is the checks that stand for the code under review:
   those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
   every commit above that push's head changes only `.legion/` (a push that changes only
   `.legion/` carries `skip-checks: true`, so GitHub runs no workflow for it). With `<o>/<r>`,
@@ -42,9 +42,7 @@ it, and any other change to the head voids it.
   A read GitHub refuses stops the command there, and is reported to the architect, never guessed. The CI head, the head of the
   branch's newest `pull_request` run
   (`gh api 'repos/<o>/<r>/actions/runs?branch=<headRefName>&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'`,
-  newest first); the PR body's `CI:` line names runs at that same commit
-  (`gh run view <run-id> --json headSha,status,conclusion`), or the line is stale and the review
-  says so. That commit's check-runs
+  newest first). That commit's check-runs
   (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
   as passing for a required check). And the compare proving only `.legion/` changed since
@@ -147,15 +145,13 @@ reviewing until you finish.
   no pre-flight of its own, and its completion reports the commit the workspace stands on. READY's
   checks run in the daemon, which reads the pull request's head on GitHub and refuses, before
   recording anything, on each ground the merger's role prompt names in its `Go daemon workflow`
-  part, by its code and with its remedy. That part is the one complete list of READY's refusals.
-  A required check or workflow still running refuses nothing; a failed or missing one does. A
+  part, by its code and with its remedy. That part is the one complete list of READY's refusals. A
   refusal records nothing; the merger reports it to the architect unless it says to complete
   again, and never pushes a commit to make CI run. On success the daemon posts the packet as a
   `dispatch message` on the issue, publishes it to the project's merge queue role when one is set,
   and says on the issue when that role has no live holder; the answer's `note` says when READY was
-  published on a pull request a person already merged, whose head can no longer change, or on a
-  base that requires no check, which the packet itself also says, or carries the by-hand note of a
-  pull request a person merges.
+  published on a pull request a person already merged, whose head can no longer change, or carries
+  the by-hand note of a pull request a person merges.
 - **The daemon submits the merge the moment READY is accepted, unless the answer says a person
   merges it.** It queues a `ready_merge` outbox row for the head READY named, and the row, as the
   implement App, reads GitHub and then the record: while the issue still awaits that READY head, a
@@ -186,7 +182,12 @@ reviewing until you finish.
   GitHub's message. While the record still awaits READY's head, GitHub showing the pull request
   closed or at another head is a webhook not yet applied, so the row waits for the two to agree.
   Only once GitHub's last change to the pull request is more than 10 minutes old, however long the
-  row waited before, does the row end and tell the architect once (`merge-stalled`). A reopen at
+  row waited before, does the row end and tell the architect once (`merge-stalled`). A merge the
+  daemon submitted that GitHub has not completed within an hour of READY's acceptance tells the
+  issue's architect once (`merge-waiting`) and goes on waiting: nothing is withdrawn, the merge
+  stands, the issue stays in `awaiting_merge`, and the architect reads the pull request for what
+  GitHub waits on — a required check that never ran or failed, a review only a person can give, a
+  queue that has not landed it — and asks a person for what no worker can do. A reopen at
   READY's head reuses the row, starts it over as though nothing had been armed, and takes it from a
   run that read the record before the reopen. Any other failure retries.
   No role runs `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull

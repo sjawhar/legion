@@ -282,13 +282,13 @@ and every later phase edits its own lines of the live body rather than replacing
 and `proof` array) is the changed behaviour exercised on a production-like surface, recorded as
 its command or run id, what was observed, the head SHA, and one negative control; a unit test is
 never one. **Before you write or edit any line of the PR body or any `proof` array, read
-`skill://legion-worker/references/pr-body.md`**: the template (the sole definition of the CI
-line), the full definition of a proof, what the tester verifies, and the simplify pass.
+`skill://legion-worker/references/pr-body.md`**: the template, the full definition of a proof,
+what the tester verifies, and the simplify pass.
 
 - **The tester runs the application, not CI again.** It drives the changed surface for real and
   tries to break it, judges whether the implementer's tests would catch what it broke, records what
-  it ran and saw, and must read CI for everything static — lint, types and the unit suites are
-  CI's work, rerun by no tester: `skill://legion-worker/references/pr-body.md`.
+  it ran and saw, and must read CI on GitHub for everything static — lint, types and the unit
+  suites are CI's work, rerun by no tester: `skill://legion-worker/references/pr-body.md`.
 - **Review threads** are answered and resolved one by one, never in bulk, and never one you have
   not read: one disposition reply per thread, then that thread's own resolution by the
   implementer, the pull request's author — its `gh api graphql` mutation after every push that
@@ -365,8 +365,8 @@ The daemon reads no handoff file and no branch head; it refuses, before recordin
 - `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading READY's checks: complete again.
 
 Such a refusal records nothing, so the corrected call at the same commit is applied. The answer
-may carry a `note` (READY published on an already-merged pull request, or a base requiring no
-check, or the `MANUAL_MERGE_REQUIRED:` note of a pull request a person merges).
+may carry a `note` (READY published on an already-merged pull request, or the
+`MANUAL_MERGE_REQUIRED:` note of a pull request a person merges).
 
 Retro's last commit removes `.legion/<issue>/` from the head that merges (`skill://legion-retro`);
 a round after it, such as one a withdrawn READY sends back, writes and commits its own handoff
@@ -399,8 +399,9 @@ Every other push — code, red tests, `docs/solutions/`, retro's removal of `.le
 forward merge, a rewrite — carries no such line and none of GitHub's bracket keywords
 (`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`), which start no workflow
 wherever they stand. The daemon classifies a push by the paths its commits touch, never by the
-trailer: a wrong trailer stalls the issue (a trailered code push gets no verdict carried; a head
-with no CI is refused at READY) and never passes it. While the head commit carries
+trailer: a wrong trailer stalls the issue (a trailered code push gets no verdict carried, and a
+head with no CI is one GitHub will not merge, so the merge waits and the daemon tells the issue's
+architect once it has waited an hour) and never passes it. While the head commit carries
 `skip-checks: true`, a pull-request body edit alone starts no GitHub workflow run, so a check that
 re-judges the body re-runs on that head only after a later push; on a code head the same edit
 re-runs it at once. While the pull request conflicts with its base (GitHub shows it
