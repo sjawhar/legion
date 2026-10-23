@@ -31,8 +31,9 @@ agent-secrets-helper install --url https://secrets.internal.example
 `install` writes `~/.config/systemd/user/agent-secrets-helper.service` (under `$XDG_CONFIG_HOME`
 when that is set), which runs this binary's `serve` with `AGENT_SECRETS_URL` set to `--url` and
 restarts it whenever it exits, then reloads systemd and enables and starts the unit. Running it
-again with the same binary path and URL changes nothing, so binaries upgraded in place need
-`systemctl --user restart agent-secrets-helper` to take effect. A changed unit restarts a running
+again with the same binary path and URL while the unit runs changes nothing, so binaries upgraded
+in place need `--restart-with-sessions` (or `systemctl --user restart agent-secrets-helper`) to
+take effect; an unchanged unit that is not running is started. A changed unit restarts a running
 helper only when no session is registered with it, since a restart ends the sessions' grants.
 With sessions registered it lists them and leaves the running helper as it is:
 
@@ -42,7 +43,9 @@ $ agent-secrets-helper install --url https://secrets.internal.example
 not restarted: 1 sessions are registered; a restart ends their grants. Re-run with --restart-with-sessions.
 ```
 
-Once those sessions end, run it again, or pass `--restart-with-sessions` to restart it anyway. A
+The unit is written by then, so a later run without the flag changes nothing: once those sessions
+end, or to restart it anyway, re-run with `--restart-with-sessions`, which restarts the running
+helper whether or not the unit changed. A
 helper with no sessions refuses new ones from the moment `install` checks until it restarts, so
 none starts in between. A running helper from a release before that refusal (`drain`) cannot
 hold new sessions off, so `install` never restarts it on its own: it lists its sessions and
@@ -51,7 +54,7 @@ prints `not restarted: the running agent-secrets-helper predates drain, …`. Re
 helper take sessions again and exits with systemd's error.
 
 A helper that answers on the socket but that the unit does not run (one started by hand) makes
-`install` stop before it writes anything: it lists that helper's sessions and exits 1 with `an
+`install` stop before it writes anything, even when the unit file already matches: it lists that helper's sessions and exits 2 with `an
 agent-secrets-helper not run by agent-secrets-helper.service answers at …; stop it, then re-run
 install`, since starting the unit would put a second helper on the socket.
 

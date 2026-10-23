@@ -18,18 +18,20 @@ import (
 )
 
 // install writes the helper's systemd user unit for the binary at exe (symlinks resolved) and
-// the broker URL from --url or AGENT_SECRETS_URL. When the unit's bytes are unchanged it does
-// nothing more. A helper answering on its socket while the unit is not active was not started by
-// it, and starting the unit would put a second helper on that socket: install refuses, listing
-// that helper's sessions, and writes and starts nothing. Otherwise it writes the unit, runs
-// `systemctl --user daemon-reload` and `enable --now`. A helper that was not answering on its
-// socket before that is now started on the new unit. One that was is restarted only when `drain`
-// finds it has no sessions (the helper then refuses new ones) or restartWithSessions is set; a
-// restart ends the sessions' grants, so with sessions it prints them and why it did not restart,
-// and returns nil. A restart that fails after a drain sends `undrain`, so the helper takes sessions
-// again, and returns the restart's error. A helper older than `drain` cannot refuse a register
-// between the check and the restart, so without restartWithSessions it is never restarted:
-// install prints its sessions and that it predates drain, and returns nil.
+// the broker URL from --url or AGENT_SECRETS_URL, in three steps. First the preflight: a helper
+// answering on its socket while the unit is not active was not started by it, and starting the
+// unit would put a second helper on that socket, so install refuses, listing that helper's
+// sessions, and writes and starts nothing, whether or not the unit file already matches. Then
+// it writes the unit when its bytes differ, and runs `systemctl --user daemon-reload` and
+// `enable --now` when it wrote it or the unit is not active. Last the restart: a helper that was
+// answering before is restarted when restartWithSessions is set, whether or not the unit
+// changed; otherwise only when the unit changed and `drain` finds it has no sessions (the
+// helper then refuses new ones). A restart ends the sessions' grants, so with sessions it prints
+// them and why it did not restart, and returns nil. A restart that fails after a drain sends
+// `undrain`, so the helper takes sessions again, and returns the restart's error. A helper older
+// than `drain` cannot refuse a register between the check and the restart, so without
+// restartWithSessions it is never restarted: install prints its sessions and that it predates
+// drain, and returns nil. An unchanged, active unit without restartWithSessions changes nothing.
 func install(args []string, getenv func(string) string, exe string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	url := fs.String("url", "", "the broker's base URL (default $AGENT_SECRETS_URL)")
@@ -67,34 +69,39 @@ RestartSec=10
 WantedBy=default.target
 `)
 
-	path := helper.UnitPath(getenv)
-	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, unit) {
-		return nil
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	cfg, err := loadConfig(getenv)
 	if err != nil {
 		return err
 	}
 	running, err := helper.Call(cfg.Socket, helper.Request{Op: "sessions"}, 2*time.Second)
 	wasRunning := err == nil
-	if wasRunning && !unitActive() {
+	active := unitActive()
+	if wasRunning && !active {
 		for _, s := range running.Sessions {
 			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State)
 		}
 		return fmt.Errorf("an agent-secrets-helper not run by %s answers at %s (its sessions are listed above); stop it, then re-run install", helper.UnitName, cfg.Socket)
 	}
-	if err := writeFileAtomic(path, unit); err != nil {
+	path := helper.UnitPath(getenv)
+	old, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := systemctl("daemon-reload"); err != nil {
-		return err
+	changed := !bytes.Equal(old, unit) || errors.Is(err, os.ErrNotExist)
+	if changed {
+		if err := writeFileAtomic(path, unit); err != nil {
+			return err
+		}
 	}
-	if err := systemctl("enable", "--now", helper.UnitName); err != nil {
-		return err
+	if changed || !active {
+		if err := systemctl("daemon-reload"); err != nil {
+			return err
+		}
+		if err := systemctl("enable", "--now", helper.UnitName); err != nil {
+			return err
+		}
 	}
-	if !wasRunning {
+	if !wasRunning || (!changed && !*restartWithSessions) {
 		return nil
 	}
 	drained := false

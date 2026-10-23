@@ -374,3 +374,70 @@ func TestInstallNeverRestartsWhenASessionArrivesBeforeTheDrain(t *testing.T) {
 		t.Fatalf("output:\n%s", out)
 	}
 }
+
+// TestInstallRestartsOnTheReRunItAsksFor: an install that changes the unit while sessions are
+// registered does not restart and says to re-run with --restart-with-sessions; that re-run, the
+// unit now unchanged, restarts the running helper.
+func TestInstallRestartsOnTheReRunItAsksFor(t *testing.T) {
+	r := newInstallRig(t)
+	r.fakeHelper(t, []helper.SessionInfo{{PID: 41, RuntimeID: "rt-a"}})
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.stdout.String(), "Re-run with --restart-with-sessions.") {
+		t.Fatalf("output:\n%s", r.stdout.String())
+	}
+	for _, c := range r.systemctlCalls(t) {
+		if strings.Contains(c, "restart") {
+			t.Fatalf("restarted a helper with sessions: %q", c)
+		}
+	}
+	_ = os.Remove(r.calls)
+	if err := r.run("--url", "https://secrets.example", "--restart-with-sessions"); err != nil {
+		t.Fatal(err)
+	}
+	if calls := r.systemctlCalls(t); strings.Join(calls, ";") != "--user restart agent-secrets-helper.service" {
+		t.Fatalf("systemctl calls on the re-run: %q; want only the restart", calls)
+	}
+}
+
+// TestInstallRefusesAnUnmanagedHelperWhenTheUnitMatches: the unit file already holds the bytes
+// install would write, but the unit is not active and a helper answers on the socket: install
+// still refuses, naming the socket, and runs nothing.
+func TestInstallRefusesAnUnmanagedHelperWhenTheUnitMatches(t *testing.T) {
+	r := newInstallRig(t)
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(r.calls)
+	if err := os.WriteFile(r.active, []byte("inactive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.fakeHelper(t, []helper.SessionInfo{{PID: 41, RuntimeID: "rt-a"}})
+	err := r.run("--url", "https://secrets.example")
+	if err == nil || !strings.Contains(err.Error(), "not run by agent-secrets-helper.service") || !strings.Contains(err.Error(), r.sock) {
+		t.Fatalf("install beside an unmanaged helper, the unit unchanged: %v", err)
+	}
+	if calls := r.systemctlCalls(t); calls != nil {
+		t.Fatalf("systemctl ran beside an unmanaged helper: %q", calls)
+	}
+}
+
+// TestInstallStartsAnUnchangedUnitThatIsNotActive: the unit file matches but the unit is not
+// running and nothing answers on the socket: install enables and starts it.
+func TestInstallStartsAnUnchangedUnitThatIsNotActive(t *testing.T) {
+	r := newInstallRig(t)
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(r.calls)
+	if err := os.WriteFile(r.active, []byte("inactive\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.run("--url", "https://secrets.example"); err != nil {
+		t.Fatal(err)
+	}
+	if calls := r.systemctlCalls(t); strings.Join(calls, ";") != "--user daemon-reload;--user enable --now agent-secrets-helper.service" {
+		t.Fatalf("systemctl calls: %q", calls)
+	}
+}

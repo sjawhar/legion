@@ -2609,15 +2609,17 @@ drops the login and deletes the file. The helper no longer speaks the earlier
 helper's user unit to `helper.UnitPath` (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`,
 else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`,
 `Environment=AGENT_SECRETS_URL=<url>` and `Restart=always`, refusing a URL or path a unit line
-would split or expand. An unchanged unit does nothing. A helper answering on the socket while `systemctl --user
+would split or expand. First, a helper answering on the socket while `systemctl --user
 is-active agent-secrets-helper.service` is not `active` was started some other way: `install`
-lists its sessions and exits 1 (`stop it, then re-run install`), writing and starting nothing.
-Otherwise it runs `systemctl --user daemon-reload` and `enable --now`, and restarts a helper that was already answering only when the
+lists its sessions and exits 2 (`stop it, then re-run install`), writing and starting nothing,
+whether or not the unit file already matches. Then it writes the unit when its bytes differ, and
+runs `systemctl --user daemon-reload` and `enable --now` when it wrote it or the unit is not
+active. Last, it restarts a helper that was already answering when `--restart-with-sessions` is
+given, even with the unit unchanged, or, without it, only when the unit changed and the
 `drain` op finds it has no sessions (it then refuses every later register and
 `enroll-session-key` `DRAINING` until it exits or is sent `undrain`, so none starts between the
 check and the restart; a restart that fails after a drain sends `undrain` and exits with the
-restart's error)
-or `--restart-with-sessions` is given; with sessions it prints them and
+restart's error). An unchanged, active unit without the flag does nothing. With sessions it prints them and
 `not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
 --restart-with-sessions.` and exits 0. A helper older than `drain` answers it `unknown op`; it
 cannot refuse a register before the restart, so `install` never restarts it without

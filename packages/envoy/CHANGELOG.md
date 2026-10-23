@@ -39,10 +39,12 @@
   `systemd --user` unit (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`, by default
   under `~/.config`), running this binary's `serve` with `AGENT_SECRETS_URL` from `--url` or the
   environment and `Restart=always`, then runs `systemctl --user daemon-reload` and
-  `enable --now`. An unchanged unit changes nothing. A helper answering on the socket that the
-  unit does not run is refused: install lists its sessions, says to stop it, and writes and starts
-  nothing. A helper that was already running is restarted
-  only when it has no sessions registered, or with `--restart-with-sessions`, since a restart ends
+  `enable --now`. An unchanged unit that is running changes nothing; one that is not is started.
+  A helper answering on the socket that the unit does not run is refused, even when the unit file
+  already matches: install lists its sessions, says to stop it, exits 2, and writes and starts
+  nothing. A helper that was already running is restarted after a unit change
+  only when it has no sessions registered, or with `--restart-with-sessions`, which restarts it
+  even when the unit is unchanged, since a restart ends
   the sessions' grants; with sessions it lists them, prints `not restarted: <n> sessions are
   registered; a restart ends their grants. Re-run with --restart-with-sessions.`, and exits 0. The
   helper's new `drain` op is that check: it answers the registered sessions and, with none, refuses
