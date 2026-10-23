@@ -1148,6 +1148,62 @@ func TestACompletionBeforeItsPushesWebhooksIsNotSentBackOnTheRedItFixed(t *testi
 	}
 }
 
+// A push webhook naming the head the record already holds can arrive after that head's own red
+// settled while implementing and after the completion handed the head on without judging it. The
+// push is then the first fact outside implementing to see the red, and sends the work back: a code
+// commit pushed above the handoff commit the completion reports, and a handoff push that started CI
+// of its own, whose late arrival takes back the fix attempt its synchronize counted, so the red at
+// the head is below max_fix_attempts again.
+func TestALatePushOfTheRecordedHeadActsOnItsRed(t *testing.T) {
+	const required = "pr-checks-result"
+	for _, tc := range []struct {
+		name     string
+		seeded   record.PullRequest
+		before   []intake.Fact
+		commit   string
+		latePush intake.Fact
+	}{
+		{
+			name: "a code commit above the handoff commit",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h0", Required: []string{required}},
+			before: []intake.Fact{pushedFromTo("h0", "handoff", "src/fix.go\n.legion/LEGION-208/implement.json", "legion-implementer[bot]"), syncedTo("handoff"),
+				syncedTo("c2"), settledAt("c2", required, 1, required)},
+			commit:   "handoff",
+			latePush: pushedFromTo("handoff", "c2", "src/lint.go", "legion-implementer[bot]"),
+		},
+		{
+			name: "a handoff push whose late arrival takes back the attempt that reached the cap",
+			seeded: record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c", Required: []string{required}, FixAttempts: 2},
+			before:   []intake.Fact{settledAt("c", required, 1, required), syncedTo("h"), settledAt("h", required, 2, required)},
+			commit:   "h",
+			latePush: pushedFromTo("c", "h", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+			seedPR(t, pool, tc.seeded)
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			applyRefusingNothing(t, pool, engine, tc.before...)
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: tc.commit, Summary: "implemented"})
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("after the completion the issue is in %s, want testing: the completion judges no head it did not report, nor a red the cap holds", got)
+			}
+			applyRefusingNothing(t, pool, engine, tc.latePush)
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the late push the issue is in %s, want implementing: the red stands for the head and nothing else acts on it", got)
+			}
+			if rounds := implementerRounds(t, pool); rounds != 1 {
+				t.Fatalf("rounds = %d, want the return counted as one", rounds)
+			}
+		})
+	}
+}
+
 // A red only a required workflow makes, which the completion leaves to the pass's next read of the
 // runs (its result may be two minutes old), still sends the work back: that read, returning the
 // same runs, is a change once the completion cleared the head they were read at, and acts on it.

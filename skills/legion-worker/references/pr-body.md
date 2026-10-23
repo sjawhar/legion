@@ -69,7 +69,8 @@ named, until `max_fix_attempts` is spent, when the architect decides. The one CI
 failed on its own, it re-runs the failed jobs once (`gh run rerun <run-id> --failed`) and completes once
 the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Waiting for
 CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completion while that red
-still stands is sent straight back.
+still stands is sent back, at once for a required check and at the daemon's next read of the runs
+(within two minutes) for a required workflow.
 
 ## The brief for the human
 

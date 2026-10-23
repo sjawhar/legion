@@ -172,14 +172,16 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	// and in awaiting_merge the rule does not act (standingRed). In reviewing the push can otherwise
 	// be what lets an approval of an earlier head stand, or what shows the current head carries code
 	// the approved one does not, so the round is settled again; the round's re-ask is reviewing's
-	// alone. Only a red this push made stand is acted on: a push that has not yet moved the head (its
-	// synchronize still on its way) leaves the record judging the head before it, whose red may be
-	// the one the push fixed, and whatever made that red stand already applied the rule.
+	// alone. A push for a head that has not arrived yet (its synchronize still on its way) leaves the
+	// record judging the head before it, whose red may be the one the push fixed: it acts only on a
+	// red it made stand, the carry it completed. A push naming the recorded head can change what the
+	// rule decides there (its planned-red mark, a fix attempt it takes back) and can be the first
+	// fact outside implementing to see a red that stood while implementing, so it applies the rule.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if classify.RedSendsBack(*pr) && !classify.RedSendsBack(prior) {
+	if fact.After == prior.HeadSHA || !classify.RedSendsBack(prior) {
 		if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
 			return intake.Result{}, err
 		}
