@@ -85,8 +85,18 @@ func rateLimitedRefusal(every time.Duration) *oauth.Refusal {
 // provider checks the proof's htu against the URL it rebuilds from the request's scheme, Host and
 // X-Forwarded-Proto, so the request it is handed carries BROKER_PUBLIC_URL's scheme and host and
 // no forwarding headers: the proof names PublicURL + /v1/oauth/token, as every other broker proof
-// names PublicURL + its path, whatever the hop in front of the broker sends.
+// names PublicURL + its path, whatever the hop in front of the broker sends. It first spends its
+// source address's token bucket (DefaultTokenLimit), a refusal being 429 invalid_request
+// RATE_LIMITED with Retry-After, as the device authorization endpoint's is.
 func (s *server) oauthToken(w http.ResponseWriter, r *http.Request) {
+	if !s.tokenAllows(r) {
+		oauth.WriteRefusal(w, &oauth.Refusal{
+			Status: http.StatusTooManyRequests, Code: "RATE_LIMITED",
+			Message:    "too many token requests; try again later",
+			RetryAfter: retryAfterSeconds(s.tokenLimiter.Every()),
+		})
+		return
+	}
 	s.deps.OAuth.Token(w, s.atPublicURL(r), s.deps.TokenHooks)
 }
 

@@ -56,6 +56,8 @@ type Deps struct {
 	// RereadOverallLimit bounds that route across every caller at once; nil means
 	// DefaultRereadOverallLimit.
 	RereadOverallLimit *ratelimit.Limit
+	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
+	TokenLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
 	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
@@ -81,6 +83,8 @@ type server struct {
 	// neither.
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
+	// tokenLimiter is TokenLimit applied per source address (clientAddress).
+	tokenLimiter *ratelimit.Keyed
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -99,11 +103,16 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.RereadOverallLimit != nil {
 		rereadOverall = *deps.RereadOverallLimit
 	}
+	token := DefaultTokenLimit
+	if deps.TokenLimit != nil {
+		token = *deps.TokenLimit
+	}
 	s := &server{
 		deps:            deps,
 		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
 		rereadLimiter:   ratelimit.NewKeyed(reread),
 		rereadOverall:   ratelimit.NewBucket(rereadOverall),
+		tokenLimiter:    ratelimit.NewKeyed(token),
 	}
 	for _, route := range routes() {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {

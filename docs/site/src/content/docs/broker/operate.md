@@ -199,8 +199,11 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   too, whose DPoP proofs name `BROKER_PUBLIC_URL/v1/oauth/token`.
 - The UI token is an approval credential: whoever holds it can approve as anyone. Give it to
   Dispatch's server and nothing else, and never to an agent.
-- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login and secret-reread
-  rate limiters see each caller's address rather than the proxy's.
+- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint
+  and secret-reread rate limiters see each caller's address rather than the proxy's. The token
+  endpoint (`POST /v1/oauth/token`) has its own per-address bucket, a burst of 60 refilled at two a
+  second, far above a machine's poll every five seconds and refresh about once a day; a refused
+  request is `429` `invalid_request` (`RATE_LIMITED: …`) with `Retry-After`.
 - The settings and reread routes take no credential. `GET /v1/settings` answers the store, the
   namespace prefix and, per store, the agent-secrets key's ARN with its AWS account and region, or
   the Cloud KMS key's name with the project number.

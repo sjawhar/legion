@@ -37,6 +37,12 @@ var DefaultLauncherLimits = LauncherLimits{
 	PerLogin:   ratelimit.Limit{Every: time.Minute, Burst: 5},
 }
 
+// DefaultTokenLimit bounds POST /v1/oauth/token per source address, in a bucket of its own: a
+// burst of 60 and two a second. A machine polls its device code every five seconds while its
+// person decides and refreshes about once a day, so even many machines behind one address
+// never meet it; a flood from one address is refused before the provider does any work.
+var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
+
 // DefaultRereadLimit bounds POST /v1/secrets/{name}/reread per source address: a person's write
 // burst passes; a flood cannot make the broker hammer DescribeSecret.
 var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
@@ -138,6 +144,12 @@ func (l *launcherLimiter) refuseAccount(w http.ResponseWriter, subject string) b
 // addressAllows spends one request of r's source address's bucket, reporting whether it had one.
 func (l *launcherLimiter) addressAllows(r *http.Request) bool {
 	return l.perAddress.AllowAt(clientAddress(r, l.trustedProxyHeader), time.Now())
+}
+
+// tokenAllows spends one request of r's source address's token-endpoint bucket, reporting
+// whether it had one.
+func (s *server) tokenAllows(r *http.Request) bool {
+	return s.tokenLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), time.Now())
 }
 
 // refuseReread writes 429 RATE_LIMITED and reports true when r's source address, or the broker as

@@ -159,3 +159,41 @@ func TestTheTokenRouteIsTheProvidersTokenEndpoint(t *testing.T) {
 		t.Fatalf("token with an unknown device code = %d %v, want a 400 OAuth error", status, body)
 	}
 }
+
+// tokenForm is a device code grant for a code no login issued, which the provider answers 400.
+var tokenForm = url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "device_code": {"no-such-code"}, "client_id": {oauthwire.ClientID}}
+
+// TestATokenRequestSpendsItsAddressesTokenBucket: POST /v1/oauth/token spends its source
+// address's own bucket before the provider does any work, and a refused request is OAuth's JSON,
+// 429 invalid_request RATE_LIMITED with Retry-After.
+func TestATokenRequestSpendsItsAddressesTokenBucket(t *testing.T) {
+	adjust := withOAuth(t, func(context.Context, url.Values, string) error { return nil })
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		adjust(d)
+		d.TokenLimit = &ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1}
+	})
+	if status, _, body := postForm(t, ts.URL+"/v1/oauth/token", tokenForm); status != http.StatusBadRequest {
+		t.Fatalf("first token request = %d %v, want the provider's 400", status, body)
+	}
+	status, header, body := postForm(t, ts.URL+"/v1/oauth/token", tokenForm)
+	desc, _ := body["error_description"].(string)
+	if status != http.StatusTooManyRequests || header.Get("Retry-After") != "2" || body["error"] != "invalid_request" || !strings.HasPrefix(desc, "RATE_LIMITED: ") {
+		t.Fatalf("second token request = %d Retry-After=%q %v, want 429 invalid_request RATE_LIMITED with Retry-After 2", status, header.Get("Retry-After"), body)
+	}
+}
+
+// TestTheDefaultTokenBucketIsNotTheLoginBucket: the token endpoint's default bucket is its own and
+// more generous than the login one, so a burst of token requests from one address (machines
+// behind one gateway polling and refreshing) is served where the login bucket would refuse, and
+// spends nothing of the login bucket.
+func TestTheDefaultTokenBucketIsNotTheLoginBucket(t *testing.T) {
+	ts := newTestServerWith(t, withOAuth(t, func(context.Context, url.Values, string) error { return nil }))
+	for i := range 25 {
+		if status, _, body := postForm(t, ts.URL+"/v1/oauth/token", tokenForm); status != http.StatusBadRequest {
+			t.Fatalf("token request %d = %d %v, want the provider's 400", i+1, status, body)
+		}
+	}
+	if status, _, body := postForm(t, ts.URL+"/v1/oauth/device_authorization", signedDeviceForm(t, ts)); status != http.StatusOK {
+		t.Fatalf("device authorization after the token requests = %d %v, want 200", status, body)
+	}
+}
