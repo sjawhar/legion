@@ -885,9 +885,9 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 }
 
-// Each Deployment runs one replica, so a scale-down eviction takes Dispatch off the tailnet until
-// the replacement is ready: every Deployment the component registers, now the app, the front door
-// and the listener, keeps the cluster autoscaler from evicting its pod.
+// Without the annotation the cluster autoscaler evicts a pod whenever it consolidates its node,
+// and the one-replica front door takes Dispatch off the tailnet until the replacement is ready:
+// every Deployment the component registers, now the app, the front door and the listener, carries it.
 func TestDispatchPodsAreNotEvictedForScaleDown(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)

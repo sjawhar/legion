@@ -90,13 +90,15 @@ func outputString(value any) (string, error) {
 	return "", fmt.Errorf("resolved to a %T, not a string", value)
 }
 
-// notEvictedForScaleDown is the pod annotation that keeps the cluster autoscaler from evicting a
-// pod to scale its node down. All three Dispatch Deployments (the app, <hostname>-tailnet and
-// <hostname>-listener) carry it set to "false": each runs one replica, so without it the
-// autoscaler evicts the front door whenever it consolidates a node, and Dispatch drops off the
-// tailnet until the replacement pod is ready. Autopilot holds a pod with this annotation to at
-// least 500m CPU and 512Mi memory, so no pod here requests less.
-const notEvictedForScaleDown = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+// safeToEvictAnnotation, set to "false" on the pod templates of all three Dispatch Deployments
+// (the app, <hostname>-tailnet and <hostname>-listener), keeps the cluster autoscaler from
+// evicting their pods to scale a node down. Without it the autoscaler evicts the one-replica front
+// door whenever it consolidates a node, and Dispatch drops off the tailnet until the replacement
+// pod is ready. Autopilot honours it as extended-duration protection: for up to seven days, from
+// scale-down and node auto-upgrade only (node repair, maintenance and drains still evict), on a
+// node of the pod's own whenever possible, and with each pod raised to at least 500m CPU and 512Mi
+// memory, so no pod here requests less.
+const safeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 
 func resources(cpu, memory string) *corev1.ResourceRequirementsArgs {
 	values := pulumi.StringMap{"cpu": pulumi.String(cpu), "memory": pulumi.String(memory)}
@@ -324,7 +326,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 				Template: corev1.PodTemplateSpecArgs{
 					Metadata: &metav1.ObjectMetaArgs{
 						Labels:      pulumi.StringMap{"app": pulumi.String(name)},
-						Annotations: pulumi.StringMap{notEvictedForScaleDown: pulumi.String("false")},
+						Annotations: pulumi.StringMap{safeToEvictAnnotation: pulumi.String("false")},
 					},
 					Spec: pod,
 				},
