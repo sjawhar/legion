@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-83",
+  "completed": "2026-10-23T09:05:00Z",
+  "proof": [
+    {
+      "criterion": "READY is accepted at a head whose required check failed, and nothing reads the head's checks",
+      "surface": "The daemon's READY completion. Twice: as a real process against a real Postgres with real migrations in this pull request's `test` job (the only production-like harness that reaches the HTTP route; no Legion pod has Docker, Postgres or root), and, from the issue pod, `api.readyChecks` itself against an httptest GitHub stand-in that records every path it is asked for.",
+      "command": "CI: `gh run view 39923720122 --repo sjawhar/legion --job 120315442677` (Tests run 39923720122, job `test`), which runs `go test ./...` in packages/daemon with LEGION_TEST_PG_DSN set against the job's Postgres service. Pod: a throwaway `TestSmokeINFRA83ReadyReadsNoCheckOfTheHead` in packages/daemon/internal/api, run with `go -C packages/daemon test ./internal/api -run TestSmokeINFRA83 -v`, then deleted.",
+      "observed": "CI: `ok github.com/sjawhar/legion/daemon/internal/api 101.837s`, which is TestHandoffCompleteReadyAcceptsAHeadWithoutReadingItsChecks (a required check that failed, a required status that failed, no result for either, one still running) and TestHandoffCompleteReadyRefusesTheSameWhateverTheBaseRequires (three base configurations x three heads) run against the real route. Pod: READY was published with no note at a head whose required check ended `failure` and whose required status ended `failure`, and the stand-in was asked for exactly `pulls/42`, `compare/<head>...<head>` and `contents/.legion/LEGION-208` - no `/check-runs`, no `/status`, no `rules/branches/main`.",
+      "headSha": "a4d99c506c443141fa78854a42a8a7eb8a3a1062",
+      "negativeControl": "The same stand-in does answer `/commits/<head>/check-runs` with conclusion \"failure\" when asked, so the served-path assertion is not vacuous; and READY still refuses what is Legion's own to refuse - the same packet at a head carrying `.legion/LEGION-208/` was refused READY_HEAD_CARRIES_HANDOFFS."
+    },
+    {
+      "criterion": "No agent is instructed to write or read a check result for a later step",
+      "surface": "The artifacts a worker actually receives: the composed role prompts the daemon binary serves, and the staged Claude Code skill bundle under packages/claude-envoy.",
+      "command": "`go -C packages/daemon test -count=1 ./internal/prompts/...`; `cd packages/claude-envoy && bun run build && bun run check-dist`; and the tree sweep `grep -rnE \"READY_CHECKS_NOT_GREEN|no check is required|refused at READY|refuses a head|READY'?s checks|the set the merger\" . -I` minus node_modules, docs/plans, docs/solutions, CHANGELOG.md and the generated bundle.",
+      "observed": "`ok github.com/sjawhar/legion/daemon/internal/prompts` (TestNoComposedPromptSaysLegionRefusesAMergeOverACheck covers the five phase workers and the architect in both shapes); `dist/ and legion/ match a fresh build`; the sweep leaves eight hits, every one either Legion's own rule about its own work (READY's handoffs and approved-head refusals in merge-gate.md:12 and legion-retro/SKILL.md:32), the name of the surviving `readyChecks` function in three Go doc comments and one TypeScript test comment, the retired-phrase list itself, or an unrelated false positive (envoy/infra's `refuses a header line`).",
+      "headSha": "a4d99c506c443141fa78854a42a8a7eb8a3a1062",
+      "negativeControl": "Appending ``- `READY_CHECKS_NOT_GREEN`: a check the base branch requires`` back into packages/daemon/internal/prompts/go/merger.md made the test fail: `prompts_test.go:235: the composed merger prompt (root false) still says \"READY_CHECKS_NOT_GREEN\"`. The line was removed again and the test passes."
+    },
+    {
+      "criterion": "A failing required check on an accepted READY head still sends the issue back to its implementer and withdraws the submitted merge",
+      "surface": "The workflow engine against a real Postgres with real migrations, in this pull request's `test` job.",
+      "command": "`gh run view 39923720122 --repo sjawhar/legion --job 120315442677`; locally `go -C packages/daemon test ./internal/workflow -run 'ChecksRed|Disarm|Ready'` with LEGION_TEST_PG_DSN set.",
+      "observed": "`ok github.com/sjawhar/legion/daemon/internal/workflow 225.326s` at this head, with TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing and the disarm tests unchanged by this branch: the scheduling the change keeps is still live.",
+      "headSha": "a4d99c506c443141fa78854a42a8a7eb8a3a1062",
+      "negativeControl": "TestARedTheBaseBranchDoesNotRequireSendsNothingBack (packages/daemon/internal/workflow/required_checks_test.go:205), in the same green package: a red the base branch does not require sends nothing back, so the suite distinguishes the two."
+    },
+    {
+      "criterion": "Every list read that decides something asks for all of its pages",
+      "surface": "`gh` against GitHub, run from this issue's pod with the implement App's credential, on sjawhar/legion#2085 (80 reviews, 35 review threads).",
+      "command": "`gh api repos/sjawhar/legion/pulls/2085/reviews --jq length`; `gh api --paginate repos/sjawhar/legion/pulls/2085/reviews --jq length`; and the GraphQL shape this change writes into skills/legion-worker/references/review-threads.md and packages/daemon/internal/prompts/roles/reviewer.md, run at `first:2` so the paging is forced, counting distinct thread ids.",
+      "observed": "30 reviews without `--paginate`, 80 with it; 35 distinct review-thread ids with `--paginate` and the `$endCursor`/`pageInfo{hasNextPage endCursor}` form (18 pages at `first:2`). `--slurp` on that same query returns one array of 18 page objects holding 35 nodes, which is what the two documents now tell the reader to add when one document is wanted.",
+      "headSha": "a4d99c506c443141fa78854a42a8a7eb8a3a1062",
+      "negativeControl": "The same two reads without the paging: `--jq length` alone returns 30 of the 80 reviews, and the same GraphQL query with `--paginate` but without `$endCursor` and `pageInfo` returns 2 of the 35 threads - gh follows a GraphQL query only in the declared form."
+    },
+    {
+      "criterion": "A merge Legion submitted and GitHub has not completed within an hour tells the architect once",
+      "surface": "The outbox runner against a real Postgres with real migrations, in this pull request's `test` job.",
+      "command": "`gh run view 39923720122 --repo sjawhar/legion --job 120315442677`; locally `go -C packages/daemon test ./internal/daemon -run ReadyMerge` with LEGION_TEST_PG_DSN set.",
+      "observed": "`ok github.com/sjawhar/legion/daemon/internal/daemon 438.485s` at this head, and again under the race detector (`ok ... 317.328s`). TestAREADYMergeGitHubLeavesWaitingTellsTheArchitectOnce holds a ready_merge row on a head GitHub reports BLOCKED, advances the fake clock past mergeWaitWarn, and asserts exactly one architect-addressed merge-waiting notice naming #42, ready-head and awaiting_merge, the ready_merge row still present and still waiting on GitHub's BLOCKED answer with its payload now `warned`, and LEGION-208 still in awaiting_merge.",
+      "headSha": "a4d99c506c443141fa78854a42a8a7eb8a3a1062",
+      "negativeControl": "The same row in the same test before the hour: the first run, on the unadvanced clock, asserts zero merge-waiting notices; and a third run an hour after the notice asserts still exactly one. A warning on every run, or none, fails one of the two."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/api/ready.go, handoff.go: readyChecks drops its judging tail, the headCheckResults function, the repository parameter and the classify/ghrepo/requiredchecks imports; READY_CHECKS_NOT_GREEN is gone from the route's refusal list and the completion note's documented cases.",
+    "packages/daemon/internal/api/handoff_test.go, state_golden_test.go, real_github_ready_test.go and packages/contracts/fixtures/daemon-api/handoff-complete.json: the accept-without-reading test (renamed, four rows, asserting the stand-in served neither check route), the base-requires-what test (three bases x three heads), the deleted check tests, and the regenerated golden.",
+    "packages/daemon/internal/daemon/auto_merge.go, record/outbox.go and auto_merge_test.go: mergeWaitWarn, ReadyMerge.Warned, the merge-waiting notice kind, rememberWait (one payload write and the notice in one lease-scoped transaction) and its test.",
+    "packages/daemon/internal/prompts/: merger.md, reviewer.md (go and roles), implementer.md, core/tester.md, worker-common.md, architect-common.md, and prompts_test.go's retired-phrase test with the shared composedText helper.",
+    "skills/: legion-worker/SKILL.md and its references pr-body.md (the CI line deleted from the template), merge-gate.md, review-threads.md, conflicts-and-rewrites.md; legion-architect/SKILL.md (the merge-waiting row, the paginated reviews read); legion-retro/SKILL.md; and the regenerated packages/claude-envoy bundle.",
+    "Documentation: AGENTS.md, packages/pi-legion/AGENTS.md, docs/site/src/content/docs/how-it-fits.md and docs/site/src/content/docs/legion/{concepts,troubleshooting,using-legion,walkthrough,running-legion}.md, scripts/e2e/README.md, packages/contracts/src/legion-api.ts, the two CHANGELOGs, and the Go doc comments in classify/{required,decisions}.go, requiredchecks, workflow/review.go and api/version.go."
+  ],
+  "trickyParts": [
+    "The warning and the arm share one payload write. rememberWait replaces readyMerge's rememberArm: both wait paths go through it, it writes the payload at most once per run, and the merge-waiting notice is enqueued inside that same pgx.BeginFunc under the row's lease, so a row can never be recorded as warned without its notice nor the reverse. A reopen's requeue of the same issue and head clears the payload, so the replacement writes nothing and the notice rolls back with it.",
+    "A cause permanentRefusal reports never warns: that row ends and finishRefused already tells the architect (merge-refused, merge-stalled, merge-removed). Without that guard the architect would get two notices for one ending row.",
+    "The hour runs from outbox.created_at, the queue at READY's acceptance, because nothing in the daemon records when GitHub was first asked; created_at survives every retry, the arm-remembering write and a reopen's upsert.",
+    "READY's conflict refusal kept its place in the order but lost its old reason (it was refused before the checks were read so a missing check would not be reported as the cause); the reason that survives is that GitHub computes no merge ref for a conflicting head, runs no pull_request workflow on it and will not merge it.",
+    "gh api graphql --paginate follows a query only when it declares $endCursor and selects pageInfo{hasNextPage endCursor}; the same query without them returns one page and looks complete. The one shape is written verbatim into both documents that carry it."
+  ],
+  "deviations": [
+    "The plan's task A said to remove the stand-in's checkRuns/statuses fields once no test sets them. They stay, with their routes, so that a renewed read of them is both observable (the recorded served paths) and consequential (they report a failure). The workflowRuns field, the actions/runs route and the base repository id are gone.",
+    "TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets became TestHandoffCompleteReadyRefusesTheSameWhateverTheBaseRequires: rather than keeping only the surviving assertions, it inverts the old test's subject - a base requiring a check, a base requiring none and a rulesets read that would answer 500 all give the same three outcomes - which also proves READY makes no rulesets read at all.",
+    "The sweep found four texts the plan's known list did not name: packages/daemon/internal/prompts/go/architect-common.md (three phrases), packages/daemon/internal/workflow/review.go's standingRed and decideChecks comments, packages/daemon/internal/workflow/checks_red_test.go (two comments), packages/daemon/internal/classify/decisions_export_test.go and scripts/e2e/README.md. All are fixed.",
+    "This pull request's own body carries no CI line, since deleting that line from the template is one of the change's five deliverables. The body says so, and the head's checks are on the Checks tab.",
+    "The simplify pass applied five findings (one dangling doc reference, the dead requiredchecks.WorkflowRun.Standing, one shared composed-prompt reader, and three stale comments) and skipped one: folding readyMerge's armed arm into its general error arm would reorder the switch's errors.As tests on the merge path, and behaviour preservation could not be established cheaply."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "No Legion pod can run the daemon's real-process harness: there is no Docker, no Postgres and no root (id -u is 1000, apt-get cannot install postgresql), and every test that drives the HTTP route or the outbox skips without LEGION_TEST_PG_DSN. The architect accepted CI's test job at the pull request's head as the production-like surface for the three daemon criteria (its A2), and this phase added a pod-side direct-call smoke of readyChecks beside it rather than resting on the CI run alone.",
+    "No merge under the new code has been observed and none can be before this pull request merges: it is the first one that would run it. The live evidence is the production check after the close.",
+    "packages/claude-envoy's `bun test` has one failure in this pod that no part of this change touches: 'queryTmux is bounded even by a tmux that ignores SIGTERM' asserts a 3,000 ms bound on a stub tmux that traps TERM and took 5,124 ms here; there is no tmux in the pod and the test spawns its own stub. `bun run check-dist` and the rest of that suite pass."
+  ]
+}
