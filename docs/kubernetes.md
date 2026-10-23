@@ -379,8 +379,13 @@ FROM ghcr.io/sjawhar/legion-worker@sha256:…
 and pins `runtime.kubernetes.image` to *that* image's digest. The runtime sets every container's `PATH`
 itself (the image's `PATH` with its own directories in front), so an `ENV PATH` in the derived image never
 reaches a pod: put the added commands in `/usr/local/bin` or `/usr/bin`, and outside `HOME`, where a
-pod's volumes would shadow them. What the deployment adds churns on its own schedule, not Legion's
-release schedule, and the deployment's repo owns its reproducibility.
+pod's volumes would shadow them. Oh My Pi's Python tool also starts its kernel with an allowlisted
+environment (`PATH`, `HOME`, `USER`, `TMPDIR`, the `LC_`, `XDG_` and `PI_` prefixes and a few more), so
+any other `ENV` of the derived image (a toolchain home such as `ELAN_HOME`, a cache directory) is missing
+there and in everything it spawns, while the bash tool keeps it: when a command needs such a variable,
+install it as a wrapper in `/usr/local/bin` that sets the variable when it is unset. What the deployment
+adds churns on its own schedule, not Legion's release schedule, and the deployment's repo owns its
+reproducibility.
 
 ### Entrypoint
 
