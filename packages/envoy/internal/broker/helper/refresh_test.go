@@ -145,32 +145,48 @@ func TestARefreshThatDoesNotReachTheBrokerKeepsTheLogin(t *testing.T) {
 }
 
 // TestAnUnlearnedRefreshIsRetriedAtTheFixedIntervalInsideTheGrace: after a refresh whose outcome
-// the helper did not learn, the loop retries at the fixed retry interval until the first attempt's
-// start plus the broker's rotation grace has passed, so a lost answer is redeemed inside the grace
-// however long the outage; only then does it back off, from refreshBackoff (shortened here from a
-// minute and an hour's cap, the grace from five minutes).
+// the helper did not learn, the schedule waits the fixed retry interval until the first attempt's
+// start plus the broker's five-minute rotation grace has passed, so a lost answer is redeemed
+// inside the grace however long the outage (doubling from 15 s would land past it after about
+// 225 s); the first wait past the grace is the backoff's start, a minute, doubling to an hour. A
+// learned outcome ends the run, so the next failure starts a fresh grace. The clock is the test's.
 func TestAnUnlearnedRefreshIsRetriedAtTheFixedIntervalInsideTheGrace(t *testing.T) {
-	f := newFakeBroker(t)
-	b := loggedInBroker(t, f, "ada@example.com")
-	f.mu.Lock()
-	f.refreshOutcome = "unavailable"
-	f.mu.Unlock()
-	count := func() int { f.mu.Lock(); defer f.mu.Unlock(); return f.refreshes }
-	b.refreshEvery, b.refreshRetry, b.refreshGrace, b.refreshBackoff = time.Hour, 20*time.Millisecond, 600*time.Millisecond, time.Hour
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	start := time.Now()
-	go b.refreshLoop(ctx, 0, time.Time{})
-	// Doubling from 20 ms would make about five attempts inside 600 ms; the fixed interval many more.
-	time.Sleep(500 * time.Millisecond)
-	if n := count(); n < 12 {
-		t.Fatalf("%d refreshes in the first 500 ms of a 600 ms grace at a 20 ms retry; want a retry every 20 ms", n)
+	unknown := errors.New("dial tcp: connection refused")
+	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	s := unlearnedRetry{retry: defaultRefreshRetry, grace: defaultRefreshGrace, backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
+	// Each attempt takes 5 s to fail, then waits the schedule's answer.
+	now := start
+	for now.Before(start.Add(defaultRefreshGrace)) {
+		failed := now.Add(5 * time.Second)
+		if failed.After(start.Add(defaultRefreshGrace)) {
+			break
+		}
+		if wait := s.next(now, failed, unknown); wait != defaultRefreshRetry {
+			t.Fatalf("wait after an attempt %s into the grace = %s; want the fixed %s", now.Sub(start), wait, defaultRefreshRetry)
+		}
+		now = failed.Add(defaultRefreshRetry)
 	}
-	waitFor(t, func() bool { return time.Since(start) > 900*time.Millisecond })
-	settled := count()
-	time.Sleep(400 * time.Millisecond)
-	if n := count(); n != settled {
-		t.Fatalf("%d refreshes after the grace passed, within 400 ms of a backoff of an hour; want none", n-settled)
+	past := start.Add(defaultRefreshGrace + time.Second)
+	for i, want := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute} {
+		if wait := s.next(past, past, unknown); wait != want {
+			t.Fatalf("wait %d past the grace = %s; want %s", i+1, wait, want)
+		}
+	}
+	for range 10 {
+		s.next(past, past, unknown)
+	}
+	if wait := s.next(past, past, unknown); wait != maxRefreshRetry {
+		t.Fatalf("wait long past the grace = %s; want the cap %s", wait, maxRefreshRetry)
+	}
+	s.reset()
+	later := past.Add(time.Hour)
+	if wait := s.next(later, later.Add(time.Second), unknown); wait != defaultRefreshRetry {
+		t.Fatalf("wait after a fresh failure following a learned outcome = %s; want the fixed %s", wait, defaultRefreshRetry)
+	}
+	// A run Start began carries its start: a loop attempt past that grace backs off at once.
+	carried := unlearnedRetry{retry: defaultRefreshRetry, grace: defaultRefreshGrace, backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff, since: start}
+	if wait := carried.next(past, past, unknown); wait != time.Minute {
+		t.Fatalf("wait past the grace of a run Start began = %s; want a minute", wait)
 	}
 }
 

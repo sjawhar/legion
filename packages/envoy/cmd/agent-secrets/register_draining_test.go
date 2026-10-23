@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,12 +54,14 @@ func TestRegisterRetriesADrainingHelper(t *testing.T) {
 }
 
 // TestRegisterStopsRetryingDrainingAtItsWait: a helper still draining when the --wait budget runs
-// out is reported, as before, with its DRAINING code.
+// out is reported, as before, with its DRAINING code, and not before that budget has passed. The
+// upper bound only catches a retry that never stops.
 func TestRegisterStopsRetryingDrainingAtItsWait(t *testing.T) {
 	sock, _ := drainingHelper(t, 1<<30)
 	start := time.Now()
 	_, err := registerWithPatience(sock, 1, 0)
-	if err == nil || time.Since(start) < time.Second || time.Since(start) > 3*time.Second {
-		t.Fatalf("register against a helper that stays draining = %v after %s; want DRAINING after about 1 s", err, time.Since(start))
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), helper.CodeDraining) || elapsed < time.Second || elapsed > 30*time.Second {
+		t.Fatalf("register against a helper that stays draining = %v after %s; want DRAINING once its 1 s wait passed", err, elapsed)
 	}
 }

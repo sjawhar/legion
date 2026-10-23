@@ -145,11 +145,10 @@ type Broker struct {
 	// has moved it; zero means a day. Only tests shorten it.
 	expiryWarning time.Duration
 	// refreshEvery is the longest the refresh loop waits after a refresh that reached the broker
-	// or a login's install (nextRefresh); refreshRetry its fixed wait after one whose outcome it did
-	// not learn while inside refreshGrace of the first such attempt; refreshBackoff its first wait
-	// once that grace has passed (doubling to an hour). Zero means a day, 15 s, five minutes and a
-	// minute. Only tests shorten them.
-	refreshEvery, refreshRetry, refreshGrace, refreshBackoff time.Duration
+	// or a login's install (nextRefresh), and refreshRetry its fixed wait after one whose outcome it
+	// did not learn, inside the grace (unlearnedRetry); zero means a day and 15 s. Only tests
+	// shorten them.
+	refreshEvery, refreshRetry time.Duration
 	// startRefreshBound is how long Start waits on its refresh of the kept login; zero means
 	// defaultStartRefreshBound. Only tests shorten it.
 	startRefreshBound time.Duration
@@ -604,20 +603,6 @@ func (b *Broker) refreshRetryOrDefault() time.Duration {
 	return b.refreshRetry
 }
 
-func (b *Broker) refreshGraceOrDefault() time.Duration {
-	if b.refreshGrace == 0 {
-		return defaultRefreshGrace
-	}
-	return b.refreshGrace
-}
-
-func (b *Broker) refreshBackoffOrDefault() time.Duration {
-	if b.refreshBackoff == 0 {
-		return defaultRefreshBackoff
-	}
-	return b.refreshBackoff
-}
-
 // nextRefresh is how long the refresh loop waits before refreshing the held credential: half the
 // time left until its expiry, at most every, so a credential the broker mints for less than two
 // days is still refreshed well before it lapses.
@@ -631,24 +616,25 @@ func (b *Broker) nextRefresh(every time.Duration) time.Duration {
 
 // refreshLoop refreshes the held machine login after first, then at nextRefresh after each
 // refresh that reached the broker and each install of a credential. A refresh whose outcome it did
-// not learn (the broker unreachable, a timeout, a 5xx) is retried at the fixed refreshRetry (15 s)
-// until the first such attempt's start plus refreshGrace (the broker's five-minute rotation grace)
-// has passed, so a lost answer's rotated token is redeemed while the broker still takes it however
-// long the outage inside the grace; after that the wait starts at refreshBackoff (a minute) and
-// doubles to an hour. No wait is sooner than a Retry-After the broker answered with (retryAfter).
+// not learn (the broker unreachable, a timeout, a 5xx) is retried on the unlearnedRetry schedule:
+// at the fixed refreshRetry (15 s) until the first such attempt's start plus the broker's
+// five-minute rotation grace has passed, so a lost answer's rotated token is redeemed while the
+// broker still takes it however long the outage inside the grace; after that the wait starts at a
+// minute and doubles to an hour. No wait is sooner than a Retry-After the broker answered with.
 // unlearned is when such a run began before the loop started (Start's own refresh), zero for none.
 // A credential a launcher call's refusal dropped is settled at once (settleRefused), and retried
 // the same way until it is. It ends with ctx.
 func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned time.Time) {
-	every, retry := b.refreshEveryOrDefault(), b.refreshRetryOrDefault()
-	grace, backoffStart := b.refreshGraceOrDefault(), b.refreshBackoffOrDefault()
+	every := b.refreshEveryOrDefault()
+	sched := unlearnedRetry{retry: b.refreshRetryOrDefault(), grace: defaultRefreshGrace,
+		backoffStart: defaultRefreshBackoff, since: unlearned}
+	sched.backoff = sched.backoffStart
 	sig := b.refreshSignals()
 	// An install before the loop started asked for a reschedule first already accounts for.
 	select {
 	case <-sig.reschedule:
 	default:
 	}
-	backoff := backoffStart
 	timer := time.NewTimer(first)
 	defer timer.Stop()
 	var settle *machineCredential
@@ -658,7 +644,7 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned
 			return
 		case <-sig.reschedule:
 			if settle == nil {
-				backoff, unlearned = backoffStart, time.Time{}
+				sched.reset()
 				timer.Reset(b.nextRefresh(every))
 			}
 			continue
@@ -685,20 +671,40 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned
 			err = b.refresh(ctx)
 		}
 		if err != nil {
-			if unlearned.IsZero() {
-				unlearned = attempt
-			}
-			if time.Now().Before(unlearned.Add(grace)) {
-				timer.Reset(max(retry, retryAfter(err)))
-				continue
-			}
-			timer.Reset(max(backoff, retryAfter(err)))
-			backoff = min(2*backoff, maxRefreshRetry)
+			timer.Reset(sched.next(attempt, time.Now(), err))
 			continue
 		}
-		backoff, unlearned = backoffStart, time.Time{}
+		sched.reset()
 		timer.Reset(b.nextRefresh(every))
 	}
+}
+
+// unlearnedRetry is the refresh loop's schedule after refreshes whose outcome it did not learn:
+// the fixed retry while inside grace of since, the first such attempt's start, then backoff from
+// backoffStart, doubling to maxRefreshRetry; no wait is sooner than the broker's Retry-After.
+type unlearnedRetry struct {
+	retry, grace, backoffStart time.Duration
+	since                      time.Time
+	backoff                    time.Duration
+}
+
+// next is the wait after an attempt that began at attempt and failed with err at now, which
+// starts a run at attempt when none is under way.
+func (u *unlearnedRetry) next(attempt, now time.Time, err error) time.Duration {
+	if u.since.IsZero() {
+		u.since = attempt
+	}
+	if now.Before(u.since.Add(u.grace)) {
+		return max(u.retry, retryAfter(err))
+	}
+	wait := max(u.backoff, retryAfter(err))
+	u.backoff = min(2*u.backoff, maxRefreshRetry)
+	return wait
+}
+
+// reset ends the run: a refresh reached the broker, or a credential was installed.
+func (u *unlearnedRetry) reset() {
+	u.since, u.backoff = time.Time{}, u.backoffStart
 }
 
 // redeem spends cred's refresh token for the rotated login: the machine file the broker's answer
