@@ -265,23 +265,6 @@ function renderAdvice(
   }
 
   if (
-    hasIssueAdvice &&
-    writesSinceHuman !== undefined &&
-    writesSinceHuman >= 3 &&
-    (tool === "dispatch_message" ||
-      tool === "dispatch_ask" ||
-      (tool === "dispatch_comment" && opts.isAskReply !== true))
-  ) {
-    const middle =
-      writesSinceHuman >= 6
-        ? "Stop posting here until a human replies."
-        : "Progress ledger or scratchpad? If so, stop.";
-    lines.push(
-      `You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
-    );
-  }
-
-  if (
     advice.issue_status === "triage" &&
     tool !== "dispatch_issue" &&
     !(tool === "dispatch_issue_update" && opts.setsStatus === true) &&
@@ -310,6 +293,25 @@ function renderAdvice(
         `You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`
       );
     }
+  }
+
+  // The cadence line comes last and opens by saying the write went through: behind `| tail -1`
+  // it is the only line an agent sees, and "Stop posting" alone reads as a refusal.
+  if (
+    hasIssueAdvice &&
+    writesSinceHuman !== undefined &&
+    writesSinceHuman >= 3 &&
+    (tool === "dispatch_message" ||
+      tool === "dispatch_ask" ||
+      (tool === "dispatch_comment" && opts.isAskReply !== true))
+  ) {
+    const middle =
+      writesSinceHuman >= 6
+        ? "Stop posting here until a human replies."
+        : "Progress ledger or scratchpad? If so, stop.";
+    lines.push(
+      `Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
+    );
   }
 
   return lines;
@@ -3201,8 +3203,9 @@ export async function executeDispatchTool(
             ? issueTopic(issue())
             : documentTopic(resolved.artifact);
       const adviceLines = [
-        ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
+        // Suggestions first: renderAdvice's cadence line must stay the result's last line.
         ...renderSuggestions(ask.advice?.suggestions, linkBase),
+        ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
       ];
       return {
         text: [
