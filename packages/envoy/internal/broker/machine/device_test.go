@@ -208,3 +208,28 @@ func TestTheTokenHooksRefuseOnlyAnEndedLogin(t *testing.T) {
 		}
 	})
 }
+
+// TestTheEarlierRoutesCredentialKeepsItsSevenDays: a credential minted from a record POST
+// /v1/launcher-credentials opened (no device code) cannot refresh, so it lives the earlier
+// route's seven days, or CredentialLifetime when that is shorter; a device login's lives
+// CredentialLifetime.
+func TestTheEarlierRoutesCredentialKeepsItsSevenDays(t *testing.T) {
+	for _, c := range []struct {
+		lifetime, want time.Duration
+	}{
+		{30 * 24 * time.Hour, 7 * 24 * time.Hour},
+		{24 * time.Hour, 24 * time.Hour},
+	} {
+		svc := newFixture(t)
+		withProvider(t, svc, 10*time.Minute)
+		svc.CredentialLifetime = c.lifetime
+		_, credentialID := approvedCredential(t, svc)
+		var left float64
+		if err := svc.Store.Pool.QueryRow(context.Background(), `select extract(epoch from expires_at - now())::float8 from launcher_credentials where id=$1`, credentialID).Scan(&left); err != nil {
+			t.Fatal(err)
+		}
+		if got := time.Duration(left) * time.Second; got < c.want-time.Minute || got > c.want {
+			t.Errorf("CredentialLifetime %s: the earlier route's credential lives %s, want %s", c.lifetime, got, c.want)
+		}
+	}
+}

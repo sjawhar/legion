@@ -175,7 +175,7 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 		return "", "", err
 	}
 	defer tx.Rollback(ctx)
-	recordID, err := s.insertRecord(ctx, tx, compactRequest, approver, code, now)
+	recordID, err := s.insertRecord(ctx, tx, compactRequest, approver, code, min(s.CredentialLifetime, EarlierRouteLifetime), now)
 	if err != nil {
 		return "", "", err
 	}
@@ -211,7 +211,7 @@ func (s *Service) LoginDevice(ctx context.Context, form url.Values, userCode str
 	if err != nil {
 		return err
 	}
-	_, err = s.insertRecord(ctx, tx, compact, approver, userCode, now)
+	_, err = s.insertRecord(ctx, tx, compact, approver, userCode, s.CredentialLifetime, now)
 	return err
 }
 
@@ -239,15 +239,20 @@ func (s *Service) verifyPersonLogin(ctx context.Context, compact string, now tim
 	return approver, err
 }
 
+// EarlierRouteLifetime bounds the credential an approval mints from a record Login opened (POST
+// /v1/launcher-credentials): a helper that logged in that way cannot refresh, so its credential
+// keeps the seven days it always had, or CredentialLifetime when that is shorter.
+const EarlierRouteLifetime = 7 * 24 * time.Hour
+
 // insertRecord writes a person's machine login record in tx: the request object, its approver,
-// the credential lifetime an approval mints, the policy version, code, and an expiry PendingTTL
-// after now. It answers the record's id.
-func (s *Service) insertRecord(ctx context.Context, tx pgx.Tx, compact, approver, code string, now time.Time) (string, error) {
+// lifetime (the credential lifetime an approval mints), the policy version, code, and an expiry
+// PendingTTL after now. It answers the record's id.
+func (s *Service) insertRecord(ctx context.Context, tx pgx.Tx, compact, approver, code string, lifetime time.Duration, now time.Time) (string, error) {
 	body := record.Body{
 		Request:         compact,
 		Approver:        approver,
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
-		LifetimeSeconds: new(int(s.CredentialLifetime.Seconds())),
+		LifetimeSeconds: new(int(lifetime.Seconds())),
 		RulesVersion:    s.Policy.Get().Version,
 		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
 		Code:            code,
@@ -272,8 +277,8 @@ func (s *Service) insertRecord(ctx context.Context, tx pgx.Tx, compact, approver
 // expires_at before the sweeper got to it — is ErrLoginExpired, both checked under the record's
 // row lock before anything is minted, so a second decision, one racing the first and one after
 // expiry all answer the same way. Approval mints the
-// credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
-// CredentialLifetime counted from the decision — in the same transaction that records the
+// credential — bound to the request object's own key (thumbprint and embedded JWK), with the lifetime
+// its record names (insertRecord) counted from the decision — in the same transaction that records the
 // decision, so a crash between the two never orphans a credential no decision names. A key that
 // already holds a live credential under another record is ErrKeyHoldsLiveCredential, and the
 // record stays pending.
