@@ -3229,9 +3229,15 @@ gh attestation verify oci://ghcr.io/sjawhar/legion/envoy@sha256:… --repo sjawh
 Add `--source-digest <the commit its tag names>` to pin the commit too. The certificate names the
 workflow whose job signed, so the `attest` job stays in `release-envoy-listener.yaml`; in a called
 workflow it would name that file and this command would refuse every image. Its subject is the
-index digest a deployment pins, not a per-platform manifest. It is separate from the BuildKit
-provenance the `docker` job attaches inside the index (`provenance: mode=min`), which a
-deployment reads to map a digest to its commit.
+`envoy:<commit sha>` index digest a deployment pins, not a per-platform manifest. `latest` has no
+attestation: `release_publish` writes it as a new index with its own revision annotation, so its
+digest differs from the `envoy:<sha>` index it points at. To pin from `latest`, read that
+annotation (`docker buildx imagetools inspect --raw ghcr.io/sjawhar/legion/envoy:latest | jq -r
+'.annotations["org.opencontainers.image.revision"]'`) and pin `envoy:<that sha>`'s digest.
+`release_publish` does not wait for `attest`; when `attest` alone fails, re-run the failed jobs,
+which signs the same digest `docker` handed over. The attestation is separate from the BuildKit
+provenance the `docker` job attaches inside the index (`provenance: mode=min`), which a deployment
+reads to map a digest to its commit.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux

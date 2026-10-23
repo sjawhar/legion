@@ -4,10 +4,12 @@
 
 ### Added
 
-- Each `ghcr.io/sjawhar/legion/envoy` image published from now on carries a GitHub artifact
-  attestation of its index digest, signed by `release-envoy-listener.yaml`, so `gh attestation
-  verify` with `--cert-identity …/release-envoy-listener.yaml@refs/heads/main --source-ref
-  refs/heads/main --deny-self-hosted-runners` accepts an image only when a run on `main` built it.
+- Each `ghcr.io/sjawhar/legion/envoy:<commit>` image published from now on carries a GitHub
+  artifact attestation of its index digest, signed by `release-envoy-listener.yaml`, so `gh
+  attestation verify --repo sjawhar/legion` with `--cert-identity
+  …/release-envoy-listener.yaml@refs/heads/main --source-ref refs/heads/main
+  --deny-self-hosted-runners` accepts an image only when a run on `main` built it. `latest` is a
+  separate index with no attestation; pin the `<commit>` image its revision annotation names.
 
 - The secrets broker serves a minted secret: a GCP secret with no version tagged
   `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists

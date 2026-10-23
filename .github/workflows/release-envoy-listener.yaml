@@ -41,13 +41,14 @@ on:
 # release_publish below); nothing runs under this workflow-level default, so it stays empty rather
 # than becoming an unreviewed grant to a job added later with no block of its own.
 #
-# The release is split into build jobs and a publish job. build, docker and release_build run the
-# module's code and every third-party module it links, so they hold no secret and no write scope
-# beyond docker's package push, and each ends in a tripwire (`release-push.sh no-credential`) that
-# fails when a credential is reachable from it anyway. release_publish holds the credentials and
-# runs no dependency code: only release-push.sh, git, gh, jq, sha256sum, `docker buildx imagetools`
-# and the pinned actions below, with no cache restored (`cache-mode: none`) and the deploy key in
-# the env of the one step that pushes the tag.
+# The release is split into build jobs and credentialed jobs. build, docker and release_build run
+# the module's code and every third-party module it links, so they hold no secret and no write
+# scope beyond docker's package push, and each ends in a tripwire (`release-push.sh
+# no-credential`) that fails when a credential is reachable from it anyway. attest and
+# release_publish hold the credentials and run no dependency code: attest runs one pinned action;
+# release_publish only release-push.sh, git, gh, jq, sha256sum, `docker buildx imagetools` and the
+# pinned actions below. Neither restores a cache (`cache-mode: none`), and the deploy key is in the
+# env of the one step that pushes the tag.
 permissions: {}
 
 env:
