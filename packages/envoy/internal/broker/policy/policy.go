@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
@@ -36,13 +37,18 @@ const (
 	TagOwner = "owner"
 	// TagTier is TierAgent or TierHuman.
 	TagTier = "tier"
-	// TagMint names the service account a value-less secret mints a one-hour Google access token
-	// for: a secret carrying it has no value of its own, and each release of it mints a token
-	// (MintSourcePrefix).
-	TagMint = "mint-service-account"
-	// MintSourcePrefix opens the Source of a minted secret: "gcp-token:" then its service
-	// account's email, so the request's frozen source and the Version both carry the target.
-	MintSourcePrefix = "gcp-token:"
+	// TagKind selects the token type a secret mints on release. An absent or empty tag leaves the
+	// secret's stored value unchanged.
+	TagKind = "kind"
+	// KindGitHubApp mints one installation token for every installation of the stored GitHub App.
+	KindGitHubApp = "github-app"
+	// KindGoogleLogin exchanges the stored authorized-user refresh token for an access token.
+	KindGoogleLogin = "google-login"
+	// TagMaxGrant bounds a request's signed grant lifetime for this secret.
+	TagMaxGrant = "max-grant"
+	// KindSourcePrefix opens the Source of a kind secret. The kind and store source are frozen
+	// into a request, so changing or clearing the kind ends every live grant.
+	KindSourcePrefix = "mint:"
 	// OwnerShared is the owner value of a secret nobody owns alone.
 	OwnerShared = "shared"
 	// TierAgent is a secret its owner's agents use without asking.
@@ -81,19 +87,24 @@ type Secret struct {
 	// an underscore (<prefix>deel-api-key is DEEL_API_KEY).
 	Name string
 	// Source is what the secret's value is read by: its ARN in Secrets Manager, or its resource
-	// name in Secret Manager; for a minted secret, MintSourcePrefix and its service account.
+	// name in Secret Manager. A kind source starts with KindSourcePrefix and freezes the kind
+	// beside its store source.
 	Source string
 	// Owner is OwnerShared, a person's email, or a registered service.
 	Owner string
 	// Tier is TierAgent or TierHuman.
 	Tier string
-	kind ownerKind
+	// Kind is empty for a stored secret, KindGitHubApp or KindGoogleLogin for a minted release.
+	Kind string
+	// MaxGrant, when set, is the greatest grant lifetime a request may sign for this secret.
+	MaxGrant  *time.Duration
+	ownership ownerKind
 }
 
 // approver is who decides an approval request for secret: anyone signed in to Dispatch for a
 // shared secret, its owner otherwise.
 func (secret Secret) approver() string {
-	if secret.kind == ownerShared {
+	if secret.ownership == ownerShared {
 		return record.AnyoneApprover
 	}
 	return secret.Owner
@@ -101,19 +112,20 @@ func (secret Secret) approver() string {
 
 // Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
-	// Version is the SHA-256 of every served secret's name, owner, tier and source: equal versions
-	// are equal policies. A request records the version it was decided under, so a live grant is
-	// re-evaluated only once the policy changed.
+	// Version is the SHA-256 of every served secret's name, owner, tier, source, kind and
+	// max-grant: equal versions are equal policies. A request records the version it was decided
+	// under, so a live grant is re-evaluated only once the policy changed.
 	Version string
 	Secrets map[string]Secret
 }
 
 // NewSet builds the one Set shape both Load and the single-name merges produce, keeping secrets
-// (keyed by Name) as its Secrets: Version is the SHA-256 over "<Name>\t<Owner>\t<Tier>\t<Source>\n"
-// per served secret, ascending by the secret's name in the store (the slug) — the exact order
-// and bytes Load wrote before NewSet existed, so deployed digests do not shift. (Sorting by the
-// uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so "a-b" < "a0" as slugs but
-// "A0" < "A_B" as Names.)
+// (keyed by Name) as its Secrets. Plain secrets keep the pre-kind digest bytes,
+// "<Name>\t<Owner>\t<Tier>\t<Source>\n"; a secret with Kind or MaxGrant adds those two
+// fields. Entries are ascending by the secret's name in the store (the slug) — the exact
+// order Load wrote before NewSet existed, so deployed plain-secret digests do not shift.
+// (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so
+// "a-b" < "a0" as slugs but "A0" < "A_B" as Names.)
 func NewSet(secrets map[string]Secret) *Set {
 	type bySlug struct {
 		slug   string
@@ -126,7 +138,15 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
+		if s.secret.Kind == "" && s.secret.MaxGrant == nil {
+			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
+			continue
+		}
+		maxGrant := ""
+		if s.secret.MaxGrant != nil {
+			maxGrant = s.secret.MaxGrant.String()
+		}
+		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.Kind, maxGrant)
 	}
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }
@@ -161,7 +181,7 @@ type Decision struct {
 // service's own session rests on BROKER_SERVICES' accounts, which are not in Version, so a caller
 // re-checks a grant of such a name on every use rather than only once Version moves.
 func (s *Set) ServiceOwned(name string) bool {
-	return s.Secrets[name].kind == ownerService
+	return s.Secrets[name].ownership == ownerService
 }
 
 // Evaluate answers r's ask for name. A name the set does not serve is ErrUnknownSecret. A name
@@ -176,12 +196,12 @@ func (s *Set) Evaluate(name string, r Requester) (Decision, error) {
 	withheld := slices.Contains(r.Withheld, name)
 	d := Decision{Source: secret.Source}
 	switch {
-	case secret.kind == ownerService:
+	case secret.ownership == ownerService:
 		d.Outcome = Deny
 		if r.Service == secret.Owner && !withheld {
 			d.Outcome = Automatic
 		}
-	case secret.Tier == TierAgent && !withheld && (secret.kind == ownerShared || record.CanonicalLogin(r.Operator) == secret.Owner):
+	case secret.Tier == TierAgent && !withheld && (secret.ownership == ownerShared || record.CanonicalLogin(r.Operator) == secret.Owner):
 		d.Outcome = Automatic
 	default:
 		d.Outcome, d.Approver = Approval, secret.approver()

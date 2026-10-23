@@ -463,6 +463,22 @@ func TestGoldenDigest(t *testing.T) {
 	}
 }
 
+func TestGoldenDigestWithKindAndMaxGrant(t *testing.T) {
+	store := goldenFixture()
+	kind := policytest.Secret("GOLDEN_KIND", "ada@example.com", policy.TierAgent, "v1")
+	kind.Tags[policy.TagKind] = policy.KindGoogleLogin
+	kind.Tags[policy.TagMaxGrant] = "1h"
+	store.Put(kind)
+	const want = "83eec292c0488a1506eb8644e77103865c469f1e25d0b8e247824174a53e9c47"
+	set, err := policytest.Loader(store).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Version != want {
+		t.Fatalf("Version = %s, want the kind golden %s", set.Version, want)
+	}
+}
+
 // TestMergedSetVersionEqualsAFullLoads pins the digest contract: building the same contents by a
 // full Load and by single-name merges gives byte-equal Versions — including names whose slug order
 // differs from their Name order ("A_B" vs "A0": '-' < '0' but '_' > '0').

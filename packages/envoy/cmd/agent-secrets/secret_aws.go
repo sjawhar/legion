@@ -25,13 +25,15 @@ import (
 )
 
 // secretsAPI is the Secrets Manager calls the secret forms make: ListSecrets and DescribeSecret to
-// read, and the five writes. *secretsmanager.Client and secrets.Local both satisfy it.
+// read, and writes for values, tags and deletion. *secretsmanager.Client and secrets.Local satisfy
+// it.
 type secretsAPI interface {
 	secretsmanager.ListSecretsAPIClient
 	DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
 	CreateSecret(ctx context.Context, in *secretsmanager.CreateSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
 	PutSecretValue(ctx context.Context, in *secretsmanager.PutSecretValueInput, o ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error)
 	TagResource(ctx context.Context, in *secretsmanager.TagResourceInput, o ...func(*secretsmanager.Options)) (*secretsmanager.TagResourceOutput, error)
+	UntagResource(ctx context.Context, in *secretsmanager.UntagResourceInput, o ...func(*secretsmanager.Options)) (*secretsmanager.UntagResourceOutput, error)
 	DeleteSecret(ctx context.Context, in *secretsmanager.DeleteSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error)
 	RestoreSecret(ctx context.Context, in *secretsmanager.RestoreSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.RestoreSecretOutput, error)
 }
@@ -173,6 +175,7 @@ func (b *awsBackend) list(ctx context.Context) ([]secretView, error) {
 			views = append(views, secretView{
 				Name: b.displayName(id), SecretName: id,
 				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
+				Kind: tags[policy.TagKind], MaxGrant: tags[policy.TagMaxGrant],
 				HasValue: secrets.HasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
 				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
@@ -191,6 +194,7 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	return secretView{
 		Name: b.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
 		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
+		Kind: tags[policy.TagKind], MaxGrant: tags[policy.TagMaxGrant],
 		HasValue: secrets.HasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
 		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
@@ -198,12 +202,19 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	}, nil
 }
 
-func (b *awsBackend) create(ctx context.Context, slug, owner, tier, value string) error {
+func (b *awsBackend) create(ctx context.Context, slug, owner, tier, kind, maxGrant, value string) error {
+	tags := ownerTierTags(owner, tier)
+	if kind != "" {
+		tags = append(tags, smtypes.Tag{Key: aws.String(policy.TagKind), Value: aws.String(kind)})
+	}
+	if maxGrant != "" {
+		tags = append(tags, smtypes.Tag{Key: aws.String(policy.TagMaxGrant), Value: aws.String(maxGrant)})
+	}
 	_, err := b.sm.CreateSecret(ctx, &secretsmanager.CreateSecretInput{
 		Name:         aws.String(b.id(slug)),
 		KmsKeyId:     aws.String(b.settings.KMSKeyARN),
 		SecretString: aws.String(value),
-		Tags:         ownerTierTags(owner, tier),
+		Tags:         tags,
 	})
 	return err
 }
@@ -224,10 +235,27 @@ func (b *awsBackend) currentTags(ctx context.Context, slug string) (owner, tier 
 	return tags[policy.TagOwner], tags[policy.TagTier], nil
 }
 
-func (b *awsBackend) retag(ctx context.Context, slug, owner, tier string) error {
+// retag writes the owner and tier tags and the kind and max-grant tags the command sets in one
+// TagResource, or removes the tags the command clears in one UntagResource. cmdSecretRetag never
+// asks for both in one command, so a denied call changes nothing: a retag is never left half
+// applied.
+func (b *awsBackend) retag(ctx context.Context, slug string, change retagChange) error {
+	if len(change.remove) > 0 {
+		_, err := b.sm.UntagResource(ctx, &secretsmanager.UntagResourceInput{
+			SecretId: aws.String(b.id(slug)),
+			TagKeys:  change.remove,
+		})
+		return err
+	}
+	tags := ownerTierTags(change.owner, change.tier)
+	for _, key := range []string{policy.TagKind, policy.TagMaxGrant} {
+		if value, ok := change.set[key]; ok {
+			tags = append(tags, smtypes.Tag{Key: aws.String(key), Value: aws.String(value)})
+		}
+	}
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(b.id(slug)),
-		Tags:     ownerTierTags(owner, tier),
+		Tags:     tags,
 	})
 	return err
 }

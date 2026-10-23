@@ -45,15 +45,15 @@ func init() {
 	// Register after variable initialization: the handlers use commands for help.
 	secretForms = []secretForm{
 		{command{"secret list", "agent-secrets secret list [--json] [--profile P]",
-			"List every agent secret under your own cloud sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."}, cmdSecretList},
+			"List every agent secret under your own cloud sign-in: its owner, tier, kind, max grant,\nwhether it has a value, and deletion details."}, cmdSecretList},
 		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
-			"Print the agent secret NAME's owner, tier, dates and versions, never its value."}, cmdSecretShow},
-		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--profile P]",
-			"Create the agent secret NAME under your own cloud sign-in, then ask the broker to serve it at\nonce. Its value is read from standard input, or typed at a prompt with echo off when standard\ninput is a terminal."}, cmdSecretCreate},
+			"Print an agent secret's owner, tier, kind, max grant, dates and versions. Never print its\nvalue."}, cmdSecretShow},
+		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--kind github-app|google-login|none] [--max-grant DURATION] [--profile P]",
+			"Create an agent secret under your own cloud sign-in. Then ask the broker to serve it. Read\nits value from standard input, or type it at a prompt with echo off."}, cmdSecretCreate},
 		{command{"secret set", "agent-secrets secret set NAME [--profile P]",
-			"Give the agent secret NAME a new value under your own cloud sign-in, then ask the broker to\nserve it at once. The value is read from standard input, or typed at a prompt with echo off\nwhen standard input is a terminal."}, cmdSecretSet},
-		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--profile P]",
-			"Change the agent secret NAME's owner, tier or both under your own cloud sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."}, cmdSecretRetag},
+			"Set a new agent-secret value under your own cloud sign-in. Then ask the broker to serve it.\nRead the value from standard input, or type it at a prompt with echo off."}, cmdSecretSet},
+		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--kind github-app|google-login|none] [--max-grant DURATION|none] [--profile P]",
+			"Change an agent secret's owner, tier, kind or max grant under your own cloud sign-in. Then\nask the broker to reread it. none removes a kind or max grant, in a retag of its own. An\nadministrator changes a shared secret's owner and tier."}, cmdSecretRetag},
 		{command{"secret delete", "agent-secrets secret delete NAME [--profile P]",
 			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own cloud\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
 		{command{"secret restore", "agent-secrets secret restore NAME [--profile P]",
@@ -158,7 +158,7 @@ func secretFail(stderr io.Writer, form string, err error) int {
 }
 
 // secretFlagValues are the secret forms' flags that take a value.
-var secretFlagValues = map[string]bool{"owner": true, "tier": true, "profile": true}
+var secretFlagValues = map[string]bool{"owner": true, "tier": true, "kind": true, "max-grant": true, "profile": true}
 
 // secretFlags is form's flag set with --profile, which every secret form takes but only the AWS
 // backend uses (GCP uses your Application Default Credentials instead; a non-empty --profile
@@ -194,6 +194,38 @@ func checkOwnerTier(owner, tier string) error {
 		return usageErr{errors.Join(errs...)}
 	}
 	return nil
+}
+
+const kindNone = "none"
+
+func checkKind(kind string) error {
+	switch kind {
+	case "", kindNone, policy.KindGitHubApp, policy.KindGoogleLogin:
+		return nil
+	default:
+		return usageErr{fmt.Errorf("--kind is %s, %s or %s, not %q", policy.KindGitHubApp, policy.KindGoogleLogin, kindNone, kind)}
+	}
+}
+
+func checkMaxGrant(maxGrant string) error {
+	if maxGrant == "" {
+		return nil
+	}
+	duration, err := time.ParseDuration(maxGrant)
+	if err != nil || duration < time.Second {
+		return usageErr{errors.New("--max-grant is a duration of at least 1s")}
+	}
+	return nil
+}
+
+// retagChange is one retag's write: owner and tier, the kind and max-grant tags the command sets
+// (set), and the tags it clears with none (remove). A retag either removes tags or sets them,
+// never both (cmdSecretRetag refuses the mix), so each backend makes the whole change in one call
+// and a refused call leaves the secret as it was.
+type retagChange struct {
+	owner, tier string
+	set         map[string]string
+	remove      []string
 }
 
 // ownerTag is the owner tag --owner names: the signed-in person's email for me, shared for shared.
@@ -405,12 +437,12 @@ type secretBackend interface {
 
 	list(ctx context.Context) ([]secretView, error)
 	show(ctx context.Context, slug string) (secretView, error)
-	create(ctx context.Context, slug, owner, tier, value string) error
+	create(ctx context.Context, slug, owner, tier, kind, maxGrant, value string) error
 	set(ctx context.Context, slug, value string) error
-	// currentTags answers the secret's current owner and tier, for retag to fill in the tag it
-	// was not given.
+	// currentTags answers the secret's current owner and tier, for retag to fill in a tag it did
+	// not receive.
 	currentTags(ctx context.Context, slug string) (owner, tier string, err error)
-	retag(ctx context.Context, slug, owner, tier string) error
+	retag(ctx context.Context, slug string, change retagChange) error
 	// delete schedules the secret's deletion and answers the moment it happens (AWS:
 	// DeleteSecret's own recovery window end; GCP: the expire_time it sets), nil only on error.
 	delete(ctx context.Context, slug string) (deletion *time.Time, err error)
@@ -569,6 +601,8 @@ type secretView struct {
 	SecretName string `json:"secret_name"`
 	Owner      string `json:"owner"`
 	Tier       string `json:"tier"`
+	Kind       string `json:"kind"`
+	MaxGrant   string `json:"max_grant"`
 	// HasValue is whether it holds a current, servable version (AWS: a version carries AWSCURRENT;
 	// GCP: versions/latest is ENABLED), so the broker can release a value.
 	HasValue bool `json:"has_value"`
@@ -628,13 +662,13 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tVALUE\tDELETED\tEARLIEST_PURGE")
+	fmt.Fprintln(tw, "NAME\tOWNER\tTIER\tKIND\tMAX_GRANT\tVALUE\tDELETED\tEARLIEST_PURGE")
 	for _, v := range views {
 		value := "no"
 		if v.HasValue {
 			value = "yes"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), value, formatTime(v.Deleted), formatTime(v.EarliestPurge))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", v.Name, orDash(v.Owner), orDash(v.Tier), orDash(v.Kind), orDash(v.MaxGrant), value, formatTime(v.Deleted), formatTime(v.EarliestPurge))
 	}
 	if err := tw.Flush(); err != nil {
 		return secretFail(stderr, form, err)
@@ -681,8 +715,8 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	fmt.Fprintf(stdout, "name: %s\nsecret_name: %s\nowner: %s\ntier: %s\ncreated: %s\nlast_changed: %s\n",
-		view.Name, view.SecretName, orDash(view.Owner), orDash(view.Tier), formatTime(view.Created), formatTime(view.LastChanged))
+	fmt.Fprintf(stdout, "name: %s\nsecret_name: %s\nowner: %s\ntier: %s\nkind: %s\nmax_grant: %s\ncreated: %s\nlast_changed: %s\n",
+		view.Name, view.SecretName, orDash(view.Owner), orDash(view.Tier), orDash(view.Kind), orDash(view.MaxGrant), formatTime(view.Created), formatTime(view.LastChanged))
 	switch {
 	case view.EarliestPurge != nil:
 		fmt.Fprintf(stdout, "deleted: %s\nearliest_purge: %s (the deletion plus Secrets Manager's %d-day minimum recovery window: restorable at least until then; the window the delete chose may be longer)\n",
@@ -714,6 +748,8 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	flags, profile := secretFlags(form, stderr)
 	owner := flags.String("owner", "", "me (your email, from your AWS or Google sign-in) or shared")
 	tier := flags.String("tier", "", "agent (its owner's agents use it without asking) or human (a person approves each use)")
+	kind := flags.String("kind", "", "github-app, google-login or none (the default)")
+	maxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -723,6 +759,12 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	}
 	if err == nil {
 		err = checkOwnerTier(*owner, *tier)
+	}
+	if err == nil {
+		err = checkKind(*kind)
+	}
+	if err == nil {
+		err = checkMaxGrant(*maxGrant)
 	}
 	if err != nil {
 		return secretFail(stderr, form, err)
@@ -736,11 +778,21 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	value, err := readSecretValue(name, pipeCommand(*profile, "secret", "create", name, "--owner", *owner, "--tier", *tier), stderr)
+	command := []string{"secret", "create", name, "--owner", *owner, "--tier", *tier}
+	if *kind != "" {
+		command = append(command, "--kind", *kind)
+	}
+	if *maxGrant != "" {
+		command = append(command, "--max-grant", *maxGrant)
+	}
+	value, err := readSecretValue(name, pipeCommand(*profile, command...), stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	if err := s.backend.create(s.ctx, slug, ownerValue, *tier, value); err != nil {
+	if *kind == kindNone {
+		*kind = ""
+	}
+	if err := s.backend.create(s.ctx, slug, ownerValue, *tier, *kind, *maxGrant, value); err != nil {
 		return secretFail(stderr, form, err)
 	}
 	fmt.Fprintf(stdout, "created %s (owner=%s, tier=%s)\n", name, ownerValue, *tier)
@@ -782,28 +834,53 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 // retag
 // ---------------------------------------------------------------------------
 
-// cmdSecretRetag changes a secret's owner, tier or both. It always sends both tags, re-sending the
-// one not named as the secret holds it: on AWS, the deployment repository's IAM policy that lets
-// a person tag their own secret conditions on both request tags, so a request carrying one fails.
-// GCP has no equivalent condition (annotations are not IAM-conditionable the way AWS tags are):
-// anyone with secretmanager.secrets.update on the namespace can retag any secret under it,
-// shared ones included; sending both tags there is for API symmetry with AWS, not an enforced
-// shared-secret protection.
+// cmdSecretRetag changes a secret's owner, tier, kind or max grant. A retag that sets tags always
+// sends owner and tier, re-sending the one not named as the secret holds it: on AWS, the
+// deployment repository's IAM policy that lets a person tag their own secret conditions on both
+// request tags, so a request carrying one fails. GCP has no equivalent condition (annotations are
+// not IAM-conditionable the way AWS tags are): anyone with secretmanager.secrets.update on the
+// namespace can retag any secret under it, shared ones included; sending both tags there is for
+// API symmetry with AWS, not an enforced shared-secret protection. A retag that removes tags
+// (--kind none, --max-grant none) changes nothing else: AWS removes tags only with UntagResource,
+// so a retag that both set and removed tags would be two calls, and a refused second call would
+// leave it half applied. The command refuses that mix before any write.
 func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	const form = "secret retag"
 	flagArgs, positional := splitArgs(args, secretFlagValues)
 	flags, profile := secretFlags(form, stderr)
 	newOwner := flags.String("owner", "", "the new owner: me (your email, from your AWS or Google sign-in) or shared")
 	newTier := flags.String("tier", "", "the new tier: agent or human")
+	newKind := flags.String("kind", "", "github-app, google-login or none")
+	newMaxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows, or none")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	name, slug, err := secretName(positional)
-	if err == nil && *newOwner == "" && *newTier == "" {
-		err = usageErr{errors.New("--owner, --tier or both is required")}
+	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newMaxGrant == "" {
+		err = usageErr{errors.New("--owner, --tier, --kind, --max-grant or a combination is required")}
 	}
 	if err == nil {
 		err = checkOwnerTier(*newOwner, *newTier)
+	}
+	if err == nil {
+		err = checkKind(*newKind)
+	}
+	if err == nil && *newMaxGrant != kindNone {
+		err = checkMaxGrant(*newMaxGrant)
+	}
+	change := retagChange{set: map[string]string{}}
+	for key, value := range map[string]string{policy.TagKind: *newKind, policy.TagMaxGrant: *newMaxGrant} {
+		switch value {
+		case "":
+		case kindNone:
+			change.remove = append(change.remove, key)
+		default:
+			change.set[key] = value
+		}
+	}
+	slices.Sort(change.remove)
+	if err == nil && len(change.remove) > 0 && (*newOwner != "" || *newTier != "" || len(change.set) > 0) {
+		err = usageErr{errors.New("none removes a tag in a retag of its own: run the removal and the other changes as two retags")}
 	}
 	if err != nil {
 		return secretFail(stderr, form, err)
@@ -817,31 +894,35 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	owner, tier := curOwner, curTier
+	change.owner, change.tier = curOwner, curTier
 	if *newOwner != "" {
-		owner, err = ownerTag(*newOwner, email)
+		change.owner, err = ownerTag(*newOwner, email)
 		if err != nil {
 			return secretFail(stderr, form, err)
 		}
 	}
 	if *newTier != "" {
-		tier = *newTier
+		change.tier = *newTier
 	}
-	if owner == "" || tier == "" {
+	if len(change.remove) == 0 && (change.owner == "" || change.tier == "") {
 		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
 	}
-	if err := s.backend.retag(s.ctx, slug, owner, tier); err != nil {
+	if err := s.backend.retag(s.ctx, slug, change); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
 		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
 		// so a deployment instead grants that permission at all only to administrators for the
-		// secrets it protects this way.
-		if s.backend.isAccessDenied(err) && (curOwner == policy.OwnerShared || owner == policy.OwnerShared) {
+		// secrets it protects this way. A removal sends no owner or tier, so the hint is not about it.
+		if len(change.remove) == 0 && s.backend.isAccessDenied(err) && (curOwner == policy.OwnerShared || change.owner == policy.OwnerShared) {
 			fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, sharedRetagRefused)
 		}
 		return 1
 	}
-	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
+	if len(change.remove) > 0 {
+		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(change.remove, ", "))
+	} else {
+		fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, change.owner, change.tier)
+	}
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
 }
 

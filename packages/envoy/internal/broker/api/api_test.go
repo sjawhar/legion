@@ -12,6 +12,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -860,6 +861,59 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	werr := decode[wireError](t, body)
 	if werr.Code != "UNKNOWN_SECRET" {
 		t.Fatalf("code = %q, want UNKNOWN_SECRET", werr.Code)
+	}
+}
+
+func TestCreateRequestWithMaxGrantNeedsLifetime(t *testing.T) {
+	ts := newTestServer(t)
+	limited := policytest.Secret("LIMITED_KEY", testApprover, policy.TierAgent, "value")
+	limited.Tags[policy.TagKind] = policy.KindGoogleLogin
+	limited.Tags[policy.TagMaxGrant] = "1h"
+	ts.Secrets.Put(limited)
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LIMITED_KEY/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("reread LIMITED_KEY = %d %s", status, body)
+	}
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need limited login", "LIMITED_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": nil})
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/requests = %d, want 400: %s", status, body)
+	}
+	reply := decode[wireError](t, body)
+	if reply.Code != "GRANT_REQUIRES_LIFETIME" || !strings.Contains(reply.Error, "LIMITED_KEY") || !strings.Contains(reply.Error, "1h") {
+		t.Fatalf("POST /v1/requests = %+v, want GRANT_REQUIRES_LIFETIME naming LIMITED_KEY and 1h", reply)
+	}
+}
+
+// TestAFailedMintIs502MintFailed: a kind secret whose minter fails, such as a Google login that
+// needs a new sign-in, answers the session 502 MINT_FAILED with the minter's words, so it can tell
+// its person what to fix, rather than an opaque 500.
+func TestAFailedMintIs502MintFailed(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.Machine.Minters = map[string]func(context.Context, string) (string, error){
+			policy.KindGoogleLogin: func(context.Context, string) (string, error) {
+				return "", errors.New("Google login needs a new sign-in: invalid_grant (invalid_rapt)")
+			},
+		}
+	})
+	lapsed := policytest.Secret("LAPSED_LOGIN", testApprover, policy.TierAgent, "stored-login")
+	lapsed.Tags[policy.TagKind] = policy.KindGoogleLogin
+	ts.Secrets.Put(lapsed)
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LAPSED_LOGIN/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("reread LAPSED_LOGIN = %d %s", status, body)
+	}
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
+	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "read login", "LAPSED_LOGIN"), "session_id": nil})
+	created := decode[wireCreateRequestResponse](t, body)
+	if created.GrantID == nil {
+		t.Fatalf("POST /v1/requests = %s, want an automatic grant", body)
+	}
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*created.GrantID+"/values", nil)
+	reply := decode[wireError](t, body)
+	if status != http.StatusBadGateway || reply.Code != "MINT_FAILED" || !strings.Contains(reply.Error, "invalid_rapt") || strings.Contains(reply.Error, "stored-login") {
+		t.Fatalf("POST values = %d %+v, want 502 MINT_FAILED naming invalid_rapt and not the stored value", status, reply)
 	}
 }
 

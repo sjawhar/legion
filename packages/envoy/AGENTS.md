@@ -2381,9 +2381,9 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier and source (its ARN, its Secret Manager
-resource name, or `gcp-token:<service account>` for a minted secret: `policy.Secret.Source`), is recorded on every request, and a
-live grant is re-checked once it has moved, and always while any granted name is a service's,
+SHA-256 of every served secret's name, owner, tier, source, kind and max grant, is recorded on
+every request. A kind source is `mint:<kind>:<store source>`, so a kind change ends a live grant.
+A live grant is re-checked once the version moves, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
 stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
@@ -2535,18 +2535,24 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-AWS `create` writes on the settings' key with both tags
-and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
-one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
-secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
+AWS `create` writes on the settings' key with owner and tier tags, plus `kind` and `max-grant`
+only when the command names them, and no `ClientRequestToken` (the SDK sets one). A `retag` is one
+write (`retagChange`): it either sets tags or removes them, never both, and refuses `none` beside
+another change before any write, so a refused call never leaves it half applied. One that sets
+tags describes the secret and sends owner and tier in one `TagResource`, plus `kind` and
+`max-grant` when the command sets them, so an IAM condition on the request's tags sees them; one
+that removes tags (`--kind none`, `--max-grant none`) is one `UntagResource` of those keys. On
+`AccessDenied` for a retag that sets tags on a
+secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
 recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. GCP `create` creates
-the secret with automatic replication under the broker's `kms_key_name` and both tags as
-annotations (owner and tier are annotations, never labels, so they carry no GCP label naming
-rules), then adds the value as its first version; `set` adds a version to a secret already held;
-`retag` sends both annotations in one `UpdateSecret` (field mask `annotations`), so a partial
-update can never leave one stale; `delete` sets `expire_time` to now plus 30 days in one
+the secret with automatic replication under the broker's `kms_key_name` and owner, tier and any
+named kind or max grant as annotations (never labels, so they carry no GCP label naming rules),
+then adds the value as its first version; `set` adds a version to a secret already held;
+`retag` merges the same change into the current annotations in one
+`UpdateSecret` (field mask `annotations`, with the read's etag), preserving every annotation it
+does not change; `delete` sets `expire_time` to now plus 30 days in one
 `UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the
 way AWS does: the secret and every version stay readable and restorable until that moment, and GCP
 deletes them for good once it passes, with no further restore - and `restore` clears `expire_time`
@@ -2839,10 +2845,8 @@ entries, each name `record.ValidService`'s form, not `shared` and given once, an
 to one name, never a namespace's `default` account (every pod there that names no account runs as
 it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
-`BROKER_MINT_TARGETS` (optional; whitespace-separated `<NAME>=<service account email>=<owner email>`
-entries, keyed by name in `Config.MintTargets`: the minted secrets served, each only with that
-account in its `mint-service-account` tag, that owner and the human tier; refused under any store
-but `gcp-secret-manager` and beside `BROKER_FAKE_SECRETS_FILE`; unset, no minted secret is served),
+`BROKER_MINT_TARGETS` (removed; startup refuses it because a secret's `kind` tag now selects what
+the broker mints),
 `BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
 entries, the ServiceAccounts that log in as a service with their own token, each account given
 once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
@@ -3067,8 +3071,8 @@ folded into an ordinary `deny` decision — no request row is written either, ma
 time" wording; a name needing approval that names a *different* approver than an
 already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
 the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
-refused on a machine login; a request naming a minted secret must sign at most 3600, else
-`400 MINT_REQUIRES_LIFETIME` before anything is written), or, when it names none, until its session ends (`grants.expires_at`
+refused on a machine login; a secret with `max-grant` refuses a missing or longer lifetime as
+`400 GRANT_REQUIRES_LIFETIME` before anything is written), or, when it names none, until its session ends (`grants.expires_at`
 null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
 lifetime, except that a no-lifetime request takes the live grant of a request written before
 migration 0013 was applied (`requests.writtenBeforeMigration13`: lifetime 43200 and `created_at`
@@ -3114,21 +3118,24 @@ reads it as pending only then; a decided record's terminal event names the decis
 cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
 pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
-`anyone`) for every approver. `Values` releases a
-live grant's values, each read from the secret its request froze (its source: the ARN, or the
-Secret Manager resource name), or, for a minted secret's `gcp-token:<account>` source, minted for
-that account (`Machine.MintToken`, lasting the shorter of an hour and the grant's remaining life)
-once `Current.StillMinted` finds the store still serving it so (held 30 s per name), re-checking the
-enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
-since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
-not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name
+`anyone`) for every approver. `Values` releases a live grant's values, each read from the secret
+its request froze (its source: the ARN, or the Secret Manager resource name). A kind source is
+`mint:<kind>:<source>`: `Machine.release` reads `<source>` and passes that value to
+`Machine.Minters[kind]`. It never returns the stored value, and a minter's failure is
+`requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message. The usual re-check
+then verifies the enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the
+policy version moved since the grant was decided, or any granted name is a service's
+(`anyServiceOwned`: the version does not cover `BROKER_SERVICES`' accounts) — that the current
+policy still allows every granted name
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
 approve the secret, or once the new tags give its session the secret without asking; a name
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
-let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
+let approve it), and that no granted name's `max-grant` is now shorter than the request's lifetime
+(`requireMaxGrant`, refused `GRANT_NOT_LIVE`; `currentPolicyAdmits` refuses approving such a
+pending request `NOT_APPROVER`); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
 scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
 `GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
 (`secrets.AWS.Read` reads both as `ErrNotFound`, `secrets.GCP.Read` reads `NOT_FOUND` and a disabled or destroyed latest version's `FAILED_PRECONDITION` the same way, and `secrets.Local` answers each as it does).

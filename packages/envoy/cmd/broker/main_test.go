@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/config"
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -82,6 +83,9 @@ func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
 	m := newRequestMachine(cfg, nil, nil, nil, nil)
 	if want := map[string]string{"example-service": "system:serviceaccount:example:example-sa"}; !maps.Equal(m.ServiceAccounts, want) {
 		t.Fatalf("request Machine's ServiceAccounts = %v, want %v", m.ServiceAccounts, want)
+	}
+	if m.Minters[policy.KindGitHubApp] == nil || m.Minters[policy.KindGoogleLogin] == nil {
+		t.Fatalf("request Machine Minters = %v, want both kind minters", m.Minters)
 	}
 }
 

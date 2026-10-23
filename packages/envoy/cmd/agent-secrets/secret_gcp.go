@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -200,6 +201,7 @@ func (b *gcpBackend) viewOf(ctx context.Context, secret *secretmanagerpb.Secret)
 	view := secretView{
 		Name: b.displayName(secret.GetName()), SecretName: secret.GetName(),
 		Owner: secret.GetAnnotations()[policy.TagOwner], Tier: secret.GetAnnotations()[policy.TagTier],
+		Kind: secret.GetAnnotations()[policy.TagKind], MaxGrant: secret.GetAnnotations()[policy.TagMaxGrant],
 		HasValue: hasValue,
 	}
 	if t := secret.GetCreateTime(); t != nil {
@@ -273,7 +275,14 @@ func (b *gcpBackend) show(ctx context.Context, slug string) (secretView, error) 
 	return view, nil
 }
 
-func (b *gcpBackend) create(ctx context.Context, slug, owner, tier, value string) error {
+func (b *gcpBackend) create(ctx context.Context, slug, owner, tier, kind, maxGrant, value string) error {
+	annotations := map[string]string{policy.TagOwner: owner, policy.TagTier: tier}
+	if kind != "" {
+		annotations[policy.TagKind] = kind
+	}
+	if maxGrant != "" {
+		annotations[policy.TagMaxGrant] = maxGrant
+	}
 	secret, err := b.client.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
 		Parent:   b.parent(),
 		SecretId: b.secretID(slug),
@@ -287,7 +296,7 @@ func (b *gcpBackend) create(ctx context.Context, slug, owner, tier, value string
 					},
 				},
 			},
-			Annotations: map[string]string{policy.TagOwner: owner, policy.TagTier: tier},
+			Annotations: annotations,
 		},
 	})
 	if err != nil {
@@ -316,25 +325,29 @@ func (b *gcpBackend) currentTags(ctx context.Context, slug string) (owner, tier 
 	return secret.GetAnnotations()[policy.TagOwner], secret.GetAnnotations()[policy.TagTier], nil
 }
 
-// retag changes only the owner and tier annotations, preserving any other annotation the secret
-// holds: an UpdateSecret whose mask names "annotations" replaces the whole map, unlike AWS's
-// TagResource, which touches only the tags it names, so this reads the secret's current
-// annotations first and sends the merged map rather than one holding only owner and tier. It
-// sends the read's Etag, so a concurrent change to the secret between the read and this write
-// (another annotation, say) fails the update with FAILED_PRECONDITION instead of being silently
-// overwritten by this request's stale map.
-func (b *gcpBackend) retag(ctx context.Context, slug, owner, tier string) error {
+// retag applies one retagChange in one UpdateSecret: owner, tier and the tags it sets, or the tags
+// it removes, and every annotation it does not change stays as it is. An UpdateSecret whose mask
+// names "annotations" replaces the whole map, so this method reads and merges the current
+// annotations. It sends the Etag, so a concurrent annotation change fails instead of being
+// silently overwritten.
+func (b *gcpBackend) retag(ctx context.Context, slug string, change retagChange) error {
 	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
 	if err != nil {
 		return err
 	}
-	annotations := secret.GetAnnotations()
-	merged := make(map[string]string, len(annotations)+2)
-	for k, v := range annotations {
-		merged[k] = v
+	merged := maps.Clone(secret.GetAnnotations())
+	if merged == nil {
+		merged = map[string]string{}
 	}
-	merged[policy.TagOwner] = owner
-	merged[policy.TagTier] = tier
+	if len(change.remove) > 0 {
+		for _, key := range change.remove {
+			delete(merged, key)
+		}
+	} else {
+		merged[policy.TagOwner] = change.owner
+		merged[policy.TagTier] = change.tier
+		maps.Copy(merged, change.set)
+	}
 	_, err = b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
 		Secret: &secretmanagerpb.Secret{
 			Name:        b.id(slug),

@@ -22,7 +22,7 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 	"unicode"
@@ -52,9 +52,13 @@ var (
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
 	ErrSecretNotInStore  = errors.New("secret is not in the secrets store")
 	ErrMixedApprovers    = errors.New("the requested secrets need different approvers; request them separately")
-	// ErrMintRequiresLifetime: a request names a minted secret (policy.MintSourcePrefix) without
-	// signing a lifetime_seconds of at most MaxMintLifetime. Its returned error names the secret.
-	ErrMintRequiresLifetime = errors.New("a minted secret must be requested with a lifetime of at most one hour")
+	// ErrGrantRequiresLifetime: a request names a secret whose max-grant tag requires a signed
+	// lifetime no longer than that tag. Its returned error names the secret and the limit.
+	ErrGrantRequiresLifetime = errors.New("a requested secret requires a shorter grant lifetime")
+	// ErrMintFailed: a kind secret's minter could not make a token from the stored value, such as
+	// a Google login that needs a new sign-in or a GitHub App GitHub refuses. Its returned error
+	// carries the minter's own message, which never holds the stored value or a token.
+	ErrMintFailed = errors.New("the broker could not mint a token from this secret")
 	// ErrRequestPending means this session already has a person deciding one of the requested
 	// names. Its returned error names that pending request.
 	ErrRequestPending = errors.New("a request for one or more of these secrets is already pending")
@@ -67,10 +71,6 @@ var (
 
 // maxSessionIDLength bounds the request body's session_id override; see ErrSessionIDInvalid.
 const maxSessionIDLength = 128
-
-// MaxMintLifetime is the longest a minted token lives, and so the longest grant of a minted
-// secret a request may sign: Google's default cap on a generated access token.
-const MaxMintLifetime = time.Hour
 
 // validSessionID reports whether sessionID is acceptable to store: empty (unset) or at most
 // maxSessionIDLength runes with no whitespace or control character.
@@ -153,10 +153,9 @@ type Machine struct {
 	// name, the subject a pod's projected token must have proved for its launcher's service to be
 	// its own (requester).
 	ServiceAccounts map[string]string
-	// MintToken mints a Google access token for serviceAccount lasting lifetime, the value Values
-	// releases for a minted secret. nil when the broker has no BROKER_MINT_TARGETS, which then
-	// serves no minted secret; a release of one fails with an internal error the broker logs.
-	MintToken func(ctx context.Context, serviceAccount string, lifetime time.Duration) (string, error)
+	// Minters maps a policy kind to the function that transforms that secret's stored value for
+	// one release. A release never returns the stored value of a kind secret.
+	Minters map[string]func(ctx context.Context, value string) (string, error)
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
 	missRereadsOnce sync.Once
@@ -266,7 +265,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err != nil {
 		return Request{}, err
 	}
-	if err := requireMintLifetime(set, names, lifetime); err != nil {
+	if err := requireMaxGrant(set, names, lifetime); err != nil {
 		return Request{}, err
 	}
 	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, lifetime, set); err != nil {
@@ -370,20 +369,33 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 	return set, nil
 }
 
-// requireMintLifetime refuses a request that names a minted secret without signing a lifetime of
-// at most MaxMintLifetime: the token it releases lasts an hour, so neither a grant that lasts until
-// its session ends nor a longer one could keep releasing what it promised. A name the set does not
-// serve is left to evaluate, which refuses it as unknown.
-func requireMintLifetime(set *policy.Set, names []string, lifetime *int) error {
+// requireMaxGrant refuses a request naming a secret whose max-grant tag requires a signed
+// lifetime that is no longer than the tag. A name the set does not serve is left to evaluate,
+// which refuses it as unknown.
+func requireMaxGrant(set *policy.Set, names []string, lifetime *int) error {
 	for _, name := range names {
-		if !strings.HasPrefix(set.Secrets[name].Source, policy.MintSourcePrefix) {
+		maxGrant := set.Secrets[name].MaxGrant
+		if maxGrant == nil || (lifetime != nil && time.Duration(*lifetime)*time.Second <= *maxGrant) {
 			continue
 		}
-		if lifetime == nil || time.Duration(*lifetime)*time.Second > MaxMintLifetime {
-			return fmt.Errorf("%w: %s is minted; ask for at most an hour (agent-secrets --ttl 1h)", ErrMintRequiresLifetime, name)
-		}
+		limit := formatGrantDuration(*maxGrant)
+		return fmt.Errorf("%w: %s allows at most %s; ask with agent-secrets --ttl %s", ErrGrantRequiresLifetime, name, limit, limit)
 	}
 	return nil
+}
+
+// formatGrantDuration is a max-grant as a --ttl the CLI accepts: whole seconds only
+// (ttlSeconds), so a tag such as 1.5s is suggested as 1s, the longest whole lifetime it allows.
+func formatGrantDuration(duration time.Duration) string {
+	duration = duration.Truncate(time.Second)
+	switch {
+	case duration%time.Hour == 0:
+		return strconv.FormatInt(int64(duration/time.Hour), 10) + "h"
+	case duration%time.Minute == 0:
+		return strconv.FormatInt(int64(duration/time.Minute), 10) + "m"
+	default:
+		return duration.String()
+	}
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs
@@ -615,7 +627,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		if err != nil {
 			return Decision{}, err
 		}
-		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login); err != nil {
+		if err := m.currentPolicyAdmits(ctx, tx, requestID, requester, login, parsed.LifetimeSeconds); err != nil {
 			return Decision{}, err
 		}
 	}
@@ -680,8 +692,10 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 // policy, nor approves it while a service owns it (the one way the policy denies a withheld name).
 // Admitted, such an approval would release the name once it returns with the tags it had, since
 // that brings back the policy version the request was made under and Values re-checks the grant
-// (stillAllowed) only when the version has moved.
-func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, requester policy.Requester, login string) error {
+// (stillAllowed) only when the version has moved. A secret whose max-grant the current policy sets
+// below the request's lifetime, or that now has one the request names none for, is no one's to
+// approve now, as with a withheld name: the session asks again within it.
+func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID string, requester policy.Requester, login string, lifetime *int) error {
 	names, err := requestedSecrets(ctx, tx, requestID)
 	if err != nil {
 		return err
@@ -704,6 +718,13 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, "", login) {
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)
 		}
+	}
+	requested := make([]string, len(names))
+	for i, g := range names {
+		requested[i] = g.name
+	}
+	if err := requireMaxGrant(set, requested, lifetime); err != nil {
+		return fmt.Errorf("%w: %w", record.ErrNotApprover, err)
 	}
 	return nil
 }

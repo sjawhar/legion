@@ -99,12 +99,18 @@
   …/release-envoy-listener.yaml@refs/heads/main --source-ref refs/heads/main
   --deny-self-hosted-runners` accepts an image only when a run on `main` built it. `latest` is a
   separate index with no attestation; pin the `<commit>` image its revision annotation names.
-- The secrets broker serves a minted secret: a GCP secret with no version tagged
-  `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
-  its name with that account and its owner and the secret is human-tier. Each release mints a
-  Google access token for the account, lasting the shorter of an hour and the grant's remaining
-  life, after rereading the secret (at most once per name per 30 seconds); a request for one must
-  ask for at most an hour (`400 MINT_REQUIRES_LIFETIME`).
+- The secrets broker mints releases by each secret's `kind` tag. `github-app` releases contain
+  installation tokens for every installation of the GitHub App that is not suspended.
+  `google-login` releases contain a Google access token. A kind secret holds its key or refresh
+  token as a current value, which the broker never returns, and a mint GitHub or Google refuses
+  is `502 MINT_FAILED` with their reason. `max-grant` limits a request's `--ttl`; a missing or
+  longer lifetime is `400 GRANT_REQUIRES_LIFETIME`, and a `max-grant` set or lowered later ends a
+  longer live grant (`GRANT_NOT_LIVE`) and refuses approval of a longer pending request
+  (`NOT_APPROVER`). `BROKER_MINT_TARGETS` is removed and the broker refuses it when it is set.
+  `agent-secrets secret create` takes `--kind` and `--max-grant`, and `secret retag` takes
+  `--kind` and `--max-grant DURATION|none`. A retag either sets tags or removes them (`none`), in
+  one write, so a refused write leaves the secret as it was. A retag that names `none` beside
+  another change exits 2 before it writes anything.
 
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the

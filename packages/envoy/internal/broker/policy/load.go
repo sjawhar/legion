@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
@@ -47,29 +48,11 @@ const (
 	// Checked after every other reason, which each name something its owner must fix before a
 	// value would make it servable.
 	ReasonNoCurrentValue = "no-current-value"
-	// ReasonMintTargetMalformed: the mint-service-account tag is not a service account's email
-	// (<name>@<project>.iam.gserviceaccount.com), so no token could be minted for it. A secret
-	// carrying a well-formed one is a minted kind, which has no value by design and is never
-	// refused ReasonNoCurrentValue.
-	ReasonMintTargetMalformed = "mint-target-malformed"
-	// ReasonMintTargetNotListed: BROKER_MINT_TARGETS does not list the secret's name with the
-	// account its mint-service-account tag names and the owner its owner tag names, or its tier is
-	// not human. Only the listed owner approves a token, under the listed name, for the account.
-	ReasonMintTargetNotListed = "mint-target-not-listed"
-	// ReasonMintedHasValue: a secret carrying mint-service-account also has a current value, which
-	// a release would never read. A minted secret holds no enabled version.
-	ReasonMintedHasValue = "minted-has-value"
+	// ReasonKindUnknown: the kind tag names no kind this broker can mint.
+	ReasonKindUnknown = "kind-unknown"
+	// ReasonMaxGrantMalformed: max-grant is not a Go duration of at least one second.
+	ReasonMaxGrantMalformed = "max-grant-malformed"
 )
-
-// MintTarget is one BROKER_MINT_TARGETS entry: the account a minted secret's token is for and the
-// one owner whose approval it needs.
-type MintTarget struct{ Account, Owner string }
-
-// mintTargetPattern is a mint-service-account tag: a service account's email.
-var mintTargetPattern = regexp.MustCompile(`^[a-z0-9-]{6,30}@[a-z0-9-]+\.iam\.gserviceaccount\.com$`)
-
-// ValidMintTarget reports whether account is of a mint-service-account tag's form.
-func ValidMintTarget(account string) bool { return mintTargetPattern.MatchString(account) }
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
 // name, with each underscore a hyphen.
@@ -100,10 +83,6 @@ type Loader struct {
 	// Services are the registered services a secret's owner tag may name: the broker's
 	// BROKER_SERVICES. An owner tag naming any other service is refused as malformed.
 	Services []string
-	// MintTargets are the minted secrets served, by name, each with the account its tag must name
-	// and the one owner it must carry: the broker's BROKER_MINT_TARGETS. Any other minted secret,
-	// or one of the agent tier, is refused ReasonMintTargetNotListed.
-	MintTargets map[string]MintTarget
 }
 
 // Load reads the namespace into a Set, logging one RefusedMessage line for each secret it refuses.
@@ -203,11 +182,11 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 	}
 	switch {
 	case s.Owner == OwnerShared:
-		s.kind = ownerShared
+		s.ownership = ownerShared
 	case ValidPersonOwner(s.Owner):
-		s.kind = ownerPerson
+		s.ownership = ownerPerson
 	case slices.Contains(l.Services, s.Owner):
-		s.kind = ownerService
+		s.ownership = ownerService
 	default:
 		return Secret{}, ReasonOwnerTagMalformed, nil
 	}
@@ -217,7 +196,7 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 	if s.Tier != TierAgent && s.Tier != TierHuman {
 		return Secret{}, ReasonTierTagMalformed, nil
 	}
-	if s.kind == ownerService && s.Tier == TierHuman {
+	if s.ownership == ownerService && s.Tier == TierHuman {
 		return Secret{}, ReasonServiceOwnerHumanTier, nil
 	}
 	onKey, err := ls.OnKey(ctx)
@@ -227,18 +206,21 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 	if !onKey {
 		return Secret{}, ReasonNotOnAgentSecretsKey, nil
 	}
-	if target, minted := ls.Tags[TagMint]; minted {
-		if !mintTargetPattern.MatchString(target) {
-			return Secret{}, ReasonMintTargetMalformed, nil
+	if raw, tagged := ls.Tags[TagMaxGrant]; tagged {
+		maxGrant, err := time.ParseDuration(raw)
+		if err != nil || maxGrant < time.Second {
+			return Secret{}, ReasonMaxGrantMalformed, nil
 		}
-		if want, listed := l.MintTargets[s.Name]; !listed || want.Account != target || s.Owner != want.Owner || s.Tier != TierHuman {
-			return Secret{}, ReasonMintTargetNotListed, nil
+		s.MaxGrant = &maxGrant
+	}
+	if kind := ls.Tags[TagKind]; kind != "" {
+		switch kind {
+		case KindGitHubApp, KindGoogleLogin:
+			s.Kind = kind
+		default:
+			return Secret{}, ReasonKindUnknown, nil
 		}
-		if ls.HasCurrentValue {
-			return Secret{}, ReasonMintedHasValue, nil
-		}
-		s.Source = MintSourcePrefix + target
-		return s, "", nil
+		s.Source = KindSourcePrefix + s.Kind + ":" + ls.Source
 	}
 	if !ls.HasCurrentValue {
 		return Secret{}, ReasonNoCurrentValue, nil

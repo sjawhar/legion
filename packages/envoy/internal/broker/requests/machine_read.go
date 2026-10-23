@@ -27,21 +27,22 @@ import (
 // the policy has changed since the grant's request was decided, or any granted name is a service's
 // (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
 // current policy still allows the session, with the names its operator withheld from it, every
-// granted name under the login that decided it (stillAllowed). Each value is read from the secret
-// the request froze, or, for a minted secret, minted for the service account its source names,
-// lasting the shorter of MaxMintLifetime and what is left of the grant.
-// It holds no pooled connection across a Secrets Manager read: the grant's names are read into
-// memory before the first value is fetched.
+// granted name under the login that decided it (stillAllowed), and that no granted name's
+// max-grant is now shorter than the lifetime the grant's request signed (requireMaxGrant). A
+// stored secret releases its frozen source. A kind secret reads that same stored source and
+// passes its value to the kind's minter. It holds no pooled connection across a Secrets Manager
+// read: the grant's names are read into memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
+	var lifetime *int
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and e.lease_expires_at > now(),
-		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.kind, e.operator, e.subject, c.service
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), r.lifetime_seconds, e.kind, e.operator, e.subject, c.service
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &lifetime, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, ErrGrantNotLive
 	}
@@ -66,16 +67,23 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		if err != nil {
 			return nil, nil, err
 		}
-		for _, g := range granted {
+		names := make([]string, len(granted))
+		for i, g := range granted {
 			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
 				return nil, nil, err
 			}
+			names[i] = g.name
+		}
+		// A max-grant added or lowered since the request was decided bounds this grant too: the
+		// version covers the tag, so this runs whenever it moved.
+		if err := requireMaxGrant(set, names, lifetime); err != nil {
+			return nil, nil, fmt.Errorf("%w: %w", ErrGrantNotLive, err)
 		}
 	}
 	values := map[string]string{}
 	released := []string{}
 	for _, g := range granted {
-		value, err := m.release(ctx, g, expires)
+		value, err := m.release(ctx, g)
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 		}
@@ -92,32 +100,40 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	return values, expires, nil
 }
 
-// release is one granted name's value: read from its frozen source, or minted when the source is
-// a minted secret's (policy.MintSourcePrefix), for at most MaxMintLifetime and never past expires,
-// once the store still serves that name as that minted secret (policy.Current.StillMinted), so a
-// secret deleted or retagged since mints nothing more.
-func (m *Machine) release(ctx context.Context, g requestedSecret, expires *time.Time) (string, error) {
-	sa, minted := strings.CutPrefix(g.source, policy.MintSourcePrefix)
+type freshReader interface {
+	ReadFresh(context.Context, string) (string, error)
+}
+
+var _ freshReader = secrets.GCP{}
+
+// release is one granted name's value. A stored secret reads its frozen source. A kind source
+// reads that frozen store source, then passes its stored value to the named minter. The store read
+// makes a deletion stop a release at once, even before a policy refresh.
+func (m *Machine) release(ctx context.Context, g requestedSecret) (string, error) {
+	source, minted := strings.CutPrefix(g.source, policy.KindSourcePrefix)
 	if !minted {
 		return m.Secrets.Read(ctx, g.source)
 	}
-	if m.MintToken == nil {
+	kind, source, ok := strings.Cut(source, ":")
+	mint := m.Minters[kind]
+	if !ok || source == "" || mint == nil {
 		return "", fmt.Errorf("secret %s is a minted kind, but this broker has no token minter", g.name)
 	}
-	still, err := m.Policy.StillMinted(ctx, g.name, g.source)
+	var value string
+	var err error
+	if reader, ok := m.Secrets.(freshReader); ok {
+		value, err = reader.ReadFresh(ctx, source)
+	} else {
+		value, err = m.Secrets.Read(ctx, source)
+	}
 	if err != nil {
 		return "", err
 	}
-	if !still {
-		return "", fmt.Errorf("%w: %s is no longer served as this grant's minted secret", ErrGrantNotLive, g.name)
+	token, err := mint(ctx, value)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrMintFailed, err)
 	}
-	life := MaxMintLifetime
-	if expires != nil {
-		if left := time.Until(*expires); left < life {
-			life = left
-		}
-	}
-	return m.MintToken(ctx, sa, life)
+	return token, nil
 }
 
 // requestedSecret is one name a request asked for that the policy did not deny when the request
