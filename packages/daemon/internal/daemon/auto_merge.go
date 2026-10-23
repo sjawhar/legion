@@ -23,6 +23,19 @@ import (
 // every later lifecycle row of the issue behind it.
 const autoMergeTimeout = 30 * time.Second
 
+// mergeWaitWarn is how long a ready_merge row waits before its issue's architect is told once that
+// GitHub has not completed the merge Legion submitted (readyMergeWaiting). It runs from
+// record.OutboxRow.CreatedAt, the moment the workflow queued the row at READY's acceptance:
+// nothing in the daemon records when GitHub was first asked, and created_at survives every retry,
+// the payload write that remembers the arm and a reopen's upsert of the same issue and head.
+// Measured on sjawhar/legion on 2026-10-23, main requires the checks lint, typecheck, test and
+// pr-title; over the last eight main heads those took test 12-16 minutes, lint 3-5, typecheck and
+// pr-title under a minute, and across the last 97 completed pull_request runs the median was 2.5
+// minutes and the 90th percentile 17, with one 82-minute outlier. An hour is above every required
+// check's observed maximum and above the 90th percentile of every run, so a row still waiting then
+// waits on something the repository's own checks will not end.
+const mergeWaitWarn = time.Hour
+
 // autoMergeDisable disarms pull request payload.Number as the implement App, which submits READY's
 // merge (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
 // while the issue awaits its merge, the merger's READY commit is the head whose arm is kept, and
@@ -62,7 +75,9 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 // workflow), and anyone else's removal ends the row with the architect told (ghautomerge.Removed,
 // merge-removed). A refusal a retry would meet again (ghautomerge.Refused) and a disagreement with
 // the record that has stood on GitHub longer than ghautomerge.LagBound (ghautomerge.Lagging.Stalled)
-// end it too, the architect told (permanentRefusal, finishRefused); every other failure retries.
+// end it too, the architect told (permanentRefusal, finishRefused); every other failure retries. A
+// wait GitHub has left standing longer than mergeWaitWarn tells the architect once that the merge
+// is still waiting (merge-waiting, rememberWait), and the row waits on.
 func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
@@ -84,7 +99,7 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 	var failed *ghautomerge.MergeFailed
 	switch {
 	case errors.As(err, &armed) && !payload.Armed:
-		if remembered := r.rememberArm(ctx, row, payload); remembered != nil {
+		if remembered := r.rememberWait(ctx, row, payload, true, err); remembered != nil {
 			return remembered
 		}
 		return err
@@ -103,22 +118,59 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 		r.log.Info(message, "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head, "reason", failed.Error())
 		return nil
 	case err != nil:
+		if remembered := r.rememberWait(ctx, row, payload, false, err); remembered != nil {
+			return remembered
+		}
 		return err
 	}
 	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "repo", repo.String(), "number", payload.Number, "head", payload.Head, "outcome", outcome)
 	return nil
 }
 
-// rememberArm records on row that its READY's head has been seen armed or queued on GitHub
-// (record.ReadyMerge.Armed), while row's lease holds it: a reopen's queue that took the row since
-// starts it over unarmed, and its own payload stands.
-func (r *outbox) rememberArm(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
-	payload.Armed = true
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		_, err := r.records.ReplaceOutboxPayload(ctx, tx, row.ID, row.LeaseToken, payload)
-		return err
+// rememberWait records on row what its wait learned that its next run must know, and tells the
+// issue's architect of a merge GitHub is taking long over, in one transaction under row's lease, so
+// a run writes the payload at most once. arm is GitHub having shown READY's head armed or queued
+// (record.ReadyMerge.Armed): from then on the arm disappearing is a removal the row reads from
+// GitHub rather than a cue to submit again. A row queued longer ago than mergeWaitWarn that has not
+// told its architect yet carries readyMergeWaiting's notice, enqueued in the same transaction as
+// the payload that records the telling (record.ReadyMerge.Warned), so the row is never recorded as
+// warned without its notice, nor the architect told twice; a cause that ends the row
+// (permanentRefusal) warns nobody, since finishRefused tells the architect of that one itself. A
+// reopen's queue that took the row since starts it over unarmed and unwarned, and its own payload
+// stands: the replacement writes nothing then, and the notice rolls back with it.
+func (r *outbox) rememberWait(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge, arm bool, cause error) error {
+	now := r.now().UTC()
+	waited := now.Sub(row.CreatedAt)
+	warn := !payload.Warned && waited > mergeWaitWarn && !permanentRefusal(row, cause, now)
+	if !arm && !warn {
+		return nil
+	}
+	payload.Armed = payload.Armed || arm
+	payload.Warned = payload.Warned || warn
+	var notice record.OutboxRow
+	if warn {
+		var err error
+		if notice, err = record.NewOutboxRow(row.Issue, readyMergeWaiting(payload, waited, cause), now); err != nil {
+			return err
+		}
+	}
+	// The notice is written in the payload's own transaction, which owns the commit hook that write
+	// registers (projectRecords, intake.OnCommit), so its lane is woken as the payload commits.
+	scoped, committed := intake.WithCommitHooks(ctx)
+	var replaced bool
+	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
+		var err error
+		if replaced, err = r.records.ReplaceOutboxPayload(scoped, tx, row.ID, row.LeaseToken, payload); err != nil || !replaced || !warn {
+			return err
+		}
+		return r.records.Enqueue(scoped, tx, notice)
 	}); err != nil {
-		return fmt.Errorf("record that READY's head is armed on outbox row %d: %w", row.ID, err)
+		return fmt.Errorf("record what outbox row %d learned while it waits: %w", row.ID, err)
+	}
+	committed()
+	if warn && replaced {
+		r.log.Warn("outbox READY merge is still waiting on GitHub; its architect is told once", "row", row.ID, "issue", row.Issue,
+			"number", payload.Number, "head", payload.Head, "waited", waited.Round(time.Minute), "error", cause)
 	}
 	return nil
 }
@@ -141,6 +193,19 @@ func readyMergeEnded(cause error) record.Notice {
 		return record.Notice{Kind: "merge-removed", Role: claim.RoleArchitect, Reason: removed.Error()}
 	}
 	return record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: cause.Error()}
+}
+
+// readyMergeWaiting is the architect's notice of a merge the daemon submitted that GitHub has not
+// completed within mergeWaitWarn of the row's queueing (merge-waiting): the pull request, READY's
+// head, how long the row has waited and what GitHub last answered, cause. Nothing has gone wrong
+// with the row — the merge has not been withdrawn, the issue stays in awaiting_merge and the
+// daemon goes on submitting it — so the architect is told once (rememberWait,
+// record.ReadyMerge.Warned) and what is left to find is on GitHub: a required check that never
+// ran or failed, a review only a person can give, a merge queue that has not landed it.
+func readyMergeWaiting(payload record.ReadyMerge, waited time.Duration, cause error) record.Notice {
+	return record.Notice{Kind: "merge-waiting", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("Legion submitted the merge of pull request #%d at READY's head %s %s ago and GitHub has not completed it; GitHub last answered: %s. The merge has not been withdrawn, the issue stays in awaiting_merge and the daemon goes on submitting it: read the pull request on GitHub to find what GitHub is waiting for",
+			payload.Number, payload.Head, waited.Round(time.Minute), cause)}
 }
 
 // graphQL is a GitHub GraphQL client carrying the implement App's token, the App that writes the

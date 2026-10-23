@@ -435,6 +435,61 @@ func TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree(t *testing.T) {
 	})
 }
 
+// A merge Legion submitted that GitHub has not completed within mergeWaitWarn of the row's
+// queueing tells the issue's architect once (merge-waiting), naming the pull request, READY's head
+// and what GitHub last answered, and then goes on waiting: nothing is withdrawn, the row stays and
+// still waits, the issue stays in awaiting_merge, and every later run of the same row, however
+// much longer it waits, tells nobody again.
+func TestAREADYMergeGitHubLeavesWaitingTellsTheArchitectOnce(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	// A head GitHub will not merge: a required check holds the pull request back, and the
+	// repository allows no auto-merge, so the row waits on GitHub however long it runs.
+	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "BLOCKED") }, mergedAnswer)
+	now := time.Now().UTC()
+	row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+	row.CreatedAt = now
+	enqueueOutbox(t, pool, records, row)
+	clock := now
+	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	assertMergeRows(t, pool, 1, "merge-waiting", 0)
+	clock = clock.Add(mergeWaitWarn + time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	reasons := assertMergeRows(t, pool, 1, "merge-waiting", 1)
+	for _, want := range []string{"#42", "ready-head", "awaiting_merge"} {
+		if !strings.Contains(reasons[0], want) {
+			t.Fatalf("merge-waiting reason %q, want it to name %q", reasons[0], want)
+		}
+	}
+	// The row goes on waiting on GitHub's answer, recorded as having told its architect.
+	var nextAt time.Time
+	var lastError string
+	var warned bool
+	if err := pool.QueryRow(context.Background(),
+		`select next_at, last_error, coalesce((payload->>'warned')::boolean, false) from outbox where kind = 'ready_merge'`).
+		Scan(&nextAt, &lastError, &warned); err != nil {
+		t.Fatalf("read the ready_merge row: %v", err)
+	}
+	if !nextAt.After(clock) || !strings.Contains(lastError, "BLOCKED") || !warned {
+		t.Fatalf("the ready_merge row runs again at %s with %q, warned %v; want it still waiting on GitHub and recorded as told", nextAt, lastError, warned)
+	}
+	var at string
+	if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.AwaitingMerge) {
+		t.Fatalf("LEGION-208 in %q (%v), want awaiting_merge", at, err)
+	}
+	clock = clock.Add(mergeWaitWarn)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("third RunOnce: %v", err)
+	}
+	assertMergeRows(t, pool, 1, "merge-waiting", 1)
+}
+
 // The delayed disarm: an auto_merge_disable row sent its disable while the issue was still merging,
 // and its runner stopped before GitHub answered. READY has been accepted at that head since, so the
 // replacement runner's disarm keeps the arm it finds, and the READY merge row finds the pull request

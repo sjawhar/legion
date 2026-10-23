@@ -410,12 +410,15 @@ func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisa
 // row having seen Head armed for auto-merge or in the merge queue on GitHub, which its executor
 // records on the row (Store.ReplaceOutboxPayload): from then on the arm or entry disappearing
 // without a merge is a removal the row reads from GitHub rather than a cue to submit again
-// (ghautomerge.Submit). A queue of the same issue and head starts the row over unarmed
-// (readyMergeConflict).
+// (ghautomerge.Submit). Warned is the row having told the issue's architect once that GitHub has
+// not completed the merge it submitted (merge-waiting, the daemon's mergeWaitWarn), which keeps it
+// from telling again however much longer it waits. A queue of the same issue and head starts the
+// row over unarmed and unwarned (readyMergeConflict).
 type ReadyMerge struct {
 	Number int    `json:"number"`
 	Head   string `json:"head"`
 	Armed  bool   `json:"armed,omitempty"`
+	Warned bool   `json:"warned,omitempty"`
 }
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
@@ -691,7 +694,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false
