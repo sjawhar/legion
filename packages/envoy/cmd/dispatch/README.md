@@ -388,10 +388,13 @@ a version, a settlement or an ask retraction from a document state it does not h
 (`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
 process it does not receive the other's updates, so presence and cursors show only the peers on
 that process. A write committed elsewhere closes the room within a notification round trip
-(`dispatch_doc_changed`, `docs/stale_room.go`); the browser reconnects, re-syncs and shows the
-current text. A reader sees a brief reconnect, never stale text they can act on. Cross-process
-live co-editing of one document — two rooms with text streaming between them — is a follow-up
-issue, out of scope here.
+(`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
+`staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
+room is re-examined when that window ends — the case the trailing write of an editing burst
+meets, since the last notification of a burst is one of the refused ones. Either way the browser
+reconnects, re-syncs and shows the current text. A reader sees a brief reconnect, never stale
+text they can act on. Cross-process live co-editing of one document — two rooms with text
+streaming between them — is a follow-up issue, out of scope here.
 
 ## Database migrations
 

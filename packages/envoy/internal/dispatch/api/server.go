@@ -293,6 +293,13 @@ type queryer interface {
 // open SSE connection reads and which starts its own listening connection on the first of them,
 // also on Lifetime. The returned wait blocks until the hub, every delivery socket and the relay
 // have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+//
+// That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
+// which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
+// runs its relay on context.Background() instead, so nothing ever ends that relay, and the wait
+// this returns blocks for ever once an SSE connection has started it. The delivery hub sets no
+// such trap, since it is built only with a Deps.Lifetime. Give the server a Deps.Lifetime where
+// it is built, or do not call the wait.
 func Register(mux *http.ServeMux, deps Deps) func() {
 	s := register(mux, deps)
 	return s.waitBackground

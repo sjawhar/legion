@@ -237,6 +237,15 @@ one. Two things have to be true first, and Dispatch can check neither of them fo
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
 
+A second server also costs connections, and Postgres counts them per server. Each server opens up
+to 16 connections for requests, up to 8 for the periodic work it runs once across the servers, up
+to 4 for loading documents, and one for the health check, and it holds three more open for as long
+as it runs: one each for the three things that wait on Postgres notifications, which are delivery,
+the live event stream, and closing a document session another server has written to. That is 32
+connections for one server at its ceiling, and twice that for two. Check the database's connection
+limit before you start the second server: a limit sized for one server, with whatever else uses
+that database counted in, is the thing that runs out.
+
 What a reader sees while two servers are serving:
 
 - Nothing they write is lost, whichever server takes it. Every edit of a document is appended

@@ -554,11 +554,11 @@ func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Le
 // Its caller runs it under that durable's consumer lease (consumerLease), so one process at a
 // time is in here for one durable.
 //
-// PushBound is read twice, here and again immediately before the delete, and two reads still
-// leave a window of one round trip: a process whose own reconciliation was skipped -- the lease
+// PushBound is read once, by the ConsumerInfo immediately before the delete, and even that read
+// leaves a window of one round trip: a process whose own reconciliation was skipped -- the lease
 // was held, or its throttle refused the pass -- goes straight to the subscribe in
-// bindDurableConsumer without passing through here, so one that binds between the second read
-// and the delete has its durable deleted under it. No message is lost, since this pass creates
+// bindDurableConsumer without passing through here, so one that binds between that read and the
+// delete has its durable deleted under it. No message is lost, since this pass creates
 // the replacement and binds it; what the loser loses is its standby, silently. Intake.Run stops
 // its bind poll as soon as it is bound ("Nothing rebinds a bound intake"), so that process
 // delivers nothing for the life of the process with "dispatch delivery: NATS consumer bound" as
@@ -575,13 +575,6 @@ func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.Consumer
 	case err != nil:
 		slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
 		return false
-	case len(info.Config.FilterSubjects) > 0 && info.PushBound:
-		// The replacement below deletes the durable, which would take the binding away from the
-		// process bound to it and leave that process delivering nothing, so it is never run
-		// against a bound consumer. Nothing is lost by waiting: this process is standing by for
-		// this durable anyway, since the subscribe below is refused while another process is
-		// bound, and the replacement happens on the poll after that process's interest goes away.
-		slog.Info("dispatch delivery: another process is bound to the NATS consumer; leaving its configuration alone", "name", name)
 	case len(info.Config.FilterSubjects) > 0:
 		// A durable an earlier release left carrying a filter-subject set, which withholds the
 		// workflow runs this slice exists to record (githubIntakeSubject). It is replaced rather
@@ -593,6 +586,14 @@ func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.Consumer
 		// back, and a process that skipped this reconciliation binds without taking the lease,
 		// so the durable can have been bound since. The ack floor comes from this read for the
 		// same reason -- it is the last thing the durable acknowledged before the delete.
+		//
+		// That fresh read is the only thing that decides whether another process is bound to
+		// this durable: one question, answered once, by the read closest to the delete, so the
+		// standby line below reports a state no read of this pass contradicts. It also decides
+		// it in the direction of acting: a durable whose binder went away between the two reads
+		// is replaced on this pass rather than left plural for another settingsPollInterval,
+		// which is what the second read was added for. The cost is the ConsumerInfo itself, one
+		// per durable per pass the throttle admits (reconcileDue), not one per bind poll.
 		bound, err := js.ConsumerInfo(bus.Stream, name)
 		switch {
 		case err != nil:
