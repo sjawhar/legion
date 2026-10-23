@@ -205,7 +205,9 @@ the same refusals:
 - `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
 - `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
   `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`
-  (`bun run build` in that package writes both).
+  (`bun run build` in that package writes both). No workflow releases this package, so build it
+  from a checkout of a commit on `main`, never of a branch (`AGENTS.md`, "Deploys come only from
+  main").
 
 A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
 Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example
