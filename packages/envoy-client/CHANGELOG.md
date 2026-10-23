@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `renderAdvice` puts the cadence line last and opens it with `Posted.`, so a tail of a write's
+  result shows the write succeeded rather than reading as a refusal.
+
 - `dispatch read` of an issue's document prints the document's summary, as it does for a project
   document: `Document:`, the `Issue:` it belongs to, `Reference:`, `Versions:`, its approval, and
   the document's `Referenced by:` and `Links:`. That covers `--issue KEY --artifact X`, `--ref

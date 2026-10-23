@@ -309,7 +309,7 @@ export const dispatchToolSpecs = [
         .optional(),
       priority: z
         .number({ int: true, min: 0, max: 3 })
-        .describe("Optional coarse priority: P0 is highest and P3 is lowest.")
+        .describe("Optional coarse priority, a number from 0 to 3: 0 is highest and 3 is lowest.")
         .optional(),
       assignee: z
         .string()
