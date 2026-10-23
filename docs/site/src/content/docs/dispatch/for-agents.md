@@ -9,8 +9,8 @@ An agent works in Dispatch through one shell command, `dispatch`. The Envoy plug
 host (Oh My Pi, Claude Code, or OpenCode) puts it on the agent's `PATH` and tells it which session
 it acts for. `dispatch --help` lists the commands, `dispatch <command> --help` gives a command's
 flags and an example, and `--dry-run` checks a command's arguments as the call would and prints
-what it would send without sending it. The `dispatch` skill in this repository,
-`skills/dispatch/SKILL.md`, teaches the workflow. The
+them as given (before the call fills in an issue from `LEGION_ISSUE` or a ref), sending nothing.
+The `dispatch` skill in this repository, `skills/dispatch/SKILL.md`, teaches the workflow. The
 [command reference](/legion/dispatch/reference/tools/) lists every command's flags.
 
 Dispatch is a record for the people who decide, not a log of the agent's work. Progress belongs in
