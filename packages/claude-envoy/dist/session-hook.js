@@ -13962,7 +13962,7 @@ function dispatchToolSchema(spec, z2, opts) {
   const shape = spec.arguments(z2);
   const strict = opts?.strict ?? spec.strict;
   const schemaOptions = strict === undefined ? undefined : { strict };
-  return spec.validation === undefined ? z2.object(shape, schemaOptions) : z2.refineObject(shape, spec.validation.check, spec.validation.message, schemaOptions);
+  return spec.validation === undefined ? z2.object(shape, schemaOptions) : z2.refineObject(shape, spec.validation.check, spec.validation.refusal ?? spec.validation.message, schemaOptions);
 }
 var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
@@ -14004,6 +14004,23 @@ var commentValidation = {
   },
   message: `${commentOwner.message} turn requires reply_to_ask.`
 };
+var ISSUE_UPDATE_FIELDS_RULE = "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+var ISSUE_UPDATE_DONE_RULE = "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
+var ISSUE_UPDATE_REASON_RULE = "reason goes only with status done";
+var ISSUE_UPDATE_RULE = `${ISSUE_UPDATE_FIELDS_RULE} ${ISSUE_UPDATE_DONE_RULE}; ${ISSUE_UPDATE_REASON_RULE}.`;
+function issueUpdateProblem(value) {
+  const input = value;
+  if (input.status === "done") {
+    if (typeof input.reason !== "string" || input.reason.trim() === "") {
+      return `${ISSUE_UPDATE_DONE_RULE}.`;
+    }
+  } else if (input.reason !== undefined) {
+    const status = typeof input.status === "string" ? `status ${input.status}` : "an update without status done";
+    return `${ISSUE_UPDATE_REASON_RULE}: it is the note posted on the issue as it closes, and ${status} closes nothing. Drop reason, or set status done to close the issue.`;
+  }
+  const changesAField = typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || Array.isArray(input.blocked_by) || typeof input.components === "object" && input.components !== null || typeof input.repo === "string";
+  return changesAField ? undefined : ISSUE_UPDATE_FIELDS_RULE;
+}
 var messageValidation = {
   check: (value) => {
     const input = value;
@@ -14105,12 +14122,9 @@ var dispatchToolSpecs = [
       repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again.").optional()
     }),
     validation: {
-      check: (value) => {
-        const input = value;
-        const reasonFits = input.status === "done" ? typeof input.reason === "string" && input.reason.trim() !== "" : input.reason === undefined;
-        return reasonFits && (typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || Array.isArray(input.blocked_by) || typeof input.components === "object" && input.components !== null || typeof input.repo === "string");
-      },
-      message: "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo. " + "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done."
+      check: (value) => issueUpdateProblem(value) === undefined,
+      message: ISSUE_UPDATE_RULE,
+      refusal: (value) => issueUpdateProblem(value) ?? ISSUE_UPDATE_RULE
     },
     strict: true
   },
@@ -14597,7 +14611,7 @@ function zodSchemaApi(zod) {
       let schema = api2.object(shape);
       if (opts.strict)
         schema = schema.strict();
-      return schema.refine(check2, message);
+      return schema.refine(check2, typeof message === "string" ? message : { error: (issue2) => message(issue2.input) });
     }
   };
 }
@@ -14801,7 +14815,10 @@ function flagTable(tool, fields) {
     }
   }
   add("--help", { action: "help", text: "Prints this help." });
-  add("--dry-run", { action: "dry-run", text: "Prints the arguments as JSON and sends nothing." });
+  add("--dry-run", {
+    action: "dry-run",
+    text: "Checks the arguments as the call would, then prints them as JSON and sends nothing."
+  });
   return flags;
 }
 function parseCommand(argv, io) {
@@ -15057,7 +15074,7 @@ function commandsHelp() {
       return `  ${commandName(spec.name).padEnd(width)}  ${sentence}`;
     }),
     "",
-    "Run dispatch <command> --help for its flags and an example; --dry-run prints the arguments a command would send.",
+    "Run dispatch <command> --help for its flags and an example; --dry-run checks a command's arguments as the call would and prints them as given, sending nothing.",
     ""
   ].join(`
 `);
@@ -17659,6 +17676,34 @@ function withAccount(error48, account) {
   const told = /[.!?]$/.test(message) ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}` : `${message}; ${account}`;
   return new Error(told, { cause: error48 });
 }
+function restatesMissingOwner(issue2) {
+  return issue2.code === "invalid_type" && issue2.path.length === 1 && issue2.path[0] === "issue" && issue2.input === undefined || issue2.code === "custom" && issue2.path.length === 0 && (issue2.message.startsWith("Exactly one of issue and project is required") || issue2.message.startsWith("issue is required unless in_reply_to"));
+}
+function dispatchServerUrls(config2) {
+  return config2.publicUrl === undefined ? [config2.url] : [config2.url, config2.publicUrl];
+}
+async function checkDispatchCall(input) {
+  const { tool, args, cwd } = input;
+  const problems = [];
+  const owner = await resolveOwnerArguments(tool, args, cwd, input.env ?? process.env, input.exec ?? defaultExec, input.serverUrls, problems);
+  const conflicts = issueFreeTools[tool] === true ? [] : ownerConflictProblems(tool, args, owner.ref, optionalString(owner.args, "ref"));
+  problems.push(...conflicts);
+  const ownerMissing = issueFreeTools[tool] !== true && (owner.owner === null || conflicts.length > 0);
+  const schema = toolSchema(tool);
+  const parsed = schema.safeParse(owner.args, { reportInput: true });
+  if (!parsed.success) {
+    const issues = ownerMissing ? parsed.error.issues.filter((issue2) => !restatesMissingOwner(issue2)) : parsed.error.issues;
+    problems.push(...formatZodIssues(issues, schema, tool));
+  }
+  problems.push(...argumentProblems(tool, owner.args));
+  const pictures = pictureSendingTools[tool] === true ? await localPictures(owner.args.images, cwd, problems) : [];
+  return {
+    problems,
+    owner,
+    args: parsed.success ? parsed.data : owner.args,
+    pictures
+  };
+}
 async function executeDispatchTool(input) {
   const { url: configUrl, token: configToken } = input.config;
   const linkBase = input.config.publicUrl ?? configUrl;
@@ -17675,21 +17720,14 @@ async function executeDispatchTool(input) {
   }, { preconnect: baseFetch.preconnect });
   const env = input.env ?? process.env;
   const exec = input.exec ?? defaultExec;
-  const problems = [];
-  const ownerArguments = await resolveOwnerArguments(input.tool, input.args, input.cwd, env, exec, input.config.publicUrl === undefined ? [configUrl] : [configUrl, input.config.publicUrl], problems);
-  const conflicts = issueFreeTools[input.tool] === true ? [] : ownerConflictProblems(input.tool, input.args, ownerArguments.ref, optionalString(ownerArguments.args, "ref"));
-  problems.push(...conflicts);
-  const ownerMissing = issueFreeTools[input.tool] !== true && (ownerArguments.owner === null || conflicts.length > 0);
-  const schema = toolSchema(input.tool);
-  const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
-  if (!parsed.success) {
-    const issues = parsed.error.issues.filter((issue3) => !ownerMissing || !(issue3.code === "invalid_type" && issue3.path.length === 1 && issue3.path[0] === "issue" && issue3.input === undefined || issue3.code === "custom" && issue3.path.length === 0 && (issue3.message.startsWith("Exactly one of issue and project is required") || issue3.message.startsWith("issue is required unless in_reply_to"))));
-    problems.push(...formatZodIssues(issues, schema, input.tool));
-  }
-  problems.push(...argumentProblems(input.tool, ownerArguments.args));
-  const pictures = pictureSendingTools[input.tool] === true ? await localPictures(ownerArguments.args.images, input.cwd, problems) : [];
-  if (problems.length > 0)
-    throw new ToolInputError(input.tool, problems);
+  const checked = await checkDispatchCall({
+    ...input,
+    serverUrls: dispatchServerUrls(input.config)
+  });
+  if (checked.problems.length > 0)
+    throw new ToolInputError(input.tool, checked.problems);
+  const ownerArguments = checked.owner;
+  const pictures = checked.pictures;
   const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
   if (input.tool === "dispatch_open_asks") {
     const client2 = dispatchClient();
@@ -17718,7 +17756,7 @@ async function executeDispatchTool(input) {
       details: { session: sessionId, owner: owner2, service }
     };
   }
-  const args = parsed.success ? parsed.data : ownerArguments.args;
+  const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
   const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;

@@ -1,7 +1,7 @@
 import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
-import { executeDispatchTool } from "./dispatch-execute";
+import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
 import {
   loadSessionMemory,
   pruneSessions,
@@ -180,16 +180,32 @@ export async function runDispatchCli(
     return USAGE;
   }
 
-  if (parsed.dryRun) {
-    print(JSON.stringify(parsed.args, null, 2));
-    return OK;
-  }
-
   // The file the session's plugin handed its shell (each plugin sets DISPATCH_HOST and
   // ENVOY_CONFIG_FILE together), else the host's own rule.
   const file =
     (env.DISPATCH_HOST === undefined ? null : handedConfigFile(env)) ??
     sessionConfigFile(host, env);
+  if (parsed.dryRun) {
+    // The call's own argument check, so the call refuses no arguments its dry run passed; what
+    // the call needs besides (Dispatch's configuration, this session's state, Dispatch's answers)
+    // a dry run does not read. It runs with Dispatch off too, reading a dashboard-URL ref only
+    // against a server it knows, and its standard output is the JSON alone.
+    const settings =
+      file.path === null ? null : sessionDispatchSettings(file, env, { cwd: io.cwd }).dispatch;
+    const { problems } = await checkDispatchCall({
+      tool: parsed.tool,
+      args: parsed.args,
+      cwd: io.cwd,
+      env,
+      serverUrls: settings?.enabled === true ? dispatchServerUrls(settings) : [],
+    });
+    if (problems.length > 0) {
+      print(new ToolInputError(parsed.tool, problems).message);
+      return REFUSED;
+    }
+    print(JSON.stringify(parsed.args, null, 2));
+    return OK;
+  }
   if (file.path === null) {
     print(`dispatch: ${file.error}`);
     return USAGE;
@@ -206,6 +222,7 @@ export async function runDispatchCli(
     return USAGE;
   }
   const config: ActiveDispatchConfig = resolution;
+
   // A result names an owner the session is not subscribed to, or the line that subscribes it,
   // only from the listener's record of the session's topics, read (Envoy's settings with it) once,
   // when a result first asks; with Envoy off, or no answer from it, a result says nothing about

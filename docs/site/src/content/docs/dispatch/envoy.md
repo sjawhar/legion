@@ -178,7 +178,8 @@ credential is configured.
 
 ## Running the listener
 
-The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image.
+The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image. Pin it by digest and
+verify it as [Running Dispatch](/legion/dispatch/running-dispatch/) shows.
 
 | Setting | What it is |
 | --- | --- |
