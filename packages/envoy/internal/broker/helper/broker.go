@@ -13,7 +13,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptrace"
 	"os"
 	"slices"
 	"strconv"
@@ -38,22 +37,17 @@ const noCredentialMsg = "no machine credential; run: agent-secrets machine login
 
 var errNoCredential = errors.New(noCredentialMsg)
 
-// The refresh loop's defaults: a refresh a day at most, and after a refresh whose outcome the
-// helper did not learn (its answer was lost, a timeout, a 5xx) a retry every 15 s until the
-// broker's five-minute rotation grace, counted from the first such attempt that got a connection to
-// the broker and so may have rotated the token, has passed, so the refresh token the helper still
-// holds is redeemed again while the broker takes it even if the lost answer had rotated it; after
-// that, or for an attempt that cannot have rotated (one that never got a connection: a refused or
-// unanswered dial, a DNS failure, a TLS handshake that failed; or a 429), a minute, doubling to an
-// hour.
+// The refresh loop's defaults: a refresh a day at most; after a refresh the broker did not answer
+// (any transport error: a refused, unanswered or unresolved dial, a timeout, a lost answer, a
+// cancelled request) or answered 5xx, a retry every 15 s for as long as that lasts, so a lost
+// answer's rotated token is redeemed again inside the broker's five-minute rotation grace whenever
+// the outage is shorter than that grace; after a 429, its Retry-After; after any other error the
+// broker answered, a minute, doubling to an hour.
 const (
 	defaultRefreshEvery = 24 * time.Hour
 	defaultRefreshRetry = 15 * time.Second
-	// defaultRefreshGrace is the broker's rotation grace (oauthstore's five minutes): a refresh
-	// token rotated by a redemption whose answer was lost stays redeemable that long.
-	defaultRefreshGrace = 5 * time.Minute
-	// defaultRefreshBackoff is the first wait once a run of unlearned refreshes outlasts the grace,
-	// doubling to maxRefreshRetry.
+	// defaultRefreshBackoff is the first wait after a refresh the broker refused with an error
+	// other than a 429 or invalid_grant, doubling to maxRefreshRetry.
 	defaultRefreshBackoff = time.Minute
 	maxRefreshRetry       = time.Hour
 	// defaultStartRefreshBound bounds Start's refresh of the kept login, so serve listens well
@@ -149,10 +143,9 @@ type Broker struct {
 	// has moved it; zero means a day. Only tests shorten it.
 	expiryWarning time.Duration
 	// refreshEvery is the longest the refresh loop waits after a refresh that reached the broker
-	// or a login's install (nextRefresh), refreshRetry its fixed wait after one whose outcome it
-	// did not learn, inside the grace, and refreshBackoff its first wait outside it
-	// (unlearnedRetry); zero means a day, 15 s and a minute. Only tests shorten them.
-	refreshEvery, refreshRetry, refreshBackoff time.Duration
+	// or a login's install (nextRefresh), and refreshRetry its wait after one the broker did not
+	// answer or answered 5xx (retrySchedule); zero means a day and 15 s. Only tests shorten them.
+	refreshEvery, refreshRetry time.Duration
 	// startRefreshBound is how long Start waits on its refresh of the kept login; zero means
 	// defaultStartRefreshBound. Only tests shorten it.
 	startRefreshBound time.Duration
@@ -499,29 +492,27 @@ func (b *Broker) retireReplaced(old *machineCredential) {
 // deletes the file, so a login the broker answered as ended is never resumed; one whose outcome
 // the helper did not learn (the broker unreachable or rate-limiting, a lost or late answer, a 5xx)
 // installs the kept login as issued, though the broker may have ended it, and leaves the refresh
-// loop to retry it (refreshLoop: every refreshRetry inside the grace, then backing off), no sooner
-// than a Retry-After the broker named. A file that is there but is not a machine login, or that
+// loop to retry it on the retrySchedule. A file that is there but is not a machine login, or that
 // others can read, is an error naming it.
 func (b *Broker) Start(ctx context.Context) error {
 	if err := RemoveLeftoverMachineTemps(b.MachineFile); err != nil {
 		b.logger().Error("removing the temporary files an interrupted machine file save left", "machine_file", b.MachineFile, "error", err)
 	}
 	f, err := LoadMachineFile(b.MachineFile)
+	sched := b.newRetrySchedule()
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		go b.refreshLoop(ctx, b.refreshEveryOrDefault(), time.Time{})
+		go b.refreshLoop(ctx, b.refreshEveryOrDefault(), sched)
 		return nil
 	case err != nil:
 		return err
 	}
 	kept := f.credential()
 	b.credMu.Lock()
-	attempt := time.Now()
 	bounded, cancel := context.WithTimeout(ctx, b.startRefreshBoundOrDefault())
 	next, refusal, err := b.redeem(bounded, kept)
 	cancel()
 	first := time.Duration(0)
-	var unlearned time.Time
 	switch {
 	case refusal != "":
 		b.installCredential(kept, &loginState{State: "issued"})
@@ -529,15 +520,12 @@ func (b *Broker) Start(ctx context.Context) error {
 		b.removeRefusedFile()
 	case err != nil:
 		b.installCredential(kept, &loginState{State: "issued"})
-		first = max(b.refreshRetryOrDefault(), retryAfter(err))
-		if mayHaveRotated(err) {
-			unlearned = attempt
-		}
+		first = sched.next(err)
 	default:
 		if err := next.Save(b.MachineFile); err != nil {
 			b.logger().Error("the helper could not keep the machine login's refresh on disk; retrying",
 				"credential_id", next.CredentialID, "machine_file", b.MachineFile, "error", err)
-			first = b.refreshRetryOrDefault()
+			first = sched.retry
 		}
 		f = next
 		b.installCredential(next.credential(), &loginState{State: "issued"})
@@ -550,7 +538,7 @@ func (b *Broker) Start(ctx context.Context) error {
 	if first == 0 {
 		first = b.nextRefresh(b.refreshEveryOrDefault())
 	}
-	go b.refreshLoop(ctx, first, unlearned)
+	go b.refreshLoop(ctx, first, sched)
 	return nil
 }
 
@@ -609,11 +597,9 @@ func (b *Broker) refreshRetryOrDefault() time.Duration {
 	return b.refreshRetry
 }
 
-func (b *Broker) refreshBackoffOrDefault() time.Duration {
-	if b.refreshBackoff == 0 {
-		return defaultRefreshBackoff
-	}
-	return b.refreshBackoff
+// newRetrySchedule is the refresh loop's retrySchedule, at refreshRetry and the default backoff.
+func (b *Broker) newRetrySchedule() retrySchedule {
+	return retrySchedule{retry: b.refreshRetryOrDefault(), backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
 }
 
 // nextRefresh is how long the refresh loop waits before refreshing the held credential: half the
@@ -628,23 +614,11 @@ func (b *Broker) nextRefresh(every time.Duration) time.Duration {
 }
 
 // refreshLoop refreshes the held machine login after first, then at nextRefresh after each
-// refresh that reached the broker and each install of a credential. A refresh whose outcome it did
-// not learn (the broker unreachable, a timeout, a 5xx) is retried on the unlearnedRetry schedule:
-// at the fixed refreshRetry (15 s) until the broker's five-minute rotation grace, counted from the
-// first such attempt that got a connection to the broker and so may have rotated the token, has
-// passed, so a lost answer's rotated token is redeemed while the broker still takes it however long
-// the outage inside the grace; outside that window the wait starts at a minute and doubles to an
-// hour. An attempt that cannot have rotated (one that never got a connection, or a 429) neither
-// opens nor moves the window.
-// No wait is sooner than a Retry-After the broker answered with. unlearned is when such a window
-// opened before the loop started (Start's own refresh), zero for none.
-// A credential a launcher call's refusal dropped is settled at once (settleRefused), and retried
-// the same way until it is. It ends with ctx.
-func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned time.Time) {
+// refresh that reached the broker and each install of a credential, and waits sched's answer after
+// each refresh that failed (retrySchedule). A credential a launcher call's refusal dropped is
+// settled at once (settleRefused), and retried the same way until it is. It ends with ctx.
+func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, sched retrySchedule) {
 	every := b.refreshEveryOrDefault()
-	sched := unlearnedRetry{retry: b.refreshRetryOrDefault(), grace: defaultRefreshGrace,
-		backoffStart: b.refreshBackoffOrDefault(), since: unlearned}
-	sched.backoff = sched.backoffStart
 	sig := b.refreshSignals()
 	// An install before the loop started asked for a reschedule first already accounts for.
 	select {
@@ -669,7 +643,6 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned
 			continue
 		case <-timer.C:
 		}
-		attempt := time.Now()
 		var err error
 		if settle != nil {
 			err = b.settleRefused(ctx, settle)
@@ -687,7 +660,7 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned
 			err = b.refresh(ctx)
 		}
 		if err != nil {
-			timer.Reset(sched.next(attempt, time.Now(), err))
+			timer.Reset(sched.next(err))
 			continue
 		}
 		sched.reset()
@@ -695,76 +668,46 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned
 	}
 }
 
-// unlearnedRetry is the refresh loop's schedule after refreshes whose outcome it did not learn:
-// the fixed retry while inside grace of since, the start of the first attempt of the run that may
-// have rotated the token, else backoff from backoffStart, doubling to maxRefreshRetry; no wait is
-// sooner than the broker's Retry-After.
-type unlearnedRetry struct {
-	retry, grace, backoffStart time.Duration
-	since                      time.Time
-	backoff                    time.Duration
+// retrySchedule is the refresh loop's wait after a refresh that failed (next). A refresh the
+// broker did not answer, or answered 5xx, waits retry (15 s), however long that goes on: the
+// broker may have rotated the token and lost its answer, and the token the helper still holds is
+// redeemable again only inside the broker's five-minute rotation grace, whose start the helper
+// cannot know, so it retries often until an answer comes. An outage longer than the grace right
+// after a lost answer still ends in a reuse, which revokes the machine. A 429 waits its Retry-After
+// (at least retry). Any other error the broker answered waits backoff, from backoffStart doubling
+// to maxRefreshRetry, until a refresh succeeds (reset). An error that is no answer of the broker's
+// (a machine file the answer could not be kept in, a save that failed) waits retry too.
+type retrySchedule struct {
+	retry, backoffStart, backoff time.Duration
 }
 
-// next is the wait after an attempt that began at attempt and failed with err at now. An attempt
-// that may have rotated the token opens the grace window at attempt when none is open; the broker
-// counts its grace from a token's first rotation, so a later one does not move it.
-func (u *unlearnedRetry) next(attempt, now time.Time, err error) time.Duration {
-	if u.since.IsZero() && mayHaveRotated(err) {
-		u.since, u.backoff = attempt, u.backoffStart
+func (s *retrySchedule) next(err error) time.Duration {
+	var re *oauth2.RetrieveError
+	if !errors.As(err, &re) || re.Response == nil || re.Response.StatusCode >= http.StatusInternalServerError {
+		return s.retry
 	}
-	if !u.since.IsZero() && now.Before(u.since.Add(u.grace)) {
-		return max(u.retry, retryAfter(err))
+	if re.Response.StatusCode == http.StatusTooManyRequests {
+		return max(s.retry, retryAfter(err))
 	}
-	wait := max(u.backoff, retryAfter(err))
-	u.backoff = min(2*u.backoff, maxRefreshRetry)
+	wait := s.backoff
+	s.backoff = min(2*s.backoff, maxRefreshRetry)
 	return wait
 }
 
-// reset ends the run: a refresh reached the broker, or a credential was installed.
-func (u *unlearnedRetry) reset() {
-	u.since, u.backoff = time.Time{}, u.backoffStart
+// reset restarts the backoff: a refresh reached the broker, or a credential was installed.
+func (s *retrySchedule) reset() {
+	s.backoff = s.backoffStart
 }
-
-// mayHaveRotated reports whether a refresh that failed with err may have reached the broker's
-// token endpoint and rotated the token: false for one that never got a connection to the broker
-// (notSentError: a refused or unanswered dial, a DNS failure, a failed TLS handshake, a connect the
-// client timeout or the caller's bound ended) and for the broker's 429, which rotates nothing; true
-// for anything else, a timeout after the connection was made, a lost answer or a 5xx among them.
-func mayHaveRotated(err error) bool {
-	var unsent *notSentError
-	if errors.As(err, &unsent) {
-		return false
-	}
-	var re *oauth2.RetrieveError
-	return !errors.As(err, &re) || re.Response == nil || re.Response.StatusCode != http.StatusTooManyRequests
-}
-
-// notSentError is a refresh's error when no connection to the broker was ever made for it
-// (redeem), so no byte of its request can have reached the broker.
-type notSentError struct{ err error }
-
-func (e *notSentError) Error() string { return e.err.Error() }
-func (e *notSentError) Unwrap() error { return e.err }
 
 // redeem spends cred's refresh token for the rotated login: the machine file the broker's answer
 // names, or refusal, the broker's invalid_grant code, when it has ended the login (revoked, lapsed
 // or reused), or another error, logged, when the helper did not learn the outcome or cannot keep
 // the answer. The broker's 429 (its token endpoint's rate limit) is one of those: the login is
-// kept and retried after its Retry-After (retryAfter). An error from an attempt that never got a
-// connection to the broker is a notSentError: the trace's GotConn, which the transport calls on the
-// request's own goroutine before it writes a byte, is the bound, since a write can still land after
-// a cancelled round trip has returned. The caller holds credMu.
+// kept and retried after its Retry-After (retryAfter). The caller holds credMu.
 func (b *Broker) redeem(ctx context.Context, cred *machineCredential) (next *MachineFile, refusal string, err error) {
-	var connected atomic.Bool
-	traced := httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
-	})
-	tok, err := b.oauthConfig().TokenSource(b.tokenContext(traced, cred.key),
+	tok, err := b.oauthConfig().TokenSource(b.tokenContext(ctx, cred.key),
 		&oauth2.Token{RefreshToken: cred.refreshToken, Expiry: time.Unix(1, 0)}).Token()
 	if err != nil {
-		if !connected.Load() {
-			err = &notSentError{err: err}
-		}
 		var re *oauth2.RetrieveError
 		switch {
 		case errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == http.StatusTooManyRequests:

@@ -2602,15 +2602,15 @@ login installed as `issued`, though the broker may have ended it, and retried by
 that is there but is
 not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
-credential is installed; a refresh whose outcome it did not learn is retried every 15 s until the
-broker's five-minute rotation grace, counted from the first such attempt that got a connection to
-the broker and so may have rotated the token (a timeout once connected, a lost answer, a 5xx; an
-attempt that never got a connection, its dial refused, unanswered or unresolved or its TLS
-handshake failed, or a 429, neither opens nor extends it), has passed, otherwise after a minute, doubling to an
-hour, and never sooner than the `Retry-After` of a 429 (the token
-endpoint's rate limit), which keeps the login like any other unlearned outcome. A lost answer
-keeps the login only while a retry lands inside the grace: an outage longer than the grace right
-after a lost answer makes the next retry a reuse, which revokes the machine and ends its sessions.
+credential is installed; a refresh the broker did not answer (any transport error: a refused,
+unanswered or unresolved dial, a timeout, a lost answer, a cancelled request) or answered 5xx is
+retried every 15 s for as long as that lasts, with no backoff (`retrySchedule`); a 429 (the token
+endpoint's rate limit) waits its `Retry-After` and keeps the login; any other refusal but
+`invalid_grant` waits a minute, doubling to an hour. A lost answer keeps the login only while a
+retry lands inside the broker's five-minute rotation grace: retrying every 15 s lands one there
+whenever the outage is shorter, and an outage longer than the grace right after a lost answer makes
+the next retry a reuse, which revokes the machine and ends its sessions. The cost is one request
+every 15 s per machine during an outage.
 A 401
 `LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
 dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,

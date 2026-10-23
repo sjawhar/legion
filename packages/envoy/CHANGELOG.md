@@ -10,10 +10,11 @@
   types into Dispatch's machine-login page as before; on approval the helper gets a refresh token
   bound to the machine's key (DPoP, RFC 9449), and refreshes the login when it starts and then at
   half the time left before the credential's expiry, at most every 24 hours; a refresh whose
-  answer is lost or that the broker cannot serve is retried every 15 s until five minutes (the time
-  a rotated token stays redeemable) after the first attempt, then after a minute, doubling to an
-  hour, so an outage longer than five minutes right after a lost answer makes the next retry a
-  reuse. Both OAuth routes refuse a form past 64 KiB, `400 invalid_request`. `machine login` names the page the broker's `verification_uri`
+  answer is lost, that does not reach the broker, or that the broker answers 5xx is retried every
+  15 s for as long as that lasts, a 429 after its `Retry-After`, and any other refusal but
+  `invalid_grant` after a minute, doubling to an hour; an outage longer than five minutes (the time
+  a rotated token stays redeemable) right after a lost answer makes the next retry a reuse. Both
+  OAuth routes refuse a form past 64 KiB, `400 invalid_request`. `machine login` names the page the broker's `verification_uri`
   names when `AGENT_SECRETS_APPROVE_URL` is unset. Each refresh moves the credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
   from then and rotates the refresh token. A rotated token redeemed again within five minutes of
   its replacement ends the tokens its earlier redemption issued, so the login never forks; one

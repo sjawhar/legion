@@ -97,8 +97,9 @@ token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` b
 readable only by its user, so a restarted helper resumes it. It refreshes the login when it starts,
 before it resumes it, and at most a day apart after: each refresh spends the refresh token for a new one and moves the
 credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from then. A refresh token it has
-replaced still works for five minutes, so a refresh whose answer was lost is retried every 15 s
-inside those five minutes. Spent after that, it is a reuse: the broker ends every refresh token of
+replaced still works for five minutes, so a refresh the broker did not answer (its answer lost, a
+timeout, the broker unreachable) or answered with a 5xx is retried every 15 s for as long as that
+lasts. Spent after the five minutes, it is a reuse: the broker ends every refresh token of
 the login and revokes the machine's credential as a revoke does, ending every session it enrolled,
 and the helper holding it drops it at its next refresh. A newer login of the same machine instead
 retires the one it replaced: that login can no longer refresh or enroll a session, and the
