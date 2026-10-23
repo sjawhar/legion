@@ -6,12 +6,18 @@ package helper
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
 // keptLogin logs a Broker in against f and returns the machine file it kept, for a second Broker
@@ -151,7 +157,7 @@ func TestARefreshThatDoesNotReachTheBrokerKeepsTheLogin(t *testing.T) {
 // 225 s); the first wait past the grace is the backoff's start, a minute, doubling to an hour. A
 // learned outcome ends the run, so the next failure starts a fresh grace. The clock is the test's.
 func TestAnUnlearnedRefreshIsRetriedAtTheFixedIntervalInsideTheGrace(t *testing.T) {
-	unknown := errors.New("dial tcp: connection refused")
+	unknown := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: io.ErrUnexpectedEOF}
 	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	s := unlearnedRetry{retry: defaultRefreshRetry, grace: defaultRefreshGrace, backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
 	// Each attempt takes 5 s to fail, then waits the schedule's answer.
@@ -187,6 +193,61 @@ func TestAnUnlearnedRefreshIsRetriedAtTheFixedIntervalInsideTheGrace(t *testing.
 	carried := unlearnedRetry{retry: defaultRefreshRetry, grace: defaultRefreshGrace, backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff, since: start}
 	if wait := carried.next(past, past, unknown); wait != time.Minute {
 		t.Fatalf("wait past the grace of a run Start began = %s; want a minute", wait)
+	}
+}
+
+// TestOnlyAnAttemptThatCouldHaveRotatedStartsTheGrace: the broker's grace starts at a rotation, so
+// an attempt that never reached it (a refused dial, a DNS failure, no route) or that it answered
+// 429 neither starts nor extends the fixed-retry window; a timeout after the request was sent, a
+// lost answer or a 5xx does. The clock is the test's.
+func TestOnlyAnAttemptThatCouldHaveRotatedStartsTheGrace(t *testing.T) {
+	dial := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token",
+		Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}
+	dns := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token",
+		Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "broker.internal.example", IsNotFound: true}}}
+	noRoute := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token",
+		Err: &net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}}
+	limited := &oauth2.RetrieveError{Response: &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"1"}}}}
+	timeout := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: context.DeadlineExceeded}
+	lost := &url.Error{Op: "Post", URL: "https://broker.internal.example/v1/oauth/token", Err: io.ErrUnexpectedEOF}
+	unavailable := &oauth2.RetrieveError{Response: &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}}}
+	start := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	fresh := func() unlearnedRetry {
+		return unlearnedRetry{retry: defaultRefreshRetry, grace: defaultRefreshGrace, backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
+	}
+	for name, err := range map[string]error{"a refused dial": dial, "a DNS failure": dns, "no route": noRoute, "a 429": limited} {
+		s := fresh()
+		s.next(start, start.Add(time.Second), err)
+		if !s.since.IsZero() {
+			t.Errorf("%s started the grace at %s; want none", name, s.since)
+		}
+	}
+	for name, err := range map[string]error{"a timeout after sending": timeout, "a lost answer": lost, "a 5xx": unavailable} {
+		s := fresh()
+		if wait := s.next(start, start.Add(time.Second), err); wait != defaultRefreshRetry || !s.since.Equal(start) {
+			t.Errorf("%s: wait %s, grace from %s; want %s from %s", name, wait, s.since, defaultRefreshRetry, start)
+		}
+	}
+	// The gate's scenario: refused at 00:00, rotated with its answer lost at 00:15. The grace runs
+	// from 00:15, so retries stay at the fixed interval until 05:15, not 05:00.
+	s := fresh()
+	s.next(start, start, dial)
+	rotated := start.Add(15 * time.Second)
+	s.next(rotated, rotated, lost)
+	if !s.since.Equal(rotated) {
+		t.Fatalf("grace from %s; want the rotating attempt's %s", s.since, rotated)
+	}
+	late := start.Add(5*time.Minute + 5*time.Second)
+	if wait := s.next(late, late, dial); wait != defaultRefreshRetry {
+		t.Fatalf("wait at 05:05 = %s; want the fixed %s inside the grace from 00:15", wait, defaultRefreshRetry)
+	}
+	// A refused dial inside the window does not extend it.
+	if !s.since.Equal(rotated) {
+		t.Fatalf("a refused dial moved the grace to %s", s.since)
+	}
+	past := rotated.Add(defaultRefreshGrace + time.Second)
+	if wait := s.next(past, past, dial); wait != defaultRefreshBackoff {
+		t.Fatalf("wait past the grace = %s; want the backoff's %s", wait, defaultRefreshBackoff)
 	}
 }
 
@@ -590,7 +651,8 @@ func TestARateLimitedRefreshKeepsTheLoginAndWaitsItsRetryAfter(t *testing.T) {
 		t.Fatalf("the machine file after a rate-limited refresh: %+v %v; want it unchanged", kept, err)
 	}
 
-	b.refreshEvery, b.refreshRetry = time.Hour, 10*time.Millisecond
+	// A 429 rotates nothing, so it opens no grace window: the loop backs off, shortened here.
+	b.refreshEvery, b.refreshRetry, b.refreshBackoff = time.Hour, 10*time.Millisecond, 10*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f.mu.Lock()

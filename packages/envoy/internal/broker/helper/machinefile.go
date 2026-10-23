@@ -41,8 +41,9 @@ type machineFileJSON struct {
 // os.ErrNotExist; one whose mode grants its group or anyone else any access, or that this user
 // does not own, is refused, naming path and the fix, since it holds the machine's key and refresh
 // token; one that is there but is not exactly one whole machine login (unreadable JSON, anything
-// after the object, an unknown field, a missing value, a key that is not a P-256 PKCS#8 key) is an
-// error naming path.
+// after the object, a missing value, a key that is not a P-256 PKCS#8 key) is an error naming path.
+// A field this release does not know is ignored, so a rollback past a release that added one still
+// starts on the file that release wrote.
 func LoadMachineFile(path string) (*MachineFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -59,7 +60,6 @@ func LoadMachineFile(path string) (*MachineFile, error) {
 		return nil, fmt.Errorf("machine file %s is owned by uid %d, not this user (uid %d); remove it, or run the helper as its owner, and chmod 600 it", path, st.Uid, os.Getuid())
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
 	var raw machineFileJSON
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("machine file %s: %w", path, err)

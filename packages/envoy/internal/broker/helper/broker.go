@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -38,10 +39,11 @@ const noCredentialMsg = "no machine credential; run: agent-secrets machine login
 var errNoCredential = errors.New(noCredentialMsg)
 
 // The refresh loop's defaults: a refresh a day at most, and after a refresh whose outcome the
-// helper did not learn (it did not reach the broker, its answer was lost, or the broker answered
-// 5xx) a retry 15 s later, doubling to at most an hour. The first retry lands well inside the
-// broker's five-minute rotation grace, during which the refresh token the helper still holds is
-// redeemable again even if the lost answer had rotated it.
+// helper did not learn (its answer was lost, a timeout, a 5xx) a retry every 15 s until the
+// broker's five-minute rotation grace, counted from the first such attempt that may have rotated
+// the token, has passed, so the refresh token the helper still holds is redeemed again while the
+// broker takes it even if the lost answer had rotated it; after that, or for an attempt that
+// cannot have rotated (a failed dial, a 429), a minute, doubling to an hour.
 const (
 	defaultRefreshEvery = 24 * time.Hour
 	defaultRefreshRetry = 15 * time.Second
@@ -145,10 +147,10 @@ type Broker struct {
 	// has moved it; zero means a day. Only tests shorten it.
 	expiryWarning time.Duration
 	// refreshEvery is the longest the refresh loop waits after a refresh that reached the broker
-	// or a login's install (nextRefresh), and refreshRetry its fixed wait after one whose outcome it
-	// did not learn, inside the grace (unlearnedRetry); zero means a day and 15 s. Only tests
-	// shorten them.
-	refreshEvery, refreshRetry time.Duration
+	// or a login's install (nextRefresh), refreshRetry its fixed wait after one whose outcome it
+	// did not learn, inside the grace, and refreshBackoff its first wait outside it
+	// (unlearnedRetry); zero means a day, 15 s and a minute. Only tests shorten them.
+	refreshEvery, refreshRetry, refreshBackoff time.Duration
 	// startRefreshBound is how long Start waits on its refresh of the kept login; zero means
 	// defaultStartRefreshBound. Only tests shorten it.
 	startRefreshBound time.Duration
@@ -459,7 +461,7 @@ func (b *Broker) keepLogin(key *ecdsa.PrivateKey, tok *oauth2.Token, code, opera
 
 // retireReplaced ends old, the credential a new machine login replaced, at the broker: POST
 // /v1/operator/machines/{id}/retire signed with old's own launcher proof. The broker sets its
-// expiry to now and ends its OAuth tokens, so no old copy of the machine file can refresh it or
+// expiry to now and deletes its OAuth tokens, so no old copy of the machine file can refresh it or
 // enroll with it, and leaves every session it enrolled running: they renew with their own proofs.
 // It is best effort: a failure is logged at WARN, never retried, and changes nothing the helper
 // holds.
@@ -526,7 +528,9 @@ func (b *Broker) Start(ctx context.Context) error {
 	case err != nil:
 		b.installCredential(kept, &loginState{State: "issued"})
 		first = max(b.refreshRetryOrDefault(), retryAfter(err))
-		unlearned = attempt
+		if mayHaveRotated(err) {
+			unlearned = attempt
+		}
 	default:
 		if err := next.Save(b.MachineFile); err != nil {
 			b.logger().Error("the helper could not keep the machine login's refresh on disk; retrying",
@@ -603,6 +607,13 @@ func (b *Broker) refreshRetryOrDefault() time.Duration {
 	return b.refreshRetry
 }
 
+func (b *Broker) refreshBackoffOrDefault() time.Duration {
+	if b.refreshBackoff == 0 {
+		return defaultRefreshBackoff
+	}
+	return b.refreshBackoff
+}
+
 // nextRefresh is how long the refresh loop waits before refreshing the held credential: half the
 // time left until its expiry, at most every, so a credential the broker mints for less than two
 // days is still refreshed well before it lapses.
@@ -617,17 +628,19 @@ func (b *Broker) nextRefresh(every time.Duration) time.Duration {
 // refreshLoop refreshes the held machine login after first, then at nextRefresh after each
 // refresh that reached the broker and each install of a credential. A refresh whose outcome it did
 // not learn (the broker unreachable, a timeout, a 5xx) is retried on the unlearnedRetry schedule:
-// at the fixed refreshRetry (15 s) until the first such attempt's start plus the broker's
-// five-minute rotation grace has passed, so a lost answer's rotated token is redeemed while the
-// broker still takes it however long the outage inside the grace; after that the wait starts at a
-// minute and doubles to an hour. No wait is sooner than a Retry-After the broker answered with.
-// unlearned is when such a run began before the loop started (Start's own refresh), zero for none.
+// at the fixed refreshRetry (15 s) until the broker's five-minute rotation grace, counted from the
+// first such attempt that could have reached the broker and rotated the token, has passed, so a
+// lost answer's rotated token is redeemed while the broker still takes it however long the outage
+// inside the grace; outside that window the wait starts at a minute and doubles to an hour. An
+// attempt that cannot have rotated (a dial that failed, a 429) neither opens nor moves the window.
+// No wait is sooner than a Retry-After the broker answered with. unlearned is when such a window
+// opened before the loop started (Start's own refresh), zero for none.
 // A credential a launcher call's refusal dropped is settled at once (settleRefused), and retried
 // the same way until it is. It ends with ctx.
 func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned time.Time) {
 	every := b.refreshEveryOrDefault()
 	sched := unlearnedRetry{retry: b.refreshRetryOrDefault(), grace: defaultRefreshGrace,
-		backoffStart: defaultRefreshBackoff, since: unlearned}
+		backoffStart: b.refreshBackoffOrDefault(), since: unlearned}
 	sched.backoff = sched.backoffStart
 	sig := b.refreshSignals()
 	// An install before the loop started asked for a reschedule first already accounts for.
@@ -680,21 +693,23 @@ func (b *Broker) refreshLoop(ctx context.Context, first time.Duration, unlearned
 }
 
 // unlearnedRetry is the refresh loop's schedule after refreshes whose outcome it did not learn:
-// the fixed retry while inside grace of since, the first such attempt's start, then backoff from
-// backoffStart, doubling to maxRefreshRetry; no wait is sooner than the broker's Retry-After.
+// the fixed retry while inside grace of since, the start of the first attempt of the run that may
+// have rotated the token, else backoff from backoffStart, doubling to maxRefreshRetry; no wait is
+// sooner than the broker's Retry-After.
 type unlearnedRetry struct {
 	retry, grace, backoffStart time.Duration
 	since                      time.Time
 	backoff                    time.Duration
 }
 
-// next is the wait after an attempt that began at attempt and failed with err at now, which
-// starts a run at attempt when none is under way.
+// next is the wait after an attempt that began at attempt and failed with err at now. An attempt
+// that may have rotated the token opens the grace window at attempt when none is open; the broker
+// counts its grace from a token's first rotation, so a later one does not move it.
 func (u *unlearnedRetry) next(attempt, now time.Time, err error) time.Duration {
-	if u.since.IsZero() {
-		u.since = attempt
+	if u.since.IsZero() && mayHaveRotated(err) {
+		u.since, u.backoff = attempt, u.backoffStart
 	}
-	if now.Before(u.since.Add(u.grace)) {
+	if !u.since.IsZero() && now.Before(u.since.Add(u.grace)) {
 		return max(u.retry, retryAfter(err))
 	}
 	wait := max(u.backoff, retryAfter(err))
@@ -705,6 +720,23 @@ func (u *unlearnedRetry) next(attempt, now time.Time, err error) time.Duration {
 // reset ends the run: a refresh reached the broker, or a credential was installed.
 func (u *unlearnedRetry) reset() {
 	u.since, u.backoff = time.Time{}, u.backoffStart
+}
+
+// mayHaveRotated reports whether a refresh that failed with err may have reached the broker's
+// token endpoint and rotated the token: false for a connection never made (a refused dial, a DNS
+// failure, no route: every error of the dial) and for the broker's 429, which rotates nothing;
+// true for anything else, a timeout after the request was sent, a lost answer or a 5xx among them.
+func mayHaveRotated(err error) bool {
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) && re.Response != nil && re.Response.StatusCode == http.StatusTooManyRequests {
+		return false
+	}
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return false
+	}
+	var dns *net.DNSError
+	return !errors.As(err, &dns)
 }
 
 // redeem spends cred's refresh token for the rotated login: the machine file the broker's answer

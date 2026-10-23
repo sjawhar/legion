@@ -2603,8 +2603,10 @@ that is there but is
 not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
 the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
 credential is installed; a refresh whose outcome it did not learn is retried every 15 s until the
-first such attempt's start plus the broker's five-minute rotation grace has passed, then after a
-minute, doubling to an hour, and never sooner than the `Retry-After` of a 429 (the token
+broker's five-minute rotation grace, counted from the first such attempt that may have reached the
+broker and rotated the token (a timeout after the request was sent, a lost answer, a 5xx; a failed
+dial or a 429 neither opens nor extends it), has passed, otherwise after a minute, doubling to an
+hour, and never sooner than the `Retry-After` of a 429 (the token
 endpoint's rate limit), which keeps the login like any other unlearned outcome. A lost answer
 keeps the login only while a retry lands inside the grace: an outage longer than the grace right
 after a lost answer makes the next retry a reuse, which revokes the machine and ends its sessions.
@@ -2619,7 +2621,8 @@ the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, o
 drops the login and deletes the file. A machine login installed while the helper held another
 credential retires the replaced one (`retireReplaced`: `POST /v1/operator/machines/{id}/retire`
 signed with that credential's own launcher proof, `enroll.Service.RetireCredential`: its expiry set
-to now and its OAuth tokens ended in one transaction, its sessions left running and renewing with
+to now and its OAuth tokens deleted in one transaction, so a retired refresh token presented later
+is a plain `invalid_grant` that revokes nothing, its sessions left running and renewing with
 their own proofs), best effort, logging a failure at WARN. The
 helper no longer speaks the earlier
 `POST /v1/launcher-credentials` login, so it needs a broker that serves the OAuth routes.
@@ -3269,8 +3272,9 @@ Revoking the calling credential itself ends that machine's access: its next laun
 `401 LAUNCHER_INVALID`. `POST /v1/operator/machines/{id}/retire` (`retireOperatorMachine`) is the
 helper's after a new login replaced the calling one: `{id}` must be the calling credential (`403
 NOT_CALLING_CREDENTIAL` otherwise; it needs no operator, so it is the one machine route a service's
-login is not refused), and `enroll.Service.RetireCredential` sets its `expires_at` to now and ends
-its OAuth tokens in one transaction, writing one `launcher_credential.retired` audit row, while its
+login is not refused), and `enroll.Service.RetireCredential` sets its `expires_at` to now and deletes
+its OAuth tokens in one transaction (an inactive token would take the reuse path and revoke the
+credential), writing one `launcher_credential.retired` audit row, while its
 enrollments keep running: a session renews with its own proof, as an expired credential's
 sessions do. It answers `204`, also for a credential already expired or revoked.
 

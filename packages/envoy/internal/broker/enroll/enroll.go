@@ -862,11 +862,14 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 
 // RetireCredential ends launcher credential id as the login a newer login of its machine replaced,
 // in one transaction: its expiry becomes now, so its key enrolls nothing more and its refresh is
-// refused, and its OAuth access and refresh tokens end. Unlike a revoke it leaves every enrollment
-// it made running: a session renews with its own proof, which an expired credential's sessions
-// already do. It writes one launcher_credential.retired audit row as actor. A credential already
-// revoked or past its expiry changes nothing; an unknown id is ErrNoCredential. It takes the
-// credential's row as a revoke does, so an enrollment Create holding it for share commits first.
+// refused, and its OAuth access and refresh tokens are deleted, so a retired refresh token
+// presented later (an old copy of the machine file, a late answer to an abandoned refresh) is a
+// plain invalid_grant rather than a reuse that would revoke the credential. Unlike a revoke it
+// leaves every enrollment it made running: a session renews with its own proof, which an expired
+// credential's sessions already do. It writes one launcher_credential.retired audit row as actor.
+// A credential already revoked or past its expiry changes nothing; an unknown id is
+// ErrNoCredential. It takes the credential's row as a revoke does, so an enrollment Create holding
+// it for share commits first.
 func (s *Service) RetireCredential(ctx context.Context, id, actor string) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -890,7 +893,7 @@ func (s *Service) RetireCredential(ctx context.Context, id, actor string) error 
 	if _, err := tx.Exec(ctx, `update launcher_credentials set expires_at = now() where id = $1`, id); err != nil {
 		return err
 	}
-	if err := oauthstore.EndCredential(ctx, tx, id); err != nil {
+	if err := oauthstore.DeleteCredentialTokens(ctx, tx, id); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.retired',$1,

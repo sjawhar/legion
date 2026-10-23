@@ -656,16 +656,35 @@ func EndCredential(ctx context.Context, tx pgx.Tx, credentialID string) error {
 	return nil
 }
 
-// CheckAndSetDPoPProofUsed records a DPoP proof as used until exp, keyed on its jti and target URI
-// (htu), and reports whether it already was. The insert, or the takeover of an expired record of
-// the same key, is one statement, so two requests presenting the same proof cannot both see it
-// unused. Sweep deletes expired records.
+// DeleteCredentialTokens deletes, in tx, every access and refresh token whose session names the
+// launcher credential, for a login retired rather than revoked. A deleted refresh token presented
+// later is unknown to the provider, a plain invalid_grant, where an inactive one would take the
+// library's reuse path and revoke the credential, ending the sessions the retire keeps.
+func DeleteCredentialTokens(ctx context.Context, tx pgx.Tx, credentialID string) error {
+	if _, err := tx.Exec(ctx, `delete from oauth_refresh_tokens where credential_id = $1`, credentialID); err != nil {
+		return fmt.Errorf("delete the credential's refresh tokens: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `delete from oauth_access_tokens where credential_id = $1`, credentialID); err != nil {
+		return fmt.Errorf("delete the credential's access tokens: %w", err)
+	}
+	return nil
+}
+
+// jtiRetentionMargin is how long past a DPoP proof's expiry its jti is remembered, mirroring the
+// broker's other replay stores: exp is dated on the broker's clock and compared with the
+// database's, so the margin covers skew between the two.
+const jtiRetentionMargin = time.Minute
+
+// CheckAndSetDPoPProofUsed records a DPoP proof as used until exp plus jtiRetentionMargin, keyed
+// on its jti and target URI (htu), and reports whether it already was. The insert, or the takeover
+// of an expired record of the same key, is one statement, so two requests presenting the same
+// proof cannot both see it unused. Sweep deletes expired records.
 func (s *Store) CheckAndSetDPoPProofUsed(ctx context.Context, jti, _, _, _, htu string, exp time.Time) (bool, error) {
 	var recorded bool
 	err := s.db(ctx).QueryRow(ctx, `insert into oauth_dpop_proofs (jti, htu, expires_at) values ($1, $2, $3)
 		on conflict (jti, htu) do update set expires_at = excluded.expires_at
 		where oauth_dpop_proofs.expires_at <= now()
-		returning true`, jti, htu, exp).Scan(&recorded)
+		returning true`, jti, htu, exp.Add(jtiRetentionMargin)).Scan(&recorded)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return true, nil
 	}

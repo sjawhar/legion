@@ -171,7 +171,6 @@ func TestAMachineFileThatDoesNotParseIsAnErrorNamingIt(t *testing.T) {
 		"not JSON":                 "{",
 		"trailing garbage":         string(data) + "garbage",
 		"a second object":          string(data) + "\n{}",
-		"an unknown field":         strings.Replace(string(data), `"credential_id"`, `"surprise":1,"credential_id"`, 1),
 		"no refresh token":         strings.Replace(string(data), `"refresh-1"`, `""`, 1),
 		"no credential id":         strings.Replace(string(data), `"cred-1"`, `""`, 1),
 		"a key that is not PKCS#8": strings.Replace(string(data), `"key":"`, `"key":"AAAA`, 1),
@@ -183,6 +182,31 @@ func TestAMachineFileThatDoesNotParseIsAnErrorNamingIt(t *testing.T) {
 		if _, err := LoadMachineFile(path); err == nil || errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), path) {
 			t.Errorf("%s: LoadMachineFile = %v; want an error naming %s", name, err, path)
 		}
+	}
+}
+
+// TestAMachineFileWithAFieldThisReleaseDoesNotKnowLoads: a field a later release added is ignored,
+// so rolling back after that release still starts on the file it wrote, while the fields this
+// release needs are still required.
+func TestAMachineFileWithAFieldThisReleaseDoesNotKnowLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "machine.json")
+	if err := testMachineFile(t, "cred-1", "refresh-1").Save(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := strings.Replace(string(data), `"credential_id"`, `"broker_url":"https://broker.internal.example","credential_id"`, 1)
+	if err := os.WriteFile(path, []byte(later), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := LoadMachineFile(path)
+	if err != nil {
+		t.Fatalf("LoadMachineFile of a file with a later release's field = %v; want it loaded", err)
+	}
+	if f.CredentialID != "cred-1" || f.RefreshToken != "refresh-1" {
+		t.Fatalf("loaded %q/%q; want cred-1/refresh-1", f.CredentialID, f.RefreshToken)
 	}
 }
 

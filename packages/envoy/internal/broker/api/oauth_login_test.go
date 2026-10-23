@@ -722,3 +722,64 @@ func TestARetiredMachineLoginKeepsItsSessions(t *testing.T) {
 		t.Fatalf("retired credential revoked = %v (%v), want not revoked", revoked, err)
 	}
 }
+
+// TestARetiredLoginsRefreshTokensRevokeNothing: a retired login that has refreshed holds a token
+// family of several rows. Presenting its latest refresh token, or the one it rotated (still inside
+// its grace), after the retire is a plain invalid_grant: the retire deleted the family, so neither
+// presentation reaches the reuse path, the credential is not revoked, and its session stays live.
+func TestARetiredLoginsRefreshTokensRevokeNothing(t *testing.T) {
+	rig := brokertest.NewRig(t)
+	m, rotated, credentialID := approvedLogin(t, rig)
+	latest, err := m.refresh(rotated)
+	if err != nil {
+		t.Fatalf("refresh before the retire: %v", err)
+	}
+	sessionKey := newSigningKey(t)
+	sessionThumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := proof.SignLauncher(m.key, credentialID, http.MethodPost, rig.URL+"/v1/enrollments", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := rig.Req(t, http.MethodPost, "/v1/enrollments", map[string]string{"Proof": p}, map[string]any{
+		"kind": "session", "runtime_id": "session-" + uuid.NewString(), "operator": rig.Operator, "thumbprint": sessionThumbprint,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("enroll = %d: %s", status, body)
+	}
+	enrollmentID := decode[struct {
+		ID string `json:"enrollment_id"`
+	}](t, body).ID
+	rp, err := proof.SignLauncher(m.key, credentialID, http.MethodPost, rig.URL+"/v1/operator/machines/"+credentialID+"/retire", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, body := rig.Req(t, http.MethodPost, "/v1/operator/machines/"+credentialID+"/retire", map[string]string{"Proof": rp}, nil); status != http.StatusNoContent {
+		t.Fatalf("retire = %d %s, want 204", status, body)
+	}
+	for _, c := range []struct {
+		name string
+		tok  *oauth2.Token
+	}{{"latest", latest}, {"rotated", rotated}} {
+		_, err := m.refresh(c.tok)
+		if err == nil {
+			t.Fatalf("refresh with the %s token after the retire succeeded", c.name)
+		}
+		if code, _ := oauthErrorCode(t, err); code != "invalid_grant" {
+			t.Fatalf("refresh with the %s token after the retire = %s, want invalid_grant", c.name, code)
+		}
+		var revoked bool
+		if err := rig.Store.Pool.QueryRow(context.Background(), `select revoked_at is not null from launcher_credentials where id=$1`, credentialID).Scan(&revoked); err != nil || revoked {
+			t.Fatalf("after the %s token: retired credential revoked = %v (%v), want not revoked", c.name, revoked, err)
+		}
+		sp, err := proof.Sign(sessionKey, enrollmentID, http.MethodPost, rig.URL+"/v1/enrollments/"+enrollmentID+"/renew", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status, body := rig.Req(t, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", map[string]string{"Proof": sp}, nil); status != http.StatusOK {
+			t.Fatalf("after the %s token: the session's renew = %d %s, want 200", c.name, status, body)
+		}
+	}
+}
