@@ -610,7 +610,7 @@ development=${from:+from $from}${until:+until $until}
 # binaries first on its PATH (start_daemon) instead. real_gh is also in-agent-credentials' own
 # negative control and note below.
 real_gh=$(mise which gh) || fail "mise has no gh"
-realbin=$(real_bin_path "$work/realbin" gh jj)
+realbin=$(real_bin_path "$work/realbin" gh jj tmux)
 require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
