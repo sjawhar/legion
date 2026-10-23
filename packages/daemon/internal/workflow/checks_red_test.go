@@ -1063,6 +1063,9 @@ func TestACompletionOnARedThatSettledWhileImplementingSendsTheWorkBack(t *testin
 			pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"), syncedTo("head")}, phase.Implementing},
 		{"green", "head", []intake.Fact{settledAt("head", required, 1)}, phase.Testing},
 		{"not settled yet", "head", nil, phase.Testing},
+		// The round's fix pushed, the completion arriving before GitHub's synchronize: the record
+		// still holds the red head the round fixed, and that red sends nothing back.
+		{"red at the head the round fixed, the completion before its synchronize", "red-head", []intake.Fact{settledAt("red-head", required, 1, required)}, phase.Testing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
