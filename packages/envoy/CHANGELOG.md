@@ -10,11 +10,20 @@
   types into Dispatch's machine-login page as before; on approval the helper gets a refresh token
   bound to the machine's key (DPoP, RFC 9449), and refreshes the login when it starts and then at
   half the time left before the credential's expiry, at most every 24 hours; a refresh whose
-  answer is lost or that the broker cannot serve is retried 15 s later, inside the minute a
-  rotated token stays redeemable. `machine login` names the page the broker's `verification_uri`
+  answer is lost or that the broker cannot serve is retried 15 s later, inside the five minutes
+  a rotated token stays redeemable. `machine login` names the page the broker's `verification_uri`
   names when `AGENT_SECRETS_APPROVE_URL` is unset. Each refresh moves the credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
-  from then and rotates the refresh token; a rotated token redeemed more than a minute after its
-  replacement ends the login. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
+  from then and rotates the refresh token. A rotated token redeemed again within five minutes of
+  its replacement ends the tokens its earlier redemption issued, so the login never forks; one
+  redeemed later is a reuse, which ends the login and revokes the machine's launcher credential
+  as a revoke does (its sessions and grants ended, audit actor `broker:refresh-token-reuse`), so
+  a copied machine file's key enrolls nothing more. The token endpoint checks each DPoP proof
+  against `BROKER_PUBLIC_URL`, never the request's `Host` or `X-Forwarded-*` headers, accepts a
+  proof within `BROKER_PROOF_SKEW_SECONDS` of the broker's clock, and spends a per-address rate
+  limit bucket of its own (429 `RATE_LIMITED` with `Retry-After`). A login through the earlier
+  `POST /v1/launcher-credentials` route, which cannot refresh, keeps its seven-day credential, or
+  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter. The provider's device codes, tokens,
+  DPoP proofs and nonces and its HMAC secret live in the tables migration 0016 creates. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
   its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
   logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
   token was reused` at ERROR, and `machine login-status` prints it. While a login is held,
@@ -27,8 +36,10 @@
   `~/.config/agent-secrets/machine.json`, mode 0600): the machine key, the credential's id and
   expiry and the current refresh token, written through a fresh temporary file so no file or link
   already in the directory is followed. It refreshes that login before it resumes it at start, so
-  a restart, a reboot or an upgrade keeps the machine logged in while a revoked machine resumes
-  nothing, and deletes the file when the broker refuses the login's refresh, within seconds of a
+  a restart, a reboot or an upgrade keeps the machine logged in. A machine revoked while its
+  helper was stopped is refused by the broker from then on, and the helper drops the login at its
+  first refresh or launcher call the broker refuses. It deletes the file when the broker refuses
+  the login's refresh, within seconds of a
   launcher call the broker refuses `LAUNCHER_INVALID`. A refreshed login it cannot save is held
   and its refresh and save retried 15 s later. `serve` holds an exclusive lock on
   `<socket>.lock` for its lifetime and refuses to start, naming the socket, while another helper

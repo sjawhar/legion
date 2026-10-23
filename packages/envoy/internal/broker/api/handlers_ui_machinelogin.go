@@ -70,8 +70,9 @@ type launcherCredentialResp struct {
 	ApprovedBy string `json:"approved_by"`
 	// When the login was approved, or a token login's first login.
 	IssuedAt time.Time `json:"issued_at"`
-	// When the credential expires. A person's machine login does not renew; a token login moves it
-	// later at each login, at most an hour away.
+	// When the credential expires. Each refresh of a person's device login moves it to
+	// BROKER_LAUNCHER_CREDENTIAL_SECONDS from then; a login through the earlier route never
+	// refreshes; a token login moves it later at each login, at most an hour away.
 	ExpiresAt time.Time `json:"expires_at"`
 	// True once expires_at has passed: the login enrolls nothing more, but sessions it enrolled
 	// still run (each renews with its own key), and revoking it ends them.

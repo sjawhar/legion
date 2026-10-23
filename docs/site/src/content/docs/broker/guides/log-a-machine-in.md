@@ -111,9 +111,11 @@ minted, which the helper now enrolls sessions with. The helper writes the login 
 `~/.config/agent-secrets/machine.json` (`AGENT_SECRETS_MACHINE_FILE`), mode 0600, and resumes it
 whenever it starts, logging `the helper resumed the machine login it kept`, so a restart, a reboot
 or an upgrade keeps the machine logged in. It refreshes the login at start, before it resumes it,
-so a machine revoked while its helper was stopped resumes nothing, and then at most a day apart
+and then at most a day apart
 (sooner for a credential that lives less than two days),
-logging `machine login refreshed` with the new expiry. Check it at any time; it also says when the
+logging `machine login refreshed` with the new expiry. A machine revoked while its helper was
+stopped is refused by the broker from then on, and the helper drops the login at its first refresh
+or launcher call the broker refuses. Check it at any time; it also says when the
 login lapses if no refresh reaches the broker:
 
 ```console
