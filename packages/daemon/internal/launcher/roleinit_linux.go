@@ -184,7 +184,7 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 // than overlaid on one kernel and hidden on another. What the role writes anywhere else under its
 // home is its own: no sibling role and nothing in the container sees it.
 func privateHome(cfg RoleInitConfig, homes, work string) error {
-	if carried, err := mountsUnder(cfg.Home); err != nil {
+	if _, carried, err := mountsUnder(cfg.Home); err != nil {
 		return err
 	} else if len(carried) > 0 {
 		return fmt.Errorf("the home %s carries mounts (%s): the container mounts what belongs under the home under %s instead",
@@ -194,7 +194,10 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 	if err := unix.Mount("overlay", cfg.Home, "overlay", 0, options); err != nil {
 		return fmt.Errorf("give the role its own layer over %s: %w", cfg.Home, err)
 	}
-	mounts, err := mountsUnder(cfg.HomeMounts)
+	// The image reaches the home mounts directory through a link (its /var/run is /run), and
+	// mountinfo names each mount by the path the link resolves to, so each is placed relative to
+	// that resolved directory.
+	homeMounts, mounts, err := mountsUnder(cfg.HomeMounts)
 	if err != nil {
 		return err
 	}
@@ -205,7 +208,7 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 		if slices.ContainsFunc(bound, func(outer string) bool { return strings.HasPrefix(mount, outer+"/") }) {
 			continue
 		}
-		rel, err := filepath.Rel(cfg.HomeMounts, mount)
+		rel, err := filepath.Rel(homeMounts, mount)
 		if err != nil {
 			return err
 		}
@@ -229,7 +232,7 @@ func privateHome(cfg RoleInitConfig, homes, work string) error {
 // The home is not carried this way (privateHome): an overlay's lower layer may have no mount under
 // it at all.
 func carryOver(dir, stage string, place func() error) error {
-	carried, err := mountsUnder(dir)
+	_, carried, err := mountsUnder(dir)
 	if err != nil {
 		return err
 	}
@@ -341,11 +344,17 @@ func roleLogf(cfg RoleInitConfig, format string, args ...any) {
 }
 
 // mountsUnder are the mount points strictly under dir, in the order the namespace holds them, so
-// a mount above another is bound back first.
-func mountsUnder(dir string) ([]string, error) {
+// a mount above another is bound back first, and the path dir resolves to, by which mountinfo
+// names them: a dir reached through a link (the image's /var/run is a link to /run) is listed
+// by its target, so dir as given would match none of its mounts.
+func mountsUnder(dir string) (string, []string, error) {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve %s: %w", dir, err)
+	}
 	file, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
-		return nil, fmt.Errorf("read this namespace's mounts: %w", err)
+		return "", nil, fmt.Errorf("read this namespace's mounts: %w", err)
 	}
 	defer file.Close()
 	var under []string
@@ -357,14 +366,14 @@ func mountsUnder(dir string) ([]string, error) {
 			continue
 		}
 		point := unescapeMount(fields[4])
-		if strings.HasPrefix(point, dir+string(filepath.Separator)) {
+		if strings.HasPrefix(point, resolved+string(filepath.Separator)) {
 			under = append(under, point)
 		}
 	}
 	if err := lines.Err(); err != nil {
-		return nil, fmt.Errorf("read this namespace's mounts: %w", err)
+		return "", nil, fmt.Errorf("read this namespace's mounts: %w", err)
 	}
-	return under, nil
+	return resolved, under, nil
 }
 
 // unescapeMount reads mountinfo's octal escapes for the characters it cannot write plainly.

@@ -237,7 +237,16 @@ func runStage(plan stagePlan) error {
 	rolesDir := filepath.Join(plan.Mount, "roles")
 	fixedRoot := filepath.Join(plan.Mount, "fixed")
 	home := filepath.Join(plan.Mount, "home")
+	// The home mounts directory is reached through a link, as the worker image's is (its /var/run
+	// is a link to /run): mountinfo names every mount under it by the link's target, so role-init
+	// must find them there.
 	homeMounts := filepath.Join(plan.Mount, "home-mounts")
+	if err := os.MkdirAll(filepath.Join(plan.Mount, "run", "home-mounts"), 0o755); err != nil {
+		return err
+	}
+	if err := os.Symlink(filepath.Join(plan.Mount, "run", "home-mounts"), homeMounts); err != nil {
+		return err
+	}
 	for _, role := range []string{plan.Role, plan.Sibling} {
 		for _, name := range []string{RoleLauncherDir, RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
 			if err := os.MkdirAll(filepath.Join(rolesDir, role, name), 0o755); err != nil {
