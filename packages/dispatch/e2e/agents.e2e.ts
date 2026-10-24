@@ -26,6 +26,7 @@ import {
 import { recordClipboard } from "./clipboard";
 import { holdFirstRequest } from "./editor";
 import { resetDatabase, setCreatedAt } from "./seed";
+import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -1710,5 +1711,90 @@ test("the Agents page loads through one dropped request for its agents", async (
     await expect(page.getByText(/^Could not (load|refresh) agents/)).toHaveCount(0);
   } finally {
     await alice.close();
+  }
+});
+
+test("an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path", async ({
+  browser,
+}, testInfo) => {
+  // The row is sized against what these fixtures put in it, so each one's length is asserted
+  // here rather than trusted: a shorter name would prove nothing about the row's width.
+  const name64 = "Legion implementer · INFRA-92 — the whole name shows on this row";
+  expect(name64).toHaveLength(64);
+  const dir70 = "/workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features";
+  expect(dir70).toHaveLength(70);
+  // A name with nothing to break on: it can only wrap mid-word, or push the page wider.
+  const unbroken64 = "legion-implementer-infra-92-agents-row-name-wraps-unbroken-names";
+  expect(unbroken64).toHaveLength(64);
+  expect(unbroken64).not.toContain(" ");
+
+  const longName: FakeSession = {
+    capabilities: ["aside", "btw"],
+    dir: dir70,
+    last_seen: Date.now(),
+    machine_id: "build-host",
+    roles: ["implementer"],
+    session_id: "long-name-session",
+    title: name64,
+  };
+  const unbrokenName: FakeSession = {
+    capabilities: ["aside", "btw"],
+    dir: "/w/legion",
+    last_seen: Date.now(),
+    machine_id: "build-host",
+    roles: ["implementer"],
+    session_id: "unbroken-name-session",
+    title: unbroken64,
+  };
+  await setLiveSessions([longName, unbrokenName]);
+
+  // A live session Dispatch has never heard from sits in the closed `No Dispatch activity` fold,
+  // where its row is hidden and nothing about it can be measured, so each one comments once.
+  await createProject({ key: "ROW", name: "Row" });
+  const issue = await createIssue({ project: "ROW", title: "Agent row widths" });
+  for (const session of [longName, unbrokenName]) {
+    await createComment(
+      issue.key,
+      { body: `Working from ${session.dir}.` },
+      { actor: { id: session.session_id, kind: "session" }, as: "agent" }
+    );
+  }
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/agents");
+
+    // The name first: it is what this row is about, and checking it before the directory fails
+    // on the name itself rather than waiting out a directory locator's timeout.
+    for (const [session, name] of [
+      [longName, name64],
+      [unbrokenName, unbroken64],
+    ] as const) {
+      const row = agentRow(page, session.session_id);
+      await expect(row).toBeVisible();
+      const heading = row.getByRole("heading", { name });
+      await expect(heading).toHaveText(name);
+      // The whole name is shown: no clamp, no ellipsis, no box too small for its text.
+      await assertWhole(heading);
+    }
+    // The unbroken name wraps rather than pushing the page wider than the viewport.
+    await assertPageFits(page);
+
+    const directory = agentRow(page, longName.session_id).locator("[data-agent-dir]");
+    if (testInfo.project.name === "iphone") {
+      // A phone has no hover, and the directory already sits on its own line under the name, so
+      // it keeps the whole path.
+      await expect(directory).toHaveText(`build-host · ${dir70}`);
+      await assertWhole(directory);
+    } else {
+      // On a laptop the directory gives the row's width to the name and keeps its last segment,
+      // with the whole path a hover away.
+      await expect(directory).toHaveText("build-host · features");
+      await expect(directory).toHaveAttribute("title", `build-host · ${dir70}`);
+    }
+  } finally {
+    await context.close();
+    await setLiveSessions([]);
   }
 });
