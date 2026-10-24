@@ -80,10 +80,14 @@ func dissociateClone(ctx context.Context, run Runner, cloneDir, feed, legacy str
 	if err != nil {
 		return fmt.Errorf("read clone alternates: %w", err)
 	}
-	current := strings.TrimSpace(string(contents))
+	entries := strings.Fields(string(contents))
+	if len(entries) != 1 {
+		return fmt.Errorf("clone alternates %s names %d object stores; refusing to remove the quarantine", alternates, len(entries))
+	}
+	current := entries[0]
 	original, quarantined := filepath.Join(feed, "objects"), filepath.Join(legacy, "objects")
 	if current != original && current != quarantined {
-		return nil
+		return fmt.Errorf("clone alternates %s names %q, not the feed or its quarantine", alternates, current)
 	}
 	if current == original {
 		if err := os.WriteFile(alternates, []byte(quarantined+"\n"), 0o600); err != nil {
