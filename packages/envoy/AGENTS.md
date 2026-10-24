@@ -2399,7 +2399,14 @@ names no account is refused `github-owners-missing`, and one whose list holds a 
 single-spaced list as one string, so a `Secret` compares equal to an unchanged reread of itself.
 `Values` takes one policy snapshot for its re-check and passes the same snapshot's owners to the
 minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an
-installation on an account they do not list.
+installation on an account they do not list, nor for a record with no positive installation id.
+Once its reads are done, `Values` checks every name whose frozen source is a stored one against the
+policy as it stands then (`recheckStoredSources`): a retag to a kind reread during the reads ends
+the grant for good, and one the policy no longer serves pauses it, so a release never returns what
+the secret stores once it is a kind. A minter's error names an upstream status by its number and a
+failed call by its class (`transportFailure`), never Go's transport text, the reason phrase or the
+body, and a Google `error_subtype` only when it is `invalid_rapt` or `rapt_required`
+(`googleReauthSubtypes`), else `unknown`.
 `policy.TagRollbackGuard` and `RollbackGuardValue` (`mint-service-account: kind-secret`) are what
 `agent-secrets secret` writes beside every kind, so a broker of legion-envoy-v13.19.0 to the
 release before kinds refuses the secret (`mint-target-malformed`) rather than serve its stored key;
@@ -2572,10 +2579,14 @@ and each backend writes a map it does not read into (`create(tags)`, `setTags`, 
 AWS `create` writes on the settings' key with those tags and no `ClientRequestToken` (the SDK sets
 one). A `retag` is one write: it either sets tags or removes them, never both, and refuses `none`
 beside another change before any read or write, so a refused call never leaves it half applied.
-Either reads the secret's tags once (`currentTags`) and builds from them the tags the secret will
-hold once the write lands (`after`), and applies the github-owners rule to those once
-(`checkGitHubOwnersFor`), as create applies it to its flags, so neither writes a `github-app`
-secret without owners.
+Either reads the secret's tags once (`currentTags`, a `heldTags` with GCP's etag) and builds from
+them the tags the secret will hold once the write lands (`after`), and applies the github-owners
+rule to those once (`checkGitHubOwnersFor`), as create applies it to its flags, so neither writes a
+`github-app` secret without owners. Each writes against that read: GCP sends the held annotations,
+changed, with the held etag, so a concurrent writer's change refuses the write
+(`errTagsChanged`); AWS's tag calls take no condition, so `raceAfterRetag` reads the tags back and,
+when another writer left a kind/owners pair the broker refuses, restores the tags it read and exits
+1 naming the race. A retag on AWS is safe only with one writer at a time.
 One that sets tags sends owner and tier in one `TagResource`, plus `kind`
 (with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM
 condition on the request's tags sees them;
@@ -2587,10 +2598,11 @@ an administrator's to change (a person's own secret may be made shared where the
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
 recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. GCP `create` creates
 the secret with automatic replication under the broker's `kms_key_name` and owner, tier and any
-named kind or max grant as annotations (never labels, so they carry no GCP label naming rules),
+named kind, `github-owners`, max grant and the rollback guard beside a kind as annotations (never
+labels, so they carry no GCP label naming rules),
 then adds the value as its first version; `set` adds a version to a secret already held;
-`retag` merges the same change into the current annotations in one
-`UpdateSecret` (field mask `annotations`, with the read's etag), preserving every annotation it
+`retag` writes the same change into the annotations it read in one
+`UpdateSecret` (field mask `annotations`, with that read's etag), preserving every annotation it
 does not change; `delete` sets `expire_time` to now plus 30 days in one
 `UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the
 way AWS does: the secret and every version stay readable and restorable until that moment, and GCP
@@ -3162,7 +3174,7 @@ its request froze (its source: the ARN, or the Secret Manager resource name). A 
 `mint:<kind>:<source>`: `Machine.release` parses it (`policy.ParseKindSource`; a malformed one is
 `policy.ErrKindSourceMalformed`), reads `<source>` through the store's own `Read`, and passes that
 value to `Machine.Minters[kind]`. It never returns the stored value. A minter's failure is
-`requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message, and one ERROR line
+`requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message (never an upstream's text), and one ERROR line
 for the operator, `broker: mint failed` (`requests.MintFailedMessage`) with the name, the kind and
 `class=` `stored-value`, `refused` or `upstream` (`secrets.MintErrorClass`). The usual re-check
 then verifies the enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the

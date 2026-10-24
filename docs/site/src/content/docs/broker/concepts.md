@@ -288,11 +288,16 @@ reason of at most 400 characters. The broker evaluates every name
   it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client
   keeps the release until its `expires_at` rather than asking again for each use. A deleted kind
   secret stops releasing as any deleted secret does. A release GitHub or Google refuses, such as a
-  Google login that needs a new sign-in, is refused `MINT_FAILED` with their reason, and the broker
-  logs it for its operator. A grant ends for good when a release finds its secret's kind changed
+  Google login that needs a new sign-in, is refused `MINT_FAILED` with the upstream's HTTP status
+  code, Google's `invalid_rapt` or `rapt_required` subtype (any other is named `unknown`), or the
+  class of a failed call, never the upstream's own text, and the broker logs it for its operator.
+  A grant ends for good when a release finds its secret's kind changed
   (removed, or changed to the other kind) or its lifetime over the current `max-grant`: that
   release answers `GRANT_NOT_LIVE` and writes a `grant.revoked` audit row by
-  `broker:release-recheck`, and the session asks again. A change reverted before any release finds
+  `broker:release-recheck`, and the session asks again. A release of a stored secret checks the
+  policy again once it has read the store, so a retag to a kind reread during that read releases
+  nothing and ends the grant the same way: retag a stored secret to a kind, and wait for the broker
+  to serve it, before storing its App key or login. A change reverted before any release finds
   it leaves the grant as it was: it was approved for that secret, kind and source, and its next
   release mints a token of that same kind from that same frozen source, never the stored value. To
   end a grant, revoke it. A kind secret the broker stops serving, such as one whose

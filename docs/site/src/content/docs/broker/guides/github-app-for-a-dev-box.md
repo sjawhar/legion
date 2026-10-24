@@ -76,6 +76,15 @@ tag lists. An installation on any other account gets no token.
 The deployment creates an empty secret named `GITHUB_APP_<PERSON>`, with the `kind: github-app`
 and `github-owners` tags. Your access lets you set its value.
 
+Set the private key only in a secret that has the `kind: github-app` tag. If the secret has no
+`kind` tag, a session that has a grant for it gets the stored value. That value is your private
+key. To change a secret without a kind to `github-app`, do these steps in this sequence:
+
+1. Change the tags with `agent-secrets secret retag`.
+2. Make sure that the output of the retag shows `broker: serving`. This output tells you that the
+   broker uses the new tags.
+3. Set the private key.
+
 Do this step on your own computer, not on the box. The agents on the box run as your user. They
 can read a file that you keep there, and they can use a Google sign-in that you leave there.
 
@@ -132,7 +141,7 @@ each installation is the entry key.
 
 The broker never returns the private key. Each time a session reads the secret, the broker makes a
 new token for each installation. If GitHub refuses a token request, the broker returns
-`MINT_FAILED` with the status from GitHub.
+`MINT_FAILED` with the HTTP status code from GitHub.
 
 ## Keep each release until it expires
 

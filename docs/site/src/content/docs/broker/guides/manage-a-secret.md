@@ -280,6 +280,19 @@ retagged DEMO_LOGIN (removed max-grant)
 broker: serving DEMO_LOGIN
 ```
 
+To make a stored secret a kind, retag it first, wait for `broker: serving` in the retag's output
+(the broker has reread it), and only then store the App key or the Google login with `secret
+set`. Until the broker serves the kind, a grant of the stored secret releases its stored value,
+and a release that finds the secret retagged while it reads the store releases nothing and ends
+that grant.
+
+A retag checks the tags it read. On GCP it writes against that read, so a retag another person
+wrote in between refuses it, with `another write changed the secret after this retag read it`,
+and nothing is written. AWS has no such check, so retag secrets there one writer at a time: a retag
+reads the tags back after its write, and when another writer's change left a kind without the
+GitHub owners it needs, it puts back the tags it read, which undoes that writer's change too, and
+exits 1 naming the race.
+
 You can retag your own secret, to `--owner shared` too. Once a secret is shared, its owner and
 tier are an administrator's to change: on AWS, by the IAM condition above; on GCP, because a
 deployment that wants this protection grants `secretmanager.secrets.update` on a shared secret

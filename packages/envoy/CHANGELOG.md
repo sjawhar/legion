@@ -4,6 +4,23 @@
 
 ### Added
 
+- A release of a stored secret checks the policy again once it has read the store: a retag to a
+  kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
+  releases nothing and ends the grant for good, as a kind change found before the read does, so a
+  grant made while the secret was plain never returns the App key or refresh token stored once it
+  is a kind. Retag a stored secret to a kind, wait for `broker: serving`, then store its key.
+- A mint error names an upstream's HTTP status by its number and a failed call by its class
+  (cancelled, timed out, not resolved, not reached, a failed TLS handshake, an answer ended early,
+  or no usable HTTP answer), never Go's transport text, the reason phrase or the body, any of which
+  an upstream can fill with the credential it was sent. A Google refusal names its `error_subtype`
+  only when it is `invalid_rapt` or `rapt_required`, and `unknown` otherwise. A GitHub App
+  installation record with no positive id is skipped: no token is asked for installation 0.
+- `agent-secrets secret retag` writes against the tags it checked. On GCP it sends the annotations
+  and etag of its one read, so a write another person made in between refuses it, `another write
+  changed the secret after this retag read it`, with nothing written. On AWS, whose tag calls take
+  no condition, it reads the tags back after its write, and when another writer left a `github-app`
+  secret without owners it restores the tags it read and exits 1 naming the race: retag on AWS one
+  writer at a time.
 - A person's machine login is an OAuth 2.0 device authorization grant (RFC 8628) on the secrets
   broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
   itself. `agent-secrets machine login` prints the same code, which the person the login names
