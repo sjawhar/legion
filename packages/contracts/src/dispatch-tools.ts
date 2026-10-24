@@ -235,8 +235,7 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
     );
 }
 
-const SPEC_WRITING_POINTER =
-  'Write a spec as the "Writing a spec" section of skill://dispatch says.';
+const SPEC_WRITING_POINTER = "Write a spec as skill://dispatch-writing-specs says.";
 
 /**
  * The `images` argument of the three tools that write text a person reads: local picture files,
@@ -668,7 +667,9 @@ export const dispatchToolSpecs = [
       "Retract an open question that is moot or resolve one after finding the answer. This closes " +
       "the question without answering it. An ask that lives as an `ask` block in a document is " +
       'closed in the document too. A reason beginning "removed from the document in version" is ' +
-      "refused: that marks a retraction the document's own settlement wrote.",
+      "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " +
+      "a newer one replaces or the design made moot, resolved for one whose answer you found; an " +
+      "answered ask cannot be resolved, and resolving records no decision by a person.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -725,7 +726,7 @@ export const dispatchToolSpecs = [
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " +
       "Do not use it for an exact replacement; use " +
-      `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
+      `dispatch suggest instead. A quote anchor is pinned to its block. A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask. Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -870,6 +871,7 @@ export const dispatchToolSpecs = [
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
+      "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -1065,7 +1067,7 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      "dispatch doc-edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
+      "dispatch doc-edit instead. Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " +
       "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " +
       "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
       `${OWNER_REFERENCE}`,

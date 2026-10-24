@@ -80,6 +80,16 @@
 
 ### Changed
 
+- The plugin ships `claude-envoy:dispatch-writing-specs` in place of
+  `claude-envoy:dispatch-brainstorming` (INFRA-140): `skills/dispatch-writing-specs` links the
+  repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words
+  together, and `dispatch` no longer has a `references/` directory; `pi-envoy`'s changelog lists
+  what each skill holds and which rules are gone. The bundled `dispatch` command (`dist/dispatch.js`,
+  `dist/envoy-channel.js`, `dist/session-hook.js`) prints the new notice after a primary spec with
+  no ask block: a person does not watch the session's chat, and sees its need only through an open
+  ask or a spec that waits for approval. `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`.
+
 - The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
   carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
   `message` bodies and `issue-update`'s closing `reason` accept that many characters, and their

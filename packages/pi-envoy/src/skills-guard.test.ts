@@ -70,6 +70,22 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
   expect(`Instructions from: ${file}\n${skill}`.length).toBeLessThan(6_000);
 });
 
+// The three Dispatch skills are read by every session with Dispatch, so their length is a cost on
+// each one. Every file of the three staged skills counts, frontmatter included, as `wc -w` counts:
+// whitespace-separated tokens.
+test("the three Dispatch skills total fewer than 2,000 words", () => {
+  const words = ["dispatch", "dispatch-first", "dispatch-writing-specs"]
+    .flatMap((skill) => files(path.join(staged, skill)))
+    .map(
+      (file) =>
+        readFileSync(file, "utf8")
+          .split(/\s+/u)
+          .filter((token) => token !== "").length
+    )
+    .reduce((total, count) => total + count, 0);
+  expect(words).toBeLessThan(2_000);
+});
+
 // Agents reach Dispatch through the `dispatch` command, so no skill or daemon prompt may tell one
 // to call a native tool it no longer has: each names the command (`dispatch ask`) instead.
 test("no skill or daemon prompt names a native Dispatch tool", () => {
@@ -103,8 +119,8 @@ test("every relative link resolves to a file inside the staged partition", () =>
 // dispatch must come with this plugin (`agents/`, which ships none today) or with Oh My Pi itself
 // (what `omp agents unpack` writes, read off the pinned binary rather than listed here). A
 // `skill://legion-*` mention in these skills is held to no such partition, on purpose: each is a
-// sentence conditioned on a Legion role (skills/dispatch/SKILL.md:98 and :148,
-// skills/dispatch-brainstorming/SKILL.md:3 and :8, skills/dispatch-first/SKILL.md:36), inert
+// sentence conditioned on a Legion role (skills/dispatch-writing-specs/SKILL.md:3, :10 and :71,
+// skills/dispatch-first/SKILL.md:43), inert
 // for a person and right for a pane with both plugins, and `brokenSkillLinks` above resolves a
 // `skill://<name>/<path>` link against the repository's skills/ for the same reason.
 test.skipIf(omp === undefined && !onActions)(
