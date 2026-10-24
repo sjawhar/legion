@@ -1951,12 +1951,17 @@ containers an `env` of `POD_UID` alone). `launchEnvironment` (`manifest.go`) spl
 environment in two — the kubelet-resolved entries go on the container, and the plain `NAME=value`
 pairs travel in the daemon's start command to `legion launcher`, which hands them to
 `legion worker-shim` and so to the agent (`launcherCommand`, `launcher.go`). So a `printenv` run
-by `kubectl exec` into the container finds none of them, while one the role's own agent runs
-prints them. They are an issue pod's role container's; `<generation>` is the role's own generation
-counter, which differs between the role containers of one pod and rises on each relaunch of that
-role in it. `DISPATCH_TOKEN_FILE` and `ENVOY_TOKEN_FILE` are stated without condition because
-configuration load refuses a `runtime: kubernetes` daemon without a Dispatch token and an Envoy
-token (`packages/daemon/internal/config/kubernetes.go`), so every pod carries both.
+by `kubectl exec` into the container finds none of them but `PATH`, which the worker image's own
+`ENV` sets (`packages/daemon/docker/worker.Dockerfile`) to the value the row below documents, so
+every process of the container carries it however it was started; one the role's own agent runs
+prints them all. They are an issue pod's role container's; `<generation>` is the role's own
+generation counter, which differs between the role containers of one pod and rises on each
+relaunch of that role in it. `DISPATCH_TOKEN_FILE` and `ENVOY_TOKEN_FILE` are stated without
+condition because configuration load refuses a `runtime: kubernetes` daemon that sets no
+`envoy_token_file` and one that sets no `dispatch_url`
+(`packages/daemon/internal/config/kubernetes.go`), and refuses a configured `dispatch_url` with no
+`dispatch_token_file` (`missingDispatchTokenFile`, `packages/daemon/internal/config/stage3.go`),
+so every pod carries both.
 
 | variable | value | renderer |
 | :--- | :--- | :--- |
