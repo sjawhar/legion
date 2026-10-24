@@ -3,7 +3,10 @@
 # checkout's skills), each given one task a skill rule governs, scored afterwards from what the
 # agent actually wrote. Two checkouts under the same scenario compare two versions of a skill.
 #
-#   rig.sh profile   <label> <checkout>            build the isolated Oh My Pi home for a checkout
+#   rig.sh profile   <label> <checkout> [--envoy-json <file>]
+#                                                  build the isolated Oh My Pi home for a checkout;
+#                                                  <file>, a JSON object, is merged into the envoy.json
+#                                                  the label's sessions read
 #   rig.sh live-read <label> <skill>...            one session reads every file of each skill
 #   rig.sh batch     <scenario> <runs> <label>...  starts the scratch services, runs 1..<runs> per
 #                                                  label (SKILL_SCENARIOS_PARALLEL at once), and
@@ -34,6 +37,14 @@
 #                   search, never its own environment or the Dispatch HTTP API. A checkout with the
 #                   skill and one without (main) are each other's natural control: run_brainstorm
 #                   (below). Scored by brainstormSurface.
+#   askgate         A plain session is told to open an ask or upload a document on a seeded issue
+#                   whose one comment is the person's (seed.ts askgate), with AskGate, the Envoy
+#                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
+#                   built with --envoy-json holding {"askgate":{"enabled":false}}).
+#                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
+#                   that do not help the choice), `link` (an ask linking the person's comment) or
+#                   `upload` (an upload of the comment as a document to link). Each run writes it to
+#                   <run>/case.txt (run_askgate). Scored by askgateReview.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
 # whose skills state it. So every comparison carries an ablate label: a checkout of the head with
@@ -56,6 +67,7 @@
 #   SKILL_SCENARIOS_WORK      work directory, outside any checkout (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run may take (default 1500)
+#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link or upload (required for that scenario)
 #
 # Each run:
 #   - Its agent is `omp -p` on the Oh My Pi the daemon pins (.omp-pin), in the label's profile
@@ -135,8 +147,14 @@ load_label() {
 }
 
 cmd_profile() {
-  [ $# = 2 ] || fail "usage: rig.sh profile <label> <checkout>"
-  local label=$1 P co profile=skills-$1
+  local usage="usage: rig.sh profile <label> <checkout> [--envoy-json <file>]"
+  [ $# = 2 ] || [ $# = 4 ] || fail "$usage"
+  local label=$1 P co profile=skills-$1 envoy_json=''
+  if [ $# = 4 ]; then
+    [ "$3" = --envoy-json ] || fail "$usage"
+    envoy_json=$(realpath -e -- "$4") || fail "--envoy-json $4 does not exist"
+    jq -e 'type == "object"' "$envoy_json" >/dev/null 2>&1 || fail "--envoy-json $4 is not a JSON object"
+  fi
   P=$(label_dir "$label")
   [ ! -e "$P" ] || fail "$P exists; remove it to rebuild label $label"
   co=$(cd "$2" && pwd -P)
@@ -151,6 +169,7 @@ cmd_profile() {
     printf 'checkout %s\n' "$co"
     printf 'commit %s\n' "$(jj -R "$co" log -r @ --no-graph -T 'commit_id ++ " parents=" ++ parents.map(|c| c.commit_id()).join(",")')"
     printf 'skills %s\n' "$(cd "$co" && find skills -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+    [ -z "$envoy_json" ] || printf 'envoy-json %s\n' "$(jq -S . "$envoy_json" | sha256sum | cut -d' ' -f1)"
   } >"$P/built-from"
   (
     # shellcheck source=/dev/null
@@ -164,6 +183,16 @@ cmd_profile() {
     fail "install-plugin-profile.sh --package pi-envoy failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$P/home" --dest "$P/pi-legion" >>"$P/install.log" 2>&1 ||
     fail "install-plugin-profile.sh --package pi-legion failed; see $P/install.log"
+  # The envoy.json a session of the label reads: a named profile's $PI_CODING_AGENT_DIR/envoy.json
+  # (envoyConfigPath, packages/envoy-client/src/envoy-config.ts), which Oh My Pi sets to the
+  # profile's agent directory. The given object is merged over whatever is there.
+  if [ -n "$envoy_json" ]; then
+    local agent=$P/home/.omp/profiles/$profile/agent
+    mkdir -p "$agent"
+    [ -f "$agent/envoy.json" ] || echo '{}' >"$agent/envoy.json"
+    jq -s '.[0] * .[1]' "$agent/envoy.json" "$envoy_json" >"$agent/envoy.json.new"
+    mv "$agent/envoy.json.new" "$agent/envoy.json"
+  fi
   bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --cache-dir "$P/cache" >>"$P/install.log" 2>&1 ||
     fail "install-model-gateway.sh failed; see $P/install.log"
   cp "$co/.omp-pin" "$P/pin"
@@ -454,6 +483,22 @@ run_measure_before_ask() {
   dispatch_session "$name"
 }
 
+# The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
+# write the agent makes. The case's prompt names that issue, and `link` names the comment too.
+run_askgate() {
+  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
+  printf '%s\n' "$askCase" >"$R/case.txt"
+  seed_dispatch askgate
+  ref=$(jq -r .comment_ref "$R/fixture.json")
+  case $askCase in
+  facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
+  link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Move the nightly export to 04:00 UTC, as %s asks? I recommend moving it." Options: "Move it to 04:00", "Keep it at 02:00".\n' "$issue" "$ref" ;;
+  upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
+  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
+  esac >"$R/prompt.txt"
+  dispatch_session "$name" capture-askgate
+}
+
 # A tiny to-do CLI in a scratch git repository with no Dispatch configuration and no word of due
 # dates. The batch seeded its one Dispatch project (seed.ts brainstorm: TODO, with two unrelated
 # issues whose titles name the "todo CLI", so a search for it finds the project), and
@@ -690,7 +735,7 @@ run_tester_proof() {
 }
 
 cmd_run() {
-  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|brainstorm> <label> <n> <index> <start>"
+  [ $# = 5 ] || fail "usage: rig.sh run <ask-on-message|measure-before-ask|tester-proof|brainstorm|askgate> <label> <n> <index> <start>"
   local scenario=$1 n=$3 index=$4 start=$5 name
   load_label "$2"
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
@@ -708,6 +753,7 @@ cmd_run() {
   measure-before-ask) run_measure_before_ask "$name" ;;
   tester-proof) run_tester_proof "$name" "$n" "$index" "$start" ;;
   brainstorm) run_brainstorm "$name" ;;
+  askgate) run_askgate "$name" ;;
   *) fail "unknown scenario $scenario" ;;
   esac
   echo "$name: $(tail -n 1 "$R/out.txt")"
@@ -728,10 +774,14 @@ stop_batch() {
 }
 
 cmd_batch() {
-  [ $# -ge 3 ] || fail "usage: rig.sh batch <scenario> <runs> <label>..."
+  [ $# -ge 3 ] || fail "usage: rig.sh batch <ask-on-message|measure-before-ask|tester-proof|brainstorm|askgate> <runs> <label>..."
   local runs=$2 label n index=0 start
   batch_scenario=$1
-  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | askgate) ;; *) fail "unknown scenario $batch_scenario" ;; esac
+  [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
+    facts | link | upload) ;;
+    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link or upload (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+  esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   shift 2
   # A batch's runs share one Dispatch, and every brainstorm run files the same feature: a second run

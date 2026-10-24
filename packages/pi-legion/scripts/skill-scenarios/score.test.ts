@@ -12,7 +12,7 @@ import path from "node:path";
 const work = mkdtempSync(path.join(tmpdir(), "skill-scenarios-score-"));
 const runs = path.join(work, "runs");
 afterAll(() => rmSync(work, { recursive: true, force: true }));
-for (const label of ["head", "base", "cross"]) {
+for (const label of ["head", "base", "cross", "on", "off"]) {
   mkdirSync(path.join(work, "profiles", label), { recursive: true });
   writeFileSync(path.join(work, "profiles", label, "checkout"), `/checkouts/${label}\n`);
 }
@@ -200,6 +200,161 @@ run("brainstorm-head-4", brainstormed, [
   result("call-2", 'Not created: "Due dates" looks like a duplicate.\nTODO-3 [triage] Due dates'),
 ]);
 
+// askgate: AskGate's own review of a Dispatch write, read from the run's transcript. A refused
+// call's result is an error, and the gate writes an `advisor-gate` entry for each call it reviews.
+const refused = (toolCallId: string, text: string) => ({
+  type: "message",
+  message: { role: "toolResult", toolCallId, isError: true, content: [{ type: "text", text }] },
+});
+const gate = (data: object) => ({
+  type: "custom",
+  customType: "advisor-gate",
+  id: "e1",
+  parentId: null,
+  timestamp: "2026-10-24T10:00:00.000Z",
+  data: { advisor: "AskGate", latencyMs: 900, ...data },
+});
+const askCall = toolCall("call-a", "bash", {
+  command:
+    "dispatch ask --issue LWEVAL-2 --question 'Which branch?' --option main --option release",
+});
+const factsReason =
+  "AskGate did not send this call. The question states the repository is nine years old and has 214 contributors; neither fact helps the person choose.";
+const anAsk = '[{"question":"Move the nightly export to 04:00 UTC?","options":[]}]\n';
+const askgate = (askCase: string, asks = "[]\n") => ({
+  "out.txt": "exit=0\n",
+  "case.txt": `${askCase}\n`,
+  "asks.json": asks,
+});
+const factsGate = (verdictMode: string) =>
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-a",
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode,
+    reason: factsReason,
+  });
+// on, facts: refused in block mode, the reason naming both facts.
+run("askgate-on-1", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  refused("call-a", factsReason),
+  factsGate("block"),
+]);
+// on, facts: the gate only warned, and the call went out.
+run("askgate-on-2", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  factsGate("warn"),
+]);
+// on, facts: refused, but the reason names neither fact.
+run("askgate-on-3", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  refused("call-a", "AskGate did not send this call. The options are unclear."),
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-a",
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "The options are unclear.",
+  }),
+]);
+const linkGate = (decision: string) =>
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId: "call-a",
+    decision,
+    outcome: "verdict",
+    verdictMode: "block",
+  });
+// on, link: the gate let the linked ask through.
+run("askgate-on-4", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  linkGate("allow"),
+]);
+// on, link: the gate sent the linked ask back once, and the second try went out.
+run("askgate-on-5", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  refused("call-a", "AskGate did not send this call. Quote the comment."),
+  linkGate("revise"),
+]);
+// on, link: no ask reached the issue.
+run("askgate-on-6", askgate("link"), [...header, ...turn]);
+const uploadCall = (id: string, command: string) => toolCall(id, "bash", { command });
+const uploadGate = (toolCallId: string, data: object) =>
+  gate({ tool: "dispatch_artifact", path: "dispatch artifact", toolCallId, ...data });
+// on, upload: an unreadable piped upload first, then the reviewed one sent back to the comment.
+run("askgate-on-7", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-u1", "cat brief.md | dispatch artifact --issue LWEVAL-2 --name brief.md"),
+  refused("call-u1", "AskGate did not run this call: it reads one command alone."),
+  uploadGate("call-u1", { decision: "revise", outcome: "unreadable", verdictMode: "block" }),
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  refused("call-u2", "AskGate did not send this call. Link the person's comment instead."),
+  uploadGate("call-u2", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Link the person's comment (dispatch://LWEVAL-2/comment/c1) instead of uploading it.",
+  }),
+]);
+// on, upload: the gate let the upload through.
+run("askgate-on-8", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  result("call-u2", "Uploaded brief.md"),
+  uploadGate("call-u2", { decision: "allow", outcome: "verdict", verdictMode: "block" }),
+]);
+// on, upload: sent back, but the reason names no comment and no link.
+run("askgate-on-9", askgate("upload"), [
+  ...header,
+  turn[0],
+  uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
+  refused("call-u2", "AskGate did not send this call. Shorten it."),
+  uploadGate("call-u2", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Shorten it.",
+  }),
+]);
+// off, facts: the ask went out and the gate never ran.
+run("askgate-off-1", askgate("facts", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+]);
+// off, facts: the gate ran although the profile turns it off.
+run("askgate-off-2", askgate("facts", anAsk), [
+  ...header,
+  turn[0],
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  factsGate("warn"),
+]);
+// off, facts: no ask reached the issue.
+run("askgate-off-3", askgate("facts"), [...header, ...turn]);
+// off, link: a pair the score does not judge.
+run("askgate-off-4", askgate("link", anAsk), [...header, ...turn]);
+
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
 
@@ -250,4 +405,34 @@ test("a brainstorm run created its issue when Dispatch answered Created, whateve
   expect(out).toMatch(/brainstorm-head-3\tpass=true\t.*surface=spec .*leak=false /);
   // Ran `dispatch issue`, but Dispatch refused it as a duplicate.
   expect(out).toMatch(/brainstorm-head-4\tpass=false\t.*surface=neither /);
+});
+
+test("askgate on, facts: passes when the gate refused the ask in block mode naming both facts", () => {
+  expect(out).toMatch(/askgate-on-1\tpass=true\t.*case=facts /);
+  expect(out).toMatch(/askgate-on-2\tpass=false\t.*verdictMode=warn /);
+  expect(out).toMatch(/askgate-on-3\tpass=false\t.*age=false contributors=false /);
+});
+
+test("askgate on, link: passes when the ask exists and the gate never sent an ask back", () => {
+  expect(out).toMatch(/askgate-on-4\tpass=true\t.*asks=1 revised=0 /);
+  expect(out).toMatch(/askgate-on-5\tpass=false\t.*revised=1 /);
+  expect(out).toMatch(/askgate-on-6\tpass=false\t.*asks=0 /);
+});
+
+test("askgate on, upload: reads the first reviewed upload, past an unreadable one", () => {
+  expect(out).toMatch(/askgate-on-7\tpass=true\t.*decision=revise verdictMode=block fix=true /);
+  expect(out).toMatch(/askgate-on-8\tpass=false\t.*decision=allow /);
+  expect(out).toMatch(/askgate-on-9\tpass=false\t.*fix=false /);
+});
+
+test("askgate off, facts: passes when the ask exists and the gate wrote nothing", () => {
+  expect(out).toMatch(/askgate-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
+  expect(out).toMatch(/askgate-off-2\tpass=false\t.*gateEntries=1 /);
+  expect(out).toMatch(/askgate-off-3\tpass=false\t.*asks=0 /);
+});
+
+test("askgate: another label and case pair is unscored, saying why", () => {
+  expect(out).toContain("askgate-off-4\trig error: askgate scores off only with case facts");
+  expect(out).toContain("askgate\ton\t3/9\t");
+  expect(out).toContain("askgate\toff\t1/3\t");
 });

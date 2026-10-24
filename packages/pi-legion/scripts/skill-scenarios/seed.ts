@@ -23,14 +23,23 @@
 //                                          brainstormSurface reads them (brainstorm.json in
 //                                          <run dir>); <file> is unread, kept for dispatch_session's
 //                                          one capture call shape
+//   seed.ts askgate <file>                 one run's own issue, with an empty spec and one comment
+//                                          by the person alice; writes {issue, comment,
+//                                          comment_ref, message} to <file>, `message` the comment id
+//   seed.ts capture-askgate <file> <run dir>
+//                                          the asks and documents on the issue <file> names, as
+//                                          score.ts's askgateReview reads them (asks.json,
+//                                          artifacts.json in <run dir>)
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
+  createComment,
   createIssue,
   createIssueArtifact,
   createMessage,
   createProject,
+  getIssue,
   getIssueEvents,
   getMessage,
   listIssueAsks,
@@ -39,6 +48,13 @@ import { CREATED, session, toolResults } from "./transcript";
 
 /** What `ask-on-message` writes and `capture` reads. */
 const Fixture = z.object({ issue: z.string(), message: z.string() });
+/** What `askgate` writes and `capture-askgate` reads. */
+const AskgateFixture = z.object({
+  issue: z.string(),
+  comment: z.string(),
+  comment_ref: z.string(),
+  message: z.string(),
+});
 /** The most events one `GET /api/v1/issues/{key}/events` page holds. */
 const EVENT_PAGE = 200;
 
@@ -204,6 +220,42 @@ if (command === "project") {
     );
     console.log(`seeded ${issue.key}`);
   }
+} else if (command === "askgate" && file !== undefined) {
+  // The person's own words are one comment on an issue with no spec, so a write that states what
+  // the person asked for must link that comment. Every run seeds the same issue, so `force`
+  // passes Dispatch's duplicate check.
+  const issue = await createIssue(
+    { project: "LWEVAL", force: true, title: "Nightly export timing", spec: "" },
+    { as: "agent" }
+  );
+  const comment = await createComment(
+    issue.key,
+    {
+      body: "Please move the nightly export to 04:00 UTC; the 02:00 run collides with the backup.",
+    },
+    { as: "user", login: "alice" }
+  );
+  const fixture: z.infer<typeof AskgateFixture> = {
+    issue: issue.key,
+    comment: comment.id,
+    comment_ref: `dispatch://${issue.key}/comment/${comment.id}`,
+    message: comment.id,
+  };
+  writeFileSync(file, `${JSON.stringify(fixture)}\n`);
+  console.log(`seeded ${issue.key} with comment ${comment.id}`);
+} else if (command === "capture-askgate" && file !== undefined && runDir !== undefined) {
+  const { issue } = AskgateFixture.parse(JSON.parse(readFileSync(file, "utf8")));
+  const reader = { as: "agent" } as const;
+  const records = {
+    asks: await listIssueAsks(issue, reader),
+    artifacts: (await getIssue(issue, reader)).artifacts,
+  };
+  for (const [name, record] of Object.entries(records)) {
+    writeFileSync(path.join(runDir, `${name}.json`), `${JSON.stringify(record)}\n`);
+  }
+  console.log(
+    `captured ${issue}: ${records.asks.length} asks, ${records.artifacts.length} documents`
+  );
 } else if (command === "capture-brainstorm" && runDir !== undefined) {
   // The run's own issue, from its own transcript, never from the project: a batch's runs share the
   // one project. Dispatch answers `Created <KEY>:` only when it creates the issue, whatever
@@ -221,7 +273,7 @@ if (command === "project") {
   console.log(`captured ${issue ?? "no new issue"}: ${asks.length} asks`);
 } else {
   console.error(
-    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir>"
+    "usage: seed.ts project | ask-on-message <file> | measure-before-ask <file> | capture <file> <run dir> | brainstorm | capture-brainstorm <file> <run dir> | askgate <file> | capture-askgate <file> <run dir>"
   );
   process.exit(2);
 }
