@@ -2,39 +2,57 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-149",
-  "completed": "2026-10-24T16:56:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-24T17:41:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
+  "important": 0,
+  "minor": 2,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "skills/legion-worker/SKILL.md:390",
-      "description": "The canonical sentence is pinned by no test, so the contradiction this change removes can be reintroduced with every required lane green - which is the defect the issue exists to close, silently re-openable. Verified at head bf77436e: `grep -rnF \"Retro's push never carries the line\" skills/ packages/ .github/` returns only the four instruction texts (skills/legion-worker/SKILL.md:390, skills/legion-retro/SKILL.md:175, packages/daemon/internal/prompts/go/worker-common.md:19, packages/daemon/internal/prompts/roles/implementer.md:49) and the two generated mirror copies under packages/claude-envoy/legion/; no test file holds it. The repository already pins prompt wording in two suites, so the lock is in-convention, not a new habit: packages/pi-legion/src/skills-guard.test.ts:132-145 pins the `$'\\n\\n\\nskip-checks: true'` recipe's shape across the staged skills and packages/daemon/internal/prompts, and packages/daemon/internal/prompts/prompts_test.go:43 pins the clause about ending the head's message with the line as the last line preceded by two empty lines. Remedy: one assertion counting the sentence exactly once in each of the four files. packages/pi-legion/src/skills-guard.test.ts already reads promptsRoot directly (line 135), so a single test there covers all four; a per-file Go-side assertion in packages/daemon/internal/prompts is equally acceptable. It must read each file, never a composed prompt: the composed implementer prompt carries the sentence twice (worker-common.md plus the implementer role residue, measured in the implement handoff's second proof). The claude-envoy mirror needs no assertion of its own - packages/claude-envoy/tests/legion-plugin-fresh.test.ts already fails if the committed bundle drifts from its sources."
+      "severity": "minor",
+      "file": "packages/pi-legion/src/skills-guard.test.ts:159-173",
+      "description": "The lock compares the canonical sentence byte for byte, so it must stay one unwrapped 187-character line inside two skill files wrapped at about 100, and a routine re-wrap fails the lane as `found: 0` - which reads as 'the rule was removed' rather than 'the prose was reflowed'. The tester measured that exact case (test.json proof 4, the legion-retro reflow mutation). It fails loudly and in the right direction, so it is not a defect: it is the round's one fast-follow, normalising whitespace on both sides of the comparison and letting the two skills wrap the sentence like the prose around it. Named in the PR body's Fast-follow line."
     },
     {
       "severity": "minor",
-      "file": "the pull request body",
-      "description": "The `Size:` line reads `13 files changed, +358/-56`; GitHub reports 14 files, +407/-56 at head bf77436e (the tester's handoff added .legion/INFRA-149/test.json). Refresh it in the same push that carries the lock. Not round-gating."
+      "file": "the pull request body, `E2E (implementer)`",
+      "description": "The block leads with `bun test src/skills-guard.test.ts` - 10 pass, 0 fail - which is a regression lock, never a proof of a criterion. The proof is the GitHub arm immediately beneath it (scratch #2132, heads 9f9b8346 no-trailer -> four required checks success and 0af01af0 trailered -> zero check runs), and the composition run at 50f9aeaa. Nothing is missing and the gate is satisfied; a reader of the first line alone would take a unit lane for the surface. Recorded in the body's `Not proven / risk`."
+    }
+  ],
+  "adjudicatedFindings": [
+    {
+      "source": "thermonuclear-code-quality at 6a14795a (Verdict: CHANGES)",
+      "finding": "The dedupe is incomplete: `packages/daemon/internal/prompts/roles/implementer.md:49` carries the canonical sentence that `go/worker-common.md:19` already gives every composed implementer prompt; `skills/legion-retro/SKILL.md:173-175` states the fact in two adjacent sentences; `go/worker-common.md:19` keeps the `retro's removal of .legion/<issue>/` item in its `Every other push` list that `skills/legion-worker/SKILL.md:401` dropped.",
+      "disposition": "Declined, each on its own ground. (1) roles/implementer.md is the retro worker's own role part - retro runs as the implementer - and the approved spec names it as one of the texts that must state the rule (dispatch://INFRA-149/spec, 'What this change does'); removing it would be a departure from an approved spec decided by a reviewer, which is the architect's call and not a defect in this head. The duplicate costs one sentence in one composed prompt and both copies say the same thing. (2) and (3) are restatements that agree with the canonical sentence rather than contradicting it; the defect this issue closes was texts that disagreed, and nothing here disagrees. No finding changes behaviour, hides an error or breaks a gate, so under the No-deferrals rule none is owed a fix in this pull request."
+    },
+    {
+      "source": "thermonuclear-code-quality at 6a14795a",
+      "finding": "The definition and the exception are resolved only by reading order: `a push whose commits touch only .legion/ ... ends its head's commit message with skip-checks: true` followed by `Retro's push never carries the line, whatever paths it touches`.",
+      "disposition": "Declined. A general rule followed immediately by an unconditional exception in the same paragraph is ordinary instruction prose, and the exception is the more specific statement. Measured rather than assumed: the tester put the pre-change and post-change texts to the retro decision in six samples per arm (test.json proof 2's negative control), and the post-change arm answers from the canonical sentence."
+    },
+    {
+      "source": "thermonuclear-deep-review at 6a14795a (Verdict: APPROVE)",
+      "finding": "Minor: the PR body's first `Not proven / risk` bullet was stale - it still said no test pins the canonical sentence.",
+      "disposition": "Accepted and fixed by me, the line's owner, before this review: the bullet now records the byte-exact matcher instead."
     }
   ],
   "verifiedAtHead": {
-    "head": "bf77436e3ca53fb2f6d434bf45707533e927543c",
-    "ciHead": "946624b2bfcba3a5c7cb931e6165d2ad74080c07",
-    "requiredSet": "main's rulesets require lint, typecheck, test, pr-title; branch protection adds none (`gh api repos/sjawhar/legion/branches/main --jq .protection.required_status_checks.checks[].context` returned nothing)",
-    "checks": "All four required names present, completed and success at the CI head (Tests run 40111667547, PR Title runs 40111667605 and 40111826721); `gh api repos/sjawhar/legion/compare/946624b2...bf77436e` reports `ahead` with only .legion/INFRA-149/implement.json and .legion/INFRA-149/test.json changed since, so those checks stand for the code under review.",
-    "threads": "`gh api graphql` reviewThreads(first:100) returned no nodes: no thread of any author, Legion role App or bot, is open on #2143.",
-    "thermonuclear": "Not run: the diff is 14 files of Markdown, JSON handoffs and the generated packages/claude-envoy/legion/ mirror, with no .go or .ts source. A docs-only diff gets no thermonuclear pair and no `Thermo` line (skill://legion-worker/references/pr-body.md).",
-    "e2eLines": "Both present in the body: `E2E (implementer)` (scratch PR sjawhar/legion#2132, heads 9f9b8346 and 0af01af0) and `E2E (tester)` (scratch PR sjawhar/legion#2144, heads 0e5bbdc7 and c4486ca8)."
+    "head": "the head this handoff's push makes, named by SHA in the submitted approval",
+    "reviewedHead": "6a14795a9d9cedb2718351218d5b38fcacc9e551",
+    "ciHead": "280e1a2d57b219c238c05d767e7bff657e2c5764",
+    "requiredSet": "main's rulesets require lint, typecheck, test, pr-title; branch protection adds none",
+    "checks": "All four present, completed and success at the CI head, read with `gh api repos/sjawhar/legion/commits/280e1a2d.../check-runs --paginate` after the lane settled: Tests run 40114290861 (lint, typecheck, test), PR Title runs 40114291010 and 40114654012 (pr-title); Legion Envoy and Contracts 40114291124, Docs 40114290985 and Worker Image 40114291013 also success. `gh api repos/sjawhar/legion/compare/280e1a2d...6a14795a` reports `ahead` with only .legion/INFRA-149/test.json changed since, so those runs stand for the code approved. The round-2 push carried packages/pi-legion/src/skills-guard.test.ts and so rightly carried no trailer, which is why the CI head is the implement handoff commit rather than a separate code commit.",
+    "threads": "One thread, PRRT_kwDORFy7ds6v5_SP (skills/legion-worker/SKILL.md:390), mine from round 1. The implementer answered and resolved it at 5b1160331cb9; I read the code rather than the reply and replied in my own words (comment 4367881279) accepting it as fixed. No bot thread and no other author's thread exists on #2143.",
+    "thermonuclear": "Both passes run once at the reviewed head 6a14795a and both bodies read rather than their statuses (dispatch://INFRA-200: an Oh My Pi defect can return a promise and no judgement; neither pass did). thermonuclear-deep-review: `Verdict: APPROVE at 6a14795a`, independently tracing the new text against classify/push.go, classify/decisions.go and api/ready.go and reaching my own reading. thermonuclear-code-quality: `Verdict: CHANGES at 6a14795a`, four items, each adjudicated above.",
+    "e2eLines": "Both present. `E2E (implementer)`: scratch PR #2132's pair plus the prompt composition, with the Bun lane run leading the block (minor 2). `E2E (tester)`: scratch PR #2144's cure measurement, plus round 2's mutation matrix on the lock."
   },
-  "verifiedClaims": [
-    "The daemon's behaviour is unchanged by this diff and the two sentences that now describe it are true of the code: packages/daemon/internal/classify/push.go:17-39 classifies a push as handoff-only from its changed paths alone and reads no commit message, and packages/daemon/internal/classify/decisions.go:59-76 records a settlement for the current head itself, so retro's deletion-only head both carries the code head's verdict by its paths and settles its own check runs - exactly what packages/daemon/internal/prompts/go/architect-common.md:8 now states as two separate claims.",
-    "The reviewer's own four-read CI procedure is untouched by the diff: skills/legion-worker/references/merge-gate.md:27 and packages/daemon/internal/prompts/go/reviewer.md:9 change only the parenthesis attributing the absence of a workflow run to the trailer line rather than to the paths. I ran all four reads at this head and they still work as written.",
-    "The instruction surface carries one rule: every hit of `grep -rn 'skip-checks\\|trailer' skills/ packages/daemon/internal/prompts/` (26) read in context. The survivors that still mention paths are packages/daemon/internal/prompts/go/worker-common.md:21 and skills/legion-worker/SKILL.md's handoff clause, both scoped to the file-backed phases (planning, implementing, testing, reviewing), none of which is retro, and skills/legion-worker/SKILL.md:403-405, which is the daemon's path-keyed carry and is correct.",
-    "skills/legion-worker/SKILL.md is 498 lines, under the 500-line guard that packages/pi-legion/src/skills-guard.test.ts:39-41 enforces; the pi-legion and claude-envoy CI jobs are success at the code head, covering that guard and the mirror's fresh-generation test."
+  "whyApproved": [
+    "The round-1 finding is closed by evidence, not by assertion: packages/pi-legion/src/skills-guard.test.ts:146-174 counts the whole sentence per file in each of skills/legion-worker/SKILL.md, skills/legion-retro/SKILL.md, packages/daemon/internal/prompts/go/worker-common.md and packages/daemon/internal/prompts/roles/implementer.md, reaching the two prompt parts through this test file's own promptsRoot (line 24), never against a composed prompt, and adding nothing for the generated mirror, whose packages/claude-envoy/tests/legion-plugin-fresh.test.ts already fails on drift.",
+    "The lock discriminates: the tester mutated one text per run - reworded, reflowed onto two lines, deleted, duplicated - and every mutation turned the pi-legion lane red at 9 pass / 1 fail, the failing object naming the file with found 0 or 2 against the expected 1, the other nine tests untouched, each file restored byte for byte afterwards.",
+    "The instruction surface still states one rule: every hit of `grep -rn 'skip-checks\\|trailer' skills/ packages/daemon/internal/prompts/` read in context across both rounds, with no text leaving retro's push to be decided by the paths it carries.",
+    "The new text's claims about the daemon remain true of code this change does not touch: classify/push.go:17-39 reads paths and no commit message, classify/decisions.go:59-76 records a settlement for the current head itself, api/ready.go:173-184 refuses only a Missing or red required check."
   ],
   "risks": [
-    "Unmeasured: READY at a freshly pushed retro head. packages/daemon/internal/api/ready.go:173-184 refuses a required check whose result is classify.Missing with `its push may have skipped CI when it should not have; tell the architect`, and GitHub may not have created the head's check runs in the seconds between retro's push and the merger's READY. The refusal is transient and the pre-existing shape for every retro that writes a learning, so this change does not introduce it - but after this change every retro ends on a code head, so every issue now meets that window. Nothing in this pull request measures it."
+    "READY reaching a retro head in the seconds before GitHub has created its check runs is bounded but not closed: the tester measured 26 s from this round's code commit to GitHub creating all five of its workflow runs, and the live interval between retro's push and the merger's first READY read is measured by no surface here. The architect ruled it a risk to carry rather than fix in this pull request, since the cost is one refused packet and a retry, and a wait or retry in that path is behaviour dispatch://INFRA-83 deletes. Recorded in the PR body's `Not proven / risk` for the merger to quote."
   ]
 }
