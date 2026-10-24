@@ -272,6 +272,31 @@ person only once the architect hands the request back (a reply leaving the turn 
 `unslotted`; Legion deliberately does not resume work another owner took. The merger's `READY`
 still waits for the design gate's current approved version.
 
+## A parked tree did not come back after a decision
+
+A root in `backlog` or `icebox` runs again when a person sets it to `todo`, or when the controller
+parked it for a hold of its own and judges that a person's decision gives its work a next step. The
+controller marks such a park with a comment on the root that begins `Parked by Legion while it
+waits on:`. First find whether the daemon relayed the decision. Its JSON log names the issue and
+the root on each of these lines:
+
+- `outbox parked decision sent to the controller` or `workflow: a person's decision on a parked
+  tree goes to the controller`: the controller received the decision.
+- `outbox parked decision not relayed: it names no person`: the gate opened under
+  `gates.design: off`, so no person made the decision.
+- `workflow: a session's reply on a parked tree is not relayed`: an agent wrote the reply. It
+  stays on the ask for the person who asked.
+
+Then read the controller's comment that begins `Parked decision read:`, on the root and on the
+issue where the decision was made. For a question, it is a reply on the question's own ask, which
+answers it or says that `todo` on the root brings the architect back to answer. It says what the
+controller judged. The tree stays parked when the park is not the controller's own hold, the park
+with its `Parked by Legion while it waits on:` comment beside it: a person's park, another agent's
+session's, or an operator's `legion status` (the comment names who, and the tree runs when they set
+it to `todo`). It stays parked too when the decision is older than the park, when the root is
+`done` or `triage`, or when the decision only questions the work. When the controller was down,
+its next start walks the parked roots. That walk reads only the last 10 events of each issue.
+
 ## An issue is held
 
 When an agent's budget runs out (launches that failed, deaths with work outstanding, prompts it

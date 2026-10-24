@@ -12,7 +12,7 @@ They are Markdown instructions loaded by Oh My Pi sessions; the daemon and the t
 | `dispatch-first/` | every session with Dispatch configured, injected by each host plugin on every request (Oh My Pi), on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart` (Claude Code), or as an instruction file (OpenCode) | searching Dispatch before acting, extending the existing issue, citing decisions, closing duplicates, the fresh-reader check before a spec reaches a human; kept under 60 lines and 6,000 characters |
 | `envoy/` | every role | subscriptions, agent-to-agent messages, and topic formats |
 | `legion-architect/` | root and sub-architects | tree ownership, decomposition, waves, gates, integration, the acceptance before the merge |
-| `legion-controller/` | the controller root process | wake routing, admitting only the work a person hands over, asking a person about each finding before filing it, the daily report, escalation |
+| `legion-controller/` | the controller root process | wake routing, admitting only the work a person hands over, asking a person about each finding before filing it, re-admitting a tree it parked on a person's decision, the daily report, escalation |
 | `legion-oracle/` | any role doing research | repository-grounded research |
 | `legion-retro/` | the implementer, at retro | the pre-merge retrospective, its Dispatch message, its last commit removing the issue's `.legion/<issue>/` from the head that merges, and the PR body content the pull request's changed paths require at that head |
 | `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |

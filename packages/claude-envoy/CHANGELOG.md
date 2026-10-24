@@ -115,6 +115,10 @@
 
 ### Changed
 
+- The generated `legion/` controller skill carries the parked-decision rule and walk: a tree the
+  controller parked for a hold of its own (its `Parked by Legion while it waits on:` comment) runs
+  again on a person's decision that gives it a next step, and every other park waits for whoever
+  made it.
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that returned its admission slot
   while its architect waits on a person, and the issue field `waitingOn` naming that gate version or

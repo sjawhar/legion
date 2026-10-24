@@ -123,6 +123,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   child as an independent root is an ask the controller opens, acted on only on the person's yes.
   Stopped-session recovery moves work to Legion only on a person's ruling the weekly plan records,
   no longer when a session's handoff or a plan row of the controller's own says so.
+- The controller skill handles the Go daemon's `parked-decision` notice and walks the parked roots
+  and their children at its start and on each `tick`. It re-admits a root it parked for a hold of
+  its own, a park it marks with a comment that begins `Parked by Legion while it waits on:`, when a
+  person's decision after the park gives its work a next step. It leaves every other park, a
+  person's, another session's or an operator's `legion status`, for whoever made it to set to
+  `todo`, and answers a person's question on its ask
+  (`skill://legion-controller/references/parked-decisions.md`).
 
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull

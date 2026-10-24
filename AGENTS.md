@@ -229,6 +229,29 @@ since no answer could resume it once it had none. Neither does an admitted root 
 taken off, since only a labelled root is resumed; its tree runs on, as any running tree does. The
 claim a person took before the hand-over arrives with the hand-over event that records the root.
 
+A root parked out of the workflow (`backlog`, `icebox`) runs nothing, and its architect is
+suspended or gone. A person's spec decision on it (an approval, a changes request, or an approval
+carried to a child's new tree) that the daemon could not deliver to its architect, and a person's
+answer, resolution or reply on an ask of its issues (one that gives the turn to the agent, or one
+under a closed ask), goes to the controller as `parked-decision`, once per decision. The daemon
+keeps the newest decision per Dispatch reference, and the root's next architect start names each
+one: admission's start task, or the catch-up of a later launch (a `legion claims retry` relaunch),
+with both spec versions when the approved one is no longer the current one. A decision on a root
+that was set to `todo` and waits for its slot is kept the same way and goes to no controller. A
+decision no person made (`gates.design: off`) is not relayed. A session's reply on such an ask is
+not relayed either: the daemon logs `workflow: a session's reply on a parked tree is not relayed`,
+the reply stays on the Dispatch ask for the person who asked, and the controller's walk skips it.
+The controller sets the root `todo` when the park is its own hold and a decision gives its work a
+next step. Its own hold is a park by `session legion-daemon:<PROJECT>` with the controller's comment
+`Parked by Legion while it waits on: …` beside it, which the controller posts when it parks a tree
+for a hold. Every other park stays parked until whoever made it sets the root to `todo`: a person's,
+another session's, and an operator's `legion status`, which the daemon writes under the same session
+with no mark. The controller says so in a comment, and the start task names the decision then. The
+controller answers a question on the question's own ask, from the record when the record holds the
+answer, and otherwise says that `todo` on the root brings its architect back to answer. Its
+parked-root walk, at its start and on each `tick`, finds a decision sent while no controller ran.
+The machinery's notices to a stopped tree (a child's status or close, a dead worker) stay dropped.
+
 The mark is a label rather than the issue's `route` because Dispatch publishes every event of a
 routed issue to the route's topic, where a label only marks the issue; it carries no workflow state.
 
