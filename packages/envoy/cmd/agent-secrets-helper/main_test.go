@@ -52,6 +52,18 @@ func registerAndWait(sock string) {
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
+// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
+// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ash")
+	if err != nil {
+		t.Fatalf("make a temporary directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/7"}))
 	if err != nil {
@@ -98,7 +110,7 @@ func TestServeRefusesAMachineFileThatDoesNotParse(t *testing.T) {
 // startup refusal: the unit always serves now, full stop — no TokenFile, and a missing
 // OperatorFile does not stop it from listening and answering `sessions` either.
 func TestServeStartsWithoutCredentialAndAnswersSessions(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	cfg := config{URL: "https://s", Socket: dir + "/h.sock", OperatorFile: dir + "/none", MachineFile: dir + "/machine.json", StatePath: dir + "/s.json"}
 	done := make(chan error, 1)
 	go func() { done <- serve(cfg) }()
@@ -197,7 +209,7 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 		{syscall.SIGINT, "interrupt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := shortTempDir(t)
 			stderr, err := os.Create(filepath.Join(dir, "stderr"))
 			if err != nil {
 				t.Fatal(err)
@@ -279,7 +291,7 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 // helper answers on (the error names it, and the socket still answers), and removes one nothing
 // answers on, as a helper that died leaves.
 func TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

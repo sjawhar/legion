@@ -17,7 +17,7 @@ import (
 // calls, then enrolled; it counts the calls.
 func drainingHelper(t *testing.T, drains int32) (string, *atomic.Int32) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)

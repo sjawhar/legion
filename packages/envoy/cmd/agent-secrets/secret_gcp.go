@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -99,6 +100,14 @@ var gcpClientDial = func(ctx context.Context, creds *google.Credentials) (*secre
 	return secretmanager.NewClient(ctx, option.WithCredentials(creds), option.WithLogger(slog.New(slog.DiscardHandler)))
 }
 
+// gcpPersonRoute is how a person runs a form under their own Google Account sign-in without
+// touching the machine's Application Default Credentials: `gcloud auth login` writes
+// legacy_credentials/<account>/adc.json (an authorized_user file) under gcloud's configuration
+// directory whether or not it activates the account, and --no-activate keeps the machine's active
+// gcloud account. It never says `gcloud auth application-default login`, which replaces the
+// machine's own ADC for every program that uses them (on a dev box, its own identity).
+const gcpPersonRoute = "run `gcloud auth login --no-activate` as yourself, then run this command again with GOOGLE_APPLICATION_CREDENTIALS naming the file that login keeps, legacy_credentials/<your email>/adc.json in gcloud's configuration directory (`gcloud info --format='value(config.paths.global_config_dir)'` prints it), which leaves this machine's own credentials as they are"
+
 // newGCPBackend loads the person's Application Default Credentials, reads the ADC JSON's own
 // "type" and dials the Secret Manager client (gcpClientDial). It makes no userinfo call: that is
 // only needed for a write's --owner me, so requireWriteSignIn makes it lazily, and a read under an
@@ -106,7 +115,13 @@ var gcpClientDial = func(ctx context.Context, creds *google.Credentials) (*secre
 func newGCPBackend(ctx context.Context, settings Settings) (*gcpBackend, error) {
 	creds, err := gcpCredentials(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("load your Google Cloud Application Default Credentials (run `gcloud auth application-default login`): %w", err)
+		// google.FindDefaultCredentials reads only the file GOOGLE_APPLICATION_CREDENTIALS names
+		// whenever that is set, so no sign-in fixes a file it cannot read or parse: only that
+		// variable or its file does.
+		if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
+			return nil, fmt.Errorf("load the Google Cloud credentials file GOOGLE_APPLICATION_CREDENTIALS names: %w", err)
+		}
+		return nil, fmt.Errorf("load your Google Cloud Application Default Credentials: %w; %s", err, gcpPersonRoute)
 	}
 	var credsKind google.CredentialsType
 	if len(creds.JSON) > 0 {
@@ -130,9 +145,11 @@ type gcpBackend struct {
 	settings Settings
 	client   *secretmanager.Client
 	creds    *google.Credentials
-	// credsKind is the ADC JSON's own "type" (google.AuthorizedUser for a person's `gcloud auth
-	// application-default login`, google.ServiceAccount for a key file, "" when ADC carries no
-	// JSON at all, such as a GCE/GKE metadata-server identity or workload identity).
+	// credsKind is the ADC JSON's own "type" (google.AuthorizedUser for a person's own sign-in,
+	// google.ServiceAccount for a key file, google.ExternalAccount for a workload identity
+	// federation credential such as a dev box's), "" when ADC carries no JSON at all (a GCE/GKE
+	// metadata-server identity or GKE workload identity) or JSON with no "type" (an OAuth client
+	// secret file).
 	credsKind google.CredentialsType
 }
 
@@ -160,14 +177,15 @@ func (b *gcpBackend) displayName(id string) string { return displayName(b.settin
 func (b *gcpBackend) requireAccount(context.Context) error { return nil }
 
 // requireWriteSignIn refuses, before any write, Application Default Credentials that are not a
-// person's own `gcloud auth application-default login` (a service account key file, or a GCE/GKE
-// metadata-server or workload identity, whose ADC carries no "authorized_user" JSON); it answers
+// person's own Google Account sign-in ("authorized_user" JSON): a service account key file, a
+// workload identity federation credential, a workforce identity federation sign-in, or a GCE/GKE
+// metadata-server identity. It names what it found (gcpCredsFound) and gcpPersonRoute. It answers
 // the signed-in person's lowercased email for --owner me. It calls the userinfo endpoint
 // (gcpUserinfo) only here, after the Kind check, not in newGCPBackend: a read never needs the
 // email, and a machine identity's token commonly lacks the userinfo scope that call needs.
 func (b *gcpBackend) requireWriteSignIn(ctx context.Context) (string, error) {
 	if b.credsKind != google.AuthorizedUser {
-		return "", fmt.Errorf("your Google Cloud Application Default Credentials are not a person's sign-in (run `gcloud auth application-default login` instead of using a service account): a secret is written under your own sign-in, never a machine's")
+		return "", fmt.Errorf("your Google Cloud Application Default Credentials are not a person's Google Account sign-in (%s): a secret is written under your own sign-in, never a machine's; %s", gcpCredsFound(b.creds, b.credsKind), gcpPersonRoute)
 	}
 	email, err := gcpUserinfo(ctx, b.creds)
 	if err != nil {
@@ -177,6 +195,36 @@ func (b *gcpBackend) requireWriteSignIn(ctx context.Context) (string, error) {
 		return "", errors.New("your Google sign-in names no email")
 	}
 	return strings.ToLower(email), nil
+}
+
+// gcpCredsFound names the Application Default Credentials requireWriteSignIn refused: where
+// google.FindDefaultCredentials took them from and their "type". It reads the file
+// GOOGLE_APPLICATION_CREDENTIALS names whenever that is set (failing, never falling back, when the
+// file cannot be read), else ~/.config/gcloud/application_default_credentials.json, whatever
+// CLOUDSDK_CONFIG says, else the metadata server, the one source that carries no JSON; a file with
+// no "type" (an OAuth client secret file) is still a file, not the metadata server.
+func gcpCredsFound(creds *google.Credentials, kind google.CredentialsType) string {
+	if len(creds.JSON) == 0 {
+		return "no credentials file: the metadata server's identity, this VM's or this pod's"
+	}
+	from := "~/.config/gcloud/application_default_credentials.json"
+	if path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); path != "" {
+		from = fmt.Sprintf("GOOGLE_APPLICATION_CREDENTIALS names %q", path)
+	}
+	if kind == "" {
+		return from + ", which names no type"
+	}
+	return fmt.Sprintf("%s, of type %q", from, kind)
+}
+
+// signInPrefix is GOOGLE_APPLICATION_CREDENTIALS as this command was given it, shell-quoted, so a
+// command line a form prints for running again (pipeCommand) signs in with the same file when the
+// variable was set for this one command, as the dev-box route sets it; "" when it is unset.
+func (b *gcpBackend) signInPrefix() string {
+	if path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); path != "" {
+		return "GOOGLE_APPLICATION_CREDENTIALS=" + shellWord(path) + " "
+	}
+	return ""
 }
 
 // hasCurrentVersion reports whether id is served while versions/latest is ENABLED.

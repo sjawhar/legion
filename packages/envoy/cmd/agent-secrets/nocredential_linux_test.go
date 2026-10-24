@@ -155,7 +155,7 @@ func TestLoginStatusSaysWhyTheHelperDroppedItsCredential(t *testing.T) {
 		{"a login nobody approved", false, "", "the most recent machine login expired before anyone approved it; run: agent-secrets machine login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sock := filepath.Join(t.TempDir(), "h.sock")
+			sock := filepath.Join(shortTempDir(t), "h.sock")
 			fakeHelperAt(t, sock, helper.Response{OK: true, LoginState: "expired", LoginRefused: tc.refused, CredentialDropped: tc.dropped})
 			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
 				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login-status")
