@@ -2,127 +2,168 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-220",
-  "completed": "2026-10-24T21:32:00Z",
+  "completed": "2026-10-24T23:05:00Z",
   "requiredSkills": {
     "implement": [
-      "legion-worker: the implementer's own rules for this repository — the pull request body and what counts as a proof (references/pr-body.md), the identity check before the push (references/default-branch-check.md), the forward merge on a conflict (references/conflicts-and-rewrites.md). The change is a plugin and a Go bridge, so the proof is the real-binary suite the plan names, not a unit run.",
-      "ce-simplify-code: the simplify pass over the settled diff. The change rewrites a state machine that exists twice (TypeScript and Go) and adds a reminder runner; the pass is where the two copies and the new module are checked for one shape rather than two.",
-      "dispatch-first: the implementer posts to Dispatch only through a finding ask or its architect; it searches before any write, and files no issue of its own (skill://legion-worker/references/findings.md)."
+      "legion-worker: the implementer's rules here — references/pr-body.md (the proof and the PR body; the production-like surfaces reachable in a pod are the pinned Oh My Pi binary and the real MCP server over stdio), references/default-branch-check.md before each push, references/cleanup-deletion.md for the Go cut of packages/daemon/internal/claudebridge/stall.go and its pins, references/conflicts-and-rewrites.md only on a conflict.",
+      "ce-simplify-code: the simplify pass over the settled diff. The whole point of this change is that one machine replaces two, so the pass is where the shared module's seam (restore/saveEntry) and the two hosts' adapters are judged as one shape.",
+      "dispatch-first: search before any Dispatch write; a problem outside this issue is a dispatch ask, never an issue the implementer files (skill://legion-worker/references/findings.md)."
     ],
     "test": [
-      "legion-worker: the tester drives the application and reads CI for everything static (references/pr-body.md). Here the application is the pinned Oh My Pi binary with both plugin entries, run as LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts from packages/pi-legion; the unit and Go suites are CI's.",
-      "dispatch-first: search before any Dispatch write; a problem outside this issue is an ask, never a new issue."
+      "legion-worker: references/pr-body.md — the tester drives the application and reads CI for everything static. Here the application is three real surfaces: LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts from packages/pi-legion, bun test from packages/claude-envoy (the real MCP server over stdio against stand-ins), and go test ./... from packages/daemon. The live Claude pane proof (scripts/e2e/claude-backend-tmux.sh) needs a devbox and cannot run in an issue pod; the tester records that rather than claiming it.",
+      "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
     ],
     "review": [
-      "legion-worker: references/review-threads.md for one disposition reply and one resolution per thread, and references/merge-gate.md for the order of the round (CI read, handoff push, review of the head, completion).",
-      "ce-simplify-code: the reviewer judges whether the two copies of the phase-stall machine stayed one shape and whether the new reminder runner earned its module boundary.",
+      "legion-worker: references/review-threads.md for one disposition reply and one resolution per thread, references/merge-gate.md for the order of the round.",
+      "ce-simplify-code: the reviewer judges whether the deleted Go copy really left one machine rather than two, and whether the new Claude Code hook endpoint earned its place on the pane's own server.",
       "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
     ]
   },
   "gapAnalysis": {
     "findings": [
       {
-        "finding": "The Claude Code bridge cannot be 'reminded at the end of every turn': its only send is b.step(followUp) inside the running turn, and agent_end is emitted only on the path that sends none (bridge.go:617-634), so endless reminding there is an unbounded loop inside one turn with no turn end at which a task or suspension can land.",
-        "answer": "Plan decision D9: the shared machine stays endless, and the bridge is bounded at three delivered reminders per stall (claudeStallReminders), then ends the turn with one log line. Recorded as a spec departure against Acceptance 9 for the architect to rule on."
+        "finding": "F1 — the pane's Legion MCP server exposes no tool a hook could call, and spec v26 names neither the tool, its arguments, its answer, nor what happens when the model calls it (envoy-channel-server.ts:1090-1094).",
+        "answer": "D4: one new tool `legion_phase_hook` beside `legion` and the Envoy tools, taking `{event, …}` and answering one JSON text block (`{}` or `{\"decision\":\"block\",\"reason\":…}`). It is visible to the model (measured), so its description says it is Claude Code's hook endpoint, claude-mechanics.md gains a sentence, and a call with a missing or unknown `event` is refused and changes no state."
       },
       {
-        "finding": "A turn the plugin starts carries no delivery id; the daemon confirms its pending delivery on any unattributed agent_start while a send is in flight (table.go:897-908), and a reminder turn that ended before the host's busy-refusal was processed would retire a task the worker never read (table.go:916-939, delivery.go:335-352).",
-        "answer": "Plan decision D10: the risk is named and accepted rather than papered over with a daemon change the issue excludes. The existing recovery is lateRefused's takeBackPending(taskUnread) (table.go:860-877); the reminder fires only after a full LEGION_STALL_REMINDER_MS of idleness, so the window is the instant the timer and the send coincide. The reviewer is told to look for it."
+        "finding": "F2 — the server never sees the daemon's task (bridge.go:402-412 writes it to Claude Code's stdin), yet acceptance 3 requires the count to reset on a task.",
+        "answer": "D7: a `UserPromptSubmit` mcp_tool hook (measured to fire under Legion's invocation) is the server's sight of every turn start; it classifies the prompt as its own reminder (exact match on the line it last wrote), an Envoy delivery it wrote to the inbox, or a daemon task, and resets the count for the last two."
       },
       {
-        "finding": "'through the Envoy client the plugin already carries' is not true: pi-legion imports no Envoy client (extensions/legion.ts:3-11) and the in-process plugin interface exposes no publish (pi-shared/src/interface.ts:31-41).",
-        "answer": "Plan decision D6 and departure 2: the plugin builds its own client with createEnvoyClient from @legion/envoy-client/transport over sessionEnvoySettings, as pi-envoy does at envoy.ts:498, and adds the tsconfig path mapping. The plugin interface is not extended, so ENVOY_PLUGIN_INTERFACE_VERSION stays 3 and no matched pi-envoy release is forced."
+        "finding": "F3 — a reminder written to the inbox during a turn becomes a step of that turn (bridge.go:430-441,604-630), which would lose the turn boundary the split exists for; the server has no idleness signal.",
+        "answer": "D9: the timer is armed only at a turn's end (`Stop`, `StopFailure`) or at a resume, and its callback does nothing when a `UserPromptSubmit` has arrived since; the claude-envoy suite drives a timer that fires after a prompt and asserts nothing is written."
       },
       {
-        "finding": "The architect topic rule in the spec is a third rule, and the record on the wire carries no tree, parent or role token — only architect?: claimView (legion-api.ts:130-137,261).",
-        "answer": "Plan decision D6 writes the expression: ROLE_TOPIC_PREFIX + roleToken(LEGION_PROJECT, X, 'architect'), where X is the claim's own issue when the record carries an architect claim whose state is neither retired nor failed, and the claim's tree otherwise. It says explicitly that this is not the daemon's owningArchitect (notice_routing.go:142-172), which walks parents the record does not carry."
+        "finding": "F4 — the shared runner's persistence is transcript-shaped (`restore(branch)`, `appendEntry`), which a Claude host has neither of.",
+        "answer": "D2: `PhaseReminderDeps` grows a persistence seam — `restore(entry)` and `saveEntry(entry)` — so the transcript scan stays in pi-legion and the state file stays in claude-envoy. Recorded as a departure (no acceptance line changes)."
       },
       {
-        "finding": "Acceptance 1 and 2 cannot be decided by the harness as it stands: without quietMs it settles at the first terminal agent_end, with quietMs it throws at a hard 90 s deadline, and a gateway out of scripted replies answers HTTP 400 at once, which does not stop the reminding (omp-harness.ts:410-419,471-500,590-607).",
-        "answer": "Section 3 of the plan requires every real-binary case to end itself, by a last scripted reply that is a real handoff_complete tool call or by an answer() that moves /legion/v1/state past the role's phase, and requires the LEGION_STALL_* values to be set in the hundreds of milliseconds through LegionPaneOptions.env so N reminders and the terminator fit inside 90 s."
+        "finding": "F5 — the across-deploy read needs the deployed Go writer's exact path and record (config.go:71, stall.go:92-135), which the spec does not restate.",
+        "answer": "D5: the same path `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, a superset record `{state,count,reported,reportKey}`, written through a temporary file renamed into place before the hook answers, reading `quiet`/`text-call` and a missing count as `{open,0}` through the mapping phase-stall.ts already makes."
       },
       {
-        "finding": "Nine existing assertions in four files encode the removed behaviour and will fail; the spec names only the two Go pins.",
-        "answer": "Section 3 lists each of them as implementer work: legion.test.ts:1618,1646,1677,1689; legion-phase-stall-omp.test.ts:288-305,331-343,355-366; bridge_test.go:332,357,743-746,799. It also requires extensions/legion-role-tools-omp.test.ts to be re-run, since it drives a worker pane too."
+        "finding": "F6 — nothing says what a hook answers before the claim boots, in an architect session, or when the record says the phase is over.",
+        "answer": "D6 and D11: the machine runs only while the claim's role is not `architect`; every hook answers `{}` otherwise, so the bridge's seeding turn is never reminded. The record check is the shared runner's: quiet when the record says the phase is over, fail open on any failure of the read."
       },
       {
-        "finding": "Two e2e scripts parse the transcript entry and assert on its state values, with a 60 s idle window and the production defaults (stage3-4b13b-acceptance.sh:786-791,810-833,847-852; stage4b-sandbox-tree.sh:2419-2459).",
-        "answer": "Plan decision D1 keeps the entry's customType and its state field name, and open/closed keep their meaning, so both scripts keep working; D8 sets LEGION_STALL_REMINDER_MS to 300000 precisely so a 60 s idle window still sees one reminder and no architect notice. Their prose headers are in T7's documentation list."
+        "finding": "F7 — Claude Code may restart the server inside the same claude process, and a plain setTimeout would hold a shut-down server open.",
+        "answer": "D5 and D9: every count change is written to the file before the hook answers, so a restart loses nothing; the server cancels its pending timer when it arms another and clears them in `stop()`."
       },
       {
-        "finding": "The transcript entry, the bridge's stall file and the Go pin's table are three serialisations of one machine, and none is defined once the state carries a count.",
-        "answer": "Plan decision D1 writes all three: {state, count} in both the entry and the file (the plugin's entry carries reported and reportKey beside them, which the bridge never writes and the machine never reads), the legacy quiet/text-call read as {open,0}, a missing count as 0; the pin's table becomes the three states by the six inputs, comparing {state, count, reminder}."
+        "finding": "F8 — the architect's instruction puts the hooks in the shared `packages/claude-envoy/hooks/hooks.json`, which is also loaded outside Legion where no `legion` MCP server exists.",
+        "answer": "D3 puts them in the generated Legion-only plugin `packages/claude-envoy/legion/hooks/hooks.json`, which a pane loads as a second --plugin-dir (claude.go:106-108). Recorded as a departure from the architect's instruction; one file move reverses it."
       },
       {
-        "finding": "The host's one-shot timer cannot be cancelled (pi-types.ts:62-63 has no clearTimeout), so two armed timers would send two reminders.",
-        "answer": "Plan decision D4: one monotonic reminderGeneration bumped by every message_start, settle, phase close, delivered reminder and session change; a callback sends only when its captured generation is unchanged, the state is still open or waiting, no turn is running, and the record check passes."
+        "finding": "F9 — a Legion pane might run two servers from this package (the pane's `legion` and the plugin's own `envoy`), and the hook names one.",
+        "answer": "Measured (M7): with `--strict-mcp-config` the plugin's own `.mcp.json` server does not appear; the session's `mcp_servers` held only the one `--mcp-config` registers. No further work."
       },
       {
-        "finding": "'the record no longer shows this role working this phase' is not a predicate the record supports; an implementer on an open production check maps to no role, and a daemon that does not answer throws.",
-        "answer": "Plan decision D5: the predicate is roleForPhase(record.phase) === claim.role, a new TypeScript mirror of the daemon's RoleFor (effects.go:27-44) in packages/contracts; the read is bounded at 5 s because the daemon client sets no deadline (daemon-client.ts:226-292) and fails open on any failure. The production-check consequence (a done issue silences reminders) is named as a deliberate scope boundary, matching Acceptance 7, and reported to the architect."
+        "finding": "F10 — `/clear` mints a new session id and would orphan a state file keyed by the old one.",
+        "answer": "D5 declares `/clear` out of scope: a Legion pane runs `claude -p` with a `--session-id`/`--resume` the daemon names, and no worker runs it. The file keys on the Claude Code session id, as the deployed Go file does."
       },
       {
-        "finding": "When the count increments and where the publish happens are unstated, and message_end's order against message_start is not guaranteed.",
-        "answer": "Plan decisions D2 and D3: settle never moves the count; only the reminded input does, applied when the host has actually delivered the reminder, so a dropped reminder counts for nothing. The publish runs only in the timer path, never in the awaited session_stop handler, and LEGION_STALL_ARCHITECT_AFTER is clamped to at least 2 so the continuation reminder can never reach it."
+        "finding": "F11 — what the `Stop` hook returns on the second Stop of a run, what an error answer costs, and whether the record check runs inside the hook.",
+        "answer": "D8 and D11: the block is used only when the count is 0; a later `Stop` answers `{}` and arms the timer. The record check runs inside the `Stop` hook, bounded at 5 s, with the hook's own timeout declared 30 s; a failed read fails open."
       },
       {
-        "finding": "Collapsing to three states leaves a settle in waiting and the meaning of 'the first reminder' undefined.",
-        "answer": "Plan decision D2 writes the whole table, every state by every input: a settle in waiting stays waiting with no reminder (the armed wait governs), reminded from waiting goes to open with the count raised, and the continuation is chosen by count === 0 rather than by any notion of 'first', so an inbound event that resets the count also restores the continuation."
+        "finding": "F12 — the Go deletion set is larger than the spec's three nouns and includes symbols that exist only to feed the machine.",
+        "answer": "D12 lists every one: stall.go whole; the bridge's `stall`, `lastAssistantText`, `handoffs`, their initialisation, both `setStall` calls, the `step` reset, the `assistant` accumulation, `isLegionTool`, `toolResults` and its `case \"user\"` caller, the settle branch and `setStall`; `Config.StallFile` and the `CLAUDE_CONFIG_DIR` refusal that exists only for it; and each named test, helper and surviving `FollowUp` use in bridge_test.go."
       },
       {
-        "finding": "legion.ts:244-247 does not trigger a turn (it passes triggerTurn: false); the turn-triggering send is pi-envoy's.",
-        "answer": "Departure 3 records the correction, and section 4 risk 1 makes it the first thing the implementer measures: prove on the real binary that a custom message sent with triggerTurn: true from a timer starts a turn in a fully idle Legion pane, before building the rest on it; if it does not, report to the architect rather than falling back."
+        "finding": "F13 — two live-proof scripts and the e2e README encode the old one-follow-up behaviour and parse the transcript entry.",
+        "answer": "T9: their prose changes; their predicates do not, because the entry keeps its `customType` and its `state` field and both assert only that no follow-up comes after a successful completion, which a closed phase still satisfies. Neither can be run from an issue pod, which the plan says."
       },
       {
-        "finding": "The reminder's message must be one inboundKind ignores; sendUserMessage or an envoy-message type would make the reminder reset its own count.",
-        "answer": "Plan decision D3 names it: pi.sendMessage with customType 'legion-phase-reminder', display true, deliverAs steer, triggerTurn true, and forbids sendUserMessage/sendUserInput and the envoy-message type. T7 adds the type to the AGENTS.md account."
+        "finding": "F14 — the move needs three new `exports` entries and a self-reference fix, and pi-legion's tsconfig wildcard would hide a missing entry until claude-envoy's bundle fails.",
+        "answer": "D1 names the three entries, the rewrite of phase-stall.ts's first import to `./interface`, the relative sibling imports, and `bun run typecheck` in packages/claude-envoy as the check that catches a missing entry."
       },
       {
-        "finding": "The four numbers are also the production values, since the daemon sets none of them.",
-        "answer": "Plan decision D8 states all four with their defaults and reasons (LEGION_STALL_REMINDER_MS 300000, LEGION_STALL_WAITING_MS 900000, LEGION_STALL_RESUME_MS 120000, LEGION_STALL_ARCHITECT_AFTER 3, clamped to at least 2), says the daemon sets none, and names the provider cost that fixes the reminder delay. Reported to the architect, whose human may want a say in the 5-minute figure."
+        "finding": "F15 — claude-envoy type-checks imported sources under stricter flags than pi-shared's.",
+        "answer": "D1 requires `bunx tsc --noEmit` in all three packages and keeps the moved files on pi-shared's own biome recipe."
       },
       {
-        "finding": "Three more places state the removed rule as fact, two of them in shipped Go comments.",
-        "answer": "T7 lists them: review.go:431-435, stall.go:13-24,69-72, scripts/e2e/README.md:613-615 and stage3-4b13b-acceptance.sh:8-11, beside AGENTS.md, the worker skill, headless.md and the regenerated claude-envoy copy; existing CHANGELOG entries stay as history and a new Unreleased entry is added."
+        "finding": "F16 — two committed generated trees (`dist/`, `legion/`) are pinned byte for byte to a fresh build on the pinned Bun.",
+        "answer": "T2 requires `bun run build` and the commit of both, with `bun run check-dist` as the check; the pod's Bun is 1.3.14, which is `.bun-version` (measured), so the build runs here."
       },
       {
-        "finding": "The publish envelope is undefined, and a publish that times out after the listener accepted it would be delivered twice.",
-        "answer": "Plan decision D6 writes the envelope: topic, a one-paragraph message naming issue, role, phase, the unanswered count and the first 500 characters of the worker's last words, the same facts as a JSON string payload (the listener refuses an object), and idempotencyKey = reportKey, a UUID minted at the first attempt of a run and kept until the count resets. A transport failure with no status is logged, dropped, and retried at the next reminder with the same key."
+        "finding": "F17 — `tests/hooks-timeout.test.ts` assumes every hook is a command hook with `args` and pins exactly three rows.",
+        "answer": "T8 rewrites it to cover both hook kinds and both files, with the five mcp_tool timeouts D3 names."
       },
       {
-        "finding": "Acceptance 8's negative over five session kinds is not decidable by one command.",
-        "answer": "Section 3 replaces it with one unit case per kind asserting that session_stop returns undefined and pi.sendMessage was not called (the architect and sub-architect share the role === 'architect' branch, so one case names both), beside the existing no-tool_call-hook pin at legion.test.ts:1445-1462."
+        "finding": "F18 — the shared module's comments say `reported`/`reportKey` are the Oh My Pi plugin's alone, while acceptance 9 requires the architect notice and its retry on Claude Code.",
+        "answer": "D11: both fields ride the Claude state file, and the two comments are corrected with the move."
+      },
+      {
+        "finding": "F19 — the four variables have no acceptance criterion, and `spec.Env` is replaced wholesale by the git identity's map, so anything added before that line is lost.",
+        "answer": "D13: `workerSpawnSpec` copies the four from the daemon's own environment into `spec.Env` after that line; both runtimes already forward `spec.Env`. The plan adds the missing acceptance criterion (§3, line 12) and three Go tests."
+      },
+      {
+        "finding": "F20 — four acceptance bullets cannot be decided in an issue pod, one of them only on a devbox, and the Claude e2e has no step today in which a worker ends a turn with its phase open.",
+        "answer": "§3 maps every bullet to a suite and a command and marks the live-pane line devbox-only; T3 adds the missing e2e step before the script's successful handoff_complete step and makes reporting the devbox need to the architect part of the work."
+      },
+      {
+        "finding": "F21 — three documents beyond the three the spec names state the behaviour being removed.",
+        "answer": "T9 lists them all: docs/deployment.md:198-202, packages/claude-envoy/AGENTS.md (a new section), workflow/review.go:431-435, the e2e README and the two script headers, both CHANGELOGs, the worker skill and headless.md."
+      },
+      {
+        "finding": "F22 — four named risks: the cosmetic stop-hook-error, the model-visible hook tool, a PostToolUse round-trip per tool call, and a deployed Claude Code older than the measured build.",
+        "answer": "§4 risks 1 and 3–5 accept and name each, with the live-pane proof as the only thing that settles the version question."
+      },
+      {
+        "finding": "F23 — five claims about Claude Code that the repository cannot establish (PostToolUse/PostToolUseFailure firing, StopFailure, a helper agent's id, and the hook arming).",
+        "answer": "Four of the five were measured in this pod on Claude Code 2.1.310 and are recorded as M1–M7 in the plan; `StopFailure` and a subagent's `agent_id` remain unmeasured and are §4 risks 2 and 7, with the live-pane proof as where they show."
+      },
+      {
+        "finding": "F24 — acceptance 1's \"the first reminder\" reads either as the first of a run or the first of the stall, and the two give different reminder counts on Claude Code.",
+        "answer": "D8 reads it as the first of the stall, keyed on the count being 0 exactly as the Oh My Pi half already is; recorded as a departure, since the acceptance test counts reminders."
       }
     ]
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 2
+    "rounds": 3
   },
   "specDepartures": [
     {
-      "spec": "Acceptance 9: a Claude Code phase worker is reminded at the end of every turn, through the Go copy of the machine in packages/daemon/internal/claudebridge.",
-      "plan": "The Go copy runs the same three states, the same count and reset and the same reminder text, but delivers at most three reminders per stall and then ends the turn; endless reminding is Oh My Pi's alone.",
-      "evidence": "packages/daemon/internal/claudebridge/bridge.go:617-634 sends the follow-up with b.step inside the running turn and emits agent_end only on the path that sends none, so one reminder per turn does not exist there: reminding without a bound is an unbounded loop inside one turn, billed per iteration, during which the daemon sees no turn end and can deliver no queued task and land no held suspension (packages/daemon/internal/supervise/table.go:916-939). config.go:31-47 carries no clock, daemon client or Envoy client.",
+      "spec": "\"the Legion plugin already ships hooks that Claude Code finds by itself (packages/claude-envoy/hooks/hooks.json), so the reminder needs no new flag and no new process: the hooks are entries in that file\" — and the architect's instruction repeating it.",
+      "plan": "The five hook entries are generated into the Legion-only plugin packages/claude-envoy/legion/hooks/hooks.json, which a Legion pane loads as its second --plugin-dir; the shared hooks/hooks.json is left as it is.",
+      "evidence": "A Legion pane loads both directories (packages/daemon/internal/runtime/tmux/claude.go:106-108), while @sjawhar/claude-envoy is installed as a plain Claude Code plugin elsewhere and ships hooks/** to every installer (package.json files list); outside a pane no `legion` MCP server exists, and Claude Code answers an mcp_tool hook whose server is not connected with a non-blocking hook error on every turn (https://code.claude.com/docs/en/hooks, \"When the server is still connecting\"). The cost of the change is one generated file in buildLegionPlugin, pinned by tests/legion-plugin-fresh.test.ts; one file move reverses it.",
       "outcome": {
         "kind": "changed",
-        "acceptance": [
-          "A Claude Code phase worker is reminded at the end of every turn -> a Claude Code phase worker is reminded at the end of every turn until three reminders of one stall have gone unanswered, after which its bridge ends the turn and waits for the next task or Envoy delivery."
+        "settledDecisions": [
+          {
+            "decision": "The new hooks are entries in packages/claude-envoy/hooks/hooks.json.",
+            "detail": "They are entries in the generated Legion-only plugin instead, so a non-Legion Claude Code session that loads this package never fires a hook against a server it does not have."
+          }
         ]
       }
     },
     {
-      "spec": "The worker's session publishes the architect message through the Envoy client the plugin already carries and the session's own Envoy settings.",
-      "plan": "The plugin builds an Envoy client of its own with createEnvoyClient from @legion/envoy-client/transport over sessionEnvoySettings, and packages/pi-legion/tsconfig.json gains that subpath mapping; the in-process plugin interface is not extended.",
-      "evidence": "packages/pi-legion/extensions/legion.ts:3-11 lists every @legion/envoy-client import of the shipped entry and none is an Envoy client; packages/pi-shared/src/interface.ts:31-41 exposes version, publishers, roleClaim, injectedUserTurns and bootstrappedSession, with no publish. packages/pi-envoy/extensions/envoy.ts:498 is the pattern the plan copies.",
+      "spec": "Acceptance 1: \"the first reminder as the end-of-turn hook's own continuation, every later one as a turn started for it\", with the Claude Code prose \"The first reminder of a run is the `Stop` hook's block\".",
+      "plan": "The block is the first reminder of the stall, not of each run: the `Stop` hook blocks only while the count is 0, so a reminder that arrived over the inbox does not earn a second block when its own run ends.",
+      "evidence": "Measured in this pod on Claude Code 2.1.310: a blocked Stop continues the turn and the next Stop carries stop_hook_active: true, so only within one run is a block distinguishable; every inbox reminder starts a run of its own, whose Stop would otherwise block again, giving two reminders per cycle and a count that climbs twice. The Oh My Pi half already keys the continuation on count === 0 (packages/pi-legion/src/phase-reminder.ts:329-342), and the acceptance test counts reminders.",
       "outcome": {
-        "kind": "unchanged"
+        "kind": "changed",
+        "acceptance": [
+          "\"the first reminder as the end-of-turn hook's own continuation\" -> the first reminder of each stall is the end-of-turn hook's continuation (the Stop hook's block on Claude Code); every later reminder, including the one that ends the run a reminder started, is a turn started for the worker."
+        ]
       }
     },
     {
-      "spec": "Every reminder after the first is a turn the plugin starts with the host's own custom-message send that triggers a turn, the one the extension already uses to put a notice in front of a worker (packages/pi-legion/extensions/legion.ts:244-247).",
-      "plan": "The plan uses that API, but records that pi-legion has no such send today and makes proving it on the real binary the implementer's first step, before anything is built on it.",
-      "evidence": "packages/pi-legion/extensions/legion.ts:244-247 is pi.sendMessage(workspaceRecreatedMessage(recreatedNotice), { deliverAs: \"steer\", triggerTurn: false }) — the notice is saved for whatever starts the next turn. The turn-triggering send is pi-envoy's run-end nudge (packages/pi-envoy/extensions/envoy.ts:2536-2542), proven on the real binary from agent_end (packages/pi-legion/extensions/legion-phase-stall-omp.test.ts:405-436), not from a timer in an idle session.",
+      "spec": "\"passing them to a worker that way is part of this work, since the daemon passes a pane and a pod only the variables it names\" — stated in the prose with no acceptance bullet.",
+      "plan": "The plan adds a twelfth acceptance criterion: a pane's -e pairs and a pod container's env carry each of the four LEGION_STALL_* variables the daemon's own environment holds, decided by Go tests in packages/daemon.",
+      "evidence": "No acceptance bullet of spec v26 mentions the variables; the seam is spec.Env (packages/daemon/internal/daemon/specs.go:125-166, forwarded at runtime/tmux/spawn.go:205-211 and runtime/sandbox/manifest.go:932-935), and spec.Env is replaced wholesale by the git identity's map at specs.go:160, so an implementer could satisfy the prose and leave nothing proven.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "added: a pane's -e pairs and a pod container's env carry each of LEGION_STALL_REMINDER_MS, LEGION_STALL_WAITING_MS, LEGION_STALL_RESUME_MS and LEGION_STALL_ARCHITECT_AFTER that the daemon holds, proven by go test ./... in packages/daemon."
+        ]
+      }
+    },
+    {
+      "spec": "\"packages/pi-legion/src/phase-stall.ts, phase-reminder.ts and stall-limits.ts move into @legion/pi-shared, where the Oh My Pi plugin and the pane's Legion server both import them.\"",
+      "plan": "They move as the spec says, and the runner's persistence changes shape with the move: restore(branch) becomes restore(entry) and appendEntry becomes saveEntry, so each host supplies its own storage (the Oh My Pi transcript, the Claude Code state file).",
+      "evidence": "packages/pi-legion/src/phase-reminder.ts:53-60,300-308 reads and writes an Oh My Pi transcript branch through pi.appendEntry and restorePhaseStall; a Claude Code host has neither, and the alternative — fabricating a one-entry branch in the server — would put a fake transcript entry in a program that has no transcript.",
       "outcome": {
         "kind": "unchanged"
       }
