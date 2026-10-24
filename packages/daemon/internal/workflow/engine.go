@@ -255,13 +255,14 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 }
 
 // keepStatus records an observation of the issue whose status the workflow does not take: its title,
-// rank, parent, label, sequence and the status Dispatch showed, with the recorded status kept.
+// rank, parent, label, sequence, claim and the status Dispatch showed, with the recorded status kept.
 // Admission, running after this handler, then records none of that status: a live event stops at its
 // sequence fence, and a boot listing the engine applied this way keeps the recorded status (admit's
 // applySummary), so neither frees the slot nor re-admits on it.
 func (e *Engine) keepStatus(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) error {
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
 	issue.HandedOver, issue.DispatchStatus = fact.HandedOver, fact.Status
+	issue.ObserveClaim(fact.ClaimedBy, fact.Seq)
 	return e.store.PutIssue(ctx, tx, issue)
 }
 
@@ -315,7 +316,10 @@ func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue
 
 // awaitPerson moves a quiet admitted root into awaiting_person. Admission releases its slot in the
 // same intake transaction and fills it from Waiting before the fact commits. The architect's daemon
-// suspension waits for its current turn to end, keeping the session for the answer's resume.
+// suspension waits for its current turn to end, keeping the session for the answer's resume. A root
+// Unresumable answers no for keeps its slot at admitted: released, nothing could ever resume it,
+// and admission's sweep would end its tree. That is the architect whose claim a person refused,
+// asking that person whether to release it.
 func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting, reason string) error {
 	if root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !InWorkflow(root) {
 		return nil
@@ -332,6 +336,14 @@ func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, 
 		if member.Key != root.Key && InWorkflow(member) && member.Phase != phase.Admitted {
 			return nil
 		}
+	}
+	unresumable, err := Unresumable(ctx, e.store, tx, root)
+	if err != nil {
+		return err
+	}
+	if unresumable != "" {
+		e.logOnCommit(ctx, "workflow: root keeps its admission slot while it waits on a person, since it could not resume", "issue", root.Key, "why", unresumable)
+		return nil
 	}
 	root.Phase, root.Awaiting = phase.AwaitingPerson, &waiting
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
@@ -490,7 +502,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
 		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
-		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
+		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo, ClaimedBy: fact.ClaimedBy, ClaimSeq: fact.Seq}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}

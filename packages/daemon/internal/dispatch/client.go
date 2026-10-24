@@ -57,6 +57,10 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 				continue
 			}
 		}
+		var claimed *Claim
+		if issue.Claim != nil {
+			claimed = &Claim{Kind: issue.Claim.Actor.Kind, ID: issue.Claim.Actor.ID}
+		}
 		issues = append(issues, IssueSummary{
 			Key:          issue.Key,
 			Title:        issue.Title,
@@ -66,6 +70,7 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			HandedOver:   CarriesLegionLabel(issue.Labels),
 			LastSeq:      issue.LastSeq,
 			ResolvedRepo: deref(issue.ResolvedRepo),
+			ClaimedBy:    claimed.Holder(),
 		})
 	}
 	return issues, nil
@@ -105,7 +110,7 @@ func (c *HTTPClient) Ask(ctx context.Context, id string) (Ask, error) {
 	if err := c.request(ctx, http.MethodGet, "/api/v1/asks/"+url.PathEscape(id), nil, &response); err != nil {
 		return Ask{}, err
 	}
-	return Ask{ID: response.Ask.ID, IssueKey: deref(response.Ask.IssueKey), Kind: response.Ask.Kind, State: response.Ask.State}, nil
+	return Ask{ID: response.Ask.ID, IssueKey: deref(response.Ask.IssueKey), Kind: response.Ask.Kind, State: response.Ask.State, WaitingOn: response.Ask.WaitingOn}, nil
 }
 
 // ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
@@ -344,14 +349,15 @@ func dispatchError(status int, statusText string, payload []byte) *Error {
 }
 
 type issueSummaryResponse struct {
-	Key          string   `json:"key"`
-	Title        string   `json:"title"`
-	Status       string   `json:"status"`
-	Parent       *string  `json:"parent"`
-	Rank         string   `json:"rank"`
-	Labels       []string `json:"labels"`
-	LastSeq      int64    `json:"last_seq"`
-	ResolvedRepo *string  `json:"resolved_repo"`
+	Key          string         `json:"key"`
+	Title        string         `json:"title"`
+	Status       string         `json:"status"`
+	Parent       *string        `json:"parent"`
+	Rank         string         `json:"rank"`
+	Labels       []string       `json:"labels"`
+	LastSeq      int64          `json:"last_seq"`
+	Claim        *claimResponse `json:"claim"`
+	ResolvedRepo *string        `json:"resolved_repo"`
 }
 
 type issueResponse struct {
@@ -373,10 +379,11 @@ type claimResponse struct {
 }
 
 type askResponse struct {
-	ID       string  `json:"id"`
-	IssueKey *string `json:"issue_key"`
-	Kind     string  `json:"kind"`
-	State    string  `json:"state"`
+	ID        string  `json:"id"`
+	IssueKey  *string `json:"issue_key"`
+	Kind      string  `json:"kind"`
+	State     string  `json:"state"`
+	WaitingOn string  `json:"waiting_on"`
 }
 
 type repoProjectResponse struct {

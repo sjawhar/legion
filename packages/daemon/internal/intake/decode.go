@@ -177,6 +177,12 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			Rank         string          `json:"rank"`
 			Labels       []string        `json:"labels"`
 			ResolvedRepo json.RawMessage `json:"resolved_repo"`
+			Claim        *struct {
+				Actor struct {
+					Kind string `json:"kind"`
+					ID   string `json:"id"`
+				} `json:"actor"`
+			} `json:"claim"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
@@ -202,6 +208,13 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			parent = *issue.Parent
 		}
+		claimedBy := ""
+		if issue.Claim != nil {
+			if issue.Claim.Actor.Kind == "" || issue.Claim.Actor.ID == "" {
+				return nil, fmt.Errorf("Dispatch issue event payload has an invalid claim actor")
+			}
+			claimedBy = issue.Claim.Actor.Kind + ":" + issue.Claim.Actor.ID
+		}
 		actorSession := ""
 		daemonActor := event.Actor.Kind == "session" && event.Actor.ID == dispatch.DaemonSession(event.IssueKey)
 		if event.Actor.Kind == "session" && !daemonActor {
@@ -209,7 +222,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		}
 		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
 			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
-			ResolvedRepoMissing: missing}, nil
+			ResolvedRepoMissing: missing, ClaimedBy: claimedBy}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`

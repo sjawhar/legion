@@ -214,6 +214,10 @@ waiting line. Admission gives it the next free slot and resumes the same archite
 tree remains live while it waits, so children do not become orphans or start planning before the
 root returns. Taking the `legion` label off such a root, or a human or foreign session claiming it,
 takes it out of the workflow with an `unslotted` notice; it is never resumed under another owner.
+A root a person or foreign session already holds the Dispatch claim of never gives up its slot at
+all: its architect asks that holder whether to release the claim and keeps the slot at `admitted`,
+since no answer could resume it once it had none. The claim a person took before the hand-over
+arrives with the hand-over event that records the root.
 
 The mark is a label rather than the issue's `route` because Dispatch publishes every event of a
 routed issue to the route's topic, where a label only marks the issue; it carries no workflow state.
@@ -233,7 +237,9 @@ gate reopens on that event), and a `changes_requested` review closes it with the
 
 When a root at `admitted` registers a closed gate and no child still runs or is held, the root
 enters `awaiting_person`, gives its admission slot back, and suspends its architect at the end of
-that turn. Approval and `changes_requested` both answer that wait; a newer version also answers it
+that turn. A registration Dispatch already shows approved at its latest version opens the gate at
+registration instead, and the root starts planning in its own slot. Approval and
+`changes_requested` both answer that wait; a newer version also answers it
 because Dispatch then waits on the architect. Once a slot is free the architect resumes its own
 session with a task naming the answer; an open gate advances the root and its admitted children
 together. A gate still closed sends the architect to revise the spec, request approval again and

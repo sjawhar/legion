@@ -5,12 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5"
 	"log/slog"
 	"maps"
-	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -366,6 +366,8 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		Repo:            resolution.Repo,
 		DefaultBranch:   resolution.DefaultBranch,
 		GitHubRepo:      resolution.GitHubRepo,
+		ClaimedBy:       observation.ClaimedBy,
+		ClaimSeq:        observation.Seq,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
@@ -451,6 +453,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		stored, status = refreshed, summary.Status
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
+		stored.ObserveClaim(summary.ClaimedBy, summary.LastSeq)
 		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq, false)
 	}
 	if summary.Status == "todo" && stored.Status == "in_progress" {
@@ -461,17 +464,20 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	return a.recordObservation(ctx, tx, *stored, observed{
 		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
 		Status: status, Shown: summary.Status, HandedOver: handed, Seq: seq,
+		ClaimedBy: summary.ClaimedBy, ClaimSeq: summary.LastSeq,
 	})
 }
 
 // applyObservation records a newer Dispatch observation of a recorded issue: the one place a live
-// event's title, rank, parent, label, and status reach the record, so a re-rank, a rename, or the
-// label taken off or put back at the same status moves the waiting line at once. A todo on a
-// lingering or closed root handed to Legion is a re-admission.
+// event's title, rank, parent, label, claim and status reach the record, so a re-rank, a rename, or
+// the label taken off or put back at the same status moves the waiting line at once. A todo on a
+// lingering or closed root handed to Legion is a re-admission. The claim the event shows is taken
+// first, so a re-admission's record carries it as a plain observation's does.
 func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, observation intake.DispatchIssue) error {
 	if observation.Seq != 0 && observation.Seq <= stored.LastDispatchSeq {
 		return nil
 	}
+	stored.ObserveClaim(observation.ClaimedBy, observation.Seq)
 	handed := observation.HandedOver
 	if observation.DaemonActor && observation.HandedOver && observation.Status == "todo" {
 		if handover, err := a.store.Handover(ctx, tx, stored.Key); err != nil || handover == nil {
@@ -560,10 +566,14 @@ func (a *Admission) orphan(ctx context.Context, tx pgx.Tx, stored record.Issue, 
 // observed is what one Dispatch observation of an issue says about it, from a live event or from
 // the boot read: Shown is the status Dispatch showed, and Status the one the record takes, which is
 // Shown except from a boot listing no newer than the record, which keeps the record's own.
+// ClaimedBy is the claim the observation showed at ClaimSeq, the Dispatch sequence it was read at,
+// which the record takes only past its own (record.Issue.ObserveClaim).
 type observed struct {
 	Title, Parent, Rank, Status, Shown string
 	HandedOver                         bool
 	Seq                                int64
+	ClaimedBy                          string
+	ClaimSeq                           int64
 }
 
 // recordObservation is where admission writes a Dispatch observation to an issue record: a live
@@ -574,7 +584,8 @@ type observed struct {
 // keepStatus: a session's write it sets back, or an edit that changed no status), and a live event
 // it wrote then stops at the sequence fence here.
 func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, o observed) error {
-	if stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
+	claimed := stored.ObserveClaim(o.ClaimedBy, o.ClaimSeq)
+	if !claimed && stored.Title == o.Title && stored.Rank == o.Rank && stored.Status == o.Status && stored.DispatchStatus == o.Shown &&
 		stored.HandedOver == o.HandedOver && sameParent(stored.Parent, record.ParentOf(o.Parent)) && stored.LastDispatchSeq == o.Seq {
 		return nil
 	}
@@ -799,7 +810,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			continue
 		}
 		if candidate.Answered() {
-			reason, err := a.resumable(ctx, tx, candidate)
+			reason, err := workflow.Unresumable(ctx, a.store, tx, candidate)
 			if err != nil {
 				return admitted, fmt.Errorf("check whether answered root %s can resume: %w", candidate.Key, err)
 			}
@@ -833,9 +844,13 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		index := nextSlotIndex(slots)
 		awaiting := candidate.Awaiting
 		answered := candidate.Answered()
+		// An answered root keeps the status it ran with, so its resume writes none, unless a person
+		// set it back to todo while it waited: then, like a fresh root, it is written in_progress.
+		writeInProgress := !answered || candidate.Status == "todo"
 		if answered {
 			candidate.Phase, candidate.Awaiting = phase.Admitted, nil
-		} else {
+		}
+		if writeInProgress {
 			candidate.Status = "in_progress"
 		}
 		if err := a.store.PutIssue(ctx, tx, candidate); err != nil {
@@ -845,14 +860,16 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		if err := a.store.PutSlot(ctx, tx, slot); err != nil {
 			return admitted, fmt.Errorf("put admission slot for %s: %w", candidate.Key, err)
 		}
+		if writeInProgress {
+			if err := a.enqueue(ctx, tx, candidate.Key, record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, now); err != nil {
+				return admitted, err
+			}
+		}
 		if answered {
 			if err := a.engine.ResumeAwaitedRoot(ctx, tx, candidate, *awaiting); err != nil {
 				return admitted, fmt.Errorf("resume %s after a person's answer: %w", candidate.Key, err)
 			}
 		} else {
-			if err := a.enqueue(ctx, tx, candidate.Key, record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, now); err != nil {
-				return admitted, err
-			}
 			if err := a.enqueue(ctx, tx, candidate.Key, record.IssueBranch{Generation: candidate.Generation}, now); err != nil {
 				return admitted, err
 			}
@@ -948,7 +965,8 @@ func (a *Admission) releaseUnslotted(ctx context.Context, tx pgx.Tx, issues []re
 	return released, nil
 }
 
-// awaitingUnresumable returns whether issue is an awaiting root this pass must remove, and why.
+// awaitingUnresumable returns whether issue is an awaiting root this pass must remove, and why
+// (workflow's Unresumable, the one rule the workflow's release also asks).
 func (a *Admission) awaitingUnresumable(ctx context.Context, tx pgx.Tx, issue record.Issue, slotted map[string]struct{}) (string, bool, error) {
 	if issue.Project != a.project || !claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Lingers() || !workflow.InWorkflow(issue) || !issue.AwaitingPerson() {
 		return "", false, nil
@@ -956,39 +974,8 @@ func (a *Admission) awaitingUnresumable(ctx context.Context, tx pgx.Tx, issue re
 	if _, running := slotted[issue.Key]; running {
 		return "", false, nil
 	}
-	reason, err := a.resumable(ctx, tx, issue)
+	reason, err := workflow.Unresumable(ctx, a.store, tx, issue)
 	return reason, reason != "", err
-}
-
-// resumable is the sole admission rule deciding whether an awaiting root may resume. A human or
-// foreign session holding its Dispatch claim owns the issue instead; the daemon and sessions that
-// claim within the tree are legitimate holders.
-func (a *Admission) resumable(ctx context.Context, tx pgx.Tx, issue record.Issue) (string, error) {
-	switch {
-	case !issue.HandedOver:
-		return "the legion label was removed", nil
-	case issue.Lingers() || !workflow.InWorkflow(issue):
-		return "it left the workflow", nil
-	case issue.ClaimedBy == "":
-		return "", nil
-	}
-	kind, id, found := strings.Cut(issue.ClaimedBy, ":")
-	if !found || kind == "" || id == "" {
-		return fmt.Sprintf("its Dispatch claim is held by %q", issue.ClaimedBy), nil
-	}
-	if kind == "session" && id == dispatch.DaemonSession(issue.Key) {
-		return "", nil
-	}
-	if kind == "session" {
-		ownsTree, err := a.store.SessionClaimsTree(ctx, tx, issue.Tree, id)
-		if err != nil {
-			return "", err
-		}
-		if ownsTree {
-			return "", nil
-		}
-	}
-	return fmt.Sprintf("its Dispatch claim is held by %s", issue.ClaimedBy), nil
 }
 
 // Held reports whether any key currently waits on the Dispatch consumer reaching the stream

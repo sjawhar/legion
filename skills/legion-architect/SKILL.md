@@ -470,9 +470,9 @@ create a wait loop for any wake source.
 
 Never yield while waiting on a human. Open the root-level `dispatch ask` or the root approval
 request before the turn ends. The daemon then suspends this same session and returns its slot while
-the person owns the next move; it resumes with a task naming an answer, resolution, agent-turn
-reply, review result, or newer version. Open ordinary asks on the root issue, never a child, so the
-daemon can preserve one live tree and resume its architect.
+the person owns the next move (a root whose claim another holds keeps its slot); it resumes with a
+task naming an answer, resolution, agent-turn reply, review result, or newer version. Open ordinary
+asks on the root issue, never a child, so the daemon can preserve one live tree and resume it.
 
 ## Architecture components
 

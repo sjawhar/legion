@@ -142,6 +142,17 @@ func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson &&
 // waits for its slot.
 func (i Issue) Answered() bool { return i.AwaitingPerson() && i.Awaiting.AnsweredAt != nil }
 
+// ObserveClaim records holder (`<kind>:<id>`, empty for nobody) as the issue's Dispatch claim at
+// seq, and reports whether it changed the record. A claim seen at or behind ClaimSeq is older
+// than the one recorded, from an issue event or a claim event out of order, and changes nothing.
+func (i *Issue) ObserveClaim(holder string, seq int64) bool {
+	if seq <= i.ClaimSeq {
+		return false
+	}
+	i.ClaimedBy, i.ClaimSeq = holder, seq
+	return true
+}
+
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {
 	Issue         string

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -73,7 +74,10 @@ type statusRecorder struct {
 	writes []statusWrite
 	// documents maps each Dispatch document id this fake knows to the issue carrying it.
 	documents map[string]string
-	issues    map[string]dispatch.Issue
+	// approved maps a document id to the version Dispatch shows approved, its latest; absent means
+	// no approval.
+	approved map[string]int
+	issues   map[string]dispatch.Issue
 }
 
 func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -113,6 +117,9 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 	issue, ok := r.documents[artifactID]
 	if !ok {
 		return dispatch.Approval{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "artifact not found"}
+	}
+	if version, approved := r.approved[artifactID]; approved {
+		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version}, nil
 	}
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
 }
@@ -817,6 +824,34 @@ func TestGateRegistrationIsItsOwnFactInEachGeneration(t *testing.T) {
 	register()
 	if got := facts.recorded(); len(got) != 2 {
 		t.Fatalf("gate facts = %#v, want one registration per generation", got)
+	}
+}
+
+// A person who approved the spec from the document header before its architect registered it:
+// register_gate's own read of the document sees the approval, and carries it into the fact, so the
+// workflow opens the gate at registration rather than releasing the root's slot first.
+func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	statuses.documents = map[string]string{
+		"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": "LEGION-208",
+		"4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d": "LEGION-208",
+	}
+	statuses.approved = map[string]int{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": 3}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, artifact := range []string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d"} {
+		if recorder := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 3,
+		}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gate register %s = %d: %s", artifact, recorder.Code, recorder.Body)
+		}
+	}
+	want := []intake.Fact{
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3},
+	}
+	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gate facts = %#v, want the approved document to carry its approval and the other none", got)
 	}
 }
 

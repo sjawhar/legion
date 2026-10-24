@@ -102,6 +102,7 @@ comes back, with everything it knew, the next time its role is needed.
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, with no required check or workflow failed or missing, and submits the merge. | implement App |
 | `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue. | none |
+
 A failed test, red CI on the head in testing, review, acceptance, retro or merging (a check or workflow the
 base branch requires), or a review that requests changes sends the issue back to `implementing`,
 and the change goes through the tester again before the reviewer sees it. Two reds are the
@@ -140,7 +141,8 @@ architect's same session is suspended after its current turn. The root stays liv
 `waitingOn` in `legion state` names the gate version or ask; after an approval, changes request,
 answer, resolution, agent-turn reply or newer spec version, `answeredAt` shows that admission will
 resume it ahead of never-run roots. A label removal or foreign Dispatch claim removes it instead;
-Legion never resumes work another owner took.
+Legion never resumes work another owner took. A root whose claim a person or another session
+already holds keeps its slot while its architect asks that holder to release it.
 
 ## The design gate
 
@@ -162,7 +164,9 @@ architect has written its spec.
 
 When the architect registers a closed gate while the root is at `admitted` and no child still runs
 or is held, the root enters `awaiting_person`, giving its slot to another root while the architect
-session waits. Approval and changes requested resume that session; a later spec version also
+session waits. A spec you approved before the architect registered it opens the gate at
+registration, so the root starts planning in its own slot. Approval and changes requested resume
+that session; a later spec version also
 returns the root because the approval request now needs the architect. After changes are
 requested, the architect revises the spec, asks for approval again and registers the new version,
 which starts a new wait and returns the slot again. The gate opens and planning starts only after

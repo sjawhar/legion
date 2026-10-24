@@ -14,15 +14,22 @@ import (
 
 // gateRegistered records the gate an architect registered for its root, and logs it. With the
 // design gate off it is approved at once, and an open gate advances the admitted tree and releases
-// any READY the gate refused, including one refused before any gate was registered.
+// any READY the gate refused, including one refused before any gate was registered. A registration
+// Dispatch already showed approved at its latest version (ApprovedVersion, read by register_gate)
+// is recorded open before the closed check, so a root a person approved before its architect
+// registered keeps its slot and starts planning, rather than returning its slot to wait for the
+// gate seed's read of that same approval.
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
-	if e.cfg.DesignGate == config.DesignGateOff {
+	switch {
+	case e.cfg.DesignGate == config.DesignGateOff:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version)
+	case fact.ApprovedVersion >= fact.Version:
+		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion)
 	}
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err

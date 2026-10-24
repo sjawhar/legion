@@ -470,7 +470,10 @@ type awaitingRoot struct {
 // catchUpAwaiting reads the person-owned state a root may have missed while this daemon was down.
 // It runs after Reconcile committed its durable-consumer holds, so a synthetic answer observes the
 // same admission fences as a live event. Each fact has a deterministic id and is therefore safe
-// beside a later JetStream redelivery of the original event.
+// beside a later JetStream redelivery of the original event. A root it cannot read is logged and
+// skipped: it waits for its live event, as before this daemon booted, and blocks no other root's
+// catch-up nor the boot. Dispatch being unreachable is returned, since the boot's readiness retry
+// waits that out (dispatch.Unreachable).
 func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 	if w.dispatch == nil {
 		return nil
@@ -496,8 +499,12 @@ func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
 		return fmt.Errorf("list awaiting roots: %w", err)
 	}
 	for _, root := range roots {
-		if err := w.catchUpAwaitingRoot(ctx, root); err != nil {
+		err := w.catchUpAwaitingRoot(ctx, root)
+		if dispatch.Unreachable(err) || ctx.Err() != nil {
 			return err
+		}
+		if err != nil {
+			w.log.Warn("boot catch-up skipped a root waiting on a person; its live event still answers it", "issue", root.issue.Key, "error", err)
 		}
 	}
 	return nil
@@ -509,15 +516,11 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 		return fmt.Errorf("read Dispatch claim of %s: %w", root.issue.Key, err)
 	}
 	if current.LastSeq > 0 {
-		claimedBy := ""
-		if current.Claim != nil {
-			if current.Claim.Kind == "" || current.Claim.ID == "" {
-				return fmt.Errorf("read Dispatch claim of %s: holder has no kind or id", root.issue.Key)
-			}
-			claimedBy = current.Claim.Kind + ":" + current.Claim.ID
+		if current.Claim != nil && (current.Claim.Kind == "" || current.Claim.ID == "") {
+			return fmt.Errorf("read Dispatch claim of %s: holder has no kind or id", root.issue.Key)
 		}
 		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("claim:%s:%d", root.issue.Key, current.LastSeq),
-			intake.DispatchClaim{Key: root.issue.Key, Seq: current.LastSeq, ClaimedBy: claimedBy}); err != nil {
+			intake.DispatchClaim{Key: root.issue.Key, Seq: current.LastSeq, ClaimedBy: current.Claim.Holder()}); err != nil {
 			return err
 		}
 	}
@@ -561,10 +564,15 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 	if ask.ID != root.issue.Awaiting.Ask || ask.IssueKey != root.issue.Key {
 		return fmt.Errorf("read ask %s for %s: Dispatch returned ask %s of %s", root.issue.Awaiting.Ask, root.issue.Key, ask.ID, ask.IssueKey)
 	}
-	switch ask.State {
-	case "answered", "resolved":
+	switch {
+	case ask.State == "answered", ask.State == "resolved":
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-closed:%s:%d:%s:%s", root.issue.Key, root.issue.Generation, ask.ID, ask.State),
 			intake.DispatchAskClosed{Key: root.issue.Key, Ask: ask.ID})
+	case ask.State == "open" && ask.WaitingOn == "agent":
+		// A reply handed the turn back to the agent while this daemon was down: the live path's
+		// comment.created with ask_waiting_on agent (DispatchAskReply), read from the ask itself.
+		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-agent-turn:%s:%d:%s", root.issue.Key, root.issue.Generation, ask.ID),
+			intake.DispatchAskReply{Key: root.issue.Key, Ask: ask.ID, WaitingOn: ask.WaitingOn})
 	default:
 		return nil
 	}

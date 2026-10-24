@@ -82,6 +82,8 @@ type IssueSummary struct {
 	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to: its own, else its
 	// nearest ancestor's, else its project's default; empty when it resolves to none.
 	ResolvedRepo string
+	// ClaimedBy is the issue's current claim holder as Claim.Holder writes it, or empty.
+	ClaimedBy string
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
@@ -110,13 +112,23 @@ type Claim struct {
 	ID   string
 }
 
+// Holder is the claim as the issue record keeps it, `<kind>:<id>`, or empty for no claim.
+func (c *Claim) Holder() string {
+	if c == nil {
+		return ""
+	}
+	return c.Kind + ":" + c.ID
+}
+
 // Ask is the bounded portion of a Dispatch ask detail the daemon needs to catch up a suspended
-// architect after boot.
+// architect after boot. WaitingOn is whose reply an open ask needs next, `human` or `agent`; Dispatch
+// leaves it empty on an answered or resolved ask.
 type Ask struct {
-	ID       string
-	IssueKey string
-	Kind     string
-	State    string
+	ID        string
+	IssueKey  string
+	Kind      string
+	State     string
+	WaitingOn string
 }
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying

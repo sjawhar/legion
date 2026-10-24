@@ -3,12 +3,46 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
+
+// Unresumable is the one rule for whether a root that returns its admission slot to wait on a
+// person may run again in its own architect session: it returns why it may not, or "" when it may.
+// Its hand-over label gone, or its leaving the workflow, ends that, and so does a Dispatch claim
+// held by a person or by a session outside its tree, which owns the issue instead; the daemon's own
+// session and a session that claims within the tree are legitimate holders. awaitPerson refuses to
+// release a root it answers no for, and admission removes an awaiting root, and skips an answered
+// one, that it answers no for.
+func Unresumable(ctx context.Context, store record.Store, tx pgx.Tx, issue record.Issue) (string, error) {
+	switch {
+	case !issue.HandedOver:
+		return "the legion label was removed", nil
+	case issue.Lingers() || !InWorkflow(issue):
+		return "it left the workflow", nil
+	case issue.ClaimedBy == "":
+		return "", nil
+	}
+	kind, id, found := strings.Cut(issue.ClaimedBy, ":")
+	if !found || kind == "" || id == "" {
+		return fmt.Sprintf("its Dispatch claim is held by %q", issue.ClaimedBy), nil
+	}
+	if kind == "session" && id == dispatch.DaemonSession(issue.Key) {
+		return "", nil
+	}
+	if kind == "session" {
+		ownsTree, err := store.SessionClaimsTree(ctx, tx, issue.Tree, id)
+		if err != nil || ownsTree {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("its Dispatch claim is held by %s", issue.ClaimedBy), nil
+}
 
 // dispatchAskOpened releases a quiet admitted root only for a question its own tree session
 // opened. Approval asks are represented by the design gate instead.
@@ -51,12 +85,12 @@ func (e *Engine) answerAwaitedAsk(ctx context.Context, tx pgx.Tx, key, ask strin
 
 // dispatchClaim keeps the newest Dispatch claim separate from LastDispatchSeq: claim events do
 // not carry the full issue observation admission records, but their holder fences an awaited root's
-// resume.
+// resume. An issue not yet recorded keeps no claim from here: its hand-over event, the one that
+// records it, carries the claim Dispatch shows then (intake.DispatchIssue.ClaimedBy).
 func (e *Engine) dispatchClaim(ctx context.Context, tx pgx.Tx, fact intake.DispatchClaim) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Key)
-	if err != nil || issue == nil || fact.Seq <= issue.ClaimSeq {
+	if err != nil || issue == nil || !issue.ObserveClaim(fact.ClaimedBy, fact.Seq) {
 		return intake.Result{}, err
 	}
-	issue.ClaimedBy, issue.ClaimSeq = fact.ClaimedBy, fact.Seq
 	return intake.Result{}, e.store.PutIssue(ctx, tx, *issue)
 }

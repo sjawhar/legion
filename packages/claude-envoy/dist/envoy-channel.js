@@ -44089,7 +44089,6 @@ var LEGION_WORKFLOW_PHASES = [
 ];
 var LEGION_PHASE_BACKWARD_TARGETS = [
   "admitted",
-  "awaiting_person",
   "planning",
   "implementing",
   "testing",

@@ -424,6 +424,32 @@ func TestADispatchIssueEventWithoutResolvedRepoDecodesWithItsRepositoryMissing(t
 	}
 }
 
+// An issue event carries the issue's claim. The hand-over that first records a root takes its
+// holder from it, so a person's claim taken before Legion had the issue still fences the root's
+// release (workflow's Unresumable). A claim with no actor is not a holder the record can name.
+func TestADispatchIssueEventCarriesItsClaimHolder(t *testing.T) {
+	original := string(capturedIssueUpdatedEnvelope(t))
+	anchor := `\"resolved_repo\":\"sjawhar/legion\"`
+	if !strings.Contains(original, anchor) {
+		t.Fatal("captured issue.updated fixture has no resolved_repo to place a claim beside")
+	}
+	claimed := strings.Replace(original, anchor, anchor+`,\"claim\":{\"actor\":{\"kind\":\"user\",\"id\":\"alice\"},\"at\":\"2026-09-23T00:46:36Z\"}`, 1)
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(claimed))
+	if err != nil {
+		t.Fatalf("decode of a claimed issue event: %v", err)
+	}
+	if got := decoded.Fact.(DispatchIssue).ClaimedBy; got != "user:alice" {
+		t.Fatalf("ClaimedBy = %q, want user:alice", got)
+	}
+	if decoded, err = decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(original)); err != nil || decoded.Fact.(DispatchIssue).ClaimedBy != "" {
+		t.Fatalf("decode of an unclaimed issue event = %#v, %v; want no holder", decoded.Fact, err)
+	}
+	broken := strings.Replace(original, anchor, anchor+`,\"claim\":{\"actor\":{\"kind\":\"user\",\"id\":\"\"}}`, 1)
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(broken)); err == nil {
+		t.Fatal("decode of a claim with no actor id succeeded, want it refused")
+	}
+}
+
 // GitHub owner and repository names are case-insensitive, so an event of a repository GitHub
 // intake hears in another spelling is the daemon's: the decoder matches its repository against the
 // heard set case-insensitively, and the fact names the heard repository.

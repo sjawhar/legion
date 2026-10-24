@@ -45,7 +45,6 @@ export const LEGION_WORKFLOW_PHASES = [
  * join this list only with their daemon transition. */
 export const LEGION_PHASE_BACKWARD_TARGETS = [
   "admitted",
-  "awaiting_person",
   "planning",
   "implementing",
   "testing",
