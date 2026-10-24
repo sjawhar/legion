@@ -448,3 +448,42 @@ func TestGitHubAppMintSkipsAnInstallationThatNamesNoAccount(t *testing.T) {
 		t.Fatalf("token requests = %v, want ada's alone", asked)
 	}
 }
+
+// TestGitHubAppMintSkipsAnInstallationWithNoID: an installation record whose id is missing, null,
+// zero or negative names no installation a token can be asked for, so it is left out, and the
+// listed owner's valid installation still mints: no token request is sent for installation 0.
+func TestGitHubAppMintSkipsAnInstallationWithNoID(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_, _ = w.Write([]byte(`[{"account":{"login":"ada"}},{"id":null,"account":{"login":"ada"}},{"id":0,"account":{"login":"ada"}},{"id":-3,"account":{"login":"ada"}},{"id":2,"account":{"login":"ada"}}]`))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			asked = append(asked, r.URL.Path)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "token-" + r.URL.Path, "expires_at": "2026-10-23T13:00:00Z"})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	value, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "ada"))
+	if err != nil {
+		t.Fatalf("Mint beside installations with no id: %v", err)
+	}
+	var got mintedGitHubApp
+	if err := json.Unmarshal([]byte(value), &got); err != nil {
+		t.Fatalf("Mint output: %v", err)
+	}
+	if installation, ok := got.Installations["ada"]; !ok || installation.InstallationID != 2 || len(got.Installations) != 1 {
+		t.Fatalf("Mint installations = %v, want ada's installation 2 alone", got.Installations)
+	}
+	if !slices.Equal(asked, []string{"/app/installations/2/access_tokens"}) {
+		t.Fatalf("token requests = %v, want installation 2's alone", asked)
+	}
+}

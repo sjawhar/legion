@@ -59,9 +59,10 @@ type githubMintedInstallation struct {
 // Mint returns a token and expiry for every installation of the App in req.Value that is not
 // suspended and whose account req.GitHubOwners lists, compared without regard to case. It leaves
 // out an installation on any other account without asking GitHub for its token: a public App can
-// be installed by anyone, and a release must not carry a token for an outsider's account. The
-// value is the JSON object stored in the secret, never part of an error. Every error wraps one of
-// ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
+// be installed by anyone, and a release must not carry a token for an outsider's account. It also
+// leaves out a record with no positive installation id, which names no installation a token can be
+// asked for. The value is the JSON object stored in the secret, never part of an error. Every error
+// wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
 func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	var secret githubAppSecret
 	// encoding/json's syntax errors quote the offending byte, so this decode and the token's do
@@ -88,9 +89,11 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	minted := githubMintedInstallations{Installations: make(map[string]githubMintedInstallation, len(installations))}
+	minted := githubMintedInstallations{Installations: make(map[string]githubMintedInstallation, len(req.GitHubOwners))}
 	for _, installation := range installations {
-		if installation.SuspendedAt != nil {
+		// JSON decoding leaves a missing or null id 0: no installation GitHub mints for, so the
+		// record is left out rather than failing the release before a valid one is reached.
+		if installation.SuspendedAt != nil || installation.ID <= 0 {
 			continue
 		}
 		// An account with neither a login nor a slug names nothing github-owners can list, so the
