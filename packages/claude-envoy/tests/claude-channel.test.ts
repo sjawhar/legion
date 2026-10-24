@@ -83,21 +83,21 @@ test("a server: entry naming this plugin's server loads it, as Claude Code match
   ).toEqual({ loaded: true })
 })
 
-// The Node binary itself, as Node names it: the first `node` on PATH may be a launcher that execs
-// Node later (mise's shim does), and until it does the process's command line is the launcher's.
 const nodeOnPath = Bun.which("node")
-const node =
-  nodeOnPath === null
-    ? null
-    : execFileSync(nodeOnPath, ["-p", "process.execPath"], { encoding: "utf8" }).trim()
 
-test.skipIf(node === null)(
+test.skipIf(nodeOnPath === null)(
   "a Node process that set its title cannot be read, whatever its executable is named",
   async () => {
+    // The Node binary itself, as Node names it: the first `node` on PATH may be a launcher that
+    // execs Node later (mise's shim does), and until it does the command line is the launcher's.
+    // Asked here, not as the file loads, so a broken `node` fails this test alone.
+    const node = execFileSync(nodeOnPath ?? "node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim()
     // Node writes process.title over its argument area and pads the rest with NULs; a versioned
     // Node (`node-22`) is not named `node`, so the padding, not the name, is what says so.
     const child = spawn(
-      node ?? "node",
+      node,
       [
         "-e",
         'process.title = "claude"; console.log("titled"); setTimeout(() => {}, 5000)',
@@ -108,7 +108,7 @@ test.skipIf(node === null)(
       { stdio: ["ignore", "pipe", "ignore"] },
     )
     try {
-      // Read the command line once the child says its title is set, however long Node took.
+      // Read the command line once the child says its title is set, within the test's timeout.
       const titled = Promise.withResolvers<void>()
       child.stdout.once("data", () => titled.resolve())
       child.once("exit", () => titled.reject(new Error("node exited before it set its title")))
