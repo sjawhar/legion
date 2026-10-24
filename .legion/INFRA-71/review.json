@@ -2,53 +2,57 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T07:45:00Z",
+  "completed": "2026-10-24T08:40:00Z",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 4,
+  "important": 5,
+  "minor": 3,
   "keyFindings": [
     {
       "severity": "important",
-      "file": ".legion/INFRA-71/plan.json:100",
-      "description": "The deployment's own cluster namespace is written out in a shell command on a public branch: the departure record quotes the specification's `kubectl -n <namespace> get jobs,pods,svc`. The guidance this change ships is clean — it uses placeholders and reads the namespace from the projected token — and that care is undone one file away. `.github/scripts/check-private-names.sh` cannot see a namespace name, so the lint job's green is no evidence, and the tester's own private-name check covered the five non-handoff paths only (`test.json` proof 2). The fix at the head is the sentence without the command; whether the pushed commit that carries the blob must also be rewritten is the architect's call, since the branch is public."
+      "file": "docs/kubernetes.md:2614",
+      "description": "The architect's first required change, which I measured independently: the diagnostic for the one failure that announces nothing tells a role to read the workload's endpoints, and this identity has no grant there — `kubectl auth can-i get endpoints` and `list endpoints` both answer `no` from a role container holding the credential. The check for the silent failure would itself be refused. Drop the command; the symptom (the pod Ready while the published reachability block times out) and the label comparison the bullet already prints land a role on the cause without it."
     },
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:2576",
-      "description": "The one step that demonstrates reaching the workload cannot run where the section says it runs. The block is introduced as \"from a role container holding nothing but its checkout and that credential\", and its payoff is `psql \"postgres://…\" -c 'select 1'`. The worker image ships no PostgreSQL client: `worker.Dockerfile:491` is the runtime stage's only apt line (ca-certificates chromium curl git jq openssh-client python3 socat util-linux wget), the toolchain capability row enumerates the image's tools without it, and `which psql` in this role container finds nothing. The section forbids the two ways out — no `exec` into the workload's pod, and installing in the pod is the withheld `operator-setup` row — so a role that follows it has a four-processor workload it cannot reach by any documented means. Demonstrate it with something the image has (`socat`, `python3`) or say that the client arrives the way the section already prescribes for checkout tools."
+      "file": "docs/kubernetes.md:2532",
+      "description": "The architect's second required change, measured here too: the naming clause says a second `apply` of a name in use \"either fails on the Job's immutable fields or patches that role's workload\". `kubectl auth can-i patch jobs` and `update jobs` both answer `no`, so it cannot patch another role's workload at all — it is refused `cannot patch resource \"jobs\"`. The other two consequences are real and the advice stands; the sentence wants what the cluster does."
     },
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:2521",
-      "description": "Nothing tells a role to name its workload for its issue, in a namespace every project's agents share under one identity — which the section itself states two paragraphs later. The example is `name: <workload>   # yours`, the Service selects `job-name: <workload>`, and the sequence ends `kubectl delete job <workload>`. Two roles that pick the same obvious name (`postgres`, `db`) collide: the second applies over the first's Job or is refused by its immutable fields, waits on the first's pod by label, queries the first's database, and its delete takes the first's running workload and Service with it. Every other object this runbook creates is scoped by issue (`issue-legion-<project>-<issue key lowercased>` at :730 and :1847), and the implementer's own live run used `infra71-doc`, a convention the document never states. One clause fixes it."
+      "file": "docs/kubernetes.md:2487",
+      "description": "The gate paragraph quotes an output no kubectl here produces, and an exit status that is mine to own: I reported `exit 0` last round from a pipeline, so what I measured was `head`'s status rather than `kubectl`'s, and the text took it. Measured properly, with the in-cluster configuration taken away: exit **1**, and the output is `The connection to the server localhost:8080 was refused - did you specify the right host or port?` — not `dial tcp 127.0.0.1:8080: connect: connection refused` plus `Warning: the server doesn't have a resource type 'jobs'`, which is what a different simulation (an emptied environment) prints. The paragraph's conclusion is right and its evidence is wrong; quote what a credential-less role gets, or state it without quoting."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:2597",
+      "description": "The reachability check runs the instant `kubectl wait --for=condition=Ready` returns, and the pod template carries no readiness probe, so Ready means the container started. The example's image is `mirror.gcr.io/library/postgres:16`, whose entrypoint runs its whole initialisation with the TCP listener disabled before restarting the server, so at that moment the port is normally still closed and `socket.create_connection` fails at once with `ConnectionRefusedError`. The paragraph below names only the timeout and assigns it one cause — the missing reachability label — so the likeliest outcome of the published sequence has no reading offered, and the reading a role will reach for is wrong. Loop the connect for about a minute, and name the refusal as a server still starting. (The mechanism is read from the upstream entrypoint and the absent probe; the Service half cannot be driven here.)"
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:2492",
+      "description": "The gate does not stop a role, and today every role reaches the stop. Before the declarations are applied the Service steps are refused `Forbidden` — the recorded state of this deployment — and the sequence is written unconditionally, so a role applies the Job, reads its uid, is refused, and only afterwards reads at :2620 that this was expected. The only `kubectl delete job` is below the step that failed, so the Job it started stays on a shared quota until its deadline. Say at the gate that unless both answers are a bare `yes` the role does not apply the Job; that also makes the paragraph at :2620-2621 unnecessary."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:2482",
-      "description": "The gate's `no` branch is not what a role in a deployment that projects no credential sees. Every Legion pod sets `automountServiceAccountToken: false`, the image carries no kubeconfig and sets no `KUBECONFIG`, so `kubectl` has no in-cluster configuration to build and falls back to its default server. Measured here, in a pod that does have the credential, with the in-cluster environment removed: `couldn't get current server API group list: Get \"http://localhost:8080/api?timeout=32s\": dial tcp 127.0.0.1:8080: connect: connection refused` and then `Warning: the server doesn't have a resource type 'jobs'` — at exit status 0, so a role could read it as success. Say that no credential means the command cannot reach a cluster at all, and that this is as conclusive as `no`."
+      "file": "docs/kubernetes.md:2498",
+      "description": "The delta amended the section opener to carry the exception and left the preamble directly above the bullets promising that each of them is \"enforced in the namespace rather than in anyone's good behaviour\" — the sentence a reader scanning the bullets actually meets, four lines above the bullet that says admission does not enforce it. One clause there."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:2466",
-      "description": "The admission list's promise is untrue of its last bullet. The list is introduced with \"a workload that breaks one is refused at submission with a message naming the rule it broke, so nothing here has to be taken on trust\", and the reachability-label bullet is not that kind of rule: by its own next sentence an unlabelled workload is admitted, started, charged against the shared quota and reachable by nothing. Neither the implementer's eight breakages nor the tester's nineteen covers a missing label, because there is no refusal to measure. The one mistake with no refusal is the one the reader is told not to guard against; move it to the Service paragraph or qualify the promise."
+      "file": "docs/kubernetes.md:2622",
+      "description": "\"reading Services needs the same grant as creating them\" is not how RBAC works: verbs are granted independently, and this identity in this namespace is the counterexample — `delete jobs` yes while `patch jobs` no. The conclusion (the last line asks only for Jobs and pods) is right because `get services` and `list services` both measure `no`, which is what the sentence should say."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:2571",
-      "description": "The section never says where to write `workload.yaml` and `service.yaml`, and a role's working directory is a jj/git checkout of this public repository, so a manifest carrying the password it just chose is snapshotted into the working-copy commit and can reach the branch — the very acceptance this branch records (`jj diff --name-only` equal to the issue's file list) is what a stray manifest breaks. One clause putting both files outside the checkout fixes it, and keeps the password out of `psql`'s argv at :2576 as well."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:2578",
-      "description": "The architect's own conditional, folded in since the round requests changes anyway: the sequence's last command is refused `Forbidden` on services until the declarations are applied, after the clean-up has already succeeded. The section says above that this is the pre-apply state, so nothing is wrong, but a clause on that line keeps a role from reading the refusal as its own mistake."
+      "file": ".legion/INFRA-71/test.json:20",
+      "description": "All five test-phase proofs record `headSha` `63a5ab96903a95996e30bae1d0d8a7f2b15f5af5`, which does not exist — GitHub answers 422 for it. The commit is `63a5ab96903a68505eb288ad63a223398f13c7e1`, which `implement.json` cites correctly; the first twelve digits match and the rest is wrong, so no proof of that phase can be resolved by a later reader. The same handoff's private-name sweep describes its surface as \"592 lines, five files\" where that diff is nine files; the line count is exact and the file count understates it by the four handoffs, which are the files the sweep most needed to cover."
     }
   ],
   "verified": [
-    "CI at code head 75e45efd: 25 check runs, none unsuccessful at the read, the required lint, typecheck, test and pr-title all success; compare 75e45efd...437b780e is .legion/ only.",
-    "The branch is this issue's work alone: nine paths, the install step and the pinned-tool guard both off it, and no file of either half remains — only the handoff ledger mentions them, as history.",
-    "The narrowed `network` row is consistent at capabilities.go:99, the golden fixture, worker.Dockerfile's comment and both other quotations in docs/kubernetes.md; Site and Ruling are unchanged, so every test holding withheld rows still holds.",
-    "No name of the deployment's cluster in the added lines of the nine paths, in any commit message of this generation, in the PR title or in its body — the one exception is the blocking finding above.",
-    "Three threads of the superseded scope answered: two are moot with the install step, and the guard's two open findings are named for dispatch://INFRA-199 rather than left to die with the file."
+    "All seven findings of the previous round are fixed, each checked rather than read: the namespace literal is redacted and appears nowhere on the branch; the reachability step is a python3 standard-library connect and `which psql` confirms why; the workload is named for its issue; the gate says neither answer is what a credential-less role gets; the label bullet is marked as the one rule admission does not enforce; the manifests are written outside the checkout; and the last line asks only for Jobs and pods.",
+    "Every other command the section names is within this identity's grant, measured from this role container: create/get/delete jobs, get and list pods, watch pods, get pods/log — all yes; create and get services, get and list endpoints, patch and update jobs, create pods — all no.",
+    "CI at code head 63a5ab96: 45 check runs, none unsuccessful, the required lint, typecheck, test and pr-title all success; compare 63a5ab96...5713433a is .legion/ only.",
+    "Considered and dismissed: that the workload's name should also carry `<project>`. An issue key carries its project's prefix, so `infra-71-postgres` is already unique among the projects of the deployment whose agents share that namespace and identity."
   ]
 }
