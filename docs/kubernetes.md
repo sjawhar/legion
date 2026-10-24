@@ -2656,27 +2656,31 @@ Read the first as starting up and the second as the label.
 
 Speaking the protocol is a client library onto the issue's own disk, the way every other tool
 that works from the checkout arrives (below), run from the checkout against that same address —
-never a binary installed into the pod. The last line asks only for Jobs and pods because reading
-a Service needs `get services`, the gate's third answer; where that is `no`, as it is in this
-deployment today, the line is refused like the Service steps above it.
+never a binary installed into the pod. The last line asks for Jobs and pods and not Services, and
+it runs: as published it exits 0 here. Add Services to it and it is refused — `kubectl get
+jobs,pods,svc` exits 1 with `services is forbidden: … cannot list resource "services"` — because
+this identity may no more list a Service than create one.
 
 **What of this has been run, and where.** This section is written partly from commands executed
 in the deployment it describes and partly from the declarations dispatch://INFRA-206 carries,
 and a reader is owed the boundary rather than a uniform voice:
 
 - *Executed from a role container here, at this change's head*: the three gate commands and the
-  whole grant matrix behind them (`create`/`delete jobs`, `get pods`, `pods/log` `yes`;
-  `patch`/`update jobs`, `get`/`list endpoints`, `get`/`create services`, `create pods` `no`);
-  the Job manifest above through the namespace's own admission, server-side with nothing
-  created, together with one deliberate breakage of each rule, each refused naming the rule; the
-  credential-less gate, with the in-cluster environment removed; and the reachability block, run
+  whole grant matrix behind them (`create`/`delete jobs`, `list`/`get pods`, `pods/log` `yes`;
+  `patch`/`update jobs`, `get`/`list endpoints`, `get`/`list`/`create services`, `create pods`
+  `no`); the credential-less gate, with the in-cluster environment removed; the Job manifest
+  above through the namespace's own admission, server-side with nothing created, together with
+  one deliberate breakage of each rule, each refused naming the rule; the reachability block, run
   as published against a listener, against a port that refuses and then listens, and against an
-  address whose packets are dropped.
-- *Not executed anywhere yet*: creating the Job for real, the Service steps, the wait, the logs
-  and the delete. The Service steps are refused `Forbidden` in this deployment — on `get` before
-  the create is attempted — so the sequence has never run past its second line here. Those lines
-  are written from the declarations and wait on a person applying them; read them as a design
-  until a role has run them end to end and said so.
+  address whose packets are dropped; and **the sequence's Job half for real** — applied and
+  created, the uid read, the pod Ready in about eighty seconds, its own log line read, the Job
+  deleted and the last line showing nothing of it left.
+- *Not executed*: the Service steps, and they are refused rather than untried — `kubectl apply`
+  of the Service ends `Forbidden` on the read of the live object, before any create is
+  attempted. So nothing has yet given a workload of this namespace a name on the network, which
+  is why the one step that depends on it, the reachability check against a real workload, is
+  written from the declarations rather than from a run. Read that pair as a design until a role
+  has run it end to end and said so; everything above is a transcript.
 
 What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
 which belongs to another namespace and to one node at a time, and a role may not run a command
