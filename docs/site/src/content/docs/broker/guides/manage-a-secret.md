@@ -28,34 +28,41 @@ You need three things:
   configure none of them.
 - **A cloud sign-in in the broker's account or project.** AWS: every form takes it from
   `--profile`, else `AWS_PROFILE`, else the AWS SDK's default credential chain; a write needs your
-  own IAM Identity Center sign-in. GCP: every form uses your Application Default Credentials; a
-  write needs them to be your own Google Account sign-in, never a machine's.
+  own IAM Identity Center sign-in. GCP: every form takes your own Google sign-in, and a write never
+  runs as a machine.
 
 ```sh
 export AGENT_SECRETS_URL=https://secrets.internal.example
 aws sso login --profile <profile>   # AWS
 export AWS_PROFILE=<profile>
+gcloud auth login                   # GCP, once
 ```
 
-On GCP, where the Application Default Credentials are yours to set (a laptop), sign in with:
+On GCP, `gcloud auth login` is all a laptop or a dev box needs. A read runs under your Application
+Default Credentials, and so does a write where they are your own Google Account sign-in. Where they
+are a machine's own identity - a dev box's workload identity federation credential, a service
+account key, or a VM's or pod's metadata-server identity - a write runs under your gcloud login
+instead, and so does every form on a machine with no Application Default Credentials. The CLI
+asks the first `gcloud` on your `PATH` for that login (`gcloud auth list`, then
+`gcloud auth print-access-token`), so gcloud keeps it fresh, and its own error says when you must
+run `gcloud auth login` again; the CLI reads none of gcloud's files, and `gcloud auth login`
+leaves the machine's Application Default Credentials as they are. gcloud runs with its log files
+off and prints the token to the CLI alone, and with impersonation, an access token and a
+credential file override cleared wherever they are set, so the token is your login's; a write
+whose token Google answers as anyone else's is refused.
+
+Your gcloud login is the account `gcloud auth list` names by a plain email address: not a service
+account (`…gserviceaccount.com`), and not a workload or workforce identity federation login
+(`principal://…`). Where it lists more than one person, the command uses the one
+`CLOUDSDK_CORE_ACCOUNT` names, and a command it prints for running again keeps that variable:
 
 ```sh
-gcloud auth application-default login
+CLOUDSDK_CORE_ACCOUNT=ada@example.com agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent
 ```
 
-On a machine whose Application Default Credentials are its own identity (a dev box or a VM), leave
-them as they are: `gcloud auth application-default login` would replace them for every program
-that uses them. Sign in with `gcloud auth login --no-activate`, which also keeps the machine's
-active gcloud account, and name the file that login keeps in a shell variable. Put
-`GOOGLE_APPLICATION_CREDENTIALS="$me"` before each write (`create`, `set`, `retag`, `delete`,
-`restore`); a variable you do not export reaches no other program, an agent session started from
-that shell included.
-
-```sh
-gcloud auth login --no-activate
-ls "$(gcloud info --format='value(config.paths.global_config_dir)')/legacy_credentials/"   # one directory per signed-in account
-me="$(gcloud info --format='value(config.paths.global_config_dir)')/legacy_credentials/<your email>/adc.json"
-```
+`GOOGLE_APPLICATION_CREDENTIALS`, when you set it, names the credentials every form uses, and the
+CLI never replaces them with your gcloud login: a write under a machine's credentials named there
+is refused.
 
 When you have made your writes, remove that sign-in from the machine, so nothing else that runs as
 your user there can use it:
@@ -73,20 +80,19 @@ created DEMO_DEPLOY_TOKEN (owner=ada@example.com, tier=agent)
 broker: serving DEMO_DEPLOY_TOKEN
 ```
 
-On a machine whose Application Default Credentials are its own identity, the same write is
-`GOOGLE_APPLICATION_CREDENTIALS="$me" agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent`
-([Before you start](#before-you-start)), and so is every write below.
+On GCP the same command writes as you on a dev box too: it uses your gcloud login where the
+machine's Application Default Credentials are its own identity, and so does every write below.
 
 - **The name** is the one agents ask for, and the environment variable their command gets it in:
   uppercase letters, digits and single underscores, starting with a letter. In Secrets Manager it
   is `<namespace>demo-deploy-token`. Any other name is refused at once (exit 2).
 - **`--owner me`** writes your sign-in's email in lowercase: your Identity Center session name
-  (AWS) or your Application Default Credentials' Google account (GCP). It must be an email the
-  broker accepts, or the command refuses before writing. The broker matches it against the email a
-  person signs in to Dispatch with, so `me` names you where that session name or Google account is
-  the same email. **`--owner shared`** makes the secret everyone's. GCP stores owner and tier as
-  the secret's **annotations**, never labels, so they never collide with a label someone else
-  applies.
+  (AWS) or the Google account the write runs as (GCP: your Application Default Credentials', or
+  your gcloud login's). It must be an email the broker accepts, or the command refuses before
+  writing. The broker matches it against the email a person signs in to Dispatch with, so `me`
+  names you where that session name or Google account is the same email. **`--owner shared`**
+  makes the secret everyone's. GCP stores owner and tier as the secret's **annotations**, never
+  labels, so they never collide with a label someone else applies.
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
 - **`--kind`** is optional. Use `github-app` for a GitHub App key and `google-login` for an
@@ -192,11 +198,21 @@ $ agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent
 agent-secrets secret create: arn:aws:sts::111122223333:assumed-role/example-devbox-instance-role/i-0abc is not a person's Identity Center sign-in: a secret is written under your own sign-in to account 111122223333 (aws sso login, then --profile or AWS_PROFILE), never a machine's role
 ```
 
-GCP write checks are the same shape, with one difference: a write refuses Application Default
-Credentials that are not a person's own Google Account sign-in (a service account key file, a
-workload identity federation credential such as a dev box's, a workforce identity federation
-sign-in, or a GCE/GKE metadata-server identity writes no secret), naming what it found and the
-`gcloud auth login --no-activate` and `GOOGLE_APPLICATION_CREDENTIALS` route above.
+GCP write checks are the same shape, with one difference: where the Application Default
+Credentials are not a person's own Google Account sign-in (a service account key file, a workload
+identity federation credential such as a dev box's, a workforce identity federation sign-in, or a
+GCE/GKE metadata-server identity), a write runs under your gcloud login
+([Before you start](#before-you-start)) rather than being refused, and leaves those credentials as
+they are. It is refused, naming what it found, only where gcloud has no login to lend:
+
+```console
+$ agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent
+agent-secrets secret create: a secret is written under your own Google sign-in, never this machine's (its Application Default Credentials are credentials of type "external_account"), so a write uses your gcloud login, but gcloud holds no person's login: sign in once with `gcloud auth login`, which leaves this machine's own credentials as they are
+```
+
+A machine's credentials that `GOOGLE_APPLICATION_CREDENTIALS` names are refused for a write
+rather than replaced, since the variable is your own choice.
+
 GCP has no wrong-account read check: every call already names `projects/<project number>/...`
 explicitly in the resource, so IAM on that resource, not this CLI, is what decides whether a read
 succeeds.

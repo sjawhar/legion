@@ -2,8 +2,10 @@ package claudebridge
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,7 +13,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -456,6 +461,118 @@ func TestEnvoyDeliveriesBecomeUserTurns(t *testing.T) {
 	if answer, _ := bufio.NewReader(conn).ReadBytes('\n'); !strings.Contains(string(answer), "an id and content") {
 		t.Errorf("a malformed delivery was answered %q", answer)
 	}
+}
+
+// An inbox client still connected when the bridge stops (claude-envoy's channel server keeps one
+// connection for every delivery, and may outlive Claude Code) neither holds the bridge's exit nor
+// keeps its inbox's directory.
+func TestTheBridgeEndsWithAnInboxClientConnected(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", "say WAITING for CI")
+	r.expect("agent_start", nil)
+	r.expect("agent_end", nil)
+	path := inboxPathOf(t, r)
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// An answer proves the inbox accepted the connection and serves it, so its client is one the
+	// inbox's close waits for: a malformed delivery is answered with its refusal.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("{}\n")); err != nil {
+		t.Fatal(err)
+	}
+	if answer, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil || !strings.Contains(string(answer), "an id and content") {
+		t.Fatalf("the inbox answered %q, %v", answer, err)
+	}
+	r.stopped()
+	select {
+	case code := <-r.done:
+		r.done <- code
+	case <-time.After(10 * time.Second):
+		t.Fatal("the bridge did not end within 10s with an inbox client connected")
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the inbox's directory %s is still there (%v)", filepath.Dir(path), err)
+	}
+}
+
+// A Claude Code that stops reading its stdin while it makes control requests fills the queue of
+// the bridge's refusals: the bridge says so once, ends Claude Code, and exits with its inbox
+// removed. (A shim that stops reading holds Claude Code's output back instead; cmd/legion's
+// TestClaudeBridgeHoldsClaudeCodeWhileTheShimPauses.)
+func TestAClaudeCodeThatStopsReadingEndsTheBridge(t *testing.T) {
+	// A refusal repeats its request's id, so a long id fills the pipe within a few dozen refusals.
+	controlRequest := `{"type":"control_request","request_id":"` + strings.Repeat("r", 1000) + `","request":{"subtype":"can_use_tool"}}`
+	// The inbox's socket path must fit sun_path, so its TMPDIR is under /tmp.
+	tmp, err := os.MkdirTemp("/tmp", "legion-bridge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	t.Setenv("TMPDIR", tmp)
+	dir := t.TempDir()
+	stream := filepath.Join(dir, "stream")
+	if err := os.WriteFile(stream, []byte(strings.Repeat(controlRequest+"\n", 2*claudeQueueLength)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdin, daemon := io.Pipe()
+	t.Cleanup(func() { _ = daemon.Close() })
+	logged := &lockedBuffer{}
+	cfg := Config{Argv: []string{"/bin/sh", "-c", "cat " + stream + "\nexec sleep 300\n"}, Env: os.Environ(),
+		SessionID: sessionID, StallFile: filepath.Join(dir, "stall.json"), Stdin: stdin, Stdout: io.Discard, Log: logged}
+	done := make(chan int, 1)
+	go func() {
+		code, err := Run(context.Background(), cfg)
+		if err != nil {
+			t.Errorf("Run: %v", err)
+		}
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		if code != 128+int(syscall.SIGTERM) {
+			t.Errorf("exit status %d, want %d, Claude Code's once SIGTERM ended it:\n%s", code, 128+int(syscall.SIGTERM), logged)
+		}
+	case <-time.After(30 * time.Second):
+		// Claude Code still runs, unreaped, under a bridge that never ended.
+		if match := regexp.MustCompile(`\(pid (\d+)\)`).FindStringSubmatch(logged.String()); match != nil {
+			pid, _ := strconv.Atoi(match[1])
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		t.Fatalf("the bridge did not end within 30s of Claude Code no longer reading:\n%s", logged)
+	}
+	overflow := "Claude Code has left " + strconv.Itoa(claudeQueueLength) + " lines unread"
+	if n := strings.Count(logged.String(), overflow); n != 1 {
+		t.Errorf("the bridge said %q %d times, want once:\n%s", overflow, n, logged)
+	}
+	if !strings.Contains(logged.String(), "Claude Code stopped reading its input: sending SIGTERM to Claude Code") {
+		t.Errorf("the bridge did not end Claude Code:\n%s", logged)
+	}
+	if left, _ := filepath.Glob(filepath.Join(tmp, "legion-claude-*")); len(left) > 0 {
+		t.Errorf("the bridge left %q in TMPDIR", left)
+	}
+}
+
+// lockedBuffer is a log the bridge's goroutines write while a test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // inboxPathOf is the inbox Claude Code was told, as the fake recorded it.

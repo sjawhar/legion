@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,12 +22,23 @@ import (
 )
 
 const (
-	// Grace is how long Claude Code has to exit after the bridge's SIGTERM before it is killed:
-	// inside the shim's own grace for the bridge (shim.DefaultGrace), so the shim never kills the
-	// bridge with Claude Code still running.
+	// Grace is how long Claude Code has to exit after the bridge's SIGTERM before it is killed.
 	Grace = 3 * time.Second
-	// drainTimeout bounds reading Claude Code's stdout once it has exited.
-	drainTimeout = time.Second
+	// drainTimeout bounds reading Claude Code's stdout once it has exited. What Claude Code wrote
+	// is in the pipe by then, and once it has exited the loop takes its lines without waiting on the
+	// shim, so a pipe's worth is read in well under a millisecond: only a process it started and
+	// left holding the pipe keeps it open past this, and that output is not Claude Code's.
+	drainTimeout = 500 * time.Millisecond
+	// flushTimeout bounds, once the bridge is told to stop or its input has ended, how long it
+	// still waits for the shim to read the frames queued for it. A shim that reads takes them as
+	// fast as it forwards them: at most framesHighWater frames and the few its requests added,
+	// most a few hundred bytes, none over shimwire.MaxFrameBytes. One that has not by then is one
+	// the stop is not waiting on.
+	//
+	// Told to stop, the bridge exits within Grace + drainTimeout + flushTimeout, 4 s, which leaves
+	// a second of the 5 s the shim gives it before killing it (shim.DefaultGrace) for the process to
+	// exit on a loaded machine; its inbox is gone 0.5 s before that.
+	flushTimeout = 500 * time.Millisecond
 	// Busy is the refusal of a prompt that arrives during a turn. It begins with Oh My Pi's own
 	// words, which the daemon reads as a turn of the agent's own (supervise's agentBusy): the task
 	// goes back unread, uncharged, and is sent again when the turn ends.
@@ -35,13 +47,10 @@ const (
 	interruptFailed = "Claude Code refused the interrupt"
 )
 
-// event is one input to the bridge's loop, from whichever goroutine read it.
+// event is a frame from the shim or an Envoy delivery from the inbox, for the bridge's loop.
 type event struct {
 	daemon   []byte    // a frame from the shim
-	claude   []byte    // a stream-json line from Claude Code
 	delivery *delivery // an Envoy delivery from the inbox
-	exited   *int      // Claude Code's exit status
-	stdinEOF bool      // the shim closed the bridge's stdin
 }
 
 // delivery is one Envoy delivery waiting to be a user turn; queued is answered once it is queued.
@@ -51,13 +60,16 @@ type delivery struct {
 	queued  chan<- error
 }
 
-// bridge is Run's state. Everything but the readers runs on Run's one goroutine, so none of it is
-// locked.
+// bridge is Run's state. Everything but the readers, the outputs' writers and end runs on Run's
+// one goroutine, and none of those touches this state, so none of it is locked.
 type bridge struct {
-	cfg   Config
-	log   *log.Logger
-	out   *shimwire.Writer
-	stdin io.WriteCloser
+	cfg Config
+	log *log.Logger
+	// toShim and toClaude are the bridge's two outputs (output.go). frames encodes each frame for
+	// the shim into encoded, which toShim then queues.
+	toShim, toClaude *output
+	frames           *shimwire.Writer
+	encoded          lineCopy
 
 	// seeding is the fresh session's `/rename`, sent before anything else and answered by a
 	// result that is no turn of the daemon's; held are the prompts and aborts that arrived during
@@ -82,36 +94,65 @@ type bridge struct {
 	lastAssistantText string
 	// handoffs are the tool_use ids of this step's `legion` handoff_complete calls.
 	handoffs map[string]bool
+	// heldBack is the shim having once fallen framesHighWater frames behind, which is logged once.
+	heldBack bool
 }
 
 // Run starts Claude Code and bridges until it exits, returning its exit status: its code, or 128
 // plus the signal that ended it. ctx is the bridge's own termination, which ends Claude Code with
 // SIGTERM and then, after Grace, SIGKILL. The error is the bridge's own failure to start.
+//
+// The loop never waits on a pipe's reader (output.go), and ending Claude Code is end's, so neither
+// waits on the other. A shim that stops reading holds back Claude Code's output and nothing else
+// (framesHighWater): the loop still takes the shim's input, Envoy's deliveries, Claude Code's exit
+// and its own end. Once Claude Code has exited and its stdout is read, the inbox is removed, and
+// Run returns once the shim has read every frame queued for it.
+//
+// Told to stop (ctx), the bridge returns within Grace + drainTimeout + flushTimeout, 4 s, its
+// inbox removed by Grace + drainTimeout; after its input ends, within twice Grace + drainTimeout +
+// flushTimeout, 7 s; and a stop or the input's end that comes while it waits for the shim ends the
+// wait within flushTimeout. end's timers need nothing of the loop, Claude Code is reaped by Grace
+// after its SIGTERM, the loop takes that exit at once, drainTimeout bounds what is left of Claude
+// Code's stdout and flushTimeout what is left of the shim's frames. The bounds count on what no
+// reader of the bridge's governs: Claude Code dying of SIGKILL, exec's Wait copying nothing (Claude
+// Code's stderr is a file, as a pane's is), and the log and the phase-stall file taking the loop's
+// writes.
 func Run(ctx context.Context, cfg Config) (int, error) {
 	logOut := cfg.Log
 	if logOut == nil {
 		logOut = io.Discard
 	}
-	b := &bridge{cfg: cfg, log: log.New(logOut, "[claude-bridge] ", 0), out: shimwire.NewWriter(cfg.Stdout), handoffs: map[string]bool{}}
+	b := &bridge{cfg: cfg, log: log.New(logOut, "[claude-bridge] ", 0), handoffs: map[string]bool{}}
+	b.frames = shimwire.NewWriter(&b.encoded)
 	var err error
 	if b.stall, err = readStall(cfg.StallFile); err != nil {
 		return 1, err
 	}
-	events := make(chan event)
+	// stop ends the outputs' writers and every reader's send, once Run returns. It does not
+	// interrupt a readLines blocked in ReadBytes, and Run does not wait for those readers.
 	stop := make(chan struct{})
 	defer close(stop)
-
-	inbox, err := listenInbox(events, stop, b.log)
+	b.toShim = newOutput("the shim", cfg.Stdout, stop, b.log)
+	events := make(chan event)
+	// inboxStop releases a delivery's send blocked on the loop and closes every inbox connection,
+	// so each client's handler returns and inbox.close's wait for them ends.
+	inboxStop := make(chan struct{})
+	inbox, err := listenInbox(events, inboxStop, b.log)
 	if err != nil {
 		return 1, err
 	}
-	defer inbox.close()
+	closeInbox := sync.OnceFunc(func() {
+		close(inboxStop)
+		inbox.close()
+	})
+	defer closeInbox()
 
 	cmd := exec.Command(cfg.Argv[0], cfg.Argv[1:]...)
 	cmd.Env = append(slices.Clone(cfg.Env), InboxVariable+"="+inbox.path)
 	cmd.Stderr = logOut
 	setParentDeathSignal(cmd)
-	if b.stdin, err = cmd.StdinPipe(); err != nil {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
 		return 1, fmt.Errorf("start %s: %w", cfg.Argv[0], err)
 	}
 	// Claude Code's stdout is a pipe of the bridge's own rather than exec's, so its exit and the
@@ -128,91 +169,166 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	}
 	_ = childStdout.Close()
 	b.log.Printf("started %s (pid %d) for session %s", cfg.Argv[0], cmd.Process.Pid, cfg.SessionID)
+	// A write blocked on a Claude Code that reads nothing ends with Claude Code: exec's Wait closes
+	// the pipe once Claude Code is reaped.
+	b.toClaude = newOutput("Claude Code", stdin, stop, b.log)
+	// stalled is closed once Claude Code has stopped reading, and end ends Claude Code on it.
+	stalled := make(chan struct{})
+	b.toClaude.limit, b.toClaude.full = claudeQueueLength, func() { close(stalled) }
 
-	pipeEnded := make(chan struct{})
-	go readLines(stdout, func(line []byte) bool { return send(events, stop, event{claude: line}) }, func() {
+	// Claude Code's lines come on a channel of their own, so the loop can stop taking them alone.
+	claudeLines, pipeEnded := make(chan []byte), make(chan struct{})
+	go readLines(stdout, func(line []byte) bool { return send(claudeLines, stop, line) }, func() {
 		_ = stdout.Close()
 		close(pipeEnded)
 	})
+	inputEnded, claudeExited := make(chan struct{}), make(chan struct{})
 	go readLines(cfg.Stdin, func(line []byte) bool { return send(events, stop, event{daemon: line}) },
-		func() { send(events, stop, event{stdinEOF: true}) })
+		func() { close(inputEnded) })
+	var status int // Claude Code's exit status, set before claudeExited is closed
 	go func() {
 		_ = cmd.Wait()
-		status := exitStatus(cmd.ProcessState)
-		send(events, stop, event{exited: &status})
+		status = exitStatus(cmd.ProcessState)
+		close(claudeExited)
 	}()
+	go b.end(ctx, cmd.Process, inputEnded, claudeExited, stalled)
 
 	if cfg.Seed {
 		b.seeding = true
 		b.writeUser("/rename " + cfg.Title)
 	}
 
-	var killAt <-chan time.Time
+	// Claude Code is done once it has exited and its stdout has been read to its end, or
+	// drainTimeout after the exit when something it started still holds the pipe: every line it
+	// wrote before exiting is acted on first. Stopping is the bridge told to stop or its input
+	// ended, which bounds the wait for the shim that follows.
+	var (
+		exited, claudeDone, stopping, ignoring bool
+		claudeExit                             = (<-chan struct{})(claudeExited)
+		drained                                = (<-chan struct{})(pipeEnded)
+		inputGone                              = (<-chan struct{})(inputEnded)
+		done                                   = ctx.Done()
+		drainBound, flushBound                 <-chan time.Time
+	)
+	for {
+		if !claudeDone && exited && drained == nil {
+			b.log.Printf("Claude Code exited with status %d", status)
+			claudeDone = true
+		}
+		if claudeDone {
+			closeInbox()
+			if b.toShim.waiting() == 0 {
+				return status, nil
+			}
+			if stopping && flushBound == nil {
+				flushBound = time.After(flushTimeout)
+			}
+		}
+		claudeIn := (<-chan []byte)(claudeLines)
+		switch {
+		case claudeDone:
+			claudeIn = nil
+		case !exited && b.toShim.waiting() >= framesHighWater:
+			claudeIn = nil
+			if !b.heldBack {
+				b.heldBack = true
+				b.log.Printf("the shim has %d frames unread; Claude Code's output waits until it reads them, now and whenever it falls that far behind",
+					framesHighWater)
+			}
+		}
+		select {
+		case line := <-claudeIn:
+			b.fromClaude(line)
+		case <-b.toShim.wrote:
+			b.toShim.written()
+		case <-b.toClaude.wrote:
+			b.toClaude.written()
+		case ev := <-events:
+			switch {
+			case claudeDone:
+				// Nothing answers the daemon once Claude Code is done: its frames are read so that
+				// the end of the shim's input still reaches the loop.
+				if ev.delivery != nil {
+					ev.delivery.queued <- errors.New("Claude Code has exited")
+				}
+				if !ignoring {
+					ignoring = true
+					b.log.Printf("ignoring the shim's frames: Claude Code has exited")
+				}
+			case ev.daemon != nil:
+				b.fromDaemon(ev.daemon)
+			case ev.delivery != nil:
+				b.deliver(*ev.delivery)
+			}
+		case <-done:
+			done, stopping = nil, true
+		case <-inputGone:
+			// The shim is gone: nothing can reach the daemon. Claude Code ends with its input,
+			// closed once what is queued for it is written, and end ends it if it has not within
+			// Grace.
+			inputGone, stopping = nil, true
+			b.toClaude.close(func() { _ = stdin.Close() })
+		case <-claudeExit:
+			claudeExit, exited = nil, true
+			if drained != nil {
+				drainBound = time.After(drainTimeout)
+			}
+		case <-drained:
+			drained, drainBound = nil, nil
+		case <-drainBound:
+			drainBound, claudeDone = nil, true
+			b.log.Printf("Claude Code exited with status %d, and something it started still holds its stdout", status)
+		case <-flushBound:
+			b.log.Printf("the shim has not read the %d frames still queued for it %v after the bridge was told to stop; leaving them",
+				b.toShim.waiting(), flushTimeout)
+			return status, nil
+		}
+	}
+}
+
+// end ends Claude Code with SIGTERM and then, after Grace, SIGKILL, once the bridge is told to stop
+// (ctx), once Claude Code has stopped reading (stalled), or Grace after the bridge's input ended
+// without Claude Code ending with it; it returns once Claude Code has exited, or once it has been
+// killed. It runs apart from the loop, so its timers need nothing of it (Run states the bounds).
+func (b *bridge) end(ctx context.Context, claude *os.Process, inputEnded, exited, stalled <-chan struct{}) {
+	var inputBound, killAt <-chan time.Time
 	terminate := func(why string) {
 		if killAt != nil {
 			return
 		}
 		b.log.Printf("%s: sending SIGTERM to Claude Code", why)
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = claude.Signal(syscall.SIGTERM)
 		killAt = time.After(Grace)
 	}
-	// The loop ends once Claude Code has exited and its stdout has been read to its end, or
-	// drainTimeout after the exit when something it started still holds the pipe: every line it
-	// wrote before exiting is acted on first.
-	var exited *int
-	var drainBound, inputBound <-chan time.Time
-	drained := (<-chan struct{})(pipeEnded)
 	done := ctx.Done()
 	for {
 		select {
+		case <-exited:
+			return
 		case <-done:
 			done = nil
 			terminate("signalled to stop")
+		case <-stalled:
+			stalled = nil
+			terminate("Claude Code stopped reading its input")
+		case <-inputEnded:
+			inputEnded = nil
+			inputBound = time.After(Grace)
 		case <-inputBound:
 			inputBound = nil
 			terminate(fmt.Sprintf("Claude Code is still running %v after its input ended", Grace))
 		case <-killAt:
 			b.log.Printf("Claude Code is still running %v after SIGTERM; killing it", Grace)
-			_ = cmd.Process.Kill()
-			killAt = nil
-		case <-drained:
-			drained = nil
-			if exited != nil {
-				b.log.Printf("Claude Code exited with status %d", *exited)
-				return *exited, nil
-			}
-		case <-drainBound:
-			b.log.Printf("Claude Code exited with status %d, and something it started still holds its stdout", *exited)
-			return *exited, nil
-		case ev := <-events:
-			switch {
-			case ev.daemon != nil:
-				b.fromDaemon(ev.daemon)
-			case ev.claude != nil:
-				b.fromClaude(ev.claude)
-			case ev.delivery != nil:
-				b.deliver(*ev.delivery)
-			case ev.stdinEOF:
-				// The shim is gone: nothing can reach the daemon. Claude Code ends with its input,
-				// and is ended if it has not within Grace.
-				_ = b.stdin.Close()
-				inputBound = time.After(Grace)
-			case ev.exited != nil:
-				exited, killAt, inputBound = ev.exited, nil, nil
-				if drained == nil {
-					b.log.Printf("Claude Code exited with status %d", *exited)
-					return *exited, nil
-				}
-				drainBound = time.After(drainTimeout)
-			}
+			_ = claude.Kill()
+			return
 		}
 	}
 }
 
-// send hands ev to the loop unless the bridge has stopped.
-func send(events chan<- event, stop <-chan struct{}, ev event) bool {
+// send hands v to the loop on ch unless stop is closed first.
+func send[T any](ch chan<- T, stop <-chan struct{}, v T) bool {
 	select {
-	case events <- ev:
+	case ch <- v:
 		return true
 	case <-stop:
 		return false
@@ -534,30 +650,53 @@ func (b *bridge) writeUser(text string) {
 		"role": "user", "content": []map[string]string{{"type": "text", "text": text}}}})
 }
 
+// writeClaude queues v for Claude Code as one stream-json line.
 func (b *bridge) writeClaude(v any) {
 	line, err := json.Marshal(v)
-	if err == nil {
-		_, err = b.stdin.Write(append(line, '\n'))
-	}
 	if err != nil {
 		b.log.Printf("could not write to Claude Code: %v", err)
+		return
 	}
+	b.toClaude.put(append(line, '\n'), "")
 }
 
 func (b *bridge) respond(r shimwire.Response) { b.emit(r) }
 
+// emit queues f for the shim, encoded and checked as shimwire's Writer writes a frame.
 func (b *bridge) emit(f shimwire.Frame) {
-	if err := b.out.WriteFrame(f); err != nil {
+	if err := b.frames.WriteFrame(f); err != nil {
 		b.log.Printf("could not write a %s frame to the shim: %v", f.FrameType(), err)
+		return
 	}
+	b.toShim.put(b.encoded.take(), f.FrameType())
 }
 
+// emitRaw queues v for the shim as one frame line; a line over the frame limit is a pane summary
+// the shim goes without.
 func (b *bridge) emitRaw(v map[string]any) {
 	line, err := json.Marshal(v)
 	if err == nil {
-		err = b.out.WriteLine(line)
+		err = b.frames.WriteLine(line)
 	}
-	if err != nil && !errors.Is(err, shimwire.ErrLineTooLong) {
+	switch {
+	case err == nil:
+		b.toShim.put(b.encoded.take(), "")
+	case !errors.Is(err, shimwire.ErrLineTooLong):
 		b.log.Printf("could not write to the shim: %v", err)
 	}
+}
+
+// lineCopy is where frames writes each line it encodes: a copy of the line, which take hands over
+// for the shim's queue to own.
+type lineCopy struct{ line []byte }
+
+func (c *lineCopy) Write(p []byte) (int, error) {
+	c.line = bytes.Clone(p)
+	return len(p), nil
+}
+
+func (c *lineCopy) take() []byte {
+	line := c.line
+	c.line = nil
+	return line
 }

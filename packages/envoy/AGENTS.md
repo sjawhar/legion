@@ -1845,7 +1845,7 @@ from and that ask's document.
 - A reply joins its thread the same way on both write paths. `threadHeadOf` (`api/comment_create.go`) climbs `reply_to` from an already-locked comment to the head of its thread and, when that head is an ask, the reply stores the ask's `ask_id` with `reply_to` null and the reply's `turn`; `POST .../comments` reaches it through `normalizeCommentThreadTarget`, which validates the request's `reply_to` first, and `POST /api/v1/comments/{id}/reply` calls it directly with the comment it already holds locked, so a session answering a mention inside an ask's thread lands in that thread instead of in a `reply_to` chain no ask read selects (`store/migrations/0043_comment_reply_ask_id.up.sql` moves the rows written before that, and gives each the turn 0028 gave every other ask reply). `comment.delivery` payloads carry the `ask_id` of the comment they report on, so a receipt names the thread it changed. Neither event is published to the ask's followers: `publishFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
 - Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts; `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`); a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks and a `# Title` quote selects a heading. The outbox `payload_summary` of `ask.answered` is the answer rendering (`<selected> - <text>`), not the question.
-- The comment, comment-edit, message and broadcast body cap is `contracts.DispatchBodyMax` (32,000 UTF-16 units), generated from `DISPATCH_BODY_MAX` in `packages/contracts` rather than spelled here: `comment_create.go`, `comment_actions.go`, `messages.go` and `broadcasts.go` are its four enforcement sites, each refusing with the `CAP_EXCEEDED` wording above. Change it in `packages/contracts/src/dispatch-tools.ts` and regenerate (`bun run gen:go` there), never in `internal/contracts/generated.go`; the same constant generates the Legion daemon's `dispatch.MessageBodyLimit`, from which `record.MessagePostLimit` (31,956) subtracts the outbox marker, so a server older than a daemon of the same release refuses what that daemon posts.
+- The comment, comment-edit, message and broadcast body cap is `contracts.DispatchBodyMax` (32,000 UTF-16 units), generated from `DISPATCH_BODY_MAX` in `packages/contracts` rather than spelled here: `comment_create.go`, `comment_actions.go`, `messages.go` and `broadcasts.go` are its four enforcement sites, each refusing with the `CAP_EXCEEDED` wording above. Change it in `packages/contracts/src/dispatch-tools.ts` and regenerate (`bun run gen:go` there), never in `internal/contracts/generated.go`; the same constant generates the Legion daemon's `dispatch.MessageBodyLimit`, from which `record.MessagePostLimit` (31,956) subtracts the outbox marker, so a server older than a daemon of the same release refuses what that daemon posts. Never raise `DISPATCH_BODY_MAX` past `maxInputChars` in `internal/dispatch/embed/embed.go`, the rune limit a comment or message body is embedded at: past it the body's tail is dropped from search by meaning with no error, and `.github/scripts/check-body-embed-limit.sh` fails the build when the body cap exceeds it; that check also requires one line of each package guide (this bullet, and the body-limit row of `packages/contracts/AGENTS.md`) to name both constants, so keep this bullet one line however long it grows. The declaration comments that pair the two constants - `maxInputChars`'s comment in `embed.go` and the `DISPATCH_BODY_MAX` JSDoc in `dispatch-tools.ts` - are confirmed by a human at review, not by the check: reading a comment out of a file cannot tell comment text from a `//` or `/*` inside a string literal without parsing the language, and a gate that can report agreement it has not established is worse than one that does not try.
 - Caller text PostgreSQL cannot store (`text.Storable`) is refused before anything is written (`api/storable_text.go`, positions in UTF-16 units from 1): a U+0000, which neither its text nor its jsonb holds, is `400 NUL_CHARACTER` reading `<field> holds a NUL character (U+0000) at character N, which Dispatch cannot store`, and a byte that is not UTF-8, which its text does not hold, is `400 INVALID_UTF8` reading `<field> holds a byte that is not UTF-8 (0xFF) at character N, which Dispatch cannot store`. A name the caller wrote (a JSON member's, a query parameter's, a multipart field's) is named with a U+0000 in it written as the six characters `\u0000`, so no refusal sends the character back. The input layer checks once, not each route: `decodeJSON` walks every string and member name of the body it decoded (`unstorableJSON`, naming `title`, `options[1].label`, `ops[0].attributes.title`), and so do the two readers that read a JSON body themselves (an artifact upload's, a credential relay's); JSON carries no byte that is not UTF-8 past decoding, which writes it as U+FFFD, so these refuse only a U+0000. A multipart upload checks every field, its markdown file (`file`) and a binary file part's `Content-Type`, which it stores as the artifact's type (`file Content-Type`; a markdown file stores no part header); `Register` wraps every route, the document websocket's too, so a path or query parameter is refused before its handler runs (`refuseUnstorableParameters`: `path parameter session_id`, `query parameter label`; a query with no percent escape is not parsed for it); and the document websocket refuses, before the upgrade, a U+0000 in the actor JSON its bearer names in the `X-Dispatch-Actor` header (`docs.ActorHeader`, `refuseUnstorableActor`: `X-Dispatch-Actor.id`). The check covers every parameter, field and member a request carries, including ones no handler reads. A new reader of caller text goes through one of these.
 - Listener message APIs preserve the human `message` as a one-line `payload_summary` of at most 160 characters; when it differs, the complete message is `payload`. A supplied `payload` for `/v1/messages/publish` wins over the derived value.
 - Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
@@ -2462,24 +2462,48 @@ name lowercased; create and retag refuse it before writing unless it matches the
 rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
 (`google.FindDefaultCredentials`: the file `GOOGLE_APPLICATION_CREDENTIALS` names whenever it is
 set, else `~/.config/gcloud/application_default_credentials.json` whatever `CLOUDSDK_CONFIG` says,
-else the metadata server; a load that fails while `GOOGLE_APPLICATION_CREDENTIALS` is set names
-that variable and advises no sign-in, since no other file is read while it is set, and one that
-fails while it is unset advises the refusal's route below, `gcpPersonRoute`) and calls
-Secret Manager itself under `cloud.google.com/go/secretmanager`, so IAM in that project decides
-what the person may read or write. GCP's requireAccount is a no-op, unlike AWS's: every call
-already names `projects/<project number>/...` explicitly, so a wrong-project identity gets a real
-refusal from the API itself rather than silently reading another project's secrets - the hazard
-AWS's `ListSecrets` (which takes no project parameter) has and GCP's calls do not.
-A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
-service account key file, a workload identity federation credential (a dev box's own), a workforce
-identity federation sign-in, or a GCE/GKE metadata-server identity (GKE Workload Identity's too),
-whose ADC carries no JSON at all - (`gcpBackend.requireWriteSignIn`). The refusal names what it
-found (`gcpCredsFound`) and `gcpPersonRoute`, the route that leaves the machine's identity alone:
-`gcloud auth login --no-activate` (which writes `legacy_credentials/<email>/adc.json` and keeps the
-active gcloud account), then the command again with `GOOGLE_APPLICATION_CREDENTIALS` naming that
-file, never `gcloud auth application-default login`, which replaces a machine's own ADC for every
-program that uses it. `--owner me` is the Google userinfo endpoint's `email` for the signed-in
-Application Default Credentials, lowercased.
+else the metadata server) and calls Secret Manager itself under `cloud.google.com/go/secretmanager`,
+so IAM in that project decides what the person may read or write. A load that fails while
+`GOOGLE_APPLICATION_CREDENTIALS` is set names that variable and advises no sign-in, since no other
+file is read while it is set; one that fails while it is unset signs every form, a read included,
+in with the person's gcloud login instead (`gcloudLogin`). GCP's requireAccount is a no-op, unlike
+AWS's: every call already names `projects/<project number>/...` explicitly, so a wrong-project
+identity gets a real refusal from the API itself rather than silently reading another project's
+secrets - the hazard AWS's `ListSecrets` (which takes no project parameter) has and GCP's calls do
+not. A write runs only under a person's own Google Account sign-in (`gcpBackend.requireWriteSignIn`,
+reached only through `connectWriter`): ADC of type `authorized_user` write as they are; under any
+other ADC - a service account key file, a workload identity federation credential (a dev box's
+own), a workforce identity federation sign-in, or a GCE/GKE metadata-server identity (GKE Workload
+Identity's too), whose ADC carries no JSON at all - it signs the backend in with the person's
+gcloud login, redialing Secret Manager under it (`signIn`) and leaving the machine's ADC as they
+are, unless `GOOGLE_APPLICATION_CREDENTIALS` named them, a choice it refuses rather than overrides.
+Reads under a machine's ADC run under it. `gcloudLogin` borrows the login through gcloud's own
+interface, never its credential files: the first `gcloud` on PATH (`exec.LookPath`) lists its
+logins (`gcloud auth list --format=json`); a person's is an account named by a plain email the
+broker accepts as a person owner (`personAccount`: `policy.ValidPersonOwner`), never a
+`.gserviceaccount.com` one or a workload or workforce identity federation login, which gcloud
+names by a `principal://` identifier; it takes the one `CLOUDSDK_CORE_ACCOUNT` names when that is
+one of them, else the only one, refusing none (naming `gcloud auth login`) or several (naming
+each, and `CLOUDSDK_CORE_ACCOUNT`). Its tokens are `gcloudTokenArgs`,
+`gcloud auth print-access-token --format=value[private](token) --impersonate-service-account=
+--access-token-file= --credential-file-override= <account>`, behind `oauth2.ReuseTokenSource`, each
+taken to last `gcloudTokenLife` (5 minutes: gcloud prints no expiry, and refreshes a token within
+300 s of its expiry before printing it). gcloud prints a command's output through its logger, whose
+file handler keeps a copy in `logs/` under gcloud's configuration directory, so the `private`
+format attribute writes the token to the console stream alone, and every gcloud run has
+`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1` and `CLOUDSDK_CORE_DISABLE_PROMPTS=1`. The empty flags
+clear impersonation, an access token file and a credential file override, whichever of the
+environment and the configuration file sets them (a flag outranks both, and an empty value turns
+the property off), and `gcloudEnv` drops `gcloudIdentityOverrides` (`CLOUDSDK_AUTH_ACCESS_TOKEN`,
+which gcloud reads directly, and the three properties' variables); a write still refuses a token
+whose userinfo `email` is not the chosen account, compared case-insensitively. gcloud reads
+`/dev/null`, never the CLI's standard input (a secret's value), and no error carries its token. A
+refusal names what it found (`gcpCredsFound`: the credentials' `type` or the metadata server,
+never a file path) and never advises `gcloud auth application-default login`, which replaces a
+machine's own ADC for every program that uses it. `--owner me` is the Google userinfo endpoint's
+`email` for the sign-in the write runs under, lowercased. A command a form prints for running
+again starts with `GOOGLE_APPLICATION_CREDENTIALS=…` when that was set, and with
+`CLOUDSDK_CORE_ACCOUNT=…` when it chose the gcloud login (`signInPrefix`).
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
@@ -2620,9 +2644,9 @@ that date never waits past the purge (`earliestPurge` is the one place `DeletedD
 GCP's deletion moment is `expire_time` itself, the exact purge moment, so `show` and `list` print
 only it, with no separate earliest-purge line. The forms' unit tests run in-process against
 `secrets.Local` and a fake STS and broker (`secret_test.go`) for AWS, and against a fake Secret
-Manager gRPC server and fake Application Default Credentials (`secret_gcp_test.go`) for GCP; AWS's
-`secret_e2e_test.go` runs create, delete, restore and retag against `brokertest.NewRig`'s real
-broker.
+Manager gRPC server, fake Application Default Credentials and a stub `gcloud` alone on `PATH`
+(`secret_gcp_test.go`) for GCP; AWS's `secret_e2e_test.go` runs create, delete, restore and retag
+against `brokertest.NewRig`'s real broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
