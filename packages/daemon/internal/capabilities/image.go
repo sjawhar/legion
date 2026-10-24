@@ -250,8 +250,8 @@ func pluginEnabled(lock, name string) (string, bool) {
 // refuses to start without it, and that file is the entry point of `bun run e2e`, the Dispatch
 // browser suite a reader-facing Dispatch change must pass before it merges, so a role whose image
 // lacks psql cannot run the suite its own change owes. redis-cli, sqlite3, nc and dig are the
-// clients a role's own work needs on the issue's disk and an unprivileged container can never
-// install for itself: a session's SQLite file, a reachability check, a name that does not resolve.
+// clients a role's own work needs and an unprivileged container can never install for itself: a
+// session's SQLite file, a reachability check, a name that does not resolve.
 // A missing tool fails the publish naming the tool; a deployment that layers its own image on the
 // published one inherits the five; a deployment still pinning an older digest keeps the old list,
 // because the probe runs that image's own `legion`.
