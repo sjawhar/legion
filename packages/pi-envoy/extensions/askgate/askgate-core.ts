@@ -585,7 +585,7 @@ const flagName = (flag: Word) => flag.value.split("=", 1)[0];
 function uploadMayBeDocument(flags: readonly Word[]): boolean {
   if (flags.some((flag) => [...INLINE_FLAGS, ...INDIRECT_FLAGS].includes(flagName(flag))))
     return true;
-  const valueOf = (name: string): { value: string; literal: boolean } | undefined => {
+  const flagValue = (name: string): { value: string; literal: boolean } | undefined => {
     const at = flags.findIndex((flag) => flagName(flag) === name);
     if (at === -1) return undefined;
     const flag = flags[at];
@@ -597,8 +597,8 @@ function uploadMayBeDocument(flags: readonly Word[]): boolean {
     if (word === undefined) return undefined;
     return { value: word.value, literal: scanWord(word.raw, 0).unread.length === 0 };
   };
-  const named = valueOf("--name");
-  const file = valueOf("--path");
+  const named = flagValue("--name");
+  const file = flagValue("--path");
   if (named === undefined || file === undefined) return false;
   return (
     !named.literal ||
