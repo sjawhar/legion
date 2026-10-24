@@ -64,8 +64,8 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 // transition), since GitHub computes no merge ref for a conflicting head and no CI result will
 // ever arrive for it. It decides on every read, not only a changed one: a conflict recorded
 // before the issue reaches awaiting_merge - in testing, reviewing, retro or merging, where
-// nothing moves yet, since the merger's READY check posts a conflicting head whose required
-// checks all succeeded - must still withdraw the READY once the issue gets there. Outside
+// nothing moves yet, since the pass reads every open pull request, in whatever phase its issue
+// is when the base moves - must still withdraw the READY once the issue gets there. Outside
 // awaiting_merge the read is recorded and nothing moves: a conflict is no red for RedSendsBack to
 // act on (GitHub runs no checks on it for a verdict to stand), and the tester or implementer
 // already at work will see it on its own pass or push. Leaving awaiting_merge is what stops a

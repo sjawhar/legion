@@ -640,6 +640,67 @@ func TestAREADYMergeDisagreementSpendsNoWaitingNotice(t *testing.T) {
 	}
 }
 
+// The arm gone from GitHub is no wait the architect is told of either. Once the row has seen
+// READY's head armed, an open pull request at that head with nothing armed and no removal on its
+// timeline is a wait (ghautomerge.Disappeared, removal's last answer) whose own words are that the
+// arm the daemon placed is gone and GitHub has yet to say who took it, so a row past
+// mergeWaitWarn that meets one answers every other term of the warn gate: the architect would be
+// told the merge has not been withdrawn and the daemon goes on submitting it, under a cause that
+// says it may have been, and the removal GitHub names next, whose own telling ends the row
+// (merge-removed), would find the one notice spent. Only GitHub not having completed the merge
+// carries it (waitingOnGitHub), so the notice stays unspent for the genuine wait that follows.
+// Here GitHub shows READY's head armed, then loses the arm with its timeline naming no removal,
+// then shows it armed again, and the architect is told once: of the wait.
+//
+// On the gate before waitingOnGitHub the disappearance warns, and the assertion that breaks is the
+// assertMergeRows of no merge-waiting notice after that run: a Disappeared is a wait
+// (wait.ErrWaiting), is no ghautomerge.Lagging, and is no permanentRefusal, so every term of that
+// gate held and the notice was written on it.
+func TestAREADYMergeArmGoneFromGitHubSpendsNoWaitingNotice(t *testing.T) {
+	github := newArmableGitHub(t)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	now := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head", Queued: now}, now))
+	clock := now
+	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the run that saw READY's head armed: %v", err)
+	}
+	assertMergeRows(t, pool, 1, "merge-waiting", 0)
+	// GitHub's read of the pull request runs ahead of its timeline: the arm the row saw is gone,
+	// with nothing on the timeline yet to name what took it, an hour and a minute after the
+	// submission was queued.
+	github.set(func(g *armableGitHub) { g.armed = false })
+	clock = now.Add(mergeWaitWarn + time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the run whose arm had disappeared: %v", err)
+	}
+	assertMergeRows(t, pool, 1, "merge-waiting", 0)
+	nextAt, lastError, warned, _ := readyMergeState(t, pool)
+	if !nextAt.After(clock) || !strings.Contains(lastError, "no longer armed or queued") || warned {
+		t.Fatalf("the ready_merge row runs again at %s with %q, warned %v; want it waiting for GitHub to record the removal with its notice unspent", nextAt, lastError, warned)
+	}
+	// GitHub's read catches its timeline up, the arm standing where the row saw it: a wait, and
+	// the notice the disappearance must have left unspent is the one it carries.
+	github.set(func(g *armableGitHub) { g.armed = true })
+	clock = clock.Add(time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the run GitHub left waiting on its arm: %v", err)
+	}
+	reasons := assertMergeRows(t, pool, 1, "merge-waiting", 1)
+	if !strings.Contains(reasons[0], "armed for auto-merge") || strings.Contains(reasons[0], "no longer armed") {
+		t.Fatalf("merge-waiting reason %q, want the arm's own answer as what GitHub last answered", reasons[0])
+	}
+	if _, _, warned, _ := readyMergeState(t, pool); !warned {
+		t.Fatal("the waiting row is not recorded as having told its architect, want the telling and its notice written together")
+	}
+	if _, arms := github.counts(); arms != 0 {
+		t.Fatalf("arms %d while the arm was gone from GitHub, want none: the row reads the removal rather than submitting again", arms)
+	}
+}
+
 // A reopen at READY's head starts the wait over with the telling. The reopen's queue of the same
 // issue and head replaces the payload (record's readyMergeConflict), which clears
 // record.ReadyMerge.Warned, while leaving the row's created_at at the original queueing: a wait
