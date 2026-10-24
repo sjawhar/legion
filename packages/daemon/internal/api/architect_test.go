@@ -303,6 +303,7 @@ func assertProcessedEvent(t *testing.T, h *harness, eventID string) {
 func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	statuses.documents = map[string]string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": "LEGION-208"}
+	statuses.approvals = map[string]dispatch.Approval{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": {State: "none", LatestVersion: 7}}
 	seedTree(t, h, "LEGION-208", "LEGION-209")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 
@@ -844,6 +845,7 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 		"4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d": "LEGION-208",
 	}
 	statuses.approved = map[string]int{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": 3}
+	statuses.approvals = map[string]dispatch.Approval{"4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d": {State: "none", LatestVersion: 3}}
 	seedTree(t, h, "LEGION-208")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 	for _, artifact := range []string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d"} {
@@ -854,8 +856,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, ReviewedBy: dispatch.Actor{Kind: "user", ID: "alice"}},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, ReviewedBy: dispatch.Actor{Kind: "user", ID: "alice"}, DispatchVersion: 3},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3, DispatchVersion: 3},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("gate facts = %#v, want the approved document to carry its approval and the other none", got)
@@ -887,9 +889,9 @@ func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) 
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason, ReviewedBy: dispatch.Actor{Kind: "user", ID: "bob"}},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason, ReviewedBy: dispatch.Actor{Kind: "user", ID: "bob"}, DispatchVersion: 4},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true, DispatchVersion: 4},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("gate facts = %#v, want %#v", got, want)
@@ -933,5 +935,23 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 	}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
 	if got := facts.recorded(); len(got) != 1 {
 		t.Fatalf("refused closes applied facts %#v", got[1:])
+	}
+}
+
+// register_gate refuses a version Dispatch does not show for the document: the caller names the
+// version, and a gate recorded past the document's own latest version is one no person's review
+// can open, so a root waiting on it would never be answered.
+func TestGateRegistrationRefusesAVersionDispatchDoesNotShow(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	const artifact = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093"
+	statuses.documents = map[string]string{artifact: "LEGION-208"}
+	statuses.approvals = map[string]dispatch.Approval{artifact: {State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "human"}}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 5,
+	}, nil), http.StatusConflict, "VERSION_NOT_IN_DISPATCH")
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("gate facts = %#v, want none for a refused registration", got)
 	}
 }

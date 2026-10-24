@@ -386,17 +386,17 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
-// A gate records the version a human requested changes on, so the registration that reads the
-// same request from Dispatch afterwards knows the architect was told of it. An approval of that
-// version clears the record.
+// A gate records the changes request the architect was told of, its version and the reviewer's
+// reason, so a registration or a gate seed that re-reads the same request from Dispatch knows it
+// was told. An approval of that version clears the record.
 func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
 	issue := Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-209", Project: "LEGION", Title: "gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}
-	requested := 4
-	closed := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ChangesRequestedVersion: &requested}
+	told := 4
+	closed := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path"}
 	approved := 4
 	opened := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ApprovedVersion: &approved}
 
@@ -1652,7 +1652,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
-		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "changes_requested_version"},
+		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "told_changes_version", "told_changes_reason"},
 		"slots":             {"issue", "index", "admitted_at"},
 		"processed_events":  {"source", "event_id", "processed_at"},
 		"outbox":            {"id", "kind", "issue", "payload", "attempts", "next_at", "last_error", "created_at", "lease_token", "lease_until"},

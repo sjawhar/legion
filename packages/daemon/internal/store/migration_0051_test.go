@@ -62,9 +62,9 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 	}
 }
 
-// An old gate migrates with no changes request recorded, and the column takes a version or
-// nothing, never zero.
-func TestTheGatesChangesRequestArrivesWith0051(t *testing.T) {
+// An old gate migrates with no changes request recorded as told, and the pair takes a version
+// with its reason, or nothing, never a version of zero and never a reason without a version.
+func TestTheGatesToldChangesRequestArrivesWith0051(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 50)
@@ -80,18 +80,26 @@ func TestTheGatesChangesRequestArrivesWith0051(t *testing.T) {
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	var requested *int
-	if err := store.Pool().QueryRow(ctx, `select changes_requested_version from design_gates where issue = 'LEGION-208'`).Scan(&requested); err != nil {
+	var version *int
+	var reason string
+	if err := store.Pool().QueryRow(ctx, `select told_changes_version, told_changes_reason from design_gates where issue = 'LEGION-208'`).
+		Scan(&version, &reason); err != nil {
 		t.Fatalf("read the migrated gate: %v", err)
 	}
-	if requested != nil {
-		t.Fatalf("gate after 0051 = changes_requested_version %v, want none recorded", *requested)
+	if version != nil || reason != "" {
+		t.Fatalf("gate after 0051 = told_changes_version %v reason %q, want none recorded", version, reason)
 	}
-	if _, err := store.Pool().Exec(ctx, `update design_gates set changes_requested_version = 4 where issue = 'LEGION-208'`); err != nil {
-		t.Fatalf("record a changes request: %v, want it accepted", err)
+	if _, err := store.Pool().Exec(ctx, `update design_gates
+		set told_changes_version = 4, told_changes_reason = 'name the rollback path' where issue = 'LEGION-208'`); err != nil {
+		t.Fatalf("record a told changes request: %v, want it accepted", err)
 	}
-	_, err := store.Pool().Exec(ctx, `update design_gates set changes_requested_version = 0 where issue = 'LEGION-208'`)
-	if err == nil || !strings.Contains(err.Error(), "check constraint") {
-		t.Fatalf("a changes request at version zero = %v, want a check constraint to refuse it", err)
+	for _, refused := range []struct{ why, statement string }{
+		{"a version of zero", `update design_gates set told_changes_version = 0 where issue = 'LEGION-208'`},
+		{"a reason with no version", `update design_gates set told_changes_version = null where issue = 'LEGION-208'`},
+	} {
+		_, err := store.Pool().Exec(ctx, refused.statement)
+		if err == nil || !strings.Contains(err.Error(), "check constraint") {
+			t.Fatalf("%s = %v, want a check constraint to refuse it", refused.why, err)
+		}
 	}
 }

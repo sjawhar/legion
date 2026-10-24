@@ -566,7 +566,9 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	if err != nil {
 		return fmt.Errorf("read approval of %s for %s: %w", root.gate.ArtifactID, root.issue.Key, err)
 	}
-	if approval.LatestVersion > root.gate.LatestVersion {
+	// The awaited version, not the gate's: a registration may have recorded a newer version on the
+	// gate whose own event never arrived, and that version is the answer.
+	if approval.LatestVersion > root.issue.Awaiting.GateVersion {
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-version:%s:%d:%d", root.issue.Key, root.issue.Generation, approval.LatestVersion),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion})
 	}

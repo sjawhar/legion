@@ -275,12 +275,14 @@ that turn. A registration Dispatch already shows approved at its latest version 
 registration instead, and the root starts planning in its own slot; one Dispatch shows changes
 requested at its latest version keeps the slot with the architect told, and so does one whose
 approval request Dispatch shows waiting on the architect. A root that handed its request back and
-is already waiting is answered by the registration itself in each of those three cases, since the
-person's act reaches the daemon with it and the event that follows finds the gate as the
-registration left it. A changes request the gate already records, which the architect was told of
-when it was recorded, is not told again. Approval and `changes_requested` both
-answer that wait, and so does a person's reply on an ask of the root; a newer version also answers
-it because Dispatch then waits on the architect. Once a slot is free the architect resumes its own
+is already waiting is answered by the person's review the registration carries, its approval or
+its changes request, since that review reaches the daemon with the registration and the event
+that follows finds the gate as the registration left it; a request Dispatch merely shows waiting
+on the architect answers nothing, because the turn may have reached the agent through a session's
+note, and only a person's own act answers a wait. A changes request the gate records as told, or
+one whose answer resumes the root with a task naming it, is not told again. Approval and
+`changes_requested` both answer that wait, and so does a person's reply on an ask of the root; a
+newer version also answers it because Dispatch then waits on the architect. Once a slot is free the architect resumes its own
 session with a task naming the answer; an open gate advances the root and its admitted children
 together. A gate still closed sends the architect to revise the spec and hand the request back to
 the person. A session of the tree handing an ask on the admitted root back to the person — a reply
