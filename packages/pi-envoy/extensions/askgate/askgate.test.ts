@@ -120,6 +120,7 @@ function bind(
     now: Date.now,
     logger: { warn: (message: string) => warnings.push(message) },
     appendFile: (p, text) => dumps.push([p, text]),
+    readFile: (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : undefined),
     complete: (req) => {
       calls.push(req);
       return complete(req);
@@ -1597,6 +1598,90 @@ console.log(JSON.stringify(args, null, 2));
     expect(await g.bash("b1", ASK)).toBeUndefined();
     expect(g.dryRuns).toHaveLength(0);
     expect(g.entries).toHaveLength(0);
+  });
+
+  describe("dispatch artifact uploads of markdown (Task 4.3)", () => {
+    const BRIEF = "# Brief\n\nThe person said: ship it on Friday.\n";
+    const docs = path.join(work, "docs");
+    fs.mkdirSync(docs, { recursive: true });
+    fs.writeFileSync(path.join(work, "brief.md"), BRIEF);
+    fs.writeFileSync(path.join(docs, "brief.md"), `${BRIEF}(the copy in docs)\n`);
+    /** The upload request applies failure 10 alone: its own instruction, and no other rule's. */
+    const uploadRule = "Judge this upload against content failure 10 alone.";
+
+    test("(a) --content-file reaches the model with the file's text, in a request that applies failure 10 alone", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash(
+        "u1",
+        "dispatch artifact --issue DSP-1 --name brief.md --content-file brief.md"
+      );
+      expect(result).toBeUndefined();
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(JSON.stringify(BRIEF));
+      expect(g.calls[0].user).toContain(uploadRule);
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
+    });
+    test("(b) --path, whose dry run prints {issue, name, path}, reaches the model with the same text", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash("u2", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md");
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
+      expect(g.calls[0].user).toContain('"path": "brief.md"');
+      expect(g.calls[0].user).toContain(uploadRule);
+    });
+    test("(c) after a leading cd, a relative --path is read from the directory the cd reached, which bash names", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u3",
+        "cd docs && dispatch artifact --issue DSP-1 --name brief.md --path brief.md"
+      );
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the copy in docs)\n`));
+      // The directory comes from the command's own cd and then pwd, run as the dry run runs.
+      expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd");
+      expect(g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === 10_000)).toBe(true);
+    });
+    test("(d) a --path the gate cannot read records error and the call runs", async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash(
+        "u4",
+        "dispatch artifact --issue DSP-1 --name brief.md --path missing.md"
+      );
+      expect(result).toBeUndefined();
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "error" }]);
+      expect(g.entries[0].reason).toContain(path.join(work, "missing.md"));
+    });
+    test("(e) an upload of shot.png never reaches the model", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      expect(
+        await g.bash("u5", "dispatch artifact --issue DSP-1 --name shot.png --path shot.png")
+      ).toBeUndefined();
+      expect(g.dryRuns).toHaveLength(0);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries).toHaveLength(0);
+    });
+    test("an upload that is not markdown, joined to other commands, is not refused as unreadable", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      expect(
+        await g.bash("u6", "dispatch artifact --issue DSP-1 --name shot.png --path shot.png | cat")
+      ).toBeUndefined();
+      expect(g.entries).toHaveLength(0);
+    });
+    test("a markdown upload joined to other commands is refused as unreadable, as any scoped write is", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash(
+        "u7",
+        "dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat"
+      );
+      expect(result?.block).toBe(true);
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
+    });
+    test("other writes keep the full rules and do not get the upload instruction", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash("u8", ASK);
+      expect(g.calls[0].user).not.toContain(uploadRule);
+    });
   });
 });
 

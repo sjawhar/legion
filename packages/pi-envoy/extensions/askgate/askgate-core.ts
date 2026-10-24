@@ -3,21 +3,27 @@
 // that binds Oh My Pi's completion call and buildSessionContext; everything else lives here so the
 // tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
-// Scope: seven calls on the command line and six of them as devices, each recorded under one tool
+// Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
 //   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`: the
 //     head rules of the plugin that ships the CLI, copied, with the program taken by a literal
 //     path to `dispatch` as well as by name, plus AskGate's two harmless wrappers, one leading
 //     `cd <path> &&` with a path the shell does not expand and one trailing `2>&1`)
 //     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
-//     `summary` is what the person approves), or `issue` with `--spec` or `--spec-file`. The gate learns
+//     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
+//     `artifact` with a `--name` that ends in `.md`. The gate learns
 //     the exact arguments by running that command with `--dry-run` after the command name, in the
 //     call's working directory (then its `cd`, as the call will) and environment, its
 //     here-document still on stdin and without its `2>&1`, under a 10 s limit, and reviews the
 //     JSON it prints. A dry-run that fails, times out or prints no JSON object is recorded as
 //     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
-//     reviewed.
+//     reviewed. An upload given with `--path` prints the path, not the text: the gate reads that
+//     file (`readFile`) and adds its text as `content`, so both forms reach the model alike, cut to
+//     the same 64 KB. A relative path resolves in the directory the command runs in; after its own
+//     `cd`, bash names that directory (the `cd`, then `pwd`, run as the dry run runs). A file the
+//     gate cannot read is `error`, and the call runs. An upload is judged against failure 10 alone
+//     (askgate-upload.md), since a plan or a report is long by nature.
 //   - A `bash` call that holds a scoped `dispatch` write those rules cannot read — joined to
 //     anything else (`cd $X && dispatch ask …`, `cd a && cd b && dispatch ask …`, `dispatch ask …
 //     2>&1 | tail`, `cat > f <<EOF …; dispatch ask --spec-file f`), one using an unquoted
@@ -97,6 +103,7 @@ import { createHash } from "node:crypto";
 import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
+import uploadRule from "./askgate-upload.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
 
 const SCOPED_DEVICES = [
@@ -116,9 +123,14 @@ const SCOPED_COMMANDS = [
   "doc-edit",
   "issue",
   "request-approval",
+  "artifact",
 ] as const;
 const SPEC_ONLY_COMMAND = "issue";
 const SPEC_FLAGS = ["--spec", "--spec-file"];
+/** `dispatch artifact` is reviewed only as an upload of a markdown document: a `--name` ending in `.md`. */
+const UPLOAD_COMMAND = "artifact";
+const UPLOAD_NAME_FLAG = "--name";
+const MARKDOWN_NAME = /\.md$/i;
 /** Flags under which a `dispatch` command sends nothing. */
 const NO_SEND_FLAGS = ["--dry-run", "--help"];
 const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
@@ -248,6 +260,8 @@ interface Deps {
   configFile: string;
   /** Appends to a file; serves OMP_ASKGATE_DUMP. */
   appendFile: (p: string, text: string) => void;
+  /** File text, or undefined when no file is there; reads the document an upload's `--path` names. */
+  readFile: (p: string) => string | undefined;
   complete: (req: CompleteRequest) => Promise<Completion>;
   /**
    * The models after `primary` in `role`'s retry.fallbackChains chain, in the order omp walks it,
@@ -515,6 +529,25 @@ function headScan(head: string): boolean {
 
 type Word = { raw: string; value: string };
 
+/**
+ * Whether `name` with `flags` is a write the gate reviews: a scoped command, with no flag under
+ * which it sends nothing, an `issue` only with a spec, and an `artifact` only with a markdown name.
+ */
+function reviewedWrite(name: string, flags: readonly Word[]): boolean {
+  if (!(SCOPED_COMMANDS as readonly string[]).includes(name)) return false;
+  if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) return false;
+  const flagName = (flag: Word) => flag.value.split("=", 1)[0];
+  if (name === SPEC_ONLY_COMMAND) return flags.some((flag) => SPEC_FLAGS.includes(flagName(flag)));
+  if (name === UPLOAD_COMMAND) {
+    const at = flags.findIndex((flag) => flagName(flag) === UPLOAD_NAME_FLAG);
+    if (at === -1) return false;
+    const { value } = flags[at];
+    const named = value.includes("=") ? value.slice(value.indexOf("=") + 1) : flags[at + 1]?.value;
+    return named !== undefined && MARKDOWN_NAME.test(named);
+  }
+  return true;
+}
+
 /** A head's words as bash splits them at unquoted blanks, each as written and with its quotes
  * removed. Only for a head `dispatchCommandHead` accepted, which holds no escape or expansion. */
 function headWords(head: string): Word[] {
@@ -545,6 +578,13 @@ export interface ScopedCommand {
   command: string;
   dryRunScript: string;
   rebuttal?: string;
+  /** A `dispatch artifact` upload of a markdown document, reviewed against failure 10 alone. */
+  upload?: true;
+  /**
+   * The command's own leading `cd` and then `pwd`: run where the dry run runs, it prints the
+   * directory the command reaches, against which an upload's relative `path` resolves.
+   */
+  cdScript?: string;
 }
 
 /** The `bash` command as a scoped `dispatch` call, or undefined for any other command. */
@@ -554,14 +594,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (found === undefined) return undefined;
   const { head, at, cdEnd, end } = found;
   const [program, name, ...flags] = headWords(head);
-  if (name === undefined || !(SCOPED_COMMANDS as readonly string[]).includes(name.value))
-    return undefined;
-  if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) return undefined;
-  if (
-    name.value === SPEC_ONLY_COMMAND &&
-    !flags.some((flag) => SPEC_FLAGS.includes(flag.value.split("=", 1)[0]))
-  )
-    return undefined;
+  if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
   // An override is `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a value that starts
   // with `--` is the next flag, as the CLI reads it. A blank line is no override and stays put.
   let rebuttal: string | undefined;
@@ -596,6 +629,8 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     command: `${command.slice(0, at)}${[program.raw, name.raw, ...rest].join(" ")}${command.slice(at + head.length)}`,
     dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...rest].join(" ")}${command.slice(end)}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
+    ...(name.value === UPLOAD_COMMAND ? { upload: true as const } : {}),
+    ...(cdEnd === undefined ? {} : { cdScript: `${command.slice(0, cdEnd)} >/dev/null && pwd` }),
   };
 }
 
@@ -800,22 +835,11 @@ export function unreadableDispatchWrite(command: unknown): UnreadableCommand | u
       } else break;
     }
     const [program, name, ...flags] = words.slice(at);
-    if (
-      program === undefined ||
-      name === undefined ||
-      !(SCOPED_COMMANDS as readonly string[]).includes(name.value)
-    )
-      continue;
+    if (program === undefined || name === undefined || !reviewedWrite(name.value, flags)) continue;
     const named = program.value.split("/").at(-1) === "dispatch";
     const unread = [...new Set(scanWord(program.raw, 0).unread)];
     const expansions = unread.filter((char) => EXPANSIONS.includes(char));
     if (!named && expansions.length === 0) continue;
-    if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) continue;
-    if (
-      name.value === SPEC_ONLY_COMMAND &&
-      !flags.some((flag) => SPEC_FLAGS.includes(flag.value.split("=", 1)[0]))
-    )
-      continue;
     const found = {
       tool: `dispatch_${name.value.replaceAll("-", "_")}`,
       label: `dispatch ${name.value}`,
@@ -1056,13 +1080,17 @@ export function renderTemplate(template: string, values: Record<string, string>)
   });
 }
 
-/** The gate's user message: the agent's system prompt and transcript as escaped data, then the call. */
+/**
+ * The gate's user message: the agent's system prompt and transcript as escaped data, then the call.
+ * An upload of a markdown document carries askgate-upload.md, which limits the review to failure 10.
+ */
 function renderRequest(
   primarySystemPrompt: string,
   transcript: string,
   tool: string,
   input: Input,
-  priorReasons: readonly string[]
+  priorReasons: readonly string[],
+  upload: boolean
 ): string {
   const prior =
     priorReasons.length > 0
@@ -1076,6 +1104,7 @@ function renderRequest(
     transcript,
     tool,
     args: renderArgs(input),
+    uploadRule: upload ? `${uploadRule.trim()}\n` : "",
     priorReasons: prior,
   });
 }
@@ -1385,7 +1414,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       base: Base,
       key: string,
       rebuttal: string | undefined,
-      override: Override
+      override: Override,
+      upload = false
     ): Promise<Decision> => {
       if (rebuttal !== undefined) {
         breaker.reset(key);
@@ -1417,7 +1447,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
               base.path,
               event.input,
-              breaker.reasons(key)
+              breaker.reasons(key),
+              upload
             ),
         }
       );
@@ -1515,41 +1546,84 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ? input.cwd.replace(/^~(?=$|\/)/, deps.home)
           : undefined;
       const cwd = raw === undefined || /^\/+$/.test(raw) ? ctx.cwd : path.resolve(ctx.cwd, raw);
-      // Abandoned like a waiting model call: the run's stop or the session's shutdown kills the dry-run.
-      const controller = new AbortController();
-      let cause: "abandoned" | "shutdown" | undefined;
-      inflight.set(toolCallId, (given) => {
-        cause = given;
-        controller.abort();
-      });
-      let run: DryRunResult;
-      try {
-        run = await deps.dryRun(scoped.dryRunScript, {
-          cwd,
-          env: deps.env,
-          timeoutMs: DRY_RUN_TIMEOUT_MS,
-          signal: controller.signal,
+      /** Runs one script as the dry run runs: in `cwd`, under the limit, abandoned with the call. */
+      const runScript = async (
+        script: string
+      ): Promise<{ run: DryRunResult } | { cause: "abandoned" | "shutdown" }> => {
+        // Abandoned like a waiting model call: the run's stop or the session's shutdown kills it.
+        const controller = new AbortController();
+        let cause: "abandoned" | "shutdown" | undefined;
+        inflight.set(toolCallId, (given) => {
+          cause = given;
+          controller.abort();
         });
-      } finally {
-        inflight.delete(toolCallId);
-      }
-      if (cause !== undefined) return { cause };
-      if (run.timedOut)
-        return {
-          failure: `${scoped.label} --dry-run did not finish within ${DRY_RUN_TIMEOUT_MS} ms`,
-        };
-      const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_REASON_MAX_BYTES);
-      if (run.exitCode !== 0)
-        return {
-          failure: `${scoped.label} --dry-run exited ${run.exitCode ?? "on a signal"}: ${printed}`,
-        };
+        try {
+          const run = await deps.dryRun(script, {
+            cwd,
+            env: deps.env,
+            timeoutMs: DRY_RUN_TIMEOUT_MS,
+            signal: controller.signal,
+          });
+          return cause === undefined ? { run } : { cause };
+        } finally {
+          inflight.delete(toolCallId);
+        }
+      };
+      /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
+      const stdoutOf = async (
+        script: string,
+        what: string
+      ): Promise<
+        | { stdout: string; stderr: string }
+        | { failure: string }
+        | { cause: "abandoned" | "shutdown" }
+      > => {
+        const ran = await runScript(script);
+        if ("cause" in ran) return ran;
+        const { run } = ran;
+        if (run.timedOut)
+          return { failure: `${what} did not finish within ${DRY_RUN_TIMEOUT_MS} ms` };
+        if (run.exitCode !== 0) {
+          const printed = clipBytes((run.stdout || run.stderr).trim(), GATE_REASON_MAX_BYTES);
+          return { failure: `${what} exited ${run.exitCode ?? "on a signal"}: ${printed}` };
+        }
+        return { stdout: run.stdout, stderr: run.stderr };
+      };
+      const dry = await stdoutOf(scoped.dryRunScript, `${scoped.label} --dry-run`);
+      if (!("stdout" in dry)) return dry;
+      let args: Input | undefined;
       try {
-        const args: unknown = JSON.parse(run.stdout);
-        if (isRecord(args)) return { args };
+        const parsed: unknown = JSON.parse(dry.stdout);
+        if (isRecord(parsed)) args = parsed;
       } catch {
         // Not JSON: reported below.
       }
-      return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
+      if (args === undefined) {
+        const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
+        return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
+      }
+      // An upload given with `--path` prints the path, not the text: the gate reads the file and adds
+      // its text as `content`, so the model sees one shape for both forms of the upload.
+      if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
+        return { args };
+      // A relative path resolves where the command runs: after its own `cd`, which bash resolves
+      // (CDPATH included), so the gate asks bash for that directory rather than guessing it.
+      let base = cwd;
+      if (scoped.cdScript !== undefined) {
+        const reached = await stdoutOf(scoped.cdScript, `${scoped.label}'s cd`);
+        if (!("stdout" in reached)) return reached;
+        base = reached.stdout.trim();
+      }
+      const file = path.resolve(base, args.path);
+      let content: string | undefined;
+      try {
+        content = deps.readFile(file);
+      } catch (error) {
+        return { failure: `${scoped.label}: ${file} could not be read: ${messageOf(error)}` };
+      }
+      if (content === undefined)
+        return { failure: `${scoped.label}: ${file}, which --path names, does not exist` };
+      return { args: { ...args, content } };
     };
 
     /** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
@@ -1620,7 +1694,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 base,
                 key,
                 scoped.rebuttal,
-                COMMAND_OVERRIDE
+                COMMAND_OVERRIDE,
+                scoped.upload === true
               );
             }
           }
