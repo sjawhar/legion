@@ -15,8 +15,8 @@ export interface SessionTitleEnvironment {
  */
 export type SessionTitle = (sessionId: string) => string
 
-/** What `tmux -S <socket> display-message -p` prints for `pane` and `format`; undefined when tmux
- *  cannot say. */
+/** What `tmux -u -S <socket> display-message -p` prints for `pane` and `format`; undefined when
+ *  tmux cannot say. */
 export type TmuxQuery = (socket: string, pane: string, format: string) => string | undefined
 
 // `automatic-rename` is the window option, which tmux expands as a format variable (1 or 0). A
@@ -108,15 +108,17 @@ export function isAncestor(candidate: string, pid: number = process.pid): boolea
 }
 
 /**
- * `tmux -S <socket> display-message -p -t <pane> <format>`; undefined when tmux is missing, slow
+ * `tmux -u -S <socket> display-message -p -t <pane> <format>`; undefined when tmux is missing, slow
  * or refuses, or prints nothing: a running tmux server answers a pane it does not have with an
- * empty line and exit status 0 (tmux 3.7b), not an error.
+ * empty line and exit status 0 (tmux 3.7b), not an error. `-u`, because the format's fields are
+ * tab-separated, and tmux prints a tab as `_` to a client that has neither `TMUX` nor a UTF-8
+ * locale in its environment; the daemon's `utf8Argv` passes it for the same reason.
  */
 export function queryTmux(socket: string, pane: string, format: string): string | undefined {
   try {
     const answer = execFileSync(
       "tmux",
-      ["-S", socket, "display-message", "-p", "-t", pane, format],
+      ["-u", "-S", socket, "display-message", "-p", "-t", pane, format],
       {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],

@@ -540,9 +540,11 @@ func (r *rig) recorded() [][]string {
 	return slices.Clone(r.argvs)
 }
 
-// tmux runs a command against the rig's server as a bystander would: not through the runtime.
+// tmux runs a command against the rig's server as a bystander would: not through the runtime. It
+// passes `-u`, as utf8Argv does, since a test reads some listings split on tabs and tmux prints a
+// tab as `_` to a client with neither TMUX nor a UTF-8 locale in its environment.
 func (r *rig) tmux(args ...string) (string, error) {
-	cmd := exec.Command("tmux", append([]string{"-L", "legion-" + r.project}, args...)...)
+	cmd := exec.Command("tmux", append([]string{"-u", "-L", "legion-" + r.project}, args...)...)
 	cmd.Env = r.environ
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err

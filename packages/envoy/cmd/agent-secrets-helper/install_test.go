@@ -33,7 +33,7 @@ func newInstallRig(t *testing.T) *installRig {
 	t.Helper()
 	// TMPDIR may sit behind a symlink; install writes the resolved path, so the rig's binary
 	// lives at one. The socket keeps the short unresolved path (unix socket paths are capped).
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	real, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)

@@ -71,9 +71,10 @@ func newContractRig(t *testing.T, options ...brokertest.Option) *contractRig {
 // at broker's URL and OperatorFile, keeping its login at machineFile and sending its broker calls
 // through client, both logging to logBuf through one logger, and starts it as
 // cmd/agent-secrets-helper does: the Broker resumes any login machineFile holds, then the Server
-// recovers its sessions and listens. Every socket/registry/operator artifact lives under its own
-// TempDir, never under $HOME — the caller is expected to have set HOME to a separate,
-// otherwise-untouched TempDir of its own so it can later assert nothing wrote there.
+// recovers its sessions and listens. Every registry/operator artifact lives under its own TempDir
+// and the socket under a short temporary directory of its own, never under $HOME — the caller is
+// expected to have set HOME to a separate, otherwise-untouched TempDir of its own so it can later
+// assert nothing wrote there.
 func startContractHelper(t *testing.T, broker *brokertest.Rig, machineFile string, client *http.Client) *contractRig {
 	t.Helper()
 	artifacts := t.TempDir()
@@ -89,7 +90,7 @@ func startContractHelper(t *testing.T, broker *brokertest.Rig, machineFile strin
 		Log:      log,
 		MinRenew: 50 * time.Millisecond,
 	}
-	cr.sock = filepath.Join(artifacts, "helper.sock")
+	cr.sock = filepath.Join(shortTempDir(t), "helper.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: cr.sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)

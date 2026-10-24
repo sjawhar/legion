@@ -47,6 +47,18 @@ func buildAgentSecrets(t *testing.T) string {
 	return binary
 }
 
+// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
+// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ast")
+	if err != nil {
+		t.Fatalf("make a temporary directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on
 // call counts (e.g. "no second ask", "never entered the polling loop") instead of only on the
 // final observable outcome, plus (guarded by mu) the last session_id POST /v1/requests recorded
@@ -1007,7 +1019,7 @@ func fakeLoginHelper(t *testing.T, code string, states []string) string {
 // fakeLoginHelperAt is fakeLoginHelper whose login answer names verificationURI.
 func fakeLoginHelperAt(t *testing.T, code, verificationURI string, states []string) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)

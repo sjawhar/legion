@@ -31,7 +31,7 @@ import (
 // request — the pidfd pin only Linux provides.
 func fakeHelperWithPids(t *testing.T, canned helper.Response) (string, <-chan int) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func serveRealHelper(t *testing.T, brokerURL, operator string) (*helper.Server, 
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MinRenew: 50 * time.Millisecond,
 	}
-	sock := filepath.Join(dir, "helper.sock")
+	sock := filepath.Join(shortTempDir(t), "helper.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
