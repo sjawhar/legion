@@ -18,7 +18,7 @@ import (
 // received.
 func fakeHelperByOp(t *testing.T, answers map[string]helper.Response) (string, <-chan helper.Request) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)

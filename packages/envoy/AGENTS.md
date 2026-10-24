@@ -2444,17 +2444,26 @@ secrets), and a write also refuses any ARN but `assumed-role/AWSReservedSSO_*/<s
 account (`requireWriteSignIn`, naming the ARN, in any AWS partition). `--owner me` is that session
 name lowercased; create and retag refuse it before writing unless it matches the broker's email
 rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
-(`gcloud auth application-default login`) and calls Secret Manager itself under
-`cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
-write. GCP's requireAccount is a no-op, unlike AWS's: every call already names
-`projects/<project number>/...` explicitly, so a wrong-project identity gets a real refusal from
-the API itself rather than silently reading another project's secrets - the hazard AWS's
-`ListSecrets` (which takes no project parameter) has and GCP's calls do not.
+(`google.FindDefaultCredentials`: the file `GOOGLE_APPLICATION_CREDENTIALS` names whenever it is
+set, else `~/.config/gcloud/application_default_credentials.json` whatever `CLOUDSDK_CONFIG` says,
+else the metadata server; a load that fails while `GOOGLE_APPLICATION_CREDENTIALS` is set names
+that variable and advises no sign-in, since no other file is read while it is set, and one that
+fails while it is unset advises the refusal's route below, `gcpPersonRoute`) and calls
+Secret Manager itself under `cloud.google.com/go/secretmanager`, so IAM in that project decides
+what the person may read or write. GCP's requireAccount is a no-op, unlike AWS's: every call
+already names `projects/<project number>/...` explicitly, so a wrong-project identity gets a real
+refusal from the API itself rather than silently reading another project's secrets - the hazard
+AWS's `ListSecrets` (which takes no project parameter) has and GCP's calls do not.
 A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
-service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC carries no
-JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
-the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
-lowercased.
+service account key file, a workload identity federation credential (a dev box's own), a workforce
+identity federation sign-in, or a GCE/GKE metadata-server identity (GKE Workload Identity's too),
+whose ADC carries no JSON at all - (`gcpBackend.requireWriteSignIn`). The refusal names what it
+found (`gcpCredsFound`) and `gcpPersonRoute`, the route that leaves the machine's identity alone:
+`gcloud auth login --no-activate` (which writes `legacy_credentials/<email>/adc.json` and keeps the
+active gcloud account), then the command again with `GOOGLE_APPLICATION_CREDENTIALS` naming that
+file, never `gcloud auth application-default login`, which replaces a machine's own ADC for every
+program that uses it. `--owner me` is the Google userinfo endpoint's `email` for the signed-in
+Application Default Credentials, lowercased.
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the

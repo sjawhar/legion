@@ -157,6 +157,10 @@ func (b *awsBackend) requireWriteSignIn(ctx context.Context) (string, error) {
 	return requireWriteSignIn(ctx, b.st, b.settings)
 }
 
+// signInPrefix is empty: an AWS sign-in a printed command needs is its --profile, which
+// pipeCommand writes itself.
+func (b *awsBackend) signInPrefix() string { return "" }
+
 func (b *awsBackend) list(ctx context.Context) ([]secretView, error) {
 	views := []secretView{}
 	pages := secretsmanager.NewListSecretsPaginator(b.sm, &secretsmanager.ListSecretsInput{

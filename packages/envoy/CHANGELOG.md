@@ -1045,6 +1045,20 @@
 
 ### Fixed
 
+- `agent-secrets secret` no longer tells a person on a machine whose Application Default
+  Credentials are its own identity (a dev box's workload identity federation credential, a
+  service account key, the metadata server's identity) to run
+  `gcloud auth application-default login`, which replaces that identity for every program that
+  uses it. A refused GCP write names where its credentials came from and their `type`, and the
+  route that leaves the machine's identity alone: `gcloud auth login --no-activate`, then the
+  command again with `GOOGLE_APPLICATION_CREDENTIALS` naming the
+  `legacy_credentials/<your email>/adc.json` that login keeps. A load that finds no credentials
+  advises the same route, one that fails while `GOOGLE_APPLICATION_CREDENTIALS` is set names that
+  variable instead of advising a sign-in, and the `--profile` refusal under the GCP store no
+  longer advises one either. A command line `create` or `set` prints for running again (`pipe the
+  value in: … < FILE`) starts with that `GOOGLE_APPLICATION_CREDENTIALS=…` when it was set, so it
+  signs in with the same file.
+
 - A publish to an ad-hoc topic (`envoy_publish` to a `notifications.` topic no stream subject
   captures, such as `notifications.team.deploy-squad`) reaches its subscribers again, and is
   answered at once. The listener sends such a topic over core NATS, confirmed as a role lane is

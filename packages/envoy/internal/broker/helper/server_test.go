@@ -33,6 +33,18 @@ type rig struct {
 	parentOf atomic.Pointer[func(int) (int, error)]
 }
 
+// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
+// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "hlp")
+	if err != nil {
+		t.Fatalf("make a temporary directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
 // log it in (see rig.login) before any Enroll — machine session or box — can succeed, since Task
 // 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
@@ -71,7 +83,7 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		}
 		return PeerOf(conn)
 	}
-	r.sock = filepath.Join(t.TempDir(), "helper.sock")
+	r.sock = filepath.Join(shortTempDir(t), "helper.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: r.sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -106,8 +118,8 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		cancel()
 		// Serve's own ctx.Done() watcher goroutine closes (and so unlinks) the unix socket
 		// asynchronously; wait for Serve itself to return — which only happens after that
-		// Close — so the socket is gone before this test's t.TempDir() cleanup removes the
-		// directory it lives in.
+		// Close — so the socket is gone before shortTempDir's cleanup removes the directory it
+		// lives in.
 		<-served
 	})
 	r.srv.Recover(ctx)

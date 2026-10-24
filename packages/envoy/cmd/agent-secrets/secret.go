@@ -334,9 +334,10 @@ func shellWord(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// pipeCommand is the command line a form names for piping a value in: agent-secrets, then words,
-// then --profile as the person gave it, each shell-quoted, so running it signs in the same way.
-func pipeCommand(profile string, words ...string) string {
+// pipeCommand is the command line a form names for piping a value in: prefix (the backend's
+// signInPrefix), agent-secrets, then words, then --profile as the person gave it, each
+// shell-quoted, so running it signs in the same way.
+func pipeCommand(prefix, profile string, words ...string) string {
 	if profile != "" {
 		words = append(words, "--profile", profile)
 	}
@@ -344,7 +345,7 @@ func pipeCommand(profile string, words ...string) string {
 	for i, w := range words {
 		quoted[i] = shellWord(w)
 	}
-	return "agent-secrets " + strings.Join(quoted, " ")
+	return prefix + "agent-secrets " + strings.Join(quoted, " ")
 }
 
 // readSecretValue reads the value of the secret name for a form. At a terminal it prompts on
@@ -453,9 +454,14 @@ type secretBackend interface {
 	// secrets. AWS only: GCP needs no equivalent (gcpBackend.requireAccount says why).
 	requireAccount(ctx context.Context) error
 	// requireWriteSignIn refuses, before any write, a sign-in that must not write - AWS a
-	// machine's own role, GCP a service-account identity - and answers the signed-in person's
-	// lowercased email for --owner me.
+	// machine's own role, GCP any but a person's own Google Account sign-in - and answers the
+	// signed-in person's lowercased email for --owner me.
 	requireWriteSignIn(ctx context.Context) (email string, err error)
+	// signInPrefix is the shell assignment a command line the form prints for running again
+	// (pipeCommand) needs to sign in as this one did when the sign-in came from a variable set
+	// for this command alone: GCP's GOOGLE_APPLICATION_CREDENTIALS when set, else "". It ends in
+	// a space when it is not empty.
+	signInPrefix() string
 
 	list(ctx context.Context) ([]secretView, error)
 	show(ctx context.Context, slug string) (secretView, error)
@@ -536,7 +542,7 @@ func openSecretBackend(ctx context.Context, profile string, settings Settings) (
 		return &awsBackend{settings: settings, sm: sm, st: st}, nil
 	case secrets.StoreGCP:
 		if profile != "" {
-			return nil, usageErr{fmt.Errorf("--profile names an AWS profile; this broker's store is %s, which uses your Application Default Credentials (gcloud auth application-default login), not --profile", settings.Store)}
+			return nil, usageErr{fmt.Errorf("--profile names an AWS profile; this broker's store is %s, which uses your Application Default Credentials, not --profile (set GOOGLE_APPLICATION_CREDENTIALS to use another credentials file for one command)", settings.Store)}
 		}
 		if err := checkSettingsKMSKeyName(settings); err != nil {
 			return nil, err
@@ -823,7 +829,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if *maxGrant != "" {
 		command = append(command, "--max-grant", *maxGrant)
 	}
-	value, err := readSecretValue(name, pipeCommand(*profile, command...), stderr)
+	value, err := readSecretValue(name, pipeCommand(s.backend.signInPrefix(), *profile, command...), stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
@@ -856,7 +862,7 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 		return secretFail(stderr, form, err)
 	}
 	defer s.Close()
-	value, err := readSecretValue(name, pipeCommand(*profile, "secret", "set", name), stderr)
+	value, err := readSecretValue(name, pipeCommand(s.backend.signInPrefix(), *profile, "secret", "set", name), stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
