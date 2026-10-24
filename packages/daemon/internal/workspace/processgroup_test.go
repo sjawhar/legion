@@ -59,7 +59,11 @@ func (r *shortTimeoutRunner) Timeout() time.Duration { return r.run.Timeout() }
 func (r *shortTimeoutRunner) Run(ctx context.Context, command Command) (Result, error) {
 	if commandWith(command.Argv, "git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets") {
 		rewritten := append([]string(nil), command.Argv...)
-		rewritten[4] = r.remote
+		for i, arg := range rewritten {
+			if arg == "https://github.com/acme/widgets" {
+				rewritten[i] = r.remote
+			}
+		}
 		command.Argv = rewritten
 		command.Timeout = r.timeout
 	}

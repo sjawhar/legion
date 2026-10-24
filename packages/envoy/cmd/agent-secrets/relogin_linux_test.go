@@ -55,8 +55,8 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 		t.Fatalf("read the minted credential's expiry: %v", err)
 	}
 	// A week less the seconds the test has run so far.
-	expiry := prefix + "the launcher credential expires at " + minted.UTC().Format(time.RFC3339) + " (in 6d23h"
-	const expiryEnd = "m); the broker has no renewal, so a new machine login a human approves must replace it before then\n"
+	expiry := prefix + "the machine login renews itself; without a refresh it lapses at " + minted.UTC().Format(time.RFC3339) + " (in 6d23h"
+	const expiryEnd = "m)\n"
 	if stdout, stderr, exit := loginStatus(); exit != 0 || stdout != "issued\n" || !strings.HasPrefix(stderr, expiry) || !strings.HasSuffix(stderr, expiryEnd) || strings.Count(stderr, "\n") != 1 {
 		t.Fatalf("login-status after the approved login: exit %d, stdout %q, stderr %q; want 0, %q, %q…%q", exit, stdout, stderr, "issued\n", expiry, expiryEnd)
 	}

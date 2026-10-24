@@ -5,9 +5,10 @@ sidebar:
   order: 5
 ---
 
-Before you start, the agent's machine needs `agent-secrets-helper serve` running, with its operator
-(the person who approves for the machine) named in `~/.config/agent-secrets/operator`, and
-`AGENT_SECRETS_URL` set to the broker's address, for the helper and in the shells agents start
+Before you start, the agent's machine needs the helper installed and running
+(`agent-secrets-helper install --url <broker address>`), with its operator (the person who approves
+for the machine) named in `~/.config/agent-secrets/operator`, and `AGENT_SECRETS_URL` set to the
+broker's address in the shells agents start
 from. The video's machine also sets `AGENT_SECRETS_APPROVE_URL` to Dispatch's address, which makes
 the commands below print the Dispatch page to open.
 [Log a machine in](/legion/broker/guides/log-a-machine-in/) sets all of this up.
@@ -31,7 +32,8 @@ it, the page lists it under **Machine logins**, where **Revoke** would end it an
 it started ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)),
 and the login on the machine returns. `agent-secrets machine login-status` checks the machine
 login at any time: it prints `issued` while the machine holds one, and says when that login
-expires. The broker does not renew it, so before then a person must approve a new machine login.
+lapses. The helper refreshes it every day, and resumes it after a restart, so the machine logs in
+once.
 
 ![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons, and below them the machine logins list, empty until she approves](/legion/media/broker/machine-login.png)
 

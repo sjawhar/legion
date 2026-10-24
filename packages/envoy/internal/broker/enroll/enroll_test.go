@@ -12,6 +12,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -443,6 +444,38 @@ func TestReplayReportsFreshOnceThenSeen(t *testing.T) {
 	fresh, err = svc.Replay(ctx, jti, expires)
 	if err != nil || fresh {
 		t.Fatalf("Replay(second, same jti) = fresh=%v err=%v, want fresh=false", fresh, err)
+	}
+}
+
+// TestReplayRecordsInTheTransactionItIsHanded pins that Replay handed a transaction's context
+// (oauthstore.WithTx) records the jti in that transaction alone: on a one-connection pool the
+// transaction holds, it answers without a second connection, a repeat in the same transaction is
+// seen, and a rollback forgets the jti.
+func TestReplayRecordsInTheTransactionItIsHanded(t *testing.T) {
+	svc := newService(t, "pool_max_conns=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	expires := time.Now().Add(time.Hour)
+	jti := uuid.New().String()
+
+	tx, err := svc.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pool's close waits for this connection, so a failure below must still release it.
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	txCtx := oauthstore.WithTx(ctx, tx)
+	if fresh, err := svc.Replay(txCtx, jti, expires); err != nil || !fresh {
+		t.Fatalf("Replay(first, in the transaction) = fresh=%v err=%v, want fresh=true", fresh, err)
+	}
+	if fresh, err := svc.Replay(txCtx, jti, expires); err != nil || fresh {
+		t.Fatalf("Replay(second, in the transaction) = fresh=%v err=%v, want fresh=false", fresh, err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, err := svc.Replay(ctx, jti, expires); err != nil || !fresh {
+		t.Fatalf("Replay(after the rollback) = fresh=%v err=%v, want fresh=true", fresh, err)
 	}
 }
 

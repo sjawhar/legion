@@ -97,6 +97,13 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/launcher-credentials/token", public((*server).tokenLogin)},
 		// Poll a machine login by its pending id; once approved, answers its credential's id.
 		{http.MethodGet, "/v1/launcher-credentials/{pending}", public((*server).readMachineLogin)},
+		// Start a person's machine login as an OAuth device authorization (RFC 8628): answers the
+		// device code the machine polls with and the code the person types. Rate-limited per source
+		// address like the login above; mounted only when the broker runs its OAuth provider.
+		{http.MethodPost, "/v1/oauth/device_authorization", public((*server).deviceAuthorization)},
+		// Exchange an approved device code, or a refresh token, for a DPoP-bound token pair naming the
+		// machine login's launcher credential; mounted only when the broker runs its OAuth provider.
+		{http.MethodPost, "/v1/oauth/token", public((*server).oauthToken)},
 		// Extend the calling session's lease.
 		{http.MethodPost, "/v1/enrollments/{id}/renew", renewAuth((*server).renewEnrollment)},
 		// Describe the calling session's enrollment and its live grants.
@@ -145,6 +152,10 @@ func routes() []apiRoute {
 		// and every session it enrolled ends. A service's login is not found here, like an unknown
 		// id. Revoking the calling machine's own login ends this machine's access.
 		{http.MethodPost, "/v1/operator/machines/{id}/revoke", launcherAuth((*server).revokeOperatorMachine)},
+		// Retire the calling machine login after its machine logged in again: it enrolls nothing
+		// more and cannot refresh, while the sessions it enrolled keep running and renewing with their
+		// own keys. {id} must be the calling credential.
+		{http.MethodPost, "/v1/operator/machines/{id}/retire", launcherAuth((*server).retireOperatorMachine)},
 		// List the live grants of the operator's sessions and those the operator approved, exactly as
 		// Dispatch's Live grants page lists them.
 		{http.MethodGet, "/v1/operator/grants", launcherAuth((*server).listOperatorGrants)},

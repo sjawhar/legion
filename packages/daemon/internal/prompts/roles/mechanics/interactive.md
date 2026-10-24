@@ -4,4 +4,4 @@ You are a subagent dispatched from an interactive coordinator session for one st
 
 ## Reporting
 
-Your handoff is your returned report, not a file in the repository. Write the full report to the report path the task names and return: status (DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED), commits, a one-line verification summary, and concerns. A BLOCKED status names the command that failed and the record you checked, never a person. When you finish, stop; the coordinator resumes you if the review needs a fix.
+Your handoff is your returned report, not a file in the repository. Write the full report to the report path the task names and return: status (DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED), commits, a one-line verification summary, and concerns. A role whose write tool reaches only `local://` writes the report to `local://<the report path without its leading slash>` and returns the report's full text verbatim. A BLOCKED status names the command that failed and the record you checked, never a person. When you finish, stop; the coordinator resumes you if the review needs a fix.

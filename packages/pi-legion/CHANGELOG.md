@@ -78,6 +78,40 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   message. The `legion-retro` skill also gives a retro worker the cure for a head it has already
   pushed with the line.
 
+- No Legion role, and no subagent of one, files an issue for a problem it finds outside its own
+  issue. It opens a `dispatch ask` on the controller's report issue instead, naming the issue it
+  came from and where the fix belongs (and that it is not Legion's when it is not), with its
+  evidence in a comment the ask cites, a recommendation, and the options `File an issue`,
+  `Do not file` and, when the project maps the repository, `File it for Legion`. The report issue
+  never closes, so the ask stays answerable when its issue merges. The asker publishes the ask's
+  reference to the controller topic; the controller follows it, files only what the person's answer
+  asks for (with the `legion` label only when the answer asks Legion to work it), and replies under
+  the ask `Filed dispatch://<KEY>` or `Not filed: <reason>`. At each start it follows the report
+  issue's open asks and acts on any answered one with no such reply. The new
+  `skill://legion-worker/references/findings.md` holds the rule; the `dispatch-first` and
+  `dispatch` skills, every Legion skill and the phase workers' and architects' role prompts point
+  to it. An architect still files the children of its own tree; a review-round-cap split on a root
+  becomes a finding ask, and on a child a sibling under the same parent.
+- The production check's `fail` is a finding ask on the report issue rather than an issue of its
+  own: the `legion-worker` merge-gate reference, the `legion-architect` and `legion-retro` skills,
+  the implementer's role prompts and the daemon's check task say so, the implementer publishes the
+  ask to the controller, and the `Production:` line names the ask.
+- The controller starts no work on its own. "Keeping the slots full", the walk that labelled and
+  admitted the highest-priority `todo` issue whenever a slot was free, is gone: a free slot is
+  never a reason to label or admit an issue, the controller never sets a parked issue back to
+  `todo` to fill one, and the `slot-free`, `todo` and `tick` wakes the daemon still sends take
+  nothing. Work reaches Legion only when a person labels it, or asks the controller to (a message,
+  a Slack request, an answer to a finding ask). Every issue the controller files for a person
+  carries one spec line, `Filed for <person> at their request: <request>`, naming the answered
+  ask, the Slack message or the direct message. Triage admits a labelled root only when a person
+  set the label, or the controller's own session filed it with that line (for an ask, the session
+  whose `Filed dispatch://<KEY>` reply follows a `File it for Legion` answer), and asks a person
+  about any other. A Slack mention a bot posted gets an answer, never an issue or a label. When
+  the report issue is found closed, the controller reopens it into `icebox`. Re-filing a
+  child as an independent root is an ask the controller opens, acted on only on the person's yes.
+  Stopped-session recovery moves work to Legion only on a person's ruling the weekly plan records,
+  no longer when a session's handoff or a plan row of the controller's own says so.
+
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
   request's remote CI and any `sleep` loop, and the `CI` line names each run's state as GitHub shows
@@ -87,7 +121,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   that red until a later settlement or a reviewer read it.
 - The architect decides each `review_round_cap` notice in the turn it wakes, and posts the decision
   on the issue: narrow the next rounds to named acceptance lines, split the part that cannot settle
-  into an issue of its own blocked by this one, or let rounds that each found less than the one before run on. The daemon's cap
+  off (a sibling child under the same parent, or, on a root, a finding ask whether the rest needs
+  an issue), or let rounds that each found less than the one before run on. The daemon's cap
   still notifies only.
 
 - **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and

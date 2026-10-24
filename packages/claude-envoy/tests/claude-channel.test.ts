@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -12,6 +12,7 @@ import {
   claudeCommandLine,
   installedMarketplace,
   loadedMarketplace,
+  managedSettingsDirectory,
   processCommandLine,
 } from "../src/claude-channel"
 
@@ -82,26 +83,36 @@ test("a server: entry naming this plugin's server loads it, as Claude Code match
   ).toEqual({ loaded: true })
 })
 
-const node = Bun.which("node")
+const nodeOnPath = Bun.which("node")
 
-test.skipIf(node === null)(
+test.skipIf(nodeOnPath === null)(
   "a Node process that set its title cannot be read, whatever its executable is named",
   async () => {
+    // The Node binary itself, as Node names it: the first `node` on PATH may be a launcher that
+    // execs Node later (mise's shim does), and until it does the command line is the launcher's.
+    // Asked here, not as the file loads, so a broken `node` fails this test alone.
+    const node = execFileSync(nodeOnPath ?? "node", ["-p", "process.execPath"], {
+      encoding: "utf8",
+    }).trim()
     // Node writes process.title over its argument area and pads the rest with NULs; a versioned
     // Node (`node-22`) is not named `node`, so the padding, not the name, is what says so.
     const child = spawn(
-      node ?? "node",
+      node,
       [
         "-e",
-        'process.title = "claude"; setTimeout(() => {}, 5000)',
+        'process.title = "claude"; console.log("titled"); setTimeout(() => {}, 5000)',
         "--",
         "--dangerously-load-development-channels",
         "x",
       ],
-      { stdio: "ignore" },
+      { stdio: ["ignore", "pipe", "ignore"] },
     )
     try {
-      await Bun.sleep(300)
+      // Read the command line once the child says its title is set, within the test's timeout.
+      const titled = Promise.withResolvers<void>()
+      child.stdout.once("data", () => titled.resolve())
+      child.once("exit", () => titled.reject(new Error("node exited before it set its title")))
+      await titled.promise
       const pid = child.pid ?? 0
       expect(processCommandLine(pid, () => "/usr/bin/node-22")).toBe(undefined)
       expect(processCommandLine(pid, () => "/bin/cat")).toBe(undefined)
@@ -286,12 +297,13 @@ test("a development channel naming this plugin is loaded", () => {
   ).toEqual({ loaded: true })
 })
 
-test("--channels loads this plugin only when an org allowlist names it", () => {
+test("--channels loads this plugin only when the managed settings allowlist names it", () => {
   const commandLine = exact("--channels", "plugin:claude-envoy@legion-plugins")
+  const where = `${join(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`
   expect(claudeChannelGate({ commandLine, plugin, allowlist: ORG_LIST })).toEqual({ loaded: true })
   expect(claudeChannelGate({ commandLine, plugin, allowlist: undefined })).toEqual({
     loaded: false,
-    why: "plugin:claude-envoy@legion-plugins is not on Claude Code's approved channels allowlist (an organization adds it with allowedChannelPlugins in managed settings; for one session use --dangerously-load-development-channels plugin:claude-envoy@legion-plugins)",
+    why: `plugin:claude-envoy@legion-plugins is not on Claude Code's approved channels allowlist (add it to allowedChannelPlugins in ${where}; for one session use --dangerously-load-development-channels plugin:claude-envoy@legion-plugins)`,
   })
   expect(
     claudeChannelGate({
@@ -301,7 +313,7 @@ test("--channels loads this plugin only when an org allowlist names it", () => {
     }),
   ).toEqual({
     loaded: false,
-    why: "plugin:claude-envoy@legion-plugins is not on your organization's approved channels list (allowedChannelPlugins in managed settings)",
+    why: `plugin:claude-envoy@legion-plugins is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${where})`,
   })
 })
 

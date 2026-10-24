@@ -4,6 +4,31 @@
 
 ### Fixed
 
+- The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
+  the calling process's environment: tmux printed the tabs as `_` to a process with neither `TMUX`
+  nor a UTF-8 locale, and the answer read as one field. A Claude Code session in a tmux pane has
+  `TMUX`, so its title was not affected; the real-tmux test, which ran tmux without `-u`, failed in
+  such an environment and now passes. The daemon's real-tmux test rig reads tmux with `-u` too.
+
+- The `dispatch` command (`dist/dispatch.js`) waits at most 1 s for tmux to name the session's
+  pane, then kills the tmux client and sends the call without the pane. A tmux client waiting to
+  connect to a tmux server too busy to accept caught the SIGTERM of the lookup's 5 s timeout and
+  kept waiting, and the command waited for it, so a `dispatch` call from a pane of a loaded shared
+  tmux server took up to 85 s.
+
+- The README and Dispatch's Agents page guide say to restart Claude Code once after its first
+  launch on a new profile and to check that its banner says the channel is loaded: a first launch
+  can come up with `--channels ignored` (all four new profiles tried whose key came only from an
+  `apiKeyHelper`, measured on 2.1.309), dropping every channel message while the session
+  advertises Aside, so Dispatch records the message as sent. They also say that the first launch's
+  "waiting for your organization's policy … Messages are dropped" banner stays up after the policy
+  loads, while messages already reach the model. The README's "Enable the channel" section says
+  whoever administers the machine writes the managed settings.
+
+- A session whose `--channels` entry is not allowlisted says where the allowlist goes: the
+  machine's `managed-settings.json` (`/etc/claude-code/managed-settings.json` on Linux), or the
+  server-managed settings when the account receives them, where it said an organization adds it.
+
 - The `dispatch` command (`dist/dispatch.js`) ends a write's cadence advice (three or more
   messages on an issue with no human response) with that line, opening `Posted.`, so a tail of
   the output shows the write went through; `dispatch issue --help` says `--priority` takes a

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -39,7 +40,8 @@ func tableRows(t *testing.T, stdout string) (header []string, rows [][]string) {
 // returns its helper.Broker and the launcher credential its approval minted.
 func loggedInElsewhere(t *testing.T, rig *brokertest.Rig, host string) (*helper.Broker, string) {
 	t.Helper()
-	b := &helper.Broker{URL: rig.URL, OperatorFile: rig.OperatorFile, HTTP: http.DefaultClient}
+	b := &helper.Broker{URL: rig.URL, OperatorFile: rig.OperatorFile, MachineFile: filepath.Join(t.TempDir(), "machine.json"), HTTP: http.DefaultClient}
+	t.Cleanup(b.Close)
 	code, err := b.Login(context.Background(), host)
 	if err != nil {
 		t.Fatalf("log %s in: %v", host, err)

@@ -53,8 +53,8 @@ func unlabelledTodo(key string) intake.DispatchIssue {
 	return intake.DispatchIssue{Key: key, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: key, Rank: "M"}
 }
 
-// An issue nobody handed to Legion moving into todo is a new candidate for the controller's walk,
-// which otherwise runs only at its start and when a slot frees. It wakes a registered controller
+// An issue nobody handed to Legion moving into todo wakes a registered controller, which takes
+// nothing for it (skill://legion-controller, "Free slots"). It wakes a registered controller
 // while a slot stands free, and never while every slot is taken or held for a waiting root. The
 // wake is due todoWakeDelay after the event, and until then every later event finds it pending,
 // so an edit burst is one wake even though the outbox publishes whatever is due at once.
@@ -101,7 +101,7 @@ func TestATodoIssueNotHandedToLegionWakesTheControllerWhileASlotIsFree(t *testin
 // The daemon's periodic tick wakes a registered controller whatever the slots, one wake while that
 // wake is still unpublished, named by the project. With every slot taken, it is the only wake a
 // tree waiting on a refused root claim gets: that tree holds its slot, its architect started
-// nothing, and only the controller's walk rechecks the claim. It is also the turn that posts the
+// nothing, and only the controller's turn rechecks the claim. It is also the turn that posts the
 // day's report on a day nothing else wakes the controller.
 func TestTheControllerTickWakesARegisteredControllerWhateverTheSlots(t *testing.T) {
 	tickNotice := []effect{{kind: record.OutboxKindControllerNotice, issue: testProject, payload: record.ControllerNotice{Kind: record.TickNotice}}}

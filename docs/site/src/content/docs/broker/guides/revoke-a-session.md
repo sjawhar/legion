@@ -136,10 +136,11 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
 
 ## End a machine's login
 
-A person's machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but its
-sessions outlive it: a session renews its lease with its own key, never with the machine's
-credential, so a box keeps working after the machine's credential expires, and so does a machine
-session while the helper that renews it runs. A login can be ended, with every session it enrolled,
+A person's machine login lapses `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after its last refresh, and
+its helper refreshes it at least daily, but its sessions outlive it either way: a session renews its lease
+with its own key, never with the machine's credential, so a box keeps working after the machine's
+credential expires, and so does a machine session while the helper that renews it runs. A login
+can be ended, with every session it enrolled,
 at any time: for a machine that is lost, compromised or no longer used, or a Legion daemon whose pods
 must lose their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine
 logins**: every machine logged in as you, and every service's login, such as the Legion daemon's,
@@ -151,7 +152,8 @@ that has expired stays listed, marked `expired, sessions still running`, while a
 enrolled still runs, so revoking every row a machine has ends every session it started, those of
 its earlier logins included. Click **Revoke** on its row and confirm. The broker then, at once:
 
-- refuses the login's credential, so it enrolls no more sessions; and
+- refuses the login's credential, so it enrolls no more sessions, and ends its refresh tokens, so
+  it cannot be refreshed; and
 - ends every session it enrolled (machine sessions and boxes, or every worker pod of the Legion
   daemon's login) as [ending a session](#end-a-session) does: each one's grants are revoked and its
   pending requests cancelled, and its next call is refused `PROOF_INVALID`.
@@ -209,8 +211,12 @@ agent-secrets machine list: the launcher credential is not valid (LAUNCHER_INVAL
 Nothing tells the machine's helper; it finds out the next time it calls the broker. A session's
 renewal, within a third of `BROKER_LEASE_SECONDS`, is refused; revoking that session's enrollment is
 refused too, and the helper drops the credential and logs at ERROR `the broker refused the launcher
-credential (…); cleared: no session can enroll until a human approves a new machine login`. From
-then `agent-secrets machine login-status` exits 1:
+credential (…); cleared: no session can enroll until a human approves a new machine login`. A
+helper with no session running finds out at its next refresh, within a day, or when it restarts:
+the broker refuses the refresh, and the helper drops the login, deletes its machine file and logs
+at ERROR `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
+token was reused; cleared: no session can enroll until a human approves a new machine login`. From
+then `agent-secrets machine login-status` exits 1 and prints the cause, here a refused session call:
 
 ```console
 $ agent-secrets machine login-status
@@ -218,18 +224,19 @@ expired
 agent-secrets machine login-status: the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets machine login
 ```
 
-A helper with no session running finds out when it next enrolls one. The Legion daemon finds out
-when it next enrolls or ends a pod: the broker refuses its credential `LAUNCHER_INVALID`, and the
+The Legion daemon finds out when it next enrolls or ends a pod: the broker refuses its credential
+`LAUNCHER_INVALID`, and the
 daemon logs in again with its Kubernetes token, under a new credential, unless its account is no
 longer in the broker's `BROKER_SERVICE_LOGINS`. The pods it had enrolled do not wait for that:
 their sessions ended with the revoke, so their agents' `agent-secrets` calls are refused
 `PROOF_INVALID` from then on. The daemon does not enroll a running pod again: each stays without
 secrets until the daemon replaces it, and only the pods launched after its new login are enrolled.
 
-Stopping the helper also stops the machine from enrolling sessions, since its credential lives only
-in the helper's memory, but it ends none. A machine session lapses within `BROKER_LEASE_SECONDS` once
-the helper stops, since the helper is what renews it. A box renews itself (`agent-secrets renew`),
-so it keeps working after the helper stops and after the machine's credential expires. Revoking the
+Stopping the helper stops the machine from enrolling sessions until it starts again, but it ends
+none, and the helper resumes its login when it starts. A machine session lapses within
+`BROKER_LEASE_SECONDS` once the helper stops, since the helper is what renews it. A box renews
+itself (`agent-secrets renew`), so it keeps working after the helper stops and after the machine's
+credential expires. Revoking the
 machine login ends both, and its row stays on the machine-login page while either runs, marked
 `expired, sessions still running` once the login has expired. Without Dispatch, end each box with
 `agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's

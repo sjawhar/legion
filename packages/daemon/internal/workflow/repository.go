@@ -93,7 +93,7 @@ func (e *Engine) NoteRepositoryKept(ctx context.Context, tx pgx.Tx, issue record
 	if changed == "" {
 		changed = "none"
 	}
-	note := fmt.Sprintf("Legion keeps %s as this issue's repository; the change to %s in Dispatch is not applied — an issue's repository is fixed when Legion records it. Create a new issue for %s instead.", issue.Repo, changed, changed)
+	note := fmt.Sprintf("Legion keeps %s as this issue's repository; the change to %s in Dispatch is not applied — an issue's repository is fixed when Legion records it. Work on %s needs an issue of its own, which a person decides on.", issue.Repo, changed, changed)
 	_, err := e.noteOnce(ctx, tx, issue.Key, resolved, note)
 	return err
 }

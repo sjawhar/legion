@@ -178,10 +178,16 @@ type Record struct {
 type Registry struct {
 	mu     sync.Mutex
 	saveMu sync.Mutex // serializes Save so the last rename is always the newest snapshot
+	// closed, set by Close under saveMu, makes every later Save write nothing.
+	closed bool
 	path   string
 	byPID  map[int]*Session
 	// parent reads a process's parent for the ancestry walks: procParent, or a test's fake.
 	parent func(int) (int, error)
+	// draining is set by Drain on a registry with no sessions and cleared only by Undrain: the
+	// helper is about to be restarted, and a session registered now would lose its grants to the
+	// restart.
+	draining bool
 }
 
 func NewRegistry(path string) *Registry {
@@ -253,23 +259,60 @@ func (r *Registry) RootOrUnknown(pid int) (*Session, error) {
 
 // addRootIfAbsent inserts sess as pid's session only if pid still has none, atomically with the
 // check — the race register() alone cannot close: two simultaneous registrations for one
-// unregistered pid must not both win. Returns the winning session and whether sess itself won.
-func (r *Registry) addRootIfAbsent(pid int, sess *Session) (*Session, bool) {
+// unregistered pid must not both win. Returns the winning session and whether sess itself won;
+// on a draining registry it inserts nothing and returns draining true.
+func (r *Registry) addRootIfAbsent(pid int, sess *Session) (winner *Session, won, draining bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.draining {
+		return nil, false, true
+	}
 	for _, s := range r.byPID {
 		if in, _ := descendsFrom(pid, s.PID, r.parent); in {
-			return s, false
+			return s, false, false
 		}
 	}
 	r.byPID[sess.PID] = sess
-	return sess, true
+	return sess, true, false
 }
 
-// Save writes every session's record, atomically, 0600.
+// Drain returns the live sessions and, only when there are none, marks the registry draining,
+// atomically with the check, so no session can register between an empty answer and the
+// restart it licenses.
+func (r *Registry) Drain() []*Session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*Session, 0, len(r.byPID))
+	for _, s := range r.byPID {
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		r.draining = true
+	}
+	return out
+}
+
+// Undrain clears what Drain set, for a restart that did not happen.
+func (r *Registry) Undrain() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.draining = false
+}
+
+// Draining reports whether Drain has marked the registry draining.
+func (r *Registry) Draining() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.draining
+}
+
+// Save writes every session's record, atomically, 0600. After Close it writes nothing.
 func (r *Registry) Save() error {
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
+	if r.closed {
+		return nil
+	}
 	recs := make([]Record, 0)
 	for _, s := range r.List() {
 		recs = append(recs, Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.recordedEnrollmentID()})
@@ -283,6 +326,17 @@ func (r *Registry) Save() error {
 		return err
 	}
 	return os.Rename(tmp, r.path)
+}
+
+// Close waits for a Save in progress, then makes every later Save write nothing, so a caller can
+// remove the directory the records live in while a registration, a retire or an enrollment is
+// still finishing: Serve returning does not wait for those, and each saves the records after the
+// registry has changed. A test's cleanup calls it; the helper never does, since a session retired
+// while the helper stops must still be recorded.
+func (r *Registry) Close() {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+	r.closed = true
 }
 
 // LoadRecords reads what Save wrote; no file means no sessions.

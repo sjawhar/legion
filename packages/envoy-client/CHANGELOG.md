@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
+  aborts the lookup and returns the origin without `tmux` and `pane`. An aborted `defaultExec` call
+  kills its child with SIGKILL. A tmux client waiting to connect to a tmux server too busy to
+  accept catches SIGTERM and keeps waiting, and execFile's 5 s timeout sent only SIGTERM and then
+  waited for the child, so a `dispatch` call from a pane of a loaded shared tmux server took up to
+  85 s. `ExecFn` now receives the call's `signal`, and every lookup is bounded by the caller rather
+  than by execFile: the jj and git lookups of `resolveCwdRepo` keep their 5 s each.
+
 - `renderAdvice` puts the cadence line last and opens it with `Posted.`, so a tail of a write's
   result shows the write succeeded rather than reading as a refusal.
 

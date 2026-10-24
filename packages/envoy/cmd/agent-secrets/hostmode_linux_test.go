@@ -31,7 +31,7 @@ import (
 // request — the pidfd pin only Linux provides.
 func fakeHelperWithPids(t *testing.T, canned helper.Response) (string, <-chan int) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -93,8 +93,10 @@ func realHelper(t *testing.T) string {
 
 // serveRealHelper serves a real helper.Server against the broker at brokerURL, with an operator
 // file naming operator (an email, as Dispatch names the person who approves) so a test can log it
-// in (Broker.Login). It waits for every session to be retired, and the server to stop, before the
-// test's temporary directories go.
+// in (Broker.Login). It waits for every session to be retired and the server to stop, then closes
+// the registry, which lets a save still finishing a registration, a retire or an enrollment
+// complete and makes any later one write nothing, and the broker, which does the same for its
+// machine file, before the test's temporary directories go.
 func serveRealHelper(t *testing.T, brokerURL, operator string) (*helper.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -104,13 +106,13 @@ func serveRealHelper(t *testing.T, brokerURL, operator string) (*helper.Server, 
 	}
 	srv := &helper.Server{
 		Registry: helper.NewRegistry(filepath.Join(dir, "sessions.json")),
-		Broker:   &helper.Broker{URL: brokerURL, OperatorFile: operatorFile, HTTP: http.DefaultClient},
+		Broker:   &helper.Broker{URL: brokerURL, OperatorFile: operatorFile, MachineFile: filepath.Join(dir, "machine.json"), HTTP: http.DefaultClient},
 		Hostname: "testhost",
 		PeerOf:   helper.PeerOf,
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MinRenew: 50 * time.Millisecond,
 	}
-	sock := filepath.Join(dir, "helper.sock")
+	sock := filepath.Join(shortTempDir(t), "helper.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +127,8 @@ func serveRealHelper(t *testing.T, brokerURL, operator string) (*helper.Server, 
 		}
 		cancel()
 		<-served
+		srv.Registry.Close()
+		srv.Broker.Close()
 	})
 	return srv, sock
 }
