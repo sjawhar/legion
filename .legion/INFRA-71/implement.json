@@ -2,50 +2,64 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-71",
-  "completed": "2026-10-21T16:10:00Z",
-  "round": "the tester's two findings, worked as the architect scoped them: two rules, each removing a class, and nothing else",
+  "completed": "2026-10-24T06:20:00Z",
+  "round": "generation 2, the plan's T1 to T4; T5 is blocked on a person applying dispatch://INFRA-206 and nothing of it is simulated here",
   "proof": [
     {
-      "criterion": "The tester's first finding — a numeric knob too large for the shell broke both of the script's promises: `LEGION_SETUP_BUDGET=9223372036854775808` exited 2 with dash's `Illegal number` (the one outcome the header says it cannot produce, which stops the role's agent), and `LEGION_SETUP_LOCK_HOLD=99999999999999999999` left the run holding the cache's lock past every bound.",
-      "surface": "The real script run by hand in a scratch workspace on this volume, and a throwaway copy of this tree with a hanging install and a `flock` contender; plus the script's 260-assertion suite, which carries the tester's own red cases.",
-      "command": "env LEGION_WORKSPACE=<scratch> LEGION_SETUP_BUDGET=9223372036854775807|9223372036854775808|99999999999999999999|270|08 sh scripts/legion-setup.sh ; then env … LEGION_SETUP_BUDGET=3 LEGION_SETUP_LOCK_HOLD=99999999999999999999 sh scripts/legion-setup.sh against a hanging install, timed ; bash scripts/legion-setup.test.sh",
-      "observed": "`9223372036854775808` and `99999999999999999999` now exit 0 with the default in force and the sentence in the report; `9223372036854775807`, the largest this shell can use, is still taken and runs the install; `08` is refused as before. The hold the tester measured still running at 25 s ends in **4 s measured** against a 3 s budget: `install-timeout`/124, the refusal at the head of its detail, no marker, and `/usr/bin/flock -w 2` takes the cache immediately afterwards. The suite reports `Results: 260 passed, 0 failed`, the tester's red cases among them and unmodified.",
-      "headSha": "a8bc03bc0627013688bed88dd2427de8de640e78",
-      "negativeControl": "The rule is the class, not the two values: a value reaches neither `$((…))` nor `[ … -le … ]` unless its text is a digit string this shell can work with — length first, then an equal-length string comparison against the largest it takes, so nothing unvalidated is ever compared numerically. That is what makes the hold's failure mode unreachable rather than handled: `[ 5 -le 99999999999999999999 ]` is itself an `Illegal number`, and its non-zero status took the `|| left=$hold` branch, which is how `timeout -k 5 <huge>` came to bound nothing."
+      "criterion": "Plan acceptance row 5 — the pull request is this issue's work alone, decided by machine rather than by a human reading the diff.",
+      "surface": "The branch itself, and GitHub's own file list for pull request #2092.",
+      "command": "jj diff --from 'fork_point(main@origin | @)' --name-only | sort ; gh pr view 2092 --repo sjawhar/legion --json files ; and the seven greps: grep -rl for repo-tool.sh, legion-setup, setup-report, first-turn-notice, check-check-commands, LEGION_SETUP_ and .legion-setup, excluding .jj, .legion and node_modules",
+      "observed": "Both lists are the same nine paths and no others: the four .legion/INFRA-71/*.json handoffs, AGENTS.md, docs/kubernetes.md, packages/contracts/fixtures/daemon-api/state.json, packages/daemon/docker/worker.Dockerfile and packages/daemon/internal/capabilities/capabilities.go. Six of the seven greps return nothing at all; `legion-setup` returns one line, packages/daemon/internal/runtime/sandbox/plugins_test.go:612, which is main's own fixture for a setup command that does not exist (`/nonexistent/legion-setup`) and is present at main@origin — not a leftover of this branch.",
+      "headSha": "75e45efdb78277cf7a10da45eb0a6574c3c11a92",
+      "negativeControl": "The plan's literal command, `jj diff --from main@origin --name-only`, lists several hundred paths today, because main has advanced 68 commits since this branch was cut and that command diffs against main's tip rather than the branch's base. The fork-point form is the same question asked of the base this branch actually has, and GitHub's own file list for the pull request agrees with it exactly — which is the check that matters, since the reviewer and the merger read GitHub."
     },
     {
-      "criterion": "The tester's second finding — the exemption marker must be a comment's business, and text that is not a shell comment bought a pass for a vulnerable command on the same line whenever the line's quotes did not balance.",
-      "surface": ".github/scripts/check-check-commands.sh against fixtures built as its own suite builds them, and its 179-case suite.",
-      "command": "a fixture whose scripts/probe.sh holds `echo \"see # check-check-commands: allow docs && bunx biome check .`, its single-quote twin, the balanced version of the same line, `echo don't # check-check-commands: allow …` and a balanced line carrying a genuine trailing marker ; then PYTHONPATH=/legion/pytools .github/scripts/check-check-commands.sh and .test.sh over the real tree",
-      "observed": "Both unbalanced lines are reported, as is the balanced one whose marker sits inside a string (round 2's case, still green). The line that names no pinned tool is still no problem of this gate's, and a balanced line's genuine trailing marker still exempts it — the marker remains a comment's business where there is a comment. The tree passes with 13 manifests, 8 workflows, 92 shell scripts and 551 guides, and the suite reports `Results: 179 passed, 0 failed`.",
-      "headSha": "a8bc03bc0627013688bed88dd2427de8de640e78",
-      "negativeControl": "The rule is one reading, not two quote characters: where the scan that judges the command says the text after a `#` is inside an unterminated quote, there is no comment there and therefore no marker — which is what `judge`'s own docstring already claimed. The second scan that tracked the other quote character is gone, so no spelling of the same trick survives it."
+      "criterion": "Plan acceptance row 6 — the capability row is true before and after the apply, with no test edited.",
+      "surface": "The daemon's own suites and the generated wire fixture the plugin parses.",
+      "command": "cd packages/daemon && go test ./internal/capabilities/ ./internal/api/ ; go test ./internal/api/ -update to regenerate the golden ; cd packages/contracts && bun test",
+      "observed": "Both Go packages pass (`ok … internal/capabilities 35.057s`, `ok … internal/api`), and contracts is 207 tests, 0 fail, parsing the regenerated fixture. The rendered detail now reads `dispatch://LEGION-5: reaches beyond the pod's own network: the pod is the boundary, except a workload a role starts where its deployment's cluster admits it, carrying the pod label that deployment's declaration names for a workload asking to be reachable, and the Service fronting that workload` — an exception a deployment grants, never a fact about every worker, which is what makes it true in a deployment that has not applied the declarations, this one included.",
+      "headSha": "75e45efdb78277cf7a10da45eb0a6574c3c11a92",
+      "negativeControl": "No test and no doc comment moved: the row keeps `Site: SiteWithheld` and `Ruling: \"dispatch://LEGION-5\"`, so both loops of capabilities_test.go:85 and the `Ruling` comment at capabilities.go:72-76 still hold as written. The golden was regenerated by its own command, never by hand; the proof that it follows the table rather than a hand edit is that the same command run again leaves it unchanged."
     },
     {
-      "criterion": "The repository's own checks at this head, since the install half changed again.",
-      "surface": "A throwaway copy of this tree on the issue volume with the packages installed by the script itself.",
-      "command": "sh scripts/legion-setup.sh ; ./node_modules/.bin/biome --version ; bun run typecheck and bun test in packages/pi-legion ; bun run lint . at the root",
-      "observed": "The install exits 0, biome is `Version: 2.4.11`, typecheck is clean, `bun test` is 531 tests and 0 failed, and the whole-tree Biome run is `Checked 1079 files`, exit 0.",
-      "headSha": "a8bc03bc0627013688bed88dd2427de8de640e78",
-      "negativeControl": "In this issue's own workspace, which has no node_modules, `bun run lint packages/pi-legion/` and `bun run typecheck` still exit 1 with the wrapper's message while `bunx biome check .` exits 0 answering 0.3.3 — AC1's state, left as the tester needs it."
+      "criterion": "The guidance is correct against the cluster it describes: a role that follows it writes a workload the namespace's admission accepts, and each rule it states is enforced.",
+      "surface": "The live cluster, from this role container, through the credential its deployment projects — the real admission policy, server-side, with nothing created.",
+      "command": "the Job manifest extracted from the new docs/kubernetes.md section with its placeholders filled as a role fills them, then kubectl apply --dry-run=client -f and --dry-run=server -f ; then eight one-rule breakages of that same manifest, each dry-run server-side ; then kubectl auth can-i create jobs and create services",
+      "observed": "The section's own manifest is accepted: `job.batch/infra71-doc created (server dry run)`. The first form of it was refused — `a Job sets activeDeadlineSeconds, at most 43200` — because the rule wants the deadline on the Job as well as on its pod template; the section and its manifest now say so, which is a correction the document would not have had if it had been written and not run. `kubectl auth can-i create jobs` answers `yes` and `create services` answers `no`, which is exactly the pre-apply state the section tells a role to expect.",
+      "headSha": "75e45efdb78277cf7a10da45eb0a6574c3c11a92",
+      "negativeControl": "Eight deliberate breakages, one rule at a time, each refused by the policy naming the rule it broke: the Job's deadline, the pod template's deadline, `ttlSecondsAfterFinished` over its ceiling, a container asking one processor instead of four, a missing `automountServiceAccountToken: false`, a missing `runtimeClassName: gvisor`, a missing compute-class `nodeSelector`, and a `hostPath` volume in place of the empty directory. And for the half not granted yet: applying the section's Service is refused `Forbidden … cannot get resource \"services\"`, so the Service half is recorded as refused rather than simulated."
+    },
+    {
+      "criterion": "Plan acceptance row 7 — nothing left behind references what was removed, and the repository's own checks pass at this head.",
+      "surface": "The repository's own recipes, run in the issue workspace with the packages installed into it.",
+      "command": "bun install --frozen-lockfile ; bunx biome check . ; bun test in packages/pi-legion, pi-shared, contracts and pi-envoy ; cd packages/daemon && go test -count=1 ./... ; .github/scripts/check-private-names.sh",
+      "observed": "Biome checks 1075 files and exits 0. pi-legion 499 tests 0 fail, pi-shared 70 tests 0 fail, contracts 207 tests 0 fail, pi-envoy 898 pass with one failure that is this pod's own (`prepack.test.ts` asserts a packed tarball's mode is `-rwxr-xr-x` and reads `-rwxrwxr-x`, a umask of the container, in a file this branch never touched). The private-name check passes over 4734 files, which matters here because the guidance names a cluster. The Go daemon's suites pass except eight packages this pod cannot run at all: admit and daemon want `LEGION_TEST_PG_DSN`, intake, natsauth, testnats and daemon want Docker, runtime/tmux wants tmux on PATH, and supervise's type-checking test needs cgo; the two packages this change touches both pass.",
+      "headSha": "75e45efdb78277cf7a10da45eb0a6574c3c11a92",
+      "negativeControl": "The guard this branch removed is gone from the checks as well as from the tree: `bunx biome check .` is main's own recipe again, and it resolves the pinned Biome only because the packages are installed in the workspace — which is the fault dispatch://INFRA-199 exists to fix and no longer this issue's to carry."
     }
   ],
   "filesChanged": [
-    "scripts/legion-setup.sh: `use_seconds` refuses a digit string this shell cannot work with, by its text alone, before any arithmetic or comparison touches it.",
-    ".github/scripts/check-check-commands.sh: `split_comment` returns no comment for a line whose quotes do not balance, so the exemption comes from the reading that judges the command."
+    "Three commits: the removal of both halves back to the commit this branch was cut from; the capability row with its regenerated golden and the three prose reproductions; the guidance with the runbook's scope sentence and one pointer in the root AGENTS.md.",
+    "docs/kubernetes.md: a new section, `Running a workload in the cluster from a role`, between `A shell on an issue's volume` and `Issue sizing`.",
+    "packages/daemon/internal/capabilities/capabilities.go: the `network` row's Summary only; Site and Ruling unchanged.",
+    "packages/contracts/fixtures/daemon-api/state.json: regenerated by `go test ./internal/api/ -update`.",
+    "packages/daemon/docker/worker.Dockerfile and two paragraphs of docs/kubernetes.md: the three places that reproduced the old sentence."
   ],
   "trickyParts": [
-    "The boundary is the shell's integer range rather than a shape, so the check is a length and then an equal-length string comparison — `9223372036854775807` is taken, `9223372036854775808` is not, and neither is ever handed to arithmetic.",
-    "A value just under the range wraps rather than failing (`$((1 + 9223372036854775807))` is negative), which for the budget means a deadline in the past; `remaining()`'s floor of 1 keeps that harmless, and the tester's observation of it is why the two edges are documented separately."
+    "The deadline rule is two rules: the Job and its pod template each need `activeDeadlineSeconds`. Driving the document's own manifest through live admission is what found it; reading the manifest would not have.",
+    "The plan's acceptance command diffs against main's tip, and main has moved 68 commits since this branch was cut. The branch is not merged forward, because GitHub reports the pull request MERGEABLE and the skill reintegrates a base only on a real conflict; the fork-point form of the same command, and GitHub's own file list, are what decide the criterion instead.",
+    "D7's corrected `LEGION_STATE_DIR` row is not in this diff after all: that correction was carried by the branch's own commits, and the removal took it with them. Main's row is left as main has it, which is the opposite of what D7 planned — the plan reasoned that reverting would put a false line back into main, but the clean cutover won: this issue's diff is its own work, and the correction belongs to whoever fixes that row on its own account. Named here rather than left for the reviewer to find."
   ],
   "deviations": [
-    "Nothing else was touched this round, on the architect's instruction: no tidying, no fast-follow, no retro note, so that if this work is split the install half is refiled with a clean record of what it has and has not got."
+    "The plan's T1 said to restore the touched files to `main@origin`. They are restored to the commit this branch was cut from instead: restoring to main's tip would have pulled 68 commits of main's own changes into this branch's diff, which is the opposite of what the task is for.",
+    "D7 is not applied, for the reason in `trickyParts`.",
+    "The guidance carries the pod-label requirement the architect settled after the plan was written (dispatch://INFRA-206 at specification version 33): a workload is reachable only while it carries the label that deployment's declaration names, and the label's own name is not written in this tree."
   ],
   "openQuestions": [
-    "The architect has put the continuation to a human (dispatch://INFRA-71/ask/d34a1f9c-2b33-4b5e-a131-cd760f0a0437): one more round then stop, ship with both holes written down, or split the check half from the install script. This head is the two rules it asked for under two of those three answers.",
-    "Unchanged: AC3's full line, AC4's daemon half and AC5's two-role form are the production check, needing the worker image pin and the one `runtime.kubernetes.setup` line; dispatch://INFRA-91 is outside this diff."
+    "Specification acceptance 1, 2, 3 and 4 need the apply of dispatch://INFRA-206 and a role container that may create Services. They are the tester's and this issue's live proof afterwards, and nothing here stands in for them.",
+    "The 21 resolved review threads all belong to the superseded scope and the code each answered is no longer in the diff; they are left resolved rather than reopened."
   ],
   "discoveredComplexity": [
-    "Both findings were in the fixes of the round before them, which is the pattern the architect asked to be recorded: the huge-number defect was in the validator written for the leading-zero finding, and the marker defect was where this round's unbalanced-quote reading met the round-3 marker rule."
+    "A role container's identity may already create Jobs in that namespace and may not create Services, so the two halves of this design can be proven at different times — the Job half against live admission today, the Service half only after a person applies the declarations."
   ]
 }
