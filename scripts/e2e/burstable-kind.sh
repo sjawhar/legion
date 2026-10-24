@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The Burstable roles live proof on a throwaway kind cluster: a role given a memory request below
-# its limit (`runtime.kubernetes.resources.<role>.memory_request`) runs in an issue pod the API
-# server admits, schedules and records as `Burstable`, and a file with no `resources` block keeps
+# The Burstable issue pod live proof on a throwaway kind cluster: an issue pod given a memory
+# request below its limit (`runtime.kubernetes.resources.issue`, here `issue: {memory: 32Gi,
+# memory_request: 8Gi}`) is one the API server admits, schedules and records as `Burstable`, its
+# one `roles` container carrying that reservation, and a file with no `resources` block keeps
 # its issue pod `Guaranteed`. The pods are built by Legion's own code: the daemon's loader reads
 # each legion.yaml, its sandboxOptions translates the reservation, and the Agent Sandbox runtime
 # launches the issue's root through Agent Sandbox v1.0.3's controller under gVisor
@@ -105,11 +106,12 @@ while read -r name pod config; do
   scheduled=$(kind_k -n "$ns" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="PodScheduled")].status}')
   node_name=$(kind_k -n "$ns" get pod "$pod" -o jsonpath='{.spec.nodeName}')
   runtime_class=$(kind_k -n "$ns" get pod "$pod" -o jsonpath='{.spec.runtimeClassName}')
-  implementer=$(kind_k -n "$ns" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="implementer")].resources}')
+  roles=$(kind_k -n "$ns" get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="roles")].resources}')
   kind_k -n "$ns" get pod "$pod" -o yaml >"$evidence/$name-pod.yaml"
   cp "$config" "$evidence/$name-legion.yaml"
   note "$name: kubectl get pod $pod -o jsonpath='{.status.qosClass}' → $qos (PodScheduled=$scheduled on $node_name, runtimeClassName $runtime_class)"
-  note "$name: implementer resources $implementer"
+  note "$name: roles container resources $roles"
+  [ -n "$roles" ] || fail "$name's pod $pod has no roles container"
   want=Guaranteed
   [ "$name" = burstable ] && want=Burstable
   [ "$qos" = "$want" ] || fail "$name's pod $pod is $qos, want $want"
@@ -124,15 +126,15 @@ while read -r name _ config; do
   out=$("$work/legion" start --check-config --config "$config") || fail "--check-config refused $name's file: $out"
   note "$name: $(tr '\n' '|' <<<"$out")"
   if [ "$name" = burstable ]; then
-    grep -qx 'resources: Burstable roles (a request below the limit): implementer, so every issue pod is Burstable; every other pod is Guaranteed' <<<"$out" ||
-      fail "--check-config on the burstable file does not name the Burstable role"
+    grep -qx 'resources: Burstable (a request below the limit): the issue pod; every other pod is Guaranteed' <<<"$out" ||
+      fail "--check-config on the burstable file does not name the Burstable issue pod"
   else
-    ! grep -q '^resources:' <<<"$out" || fail "--check-config on the default file names a Burstable role: $out"
+    ! grep -q '^resources:' <<<"$out" || fail "--check-config on the default file names a Burstable pod: $out"
   fi
 done <"$result"
 config=$(awk '$1 == "burstable" {print $3}' "$result")
-for broken in 'memory_request: 40Gi|runtime.kubernetes.resources.implementer.memory_request 40Gi exceeds memory 32Gi' \
-  'memory_request: lots|runtime.kubernetes.resources.implementer.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)'; do
+for broken in 'memory_request: 40Gi|runtime.kubernetes.resources.issue.memory_request 40Gi exceeds memory 32Gi' \
+  'memory_request: lots|runtime.kubernetes.resources.issue.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)'; do
   value=${broken%%|*} want=${broken#*|}
   sed "s/memory_request: 8Gi/$value/" "$config" >"$(dirname "$config")/broken.yaml"
   if refused=$("$work/legion" start --check-config --config "$(dirname "$config")/broken.yaml" 2>&1); then

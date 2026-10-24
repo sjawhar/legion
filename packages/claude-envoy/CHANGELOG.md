@@ -127,6 +127,12 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-208): under the Kubernetes runtime an issue pod runs one container, `roles`, whose
+  launcher runs every role, and `runtime.kubernetes.resources` in `GET /legion/v1/state`'s
+  `settings` is `{issue, controller}`; nothing this plugin reads or writes moved, and
+  `dist/envoy-channel.js`, which embeds the number, is rebuilt; a session of it registers with a
+  daemon at 36.
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
   every credential, credential source and credential file path left out and a URL's userinfo masked
