@@ -13,12 +13,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// A slot the waiting line does not refill is the controller's to fill: it picks the next root to
-// hand to Legion. Admission wakes a registered controller once per fact, on the controller topic
-// alone, naming the first root whose slot it released, whether the tree finished or a human took
-// the root out of the workflow, live or found at boot. A slot the waiting line refilled wakes
-// nobody (TestApplyFactReleasesSlotWhenEngineCompletesPhaseAndPromotesHead pins that), and with
-// no controller registered nobody is woken (the slot wakes' rule, controller_wake_test.go).
+// A slot the waiting line does not refill stays free until a person hands Legion an issue; the
+// controller names it in its summary and report. Admission wakes a registered controller once per
+// fact, on the controller topic alone, naming the first root whose slot it released, whether the
+// tree finished or a human took the root out of the workflow, live or found at boot. A slot the
+// waiting line refilled wakes nobody (TestApplyFactReleasesSlotWhenEngineCompletesPhaseAndPromotesHead
+// pins that), and with no controller registered nobody is woken (the slot wakes' rule,
+// controller_wake_test.go).
 func TestAReleasedSlotNoWaitingRootTakesWakesTheController(t *testing.T) {
 	slotFree := func(issue string) []effect {
 		return []effect{{kind: record.OutboxKindControllerNotice, issue: issue, payload: record.ControllerNotice{Kind: record.SlotFreeNotice}}}
@@ -61,8 +62,8 @@ func TestAReleasedSlotNoWaitingRootTakesWakesTheController(t *testing.T) {
 }
 
 // A fact that releases no slot wakes nobody, even while a slot has stood free all along: the
-// controller filled the slots at its own start and at the release that emptied them, and a wake on
-// every fact would be a wake on every Dispatch event of the project.
+// controller learned of the free slot at the release that emptied it, and a wake on every fact
+// would be a wake on every Dispatch event of the project.
 func TestAFreeSlotWakesTheControllerOnlyAtTheReleaseThatLeftItFree(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -213,13 +213,20 @@ own, or one that still holds, needs nothing.
 
 ## Free slots (Go daemon)
 
-A free slot is no reason to take an issue. Work reaches Legion only when a person hands it over
+A free slot is no reason to take an issue, and nothing reconsiders `backlog` or `icebox` on its
+own. Work reaches Legion only when a person hands it over
 ([Issues handed to Legion](#issues-handed-to-legion-go-daemon)), and a labelled root in `todo`
-takes the next free slot through the daemon's waiting line without you. So never label an issue
-nobody asked you to hand over, never set an issue you or a person parked back to `todo` to fill a
-slot, and never move a person's parked issue. The re-admissions you make are the ones the [wake
-routing table](#wake-routing-table) names: a tree whose architect failed, and the triage of a
-labelled root.
+takes the next free slot through the daemon's waiting line (`admission.waiting`) without you, so a
+park means "should not run now", and a parked root keeps its `legion` label. Never label an issue
+nobody asked you to hand over, and never set a parked issue back to `todo` to fill a slot. A
+person's parked issue moves only when that person asks. These are every move to `todo` you make:
+
+- a root a person handed over, at triage ([New issue triage](#new-issue-triage));
+- an issue a person asks you to start ([Issues handed to Legion](#issues-handed-to-legion-go-daemon));
+- a tree you re-admit after its architect failed (the `worker-died` row), or that you parked
+  after a hold (the `held` row);
+- stopped-session work a person's ruling in the weekly plan moves to Legion
+  ([backlog stewardship](skill://legion-controller/references/backlog-stewardship.md)).
 
 The daemon still wakes you about the slots. It sends each wake only while a controller is
 registered, and none while one of the same kind is still unsent:
@@ -252,11 +259,11 @@ them, and do the rest of the turn ([Turn discipline](#turn-discipline)).
 
 You file an issue only when a person asks you to: in a direct message, in a Slack request
 ([Slack mentions](skill://legion-controller/references/slack-mentions.md)), or in their answer to a
-finding ask. A problem you find, or one a session or role sends you as text, is a finding: open a
-`dispatch ask` for it as `skill://legion-worker/references/findings.md` says, on the issue that
-reference names, your report issue when no issue of the work it came from will stay open to be
-answered ([Daily report](#daily-report-go-daemon) finds it), and file nothing until a person
-answers. A problem is not Legion's because Legion found it: the ask names where the fix belongs.
+finding ask. Anything else is a finding: a problem you find, and one a session or role sends you as
+text. For each, open a `dispatch ask` on your report issue
+([Daily report](#daily-report-go-daemon) finds it, or creates it when there is none), as
+`skill://legion-worker/references/findings.md` says. Then file nothing until a person answers. A
+problem is not Legion's because Legion found it: the ask names where the fix belongs.
 
 A finding ask another role opened reaches you as its reference, `dispatch://<KEY>/ask/<id>`, on
 the controller topic. Follow it, so that its answer reaches you:
@@ -277,16 +284,26 @@ the selected option when the two disagree:
 - `File it for Legion`: the same, with `--label legion`. It opens in `triage` with the label, so
   its triage wake brings it back to you ([New issue triage](#new-issue-triage)).
 
-Before you file, read the ask's `Referenced by:`: an issue whose spec cites the ask is the one
-filed for it, so file nothing again. Name what you filed in your summary.
+Then reply under the ask with what you did, its first line exactly `Filed dispatch://<NEW KEY>` or
+`Not filed: <reason>`: `dispatch comment --issue <REPORT KEY> --reply-to-ask '<ask id>'
+--body-file -`. Dispatch refuses to resolve an answered ask, so that reply is its record. An open
+finding ask that turns moot (an issue now tracks the problem, or the problem is gone) you close
+with `dispatch resolve-ask --kind resolved`, naming why.
 
 An answer that arrives while no controller runs never wakes you, a reference published then
 reaches nobody, and each `legion controller start` begins a new session, which follows none of the
-asks an earlier one followed. So at every start, list the finding asks by the option each one
-carries: `dispatch search --query '"File it for Legion"' --project <PROJECT> --limit 50`, reading
-every page (`Next page: offset <n>`). Read each ask hit by its link (`dispatch read --ref
-'<link>'`); handle each one that is answered and that no issue cites, as above, and follow each
-one still open.
+asks an earlier one followed. So at every start, catch up on the report issue:
+
+1. Follow each of its open asks: `dispatch open-asks --project <PROJECT>` lists every unanswered
+   ask of the project, with no cap, each line naming its issue and ending in its link; keep the
+   ones on the report issue.
+2. List its answered asks, which no `dispatch` command lists, from Dispatch's route (unpaged):
+   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1"`.
+   Act on each finding ask (its `options` hold `Do not file`) and each triage ask (they hold
+   `Admit it`), as above and in [New issue triage](#new-issue-triage), unless `thread.replies`
+   already holds a reply whose `author.kind` is `session`, whose `created_at` is after
+   `answer.at`, and whose `body` starts `Filed dispatch://`, `Admitted dispatch://`, `Not filed:`
+   or `Not admitted:`.
 
 ## Daily report (Go daemon)
 
@@ -297,13 +314,17 @@ change and why, and what is running.
 on the project's `Legion daily report` issue:
 `dispatch search --query '"Legion daily report"' --project <PROJECT>` finds it. When it
 does not exist, create it once and park it in `icebox`, so nobody takes it as work; it never
-carries the `legion` label:
+carries the `legion` label. It holds every finding ask, so assign it to the person who answers
+for the project: the one the deployment instructions name, else the owner `dispatch whoami`
+names when it names one. With neither, leave out `--assignee` and say in your first report that
+the issue is unassigned, so its asks reach only the Inbox's `Unassigned` filter until someone takes
+it from the issue header:
 
 ```text
-dispatch issue --project <PROJECT> --title 'Legion daily report' --spec-file - <<'EOF'
+dispatch issue --project <PROJECT> --title 'Legion daily report' --assignee '<email>' --spec-file - <<'EOF'
 ## Summary
 
-Legion's controller posts one message here each day: what Legion finished, what it closed without a change and why, and what is running. This issue is not work, so it carries no `legion` label and stays in icebox.
+Legion's controller posts one message here each day: what Legion finished, what it closed without a change and why, and what is running. Legion's agents also ask here whether a problem they found outside their own work needs an issue. This issue is not work, so it carries no `legion` label and stays in icebox.
 EOF
 legion({ op: "set_status", issue: "<report KEY>", status: "icebox" })
 ```
@@ -377,7 +398,7 @@ themselves: an issue reaches Legion only when a person hands it over
 
 | Wake | Content | Controller action |
 |---|---|---|
-| New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: `set_status` to `todo` to admit, or to `backlog`/`icebox` to park |
+| New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: read who set the label; admit (`set_status` to `todo`) only a root a person handed over, park one to `backlog`/`icebox`, and ask the person about any other ([New issue triage](#new-issue-triage)) |
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify the free slots in `read_state` and name them in your summary; take nothing ([Free slots](#free-slots-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Take nothing: an issue nobody handed to Legion is not Legion's ([Free slots](#free-slots-go-daemon)) |
 | `unslotted on <KEY>` from the Go daemon (payload `{kind: "unslotted", reason}`) | a root that held no slot and waited for none: a person or another session moved it from `todo` to the status `reason` names while it waited, so the daemon took it out of the workflow (`issues.<KEY>.phase` is `done`) and starts nothing for it ([reading admission](skill://legion-controller/references/admission.md)) | Re-admit nothing yourself: the move was someone else's, and `dispatch read` shows who claims it now. Name it in your summary to the human ("<KEY> left Legion's waiting line: it was set to <status> while it waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again") |
@@ -399,25 +420,28 @@ themselves: an issue reaches Legion only when a person hands it over
    Note the `Assignee:` line: that human answers the tree's asks, and their Inbox opens on
    the issues they hold. Never reassign during triage — who holds an issue is the humans'
    decision, made from the issue header.
-2. If it should run now, admit the root issue:
+2. Read who handed it over. `dispatch read` does not show who set a label, so list the issue's
+   events: `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<issue>/events?limit=200"`.
+   The first `issue.created` or `issue.updated` event whose `payload.labels` holds `legion` (in
+   any case) set it, and its `actor` is who. A person's label (`actor.kind` is `user`) hands it
+   over. So does your own filing that cites a person's answered `File it for Legion` ask, or a
+   request they made of you, in its spec. Any other actor (a session, a bot, a filing that cites
+   no person's answer) hands over nothing: leave the issue in `triage` and ask the person on your
+   report issue whether Legion should take it, naming the issue and who labelled it, with the
+   options `Admit it` and `Leave it`. On `Admit it`, admit it below; either way reply under the
+   ask `Admitted dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
+3. If a person handed it over and it should run now, admit the root issue:
 
    ```text
    legion({ op: "set_status", issue: "<issue>", status: "todo" })
    ```
 
-3. If it should deliberately wait, move it to a parked status instead of leaving it in
-   `triage`:
-
-   ```text
-   legion({ op: "set_status", issue: "<issue>", status: "backlog" })
-   ```
-
-   (or `icebox` for longer-term deferral). Dispatch status is the durable record; there is no
-   other marker to maintain, beyond the `legion` label, which parking leaves in
-   place. A root never waits for capacity in `backlog`: in `todo` the
-   daemon's admission queue holds it (`admission.waiting`), so park only a root that should not
-   run now. Do not triage a system-created child as a root issue.
-4. When you post a triage note (a `dispatch comment` on the issue saying what you decided and
+4. If it should deliberately wait, park it (`set_status` to `backlog`, or `icebox` for
+   longer-term deferral) instead of leaving it in `triage`. Dispatch status is the durable record;
+   parking leaves the `legion` label in place. Park only a root that should not run now: in
+   `todo` the daemon's admission queue holds it for a slot. Do not triage a system-created child
+   as a root issue.
+5. When you post a triage note (a `dispatch comment` on the issue saying what you decided and
    why), name who will be asked with the assignee sentence: `Assigned to <login>, who will get
    this tree's questions and its design approval`, or, when the `Assignee:` line says
    `unassigned`, `Unassigned — nobody's Inbox shows this tree's questions or its design approval
@@ -427,14 +451,6 @@ themselves: an issue reaches Legion only when a person hands it over
    `gates.design: root-issues`. Under `gates.design: off` nobody approves a design, so drop "and
    its design approval" (and "or its design approval") from the sentence. An unassigned root
    still runs; its architect's asks reach no default Inbox list, only the `Unassigned` filter.
-
-## Backlog eligibility
-
-Nothing reconsiders `backlog` or `icebox` on its own, and nothing takes a `todo` issue a person did
-not hand over ([Free slots](#free-slots-go-daemon)). A handed-over root waits for a slot in `todo`,
-where the daemon's admission queue holds it (`admission.waiting`), so a park means "should not run
-now", and a parked root keeps its `legion` label. A parked issue runs again when a person sets it
-to `todo`, or when a wake tells you to re-admit it (`worker-died`).
 
 ## Architect escalation
 

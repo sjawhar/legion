@@ -238,10 +238,9 @@ reviewing until you finish.
     previous release, a daemon still running the previous commit, a deploy nobody has run): the
     summary names what is missing, and the `Production:` line stays at
     `pending deploy of <merge sha>`.
-  - `fail`, for a defect: open a `dispatch ask` for it, as
-    `skill://legion-worker/references/findings.md` says, and file no issue. The closed issue takes
-    no ask, so it goes on the tree's root (`LEGION_TREE`) while the root is before `accepting`,
-    else on the controller's report issue. It names the pull request, the merge commit, what you
+  - `fail`, for a defect: open a `dispatch ask` for it on the controller's report issue, as
+    `skill://legion-worker/references/findings.md` says, publish its reference to the controller
+    topic, and file no issue. It names this issue, the pull request, the merge commit, what you
     drove and what failed. Name the ask (`dispatch://<KEY>/ask/<id>`) in the `Production:` line
     and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look: the daemon suspends

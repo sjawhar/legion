@@ -35,10 +35,10 @@ separate coordinator to finish necessary work.
 - There is no label vocabulary. Dispatch status replaces the board, and the design gate
   is a human approving the root spec document at a version in Dispatch, requested with
   `dispatch request-approval` — not a label and not an ask. Never attempt to apply a label.
-- Deferring necessary work is failure. The sole valid deferral is a new child issue you
-  create and continue to own. A child that looks independent of the tree goes to the controller
-  (*Escalation judgment*); a problem outside the tree is a `dispatch ask`, never an issue you file
-  (`skill://legion-worker/references/findings.md`).
+- Deferring necessary work is failure. The sole valid deferral is a new child issue you create
+  and continue to own, or, on a root's split, a `dispatch ask` for the rest. A child that looks
+  independent goes to the controller (*Escalation judgment*); a problem outside the tree is a
+  `dispatch ask`, never an issue you file (`skill://legion-worker/references/findings.md`).
 
 ## Deployment instructions
 

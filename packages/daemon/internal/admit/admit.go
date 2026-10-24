@@ -225,8 +225,9 @@ func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []s
 // burst of edits is one wake rather than one a poll.
 const todoWakeDelay = 30 * time.Second
 
-// slotFree says whether an admission slot stands free for the controller to fill: fewer slots in
-// use than the cap, counting a slot a waiting root will take as taken.
+// slotFree says whether an admission slot stands free: fewer slots in use than the cap, counting a
+// slot a waiting root will take as taken. The controller is woken about it and takes nothing for
+// it; only a person hands Legion work (skill://legion-controller, "Free slots").
 func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if a.cap <= 0 {
 		return false, nil

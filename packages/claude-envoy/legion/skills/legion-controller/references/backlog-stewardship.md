@@ -54,7 +54,9 @@ Treat a session route as stopped only after the owner audit's two `no_holder` re
 minutes apart. Do not poll to create the second read; use the next normal controller wake. Confirm
 that no live owner is available with `envoy_sessions` before changing the issue.
 
-For work that the plan says moves to Legion when its session stops, preserve its
-existing labels, add `legion`, then set it `todo` with the `legion` tool's `set_status`. The label comes first: it is what
+For work that a ruling of a person's, recorded in the plan with its link (the ruling section
+above), says moves to Legion when its session stops, preserve its existing labels, add `legion`,
+then set it `todo` with the `legion` tool's `set_status`. A plan row you wrote with no such ruling
+behind it moves nothing. The label comes first: it is what
 lets the daemon admit the root. Do not apply that recovery to an issue already in an active Legion
 tree; its architect and daemon own its lifecycle. Update the weekly-plan owner row after the move.

@@ -65,10 +65,11 @@ controller posts a report on what Legion finished, closed and is running. A free
 reason for the controller to take an issue: it starts no work a person did not hand over.
 
 No Legion agent files an issue for a problem it finds outside its own issue. It opens a Dispatch ask
-instead, saying where the fix belongs (naming the repository or layer, and saying so when it is not
-Legion), with its evidence and a recommendation, and you decide whether it needs an issue. The
-controller files that issue, with the `legion` label only when your answer asks Legion to work it.
-The issues an agent still files on its own are an architect's children of its own tree.
+on Legion's daily report issue instead, naming the issue it came from and where the fix belongs
+(the repository or layer, and saying so when it is not Legion), with its evidence and a
+recommendation, and you decide whether it needs an issue. The controller files that issue, with the
+`legion` label only when your answer asks Legion to work it. The issues an agent still files on
+its own are an architect's children of its own tree.
 
 The only statuses the controller sets are `todo`, `backlog` and `icebox` (`triage` is set by
 whoever files an issue). It reads pull requests as the review App, and never touches a tree's work.
@@ -305,8 +306,8 @@ awaited), reads whether production carries the merge, and ends one of three ways
 the implementer drove the change in production through a user's own access path and wrote the
 pull request's `Production:` line, naming the merge commit and what woke the look; `pending`,
 when production does not carry the merge yet; or `fail`, a defect, which the implementer asks you
-about in a Dispatch ask (on the tree's open root, or Legion's daily report issue), naming the pull
-request, the merge commit, what it drove and what failed, so you decide whether it needs an issue.
+about in a Dispatch ask on Legion's daily report issue, naming the issue, the pull request, the
+merge commit, what it drove and what failed, so you decide whether it needs an issue.
 The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
 
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its
