@@ -16,6 +16,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -195,8 +196,8 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	containers := append(slices.Clone(pod.InitContainers), pod.Containers...)
 	for _, role := range claim.Roles {
 		for volume, dir := range map[string]string{
-			roleVolume("launcher", role): roleLauncherDir, roleVolume("private", role): rolePrivateDir, roleVolume(stateVolume, role): roleStateDir,
-			roleVolume(agentSecretsKeyVolume, role): roleAgentSecretsDir, roleVolume("gh", role): roleGHDir,
+			roleVolume("launcher", role): launcher.RoleLauncherDir, roleVolume("private", role): launcher.RolePrivateDir, roleVolume(stateVolume, role): launcher.RoleStateDir,
+			roleVolume(agentSecretsKeyVolume, role): launcher.RoleAgentSecretsDir, roleVolume("gh", role): launcher.RoleGHDir,
 		} {
 			var mountedAt []string
 			for _, c := range containers {
@@ -216,9 +217,9 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		volumes[v.Name] = v
 	}
 	for _, role := range claim.Roles {
-		launcher := volumes[roleVolume("launcher", role)].Secret
-		if launcher == nil || len(launcher.Items) != 1 || launcher.Items[0].Key != LauncherTokenFile {
-			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, launcher)
+		token := volumes[roleVolume("launcher", role)].Secret
+		if token == nil || len(token.Items) != 1 || token.Items[0].Key != LauncherTokenFile {
+			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, token)
 		}
 		gh := volumes[roleVolume("gh", role)].Secret
 		var want []corev1.KeyToPath
@@ -229,7 +230,7 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 		if gh == nil || gh.SecretName != roleSecretName(l.name, role) || !slices.Equal(gh.Items, want) || gh.DefaultMode == nil || *gh.DefaultMode != 0o440 {
 			t.Errorf("%s's gh volume projects %+v, want %s's %+v, read-only", role, gh, roleSecretName(l.name, role), want)
 		}
-		mount := mountHolding(containerNamed(t, pod, workerContainer), roleDir(role)+"/"+roleGHDir)
+		mount := mountHolding(containerNamed(t, pod, workerContainer), roleDir(role)+"/"+launcher.RoleGHDir)
 		if mount == nil || mount.Name != roleVolume("gh", role) || !mount.ReadOnly {
 			t.Errorf("the container mounts %+v at %s's gh directory, want its gh volume read-only", mount, role)
 		}

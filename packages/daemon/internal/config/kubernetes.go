@@ -57,6 +57,10 @@ type Kubernetes struct {
 	// limit is evicted, the offending issue's alone. EphemeralStorageRequest is what the scheduler
 	// fits to the node's allocatable ephemeral storage (its root volume).
 	Resources PodResources
+	// controllerNamed is whether the file named runtime.kubernetes.resources.controller, an entry
+	// setting no field included; only the file's own block (fileConfig.Kubernetes) holds it, which
+	// resolveControllerLaunch reads to refuse the key under `controller: operator`.
+	controllerNamed bool
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
 	// AgentSecrets is the secrets broker every pod is enrolled with (runtime.kubernetes.agent_secrets);
@@ -484,7 +488,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Scheduling, err = readScheduling(fields["scheduling"]); err != nil {
 		return nil, err
 	}
-	if block.Resources, err = readResources(fields["resources"]); err != nil {
+	if block.Resources, block.controllerNamed, err = readResources(fields["resources"]); err != nil {
 		return nil, err
 	}
 	if block.Pod, err = readPod(fields["pod"]); err != nil {
@@ -1261,7 +1265,8 @@ func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 
 // readResources is the file's own reservations of the two pods the daemon builds: `issue`, every
 // issue pod's, and `controller`, the pod a daemon under `controller: daemon` launches
-// (resolveControllerLaunch refuses its key otherwise). An entry sets any of `cpu` and `memory` (the
+// (resolveControllerLaunch refuses its key otherwise, so the second result says whether the file
+// named it, an entry setting no field included). An entry sets any of `cpu` and `memory` (the
 // pod's limits), `cpu_request` and `memory_request` (what the scheduler reserves of each, at most
 // its limit), `ephemeral_storage` (the pod's limit on the node's disk) and
 // `ephemeral_storage_request` (what the scheduler reserves of it); what it leaves out is "" here
@@ -1269,14 +1274,14 @@ func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 // key, the shape before an issue pod ran in one container, and a role entry's `requests` and
 // `limits` mappings, the shape before that, are known so that each is refused naming the key that
 // replaced it.
-func readResources(value *yaml.Node) (PodResources, error) {
+func readResources(value *yaml.Node) (PodResources, bool, error) {
 	const key = kubernetesKey + ".resources"
 	var resources PodResources
 	if value == nil {
-		return resources, nil
+		return resources, false, nil
 	}
 	if value.Kind != yaml.MappingNode {
-		return resources, fmt.Errorf("%s must be a mapping of issue and controller to each pod's cpu and memory reservation", key)
+		return resources, false, fmt.Errorf("%s must be a mapping of issue and controller to each pod's cpu and memory reservation", key)
 	}
 	seen := map[string]bool{}
 	for i := 0; i+1 < len(value.Content); i += 2 {
@@ -1288,32 +1293,32 @@ func readResources(value *yaml.Node) (PodResources, error) {
 		case name == string(claim.RoleController):
 			into = &resources.Controller
 		case claim.IsRole(claim.Role(name)):
-			return resources, fmt.Errorf("%s.%s is gone: an issue pod has one reservation, %s.issue", key, name, key)
+			return resources, false, fmt.Errorf("%s.%s is gone: an issue pod has one reservation, %s.issue", key, name, key)
 		default:
-			return resources, fmt.Errorf("%s key %q must be issue or controller", key, name)
+			return resources, false, fmt.Errorf("%s key %q must be issue or controller", key, name)
 		}
 		if seen[name] {
-			return resources, fmt.Errorf("%s names %s twice", key, name)
+			return resources, false, fmt.Errorf("%s names %s twice", key, name)
 		}
 		seen[name] = true
 		field := key + "." + name
 		if entry.Kind != yaml.MappingNode {
-			return resources, fmt.Errorf("%s must be a mapping of cpu and memory", field)
+			return resources, false, fmt.Errorf("%s must be a mapping of cpu and memory", field)
 		}
 		fields, err := members(entry, field, "cpu", "cpu_request", "memory", "memory_request", "ephemeral_storage", "ephemeral_storage_request", "requests", "limits")
 		if err != nil {
-			return resources, err
+			return resources, false, err
 		}
 		for _, gone := range []string{"requests", "limits"} {
 			if fields[gone] != nil {
-				return resources, fmt.Errorf("%s.%s is gone: a reservation is its cpu and memory limits, with cpu_request and memory_request below them where set", field, gone)
+				return resources, false, fmt.Errorf("%s.%s is gone: a reservation is its cpu and memory limits, with cpu_request and memory_request below them where set", field, gone)
 			}
 		}
 		if *into, err = readReservation(fields, field); err != nil {
-			return resources, err
+			return resources, false, err
 		}
 	}
-	return resources, nil
+	return resources, seen[string(claim.RoleController)], nil
 }
 
 // readReservation reads a reservation's six quantities from fields, the members of the mapping at

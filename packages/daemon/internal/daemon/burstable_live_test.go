@@ -1,6 +1,6 @@
 //go:build e2e
 
-// The Burstable roles live proof's driver (scripts/e2e/burstable-kind.sh, which builds it with
+// The Burstable issue pod live proof's driver (scripts/e2e/burstable-kind.sh, which builds it with
 // `-tags e2e`, owns the throwaway kind cluster it runs on, runs `legion start --check-config` on
 // the files this writes, and reads the pods' QoS class back with kubectl). Two legion.yaml files,
 // one giving the issue pod a memory request below its limit and one with no `resources` block,
@@ -34,10 +34,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
 
-// TestBurstableRoleRendersABurstablePodLive launches an issue pod from each case's configuration
+// TestABurstableIssuePodRendersLive launches an issue pod from each case's configuration
 // and holds it to the case's reservation and QoS class, as the API server recorded them. It writes
 // `<case> <namespace>/<pod> <legion.yaml>` per case to LEGION_E2E_RESULT for the script.
-func TestBurstableRoleRendersABurstablePodLive(t *testing.T) {
+func TestABurstableIssuePodRendersLive(t *testing.T) {
 	env := map[string]string{}
 	for _, name := range []string{"LEGION_E2E_KUBECONFIG", "LEGION_E2E_KUBE_CONTEXT", "LEGION_E2E_IMAGE", "LEGION_E2E_STREAM_HOST", "LEGION_E2E_WORK", "LEGION_E2E_RESULT"} {
 		if env[name] = os.Getenv(name); env[name] == "" {

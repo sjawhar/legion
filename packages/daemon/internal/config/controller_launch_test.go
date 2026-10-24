@@ -48,8 +48,9 @@ func TestTheControllerKeyIsRefusedWhereTheDaemonCannotLaunchOne(t *testing.T) {
 
 // The controller's pod is sized as an issue pod is, by its own key under
 // runtime.kubernetes.resources, which only a daemon that launches the controller reads: under
-// `controller: operator` the key would size nothing, so it is refused, naming why — and only the
-// key the file wrote is, never the default every settled block holds for the controller.
+// `controller: operator` the key would size nothing, so it is refused, naming why, an entry that
+// sets no field included — and only the key the file wrote is, never the default every settled
+// block holds for the controller.
 func TestTheControllersPodIsSizedOnlyWhereTheDaemonLaunchesIt(t *testing.T) {
 	const sized = "    resources: {controller: {cpu: 2, memory: 8Gi}}\n"
 	cfg, err := LoadForValidation(writeConfigFile(t, "controller: daemon\n"+kubernetesFile+sized), noEnv)
@@ -70,8 +71,9 @@ func TestTheControllersPodIsSizedOnlyWhereTheDaemonLaunchesIt(t *testing.T) {
 		}
 	}
 	for name, body := range map[string]string{
-		"no controller key":    kubernetesFile + sized,
-		"controller: operator": "controller: operator\n" + kubernetesFile + sized,
+		"no controller key":        kubernetesFile + sized,
+		"controller: operator":     "controller: operator\n" + kubernetesFile + sized,
+		"an entry setting nothing": kubernetesFile + "    resources: {controller: {}}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, body), noEnv)

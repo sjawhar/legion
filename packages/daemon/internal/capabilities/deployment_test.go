@@ -108,8 +108,8 @@ func rows(failing map[Name]string) []Row {
 	return report
 }
 
-// podSession is a live session in an issue's pod — the role's container of the pod
-// legion-omp-<issue> — which measured at measuredAt and whose report fails the given rows.
+// podSession is a live session of role in an issue's pod — the pod legion-omp-<issue>'s one
+// container, `roles` — which measured at measuredAt and whose report fails the given rows.
 func podSession(issue string, role claim.Role, measuredAt time.Time, failing map[Name]string) Session {
 	token := claim.Token(fmt.Sprintf("legion-omp-%s-%s", issue, role))
 	return Session{Role: role, Issue: issue, Report: Report{
@@ -118,7 +118,7 @@ func podSession(issue string, role claim.Role, measuredAt time.Time, failing map
 			Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: runtime.SandboxIncarnation("3f2b1c7e", 2),
 			Sandbox: &runtime.SandboxLocator{
 				Namespace: "legion", Name: "legion-omp-" + strings.ToLower(issue), PodUID: "3f2b1c7e",
-				Container: string(role), Generation: 2,
+				Container: runtime.IssuePodContainer, Generation: 2,
 			},
 		},
 		MeasuredAt: measuredAt, ReportedAt: measuredAt.Add(time.Second), ElapsedMs: 1200,
@@ -177,8 +177,8 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 			name:     "present with one session",
 			sessions: []Session{podSession("LEGION-663", claim.RoleImplementer, measured, nil)},
 			want: map[Name]State{
-				Subagents: {Name: Subagents, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/implementer (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: subagents proved"},
-				GitHub:    {Name: GitHub, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/implementer (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: github proved"},
+				Subagents: {Name: Subagents, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/roles (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: subagents proved"},
+				GitHub:    {Name: GitHub, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/roles (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: github proved"},
 			},
 		},
 		{
@@ -189,14 +189,14 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 				podSession("LEGION-665", claim.RoleArchitect, measured, nil),
 			},
 			want: map[Name]State{
-				MCP: {Name: MCP, Status: StatusPresent, Detail: "proved by 3 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
+				MCP: {Name: MCP, Status: StatusPresent, Detail: "proved by 3 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
 			},
 		},
 		{
 			name:     "open with one failing session",
 			sessions: []Session{podSession("LEGION-663", claim.RoleImplementer, measured, noSearch)},
 			want: map[Name]State{
-				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools"},
+				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools"},
 			},
 		},
 		{
@@ -216,9 +216,9 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 				podSession("LEGION-667", claim.RoleReviewer, measured, noSearch),
 			},
 			want: map[Name]State{
-				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools; " +
-					"pod legion-omp-legion-664/tester (tester, LEGION-664): web_search is not among the active tools; " +
-					"pod legion-omp-legion-665/architect (architect, LEGION-665): web_search is not among the active tools +2 more"},
+				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools; " +
+					"pod legion-omp-legion-664/roles (tester, LEGION-664): web_search is not among the active tools; " +
+					"pod legion-omp-legion-665/roles (architect, LEGION-665): web_search is not among the active tools +2 more"},
 			},
 		},
 		{
@@ -228,12 +228,12 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 				podSession("LEGION-664", claim.RoleTester, later, map[Name]string{Subagents: "task agents are disabled"}),
 			},
 			want: map[Name]State{
-				Subagents:            {Name: Subagents, Status: StatusOpen, Detail: "pod legion-omp-legion-664/tester (tester, LEGION-664): task agents are disabled"},
-				WebSearch:            {Name: WebSearch, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: web-search proved"},
-				MCP:                  {Name: MCP, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
-				RepositoryExtensions: {Name: RepositoryExtensions, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: repository-extensions proved"},
-				DispatchEnvoyTools:   {Name: DispatchEnvoyTools, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: dispatch-envoy-tools proved"},
-				GitHub:               {Name: GitHub, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: github proved"},
+				Subagents:            {Name: Subagents, Status: StatusOpen, Detail: "pod legion-omp-legion-664/roles (tester, LEGION-664): task agents are disabled"},
+				WebSearch:            {Name: WebSearch, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: web-search proved"},
+				MCP:                  {Name: MCP, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
+				RepositoryExtensions: {Name: RepositoryExtensions, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: repository-extensions proved"},
+				DispatchEnvoyTools:   {Name: DispatchEnvoyTools, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: dispatch-envoy-tools proved"},
+				GitHub:               {Name: GitHub, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: github proved"},
 			},
 		},
 	} {
@@ -315,9 +315,9 @@ func TestLogWarnsOfAnOpenLiveRow(t *testing.T) {
 	}
 	for _, want := range []string{
 		`level=WARN`,
-		`msg="capability web-search is open: pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools"`,
+		`msg="capability web-search is open: pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools"`,
 		`capability=web-search`,
-		`detail="pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools"`,
+		`detail="pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools"`,
 		`configLine=""`,
 		`source=""`,
 	} {

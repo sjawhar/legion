@@ -154,8 +154,11 @@ func legionMountPaths() []string {
 // (`legion launcher role-init`): its temporary directories, binds of its directories under
 // RoleHomesDir, and small private memory filesystems. role-init carries back a mount it finds under
 // one of them, so an operator's mount may be under one, but one at or above one would be covered in
-// every role's namespace.
-var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/tmp", "/var/lock", "/var/tmp"}
+// every role's namespace. role-init resolves each before it covers it, so the worker image's links
+// to them are named too, a mount spelled through one landing on what it covers: /var/run/lock to
+// /run/lock, /run/shm and /var/run/shm to /dev/shm (the image's /var/run is a link to /run and its
+// /var/lock a link to /run/lock, read from the image built at sha-92cb9728a212).
+var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/run/shm", "/tmp", "/var/lock", "/var/run/lock", "/var/run/shm", "/var/tmp"}
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
@@ -164,8 +167,8 @@ type launch struct {
 	// kind is the pod's kind, decided once from the claim (prepare): every facet of the pod that an
 	// issue pod and the project controller's build differently is the kind's.
 	kind podKind
-	// roles are the pod's launcher roles, one container each: the roles of the kind its labels name
-	// (podKindOf).
+	// roles are the pod's launcher roles, all of them served by the pod's one container: the roles
+	// of the kind its labels name (podKindOf).
 	roles []claim.Role
 	// workspace is the launchers' working directory (podKind.prepare): an issue pod's workspace,
 	// which workspace-init provisions on the issue's volume (workspace.Location under TreeRoot), or
@@ -992,7 +995,7 @@ const connectFlag = "--connect"
 type handedAddress struct{ name, value string }
 
 // handedAddresses are every address a role process launched now carries, whatever its role: the
-// worker stream listener its launcher dials (launcherContainers, fixed when the pod is created),
+// worker stream listener its launcher dials (podKind.launcherContainer, fixed when the pod is created),
 // then the daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment
 // names them (mainEnvironment, carried by each generation's start command, launcherCommand), the
 // broker only when the runtime enrolls pods. The stream is fixed for the pod's life, so a pod a

@@ -235,8 +235,8 @@ func pluginsSourceWords(source string) string {
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
-// Under kubernetes, when a role requests less cpu or memory than its limit, one plain `resources:`
-// line names those roles and the pods they make Burstable (capabilities.Deployment.BurstableLine);
+// Under kubernetes, when a pod's reservation requests less cpu or memory than its limit, one plain
+// `resources:` line names those pods as Burstable (capabilities.Deployment.BurstableLine);
 // a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
 // probe's attempt budget is derived above slow_command_timeout_seconds (daemon.ProbeBudget), one
 // plain line names the derived bound and why; then one names the repository cache every mapped

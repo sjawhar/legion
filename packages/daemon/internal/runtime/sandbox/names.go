@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -58,7 +59,7 @@ const (
 	CacheRoot          = "/legion/cache"
 	LauncherDir        = "/var/run/legion/launcher"
 	LauncherPrivateDir = "/var/run/legion/private"
-	LauncherTokenFile  = "LAUNCHER_TOKEN"
+	LauncherTokenFile  = launcher.LauncherTokenFile
 	GHConfigDir        = "/var/run/legion/gh"
 	ProvisionDir       = "/var/run/legion/provision"
 	StateDir           = "/var/run/legion/state"
@@ -71,24 +72,17 @@ const (
 // whole directory inside the role's namespaces and binds the role's own gh, private, state and
 // agent-secrets directories back at GHConfigDir, LauncherPrivateDir, StateDir and
 // AgentSecretsKeyDir, and makes the role's home overlay and temporary directories under its
-// directory of RoleHomesDir.
+// directory of RoleHomesDir. The names under it are internal/launcher's layout (launcher.RoleGHDir
+// and its siblings), which both sides read.
 const (
 	RolesDir     = "/var/run/legion/roles"
-	RoleHomesDir = RolesDir + "/.homes"
+	RoleHomesDir = RolesDir + "/" + launcher.RoleHomesDir
 )
 
-// The directories of a role's own under RolesDir (roleDir), each one volume's mount: the launcher
+// roleDir is role's own directory of an issue pod's one container, under RolesDir: its launcher
 // token and gh projections of its role Secret, read-only, and its memory-backed private, state and
-// agent-secrets key directories, the last only in a pod enrolled with the secrets broker.
-const (
-	roleLauncherDir     = "launcher"
-	roleGHDir           = "gh"
-	rolePrivateDir      = "private"
-	roleStateDir        = "state"
-	roleAgentSecretsDir = "agent-secrets"
-)
-
-// roleDir is role's own directory of an issue pod's one container, under RolesDir.
+// agent-secrets key directories, the last only in a pod enrolled with the secrets broker, each one
+// volume's mount at that name of launcher's layout.
 func roleDir(role claim.Role) string { return RolesDir + "/" + string(role) }
 
 // feedSubPath is the issue volume's directory that holds the pod's feed (FeedDir). The kubelet

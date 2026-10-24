@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -1322,8 +1323,8 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			if m := mounts[agentSecretsTokenVolume]; m.MountPath != AgentSecretsTokenDir || !m.ReadOnly {
 				t.Fatalf("token mount %+v, want read-only at %s", m, AgentSecretsTokenDir)
 			}
-			if m := mounts[keyVolume]; m.MountPath != roleDir(role)+"/"+roleAgentSecretsDir || m.ReadOnly {
-				t.Fatalf("key mount %+v, want writable at %s", m, roleDir(role)+"/"+roleAgentSecretsDir)
+			if m := mounts[keyVolume]; m.MountPath != roleDir(role)+"/"+launcher.RoleAgentSecretsDir || m.ReadOnly {
+				t.Fatalf("key mount %+v, want writable at %s", m, roleDir(role)+"/"+launcher.RoleAgentSecretsDir)
 			}
 			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == keyVolume })
 			if key < 0 || spec.Volumes[key].EmptyDir == nil || spec.Volumes[key].EmptyDir.Medium != corev1.StorageMediumMemory {

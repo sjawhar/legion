@@ -10,14 +10,9 @@ import { defaults } from "./stage4b-reservations";
 const lib = join(import.meta.dir);
 const include = 'include "stage4b-room";';
 const GiB = 1073741824;
-// The run's overrides (stage4b-sandbox-tree.sh's override_cpu and override_memory over the
-// defaults): 2.95 CPU and 16 GiB a pod.
-const overridden = {
-  ...defaults,
-  tester: { cpu: "1", memory: "5Gi" },
-  reviewer: { cpu: "500m", memory: "2Gi" },
-  merger: { cpu: "200m", memory: "1Gi" },
-};
+// The run's override (stage4b-sandbox-tree.sh's override_issue over the defaults): 2.95 CPU and
+// 16 GiB a pod.
+const overridden = { ...defaults, issue: { ...defaults.issue, cpu: "2950m", memory: "16Gi" } };
 const defaultPod = { cpu: 3, memory: 19 * GiB };
 
 function jq(filter: string, input: unknown, args: string[] = []) {
@@ -68,7 +63,7 @@ function nodePool(requirements: object[], limits?: object, runs?: object) {
 const cpuFloor = requirement("karpenter.k8s.aws/instance-cpu", "Gt", "3");
 
 describe("issue_pod_reservation", () => {
-  test("sums the six role containers' reservations, cores and bytes", () => {
+  test("is the issue pod's one reservation, cores and bytes", () => {
     expect(
       jq("issue_pod_reservation($expected)", null, [
         "--argjson",
@@ -78,7 +73,7 @@ describe("issue_pod_reservation", () => {
     ).toEqual(defaultPod);
   });
 
-  test("takes the run's overrides where it sets them and the defaults elsewhere", () => {
+  test("takes the run's override where it sets one", () => {
     expect(
       jq("issue_pod_reservation($expected)", null, [
         "--argjson",

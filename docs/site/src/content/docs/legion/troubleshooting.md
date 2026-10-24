@@ -310,11 +310,12 @@ its tree stands:
 `legion claims retry` relaunches only a failed architect. It refuses a claim in any other state,
 naming the state, and a failed phase worker or controller, naming who retries it.
 
-To see why the launches failed, read the failed role's container log in the issue's pod:
+To see why the launches failed, read the failed role's lines of the `roles` container's log in the
+issue's pod. The launcher prefixes each role's lines with the role's name:
 
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY>
-kubectl -n legion logs <pod> -c <role>   # e.g. -c implementer
+kubectl -n legion logs <pod> -c roles | grep '^<role>: '   # e.g. '^implementer: '
 kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
 
@@ -441,7 +442,7 @@ is queued for it, since the next phase start or re-admission resumes it as befor
 
   Nothing is registered before a refusal, so every later attempt refuses the same way until the
   repository is fixed. Run the commands it names from a shell in the issue's running pod
-  (`kubectl -n legion exec -it <pod> -c architect -- sh`), or, when none runs, in a pod of your own
+  (`kubectl -n legion exec -it <pod> -c roles -- sh`), or, when none runs, in a pod of your own
   that mounts the issue's volume (`docs/kubernetes.md` in the repository, "A shell on an issue's
   volume").
 - **The issue's volume was lost.** The daemon logs

@@ -1335,9 +1335,9 @@ whose only creator is a role's **next shim start**: `podsafety.EnsureScratch` ma
 directories once, as the shim starts Oh My Pi (`worker_shim.go`), and a role's shim lives across
 turns, so a `tmp` deleted under a live role stays gone until that role is relaunched. What a
 live role then does with it splits two ways, and the quiet half is the dangerous one: `mktemp -d`
-fails with exit 1, where Python's `tempfile` silently falls back to `/tmp` — which in a role
-container is the container's own filesystem, charged to the ephemeral-storage limit this whole
-layout exists to get out from under. So delete `tmp` with the role stopped, not merely between
+fails with exit 1, where Python's `tempfile` silently falls back to `/tmp` — which in a role's
+namespace is the role's own directory on the `role-homes` volume, on the node's disk and charged to
+the ephemeral-storage limit this whole layout exists to get out from under. So delete `tmp` with the role stopped, not merely between
 its turns; the rest of the list is reclaimable between turns, when no role is mid-build or
 mid-install. Do not leave it out of the list either, because a temporary directory sounds
 transient: a role at the merge base is told no `TMPDIR` at all and its temporaries died with the
@@ -1971,10 +1971,13 @@ isolation rests on ownership and private mounts, not on a read-only root, which 
 namespace could undo
 (`docs/solutions/legion/namespace-isolation-under-gvisor-holds-on-locked-mounts-and-ownership-not-a-read-only-root-INFRA-208.md`). An operator mount
 (`runtime.kubernetes.pod.volume_mounts`) at or above `/tmp`, `/var/tmp`, `/run/lock`, `/var/lock`
-or `/dev/shm`, or at, under or above `/var/run/legion/roles`, is refused:
-`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above <dir>, which every role's
-namespace in an issue pod covers with its own: mount under it instead`. A mount under `/tmp` and
-the like is allowed, and role-init carries it back.
+or `/dev/shm`, or at or above the image's other spellings of them (`/var/run/lock`, `/run/shm`,
+`/var/run/shm`), is refused: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above
+<dir>, which every role's namespace in an issue pod covers with its own: mount under it instead`.
+A mount under `/tmp` and the like is allowed, and role-init carries it back. A mount at, under or
+above `/var/run/legion/roles` is refused as any other path Legion mounts is:
+`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
+Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`.
 
 What a role writes without being told where is not on the node's disk: the issue's temporary
 directory, its cache and data homes and bun's install cache are one set on the issue's volume,
@@ -2089,8 +2092,9 @@ runs from, whatever we do about caches; what a cache per role confined was after
 role's later installs would put the changed copy back (LEGION-198, where bun's hardlinking was
 first met). The state home is the one that stays the role's, and for a mechanism rather than
 caution: Oh My Pi names its browser broker's lock from the state root, the name is an abstract
-unix socket, and an abstract socket name is one name across every container of a pod, so one
-state home would block every role's browser broker but the first (above).
+unix socket, and an abstract socket name is one name across every process that shares a network
+namespace, which every role of a pod does, so one state home would block every role's browser
+broker but the first (above).
 
 Sharing the cache home gives the issue's roles one Playwright browser registry, since
 playwright-core resolves it to `$XDG_CACHE_HOME/ms-playwright`, and `Registry.install()` takes an
@@ -2468,7 +2472,7 @@ operator's context: the daemon's identity creates no pod and has no exec
 
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY> --field-selector=status.phase=Running
-kubectl -n legion exec -it <pod> -c architect -- sh
+kubectl -n legion exec -it <pod> -c roles -- sh
 export XDG_STATE_HOME=/legion/scratch/state/architect   # the role's state home (below)
 jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
 ```

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -217,13 +218,13 @@ func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvV
 		command = append(command, "--role", string(role))
 		dir := roleDir(role)
 		mounts = append(mounts,
-			corev1.VolumeMount{Name: roleVolume("launcher", role), MountPath: dir + "/" + roleLauncherDir, ReadOnly: true},
-			corev1.VolumeMount{Name: roleVolume(ghVolume, role), MountPath: dir + "/" + roleGHDir, ReadOnly: true},
-			corev1.VolumeMount{Name: roleVolume("private", role), MountPath: dir + "/" + rolePrivateDir},
-			corev1.VolumeMount{Name: roleVolume(stateVolume, role), MountPath: dir + "/" + roleStateDir},
+			corev1.VolumeMount{Name: roleVolume("launcher", role), MountPath: dir + "/" + launcher.RoleLauncherDir, ReadOnly: true},
+			corev1.VolumeMount{Name: roleVolume(ghVolume, role), MountPath: dir + "/" + launcher.RoleGHDir, ReadOnly: true},
+			corev1.VolumeMount{Name: roleVolume("private", role), MountPath: dir + "/" + launcher.RolePrivateDir},
+			corev1.VolumeMount{Name: roleVolume(stateVolume, role), MountPath: dir + "/" + launcher.RoleStateDir},
 		)
 		if r.agentSecrets != nil {
-			mounts = append(mounts, corev1.VolumeMount{Name: roleVolume(agentSecretsKeyVolume, role), MountPath: dir + "/" + roleAgentSecretsDir})
+			mounts = append(mounts, corev1.VolumeMount{Name: roleVolume(agentSecretsKeyVolume, role), MountPath: dir + "/" + launcher.RoleAgentSecretsDir})
 		}
 	}
 	mounts = append(mounts, corev1.VolumeMount{Name: roleHomesVolume, MountPath: RoleHomesDir})

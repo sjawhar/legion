@@ -1,9 +1,10 @@
 // Package sandbox runs each issue in one Agent Sandbox (agents.x-k8s.io/v1beta1 Sandbox,
-// kubernetes-sigs/agent-sandbox v1.0.3). Six role containers share its workspace and network;
-// each has a private launcher that starts and stops only its own worker-shim child. The project
-// controller (`controller: daemon`) runs in a Sandbox of its own whose pod has the controller's
-// launcher alone. The two are the runtime's two kinds of pod (podKind): one supervision path runs
-// both, and each kind builds the facets of its pod the other does not.
+// kubernetes-sigs/agent-sandbox v1.0.3). Its pod's one container, `roles`, runs one launcher that
+// serves all six workflow roles, each role's generation in namespaces of its own (`legion launcher
+// role-init`), and the roles share the issue's workspace and network. The project controller
+// (`controller: daemon`) runs in a Sandbox of its own whose pod has the controller's launcher
+// alone. The two are the runtime's two kinds of pod (podKind): one supervision path runs both, and
+// each kind builds the facets of its pod the other does not.
 //
 // Process Suspend leaves the shared Sandbox running, and so does Release of a claim on an issue.
 // The durable issue close first stops every stored role, then sets its Sandbox Suspended and waits

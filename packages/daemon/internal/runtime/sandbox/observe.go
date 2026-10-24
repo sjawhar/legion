@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -422,7 +423,9 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 }
 
 // readLog is container's last lines of log, at most limit bytes of them, read under one bound
-// (call).
+// (call). The bytes kept are the newest: the stream is read whole, TailLines bounding it, and only
+// its last limit bytes are kept, from the first whole line in them, so a quote never ends before
+// the lines nearest the container's end.
 func (r *Runtime) readLog(ctx context.Context, pod, container string, lines, limit int64) (string, error) {
 	reading, cancel := call(ctx)
 	defer cancel()
@@ -431,9 +434,15 @@ func (r *Runtime) readLog(ctx context.Context, pod, container string, lines, lim
 		return "", err
 	}
 	defer stream.Close()
-	text, err := io.ReadAll(io.LimitReader(stream, limit))
+	text, err := io.ReadAll(stream)
 	if err != nil {
 		return "", err
+	}
+	if cut := int64(len(text)) - limit; cut > 0 {
+		text = text[cut:]
+		if newline := bytes.IndexByte(text, '\n'); newline >= 0 {
+			text = text[newline+1:]
+		}
 	}
 	return strings.TrimRight(string(text), "\n"), nil
 }

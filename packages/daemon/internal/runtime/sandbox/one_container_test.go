@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -135,6 +137,43 @@ func sameRequirements(a, b corev1.ResourceRequirements) bool {
 		return true
 	}
 	return same(a.Requests, b.Requests) && same(a.Limits, b.Limits)
+}
+
+// The roles container's own environment is the pod's alone, whichever role's launch created it:
+// only what the kubelet resolves (the downward API's POD_UID), never a plain value, so no role's
+// value (its XDG_STATE_HOME, LEGION_ROLE, generation), no operator value and nothing secret lands in
+// a container every role's launcher shares. Each such value travels in that role's generation's
+// start command alone.
+func TestTheRolesContainerEnvironmentNamesNoRole(t *testing.T) {
+	opts := goldenOptions()
+	opts.Pod.Env = map[string]string{"OPERATOR_SETTING": "operator-value"}
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first []corev1.EnvVar
+	for _, spec := range []runtime.SpawnSpec{rootSpec(t), workerSpec(t), childSpec(t)} {
+		l := launchOf(t, r, spec)
+		c := containerNamed(t, r.podTemplate(l).Spec, runtime.IssuePodContainer)
+		if len(c.Env) == 0 {
+			t.Fatalf("%s's launch gives the roles container no environment, want POD_UID from the downward API", spec.Role)
+		}
+		for _, v := range c.Env {
+			if v.ValueFrom == nil {
+				t.Errorf("%s's launch puts %s=%q in the roles container's own environment, want only kubelet-resolved values", spec.Role, v.Name, v.Value)
+			}
+			for _, role := range claim.Roles {
+				if strings.Contains(v.String(), string(role)) {
+					t.Errorf("%s's launch puts %s, naming role %s, in the roles container's own environment", spec.Role, v.String(), role)
+				}
+			}
+		}
+		if first == nil {
+			first = c.Env
+		} else if !slices.EqualFunc(first, c.Env, func(a, b corev1.EnvVar) bool { return a.String() == b.String() }) {
+			t.Errorf("%s's launch gives the roles container %v, another role's launch %v; the environment is the pod's, not a role's", spec.Role, c.Env, first)
+		}
+	}
 }
 
 // toEarlierLayout edits a stored issue pod into the layout before one container: one container per
@@ -301,6 +340,47 @@ func TestTheRolesContainerEndingEndsEveryRole(t *testing.T) {
 	}
 }
 
+// A Gone's quote of the shared log is the role's newest lines, read through the pod's log as the
+// kubelet serves it: a log of interleaved tester, reviewer and launcher lines larger than the byte
+// bound quotes the tester's last lines, the ones nearest the container's end, and none of the
+// reviewer's or the launcher's, nor the tester's oldest.
+func TestARolesQuoteIsItsNewestLinesOfALogPastTheBound(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	status := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "roles", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+	}}}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), podObject(name, recorded, sandboxUID, labels, status)}, withoutController())
+	padding := strings.Repeat("x", 1000)
+	var log strings.Builder
+	for i := range sharedLogLines {
+		fmt.Fprintf(&log, "tester: line %d %s\nreviewer: secret %d\nlauncher: tick %d\n", i, padding, i, i)
+	}
+	if log.Len() <= sharedLogBytes {
+		t.Fatalf("the log is %d bytes, not past the %d-byte bound", log.Len(), sharedLogBytes)
+	}
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		return true, &k8sruntime.Unknown{Raw: []byte(log.String())}, nil
+	})
+	obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	last := sharedLogLines - 1
+	quote := obs.Detail[strings.Index(obs.Detail, "last lines of tester:\n")+len("last lines of tester:\n"):]
+	lines := strings.Split(quote, "\n")
+	if len(lines) != logTailLines || lines[len(lines)-1] != fmt.Sprintf("line %d %s", last, padding) ||
+		lines[0] != fmt.Sprintf("line %d %s", last-logTailLines+1, padding) {
+		t.Fatalf("the tester's quote is %d lines from %.20q to %.20q, want its last %d, line %d to line %d", len(lines), lines[0], lines[len(lines)-1], logTailLines, last-logTailLines+1, last)
+	}
+	if strings.Contains(quote, "secret") || strings.Contains(quote, "tick") {
+		t.Fatalf("the tester's quote carries a sibling's or the launcher's line: %.200q", quote)
+	}
+}
+
 // The one container's log interleaves every role's lines, each prefixed `<role>: ` by the
 // launcher: a role's quote is its own last lines alone, the prefix dropped, and a sibling's, the
 // launcher's own unprefixed ones and a role whose name another's begins with are none of it.
@@ -366,7 +446,11 @@ func TestTheBootCensusPassesBothIssuePodLayouts(t *testing.T) {
 // A role's namespace puts its own filesystems at /tmp, /var/tmp, /run/lock (also /var/lock) and
 // /dev/shm, and covers /var/run/legion/roles whole, carrying back only mounts under the first five:
 // an operator's mount at or above one of the five, or at, under or above the roles directory,
-// would vanish from every role, so it is refused; one under the five reaches them.
+// would vanish from every role, so it is refused; one under the five reaches them. role-init
+// resolves each path before it covers it, so a mount spelled through one of the worker image's
+// links to them (/var/run to /run, /var/lock and /var/run/lock to /run/lock, /run/shm and
+// /var/run/shm to /dev/shm, read from the image) lands on what role-init covers and is refused as
+// well.
 func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 	mountAt := func(path string) Pod {
 		return Pod{
@@ -374,7 +458,10 @@ func TestCheckPodRefusesAMountARolesNamespaceHides(t *testing.T) {
 			VolumeMounts: []corev1.VolumeMount{{Name: "share", MountPath: path}},
 		}
 	}
-	for _, path := range []string{"/tmp", "/var/tmp", "/run/lock", "/var/lock", "/dev/shm", "/run", "/dev", "/var/run/legion/roles", "/var/run/legion/roles/tester", "/var/run/legion/roles/.homes"} {
+	for _, path := range []string{
+		"/tmp", "/var/tmp", "/run/lock", "/var/lock", "/dev/shm", "/run", "/dev", "/var/run/legion/roles", "/var/run/legion/roles/tester", "/var/run/legion/roles/.homes",
+		"/var/run/lock", "/run/shm", "/var/run/shm", "/var/run",
+	} {
 		if err := CheckPod(mountAt(path), nil, testOptions().Tools, nil, nil, ""); err == nil {
 			t.Errorf("a mount at %s passed, want it refused", path)
 		}

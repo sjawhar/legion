@@ -94,7 +94,7 @@ docker run --rm --name "$cluster-driver" --network kind --user "$(id -u):$(id -g
   -v "$work:$work" -e HOME=/tmp \
   -e LEGION_E2E_KUBECONFIG="$work/kubeconfig-internal" -e LEGION_E2E_KUBE_CONTEXT="$kind_context" \
   -e LEGION_E2E_IMAGE="$image" -e LEGION_E2E_WORK="$work" -e LEGION_E2E_RESULT="$result" \
-  mirror.gcr.io/library/busybox:1.37 sh -c 'LEGION_E2E_STREAM_HOST=$(ip -4 -o addr show eth0 | awk "{print \$4}" | cut -d/ -f1) exec "$0" -test.count=1 -test.timeout=40m -test.v -test.run "^TestBurstableRoleRendersABurstablePodLive\$"' "$work/burstable.test" ||
+  mirror.gcr.io/library/busybox:1.37 sh -c 'LEGION_E2E_STREAM_HOST=$(ip -4 -o addr show eth0 | awk "{print \$4}" | cut -d/ -f1) exec "$0" -test.count=1 -test.timeout=40m -test.v -test.run "^TestABurstableIssuePodRendersLive\$"' "$work/burstable.test" ||
   fail "the launch driver failed"
 [ -s "$result" ] || fail "the launch driver recorded no pod"
 pass
