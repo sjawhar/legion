@@ -23,9 +23,10 @@ it, and any other change to the head voids it.
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   and records the verdict. The `CI` fact is the checks that stand for the code under review:
   those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/` (a push that changes only
-  `.legion/` carries `skip-checks: true`, so GitHub runs no workflow for it). With `<o>/<r>`,
-  `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  every commit above that push's head changes only `.legion/` (GitHub starts no workflow run for a
+  head whose commit message carries `skip-checks: true`, which every handoff-only push before
+  retro does; retro's push carries no such line, so its head does get GitHub's workflow runs of
+  its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`

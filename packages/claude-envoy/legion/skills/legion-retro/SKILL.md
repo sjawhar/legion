@@ -167,14 +167,30 @@ what failed.
 
 Then push both commits with one push, so one CI run covers them (`<KEY>` is your `LEGION_ISSUE`):
 `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>`.
-It carries `docs/solutions/` and the removal of `.legion/<KEY>/`, so it is not a handoff-only
-push: its head's message never ends with `skip-checks: true` and carries none of GitHub's
-`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*). When
-the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
+Its head's message never ends with `skip-checks: true` and carries none of GitHub's
+`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*).
+Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
+When the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
 moved; never force), write `<dir>/before.md` back the same way before you report the refusal to
-the architect with its output, so the body matches the head GitHub has. After the push, post one
-Dispatch message on
-the issue — `--issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
+the architect with its output, so the body matches the head GitHub has.
+
+When you have already pushed a head that wrongly carries the line — under an older copy of these
+instructions, say — read that pushed head's own commit message first and confirm it ends with
+`skip-checks: true`:
+`cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" log -r <the pushed head> --no-graph -T description`.
+The fix is to describe that same commit again without the line and push it once, which is the
+rewrite of an already-pushed commit:
+`skill://legion-worker/references/conflicts-and-rewrites.md#rewriting-pushed-commits`. Run that
+section's guard first; a non-empty guard result means another tree's work is built on the commit,
+so do not rewrite it — report the listed commits to the architect instead. Once the guard has
+cleared, the bookmark moves backwards with `--allow-backwards` and the branch is pushed once:
+that is the one non-fast-forward move the rewrite section sanctions, and not the force this
+skill's push step forbids when `jj git push` refuses a branch another role moved. The rewritten
+head is a code head, so GitHub runs the base branch's required checks on it from scratch, and the
+merge waits for them.
+
+After the push, post one Dispatch message on the issue — `--issue` is your `LEGION_ISSUE`; Legion
+issues live on Dispatch, never on a GitHub
 issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
 follows the merge's close of the issue. The message must carry this revived implementer's structured
