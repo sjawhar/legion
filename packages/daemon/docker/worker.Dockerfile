@@ -484,11 +484,13 @@ ARG PI_CODEGRAPH_VERSION
 # fails every installing launch. The entry buys nothing today — Debian's priority:required set
 # already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
 # failure the day a base drops it. Do not delete it as redundant.
-# postgresql-client (psql): packages/dispatch/e2e/local-instance.ts refuses to start without psql,
-# and that file is the entry point of `bun run e2e`, the Dispatch browser suite this deployment's
-# instructions require before a reader-facing Dispatch change merges — so a role whose image lacks
-# psql cannot run the suite its own change owes. The Debian psql is a Perl wrapper around the
-# versioned client; perl-base is already in the image, so the wrapper resolves.
+# postgresql-client (psql): `bun run e2e`, the Dispatch browser suite this deployment's
+# instructions require before a reader-facing Dispatch change merges, reaches psql through
+# packages/dispatch/e2e/psql.ts, which seed.ts calls for every spec's database reset; and the local
+# stack `bun run dispatch:local` (packages/dispatch/e2e/local-instance.ts) refuses to start without
+# psql on PATH — so a role whose image lacks psql cannot run the suite its own change owes. The
+# Debian psql is a Perl wrapper around the versioned client; perl-base is already in the image, so
+# the wrapper resolves.
 # redis-tools (redis-cli): no repository of the project speaks Redis today. It is carried anyway,
 # at about a megabyte, because a second image roll costs more than a megabyte.
 # sqlite3: Oh My Pi's session files are SQLite databases, and a role debugging its own session — or
@@ -669,7 +671,10 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # toolchain check above and the toolchain capability row all ask only that `flock` be on PATH — so
 # a base that kept flock and moved it would pass every one of those and fail every installing
 # launch. The declaration and the use have to agree on the path, and this is where they are held
-# to it. The Envoy plugin's `dispatch` shim runs its bundled CLI under
+# to it. nc is pinned for the neighbouring reason: it is the one name here the alternatives system
+# supplies rather than its own package (netcat-openbsd ships /usr/bin/nc.openbsd), so the
+# alternatives link is what the name resolves through and a base that changed it would pass every
+# other gate. The Envoy plugin's `dispatch` shim runs its bundled CLI under
 # the image's bun and prints its help, so a pi-envoy packed without bin/ or dist/dispatch.js, or an
 # image without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's
 # own test. Then `legion probe-image` runs the three launch probes through
@@ -709,6 +714,7 @@ RUN set -eu; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     flock="$(command -v flock)"; echo "flock: $flock"; test "$flock" = /usr/bin/flock; \
+    nc="$(command -v nc)"; echo "nc: $nc"; test "$nc" = /usr/bin/nc; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     gh="$(command -v gh)"; echo "gh: $gh"; test "$gh" = /opt/legion/bin/gh; /usr/local/bin/gh --version; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
