@@ -277,8 +277,8 @@ Compaction (`Compact`, which ygo runs as a room closes and as the server shuts d
 runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
 that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
 version's cursor changed content. A compacted `doc_updates`, and any backup of it taken later,
-therefore holds no text a write deleted: text deleted before a version captured it is gone (Sami's
-decision, LEGION-496).
+therefore holds no text a write deleted: text deleted before a version captured it is gone (the
+operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
