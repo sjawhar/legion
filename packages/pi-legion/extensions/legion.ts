@@ -8,7 +8,12 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
-import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
+import {
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionEnvoySettings,
+} from "@legion/envoy-client/session-settings";
+import { createEnvoyClient } from "@legion/envoy-client/transport";
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
 import { findHandoffCommit } from "@legion/pi-shared/handoff-commit";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
@@ -30,17 +35,16 @@ import {
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
+import { createPhaseReminder, type EnvoyPublish } from "../src/phase-reminder";
 import {
+  assistantRanTool,
   assistantText,
   inboundKind,
   PHASE_STALL_ENTRY,
-  type PhaseStall,
-  type PhaseStallInput,
-  restorePhaseStall,
-  stepPhaseStall,
 } from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
+import { stallLimits } from "../src/stall-limits";
 import { createLegionTool } from "../src/tools";
 import {
   branchHoldsWorkspaceRecreatedNotice,
@@ -129,24 +133,57 @@ export default function legionExtension(pi: PiApi): void {
   // answer is kept, so it runs once per session.
   const checkSubagentSession = subagentSessionCheck();
 
-  // The phase-stall check (src/phase-stall.ts). It runs only in a session holding a
-  // claim for its own id with a phase role, so never in an architect (a root or a sub-architect),
-  // the controller (whose claim lives in controllerSession), a session with no Legion environment,
-  // or a `task` subagent (whose instance returns at checkSubagentSession before any capability
-  // exists). Restored from the transcript at session_start and appended to it on every change.
-  let phaseStall: PhaseStall = "closed";
+  // The endless phase reminder (src/phase-stall.ts, src/phase-reminder.ts). It runs only in a
+  // session holding a claim for its own id with a phase role, so never in an architect (a root or
+  // a sub-architect), the controller (whose claim lives in controllerSession), a session with no
+  // Legion environment, or a `task` subagent (whose instance returns at checkSubagentSession
+  // before any capability exists). Restored from the transcript at session_start and appended to
+  // it on every change.
+  //
+  // The runner's timers and its record check run outside every hook, so the pane's own session
+  // context is kept here (`paneContext`, set at session_start and after every session change):
+  // one Oh My Pi process holds one claim for its whole life, and this is the session that claim
+  // is on.
+  let paneContext: SessionContext | undefined;
   const phaseWorkerSession = (context: SessionContext): boolean => {
     const role = claimSession.capability(context.sessionManager.getSessionId())?.role;
     return role !== undefined && role !== "architect";
   };
-  const advancePhaseStall = (input: PhaseStallInput): string | undefined => {
-    const step = stepPhaseStall(phaseStall, input);
-    if (step.state !== phaseStall) {
-      phaseStall = step.state;
-      pi.appendEntry(PHASE_STALL_ENTRY, { state: phaseStall });
-    }
-    return step.followUp;
-  };
+  // The Envoy listener the architect notice goes to, built once and only when a notice is due:
+  // this entry reaches no listener of its own otherwise. Envoy off for the session leaves it
+  // undefined, and the reminder keeps coming without a notice.
+  let architectPublisher: { readonly publish: EnvoyPublish | undefined } | undefined;
+  const phaseReminder = createPhaseReminder({
+    sendReminder: (reminder) =>
+      pi.sendMessage(
+        { customType: "legion-phase-reminder", content: reminder, display: true },
+        { deliverAs: "steer", triggerTurn: true }
+      ),
+    armTimer: (callback, delayMs) => paneContext?.setTimeout(callback, delayMs),
+    appendEntry: (entry) => pi.appendEntry(PHASE_STALL_ENTRY, entry),
+    claim: () =>
+      paneContext === undefined
+        ? undefined
+        : claimSession.capability(paneContext.sessionManager.getSessionId()),
+    readState: () => roleDaemon().state(),
+    publisher: () => {
+      if (architectPublisher === undefined) {
+        const envoy = sessionEnvoySettings(sessionConfigFile("omp", process.env), process.env, {
+          cwd: process.cwd(),
+          nats: false,
+        });
+        architectPublisher = {
+          publish: envoy.enabled
+            ? createEnvoyClient({ baseUrl: envoy.url, token: envoy.token, fetch }).publish
+            : undefined,
+        };
+      }
+      return architectPublisher.publish;
+    },
+    project: process.env.LEGION_PROJECT,
+    limits: stallLimits(process.env, logger),
+    log: logger,
+  });
 
   let daemonClient: LegionDaemonClient | undefined;
   const roleDaemon = (): LegionDaemonClient => {
@@ -211,9 +248,12 @@ export default function legionExtension(pi: PiApi): void {
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
     await titleSession(context);
+    // The session this pane's claim is on, for the reminder's timers and its record check, which
+    // run outside every hook.
+    paneContext = context;
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open.
-    phaseStall = restorePhaseStall(context.sessionManager.getBranch?.() ?? []);
+    phaseReminder.restore(context.sessionManager.getBranch?.() ?? []);
     const session = classifySession(process.env);
     if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the
@@ -247,6 +287,11 @@ export default function legionExtension(pi: PiApi): void {
         });
       }
       await claimSession.bootstrap(context);
+      // The claim is registered, so this is now known to be a phase worker: a relaunch into an
+      // open phase gets its reminder from a timer, since nothing else would wake it. The guard
+      // drops that timer when any turn started meanwhile, which is exactly the case to drop —
+      // the daemon re-sending an interrupted task arrives as a prompt.
+      if (phaseWorkerSession(context)) phaseReminder.armResumeReminder();
     }
     registerLegionTool();
     await activateLegionTool();
@@ -287,6 +332,10 @@ export default function legionExtension(pi: PiApi): void {
   // instance does neither, and the subagent check is asked once for both.
   const afterSessionChange = async (context: SessionContext): Promise<void> => {
     if (await checkSubagentSession(context)) return;
+    // Whatever session the pane is left on, every reminder timer armed on the old one is stale,
+    // and the new one is where the next is armed.
+    paneContext = context;
+    phaseReminder.sessionChanged();
     if (classifySession(process.env).kind === "controller") await titleSession(context);
     await controllerSession.reclaimAfterSessionChange(context);
   };
@@ -295,36 +344,45 @@ export default function legionExtension(pi: PiApi): void {
   pi.on("session_tree", (_event, context) => afterSessionChange(context));
 
   // The daemon's assignment (a user message) opens the phase; an Envoy delivery re-arms a stall
-  // that already had its follow-up or a WAITING reply. A person's direct message that envoy.ts
-  // sent in as the user's own turn is a user message too (a `skill-prompt` custom message for a
-  // `/skill:`), but it is an inbound event, as its Envoy card was: the record envoy.ts keeps of the
-  // turns it sent in says which message that is, whichever of the two extensions asks first. A turn
-  // that record misses falls through to `inboundKind` and counts as an assignment; the phase-stall
-  // section of `packages/pi-legion/AGENTS.md` says which turns it misses. The `legion` tool's
-  // successful `handoff_complete` closes the phase (`onPhaseCompleted`, below).
+  // whose reminders went unanswered or that a WAITING reply quieted. A person's direct message
+  // that envoy.ts sent in as the user's own turn is a user message too (a `skill-prompt` custom
+  // message for a `/skill:`), but it is an inbound event, as its Envoy card was: the record
+  // envoy.ts keeps of the turns it sent in says which message that is, whichever of the two
+  // extensions asks first. A turn that record misses falls through to `inboundKind` and counts as
+  // an assignment; the phase-stall section of `packages/pi-legion/AGENTS.md` says which turns it
+  // misses. The `legion` tool's successful `handoff_complete`, and a successful backward move,
+  // close the phase (`onPhaseCompleted`, below). Every message, classified or not, says a turn is
+  // running and leaves every armed reminder timer stale.
   pi.on("message_start", async (event, context) => {
     if (!phaseWorkerSession(context)) return;
+    phaseReminder.turnStarted();
     const injected =
       matchInjectedUserTurn(context.sessionManager.getSessionId(), event.message) !== undefined;
     const kind = injected ? "inbound-event" : inboundKind(event.message);
-    if (kind !== undefined) advancePhaseStall({ kind });
+    if (kind !== undefined) phaseReminder.apply({ kind });
+  });
+
+  // An assistant message that settled having run at least one real tool call: the worker is
+  // working, so nothing it has been reminded of is unanswered. Read from `message_end` rather
+  // than a `tool_call` hook, which this entry registers none of, so nothing it does can block or
+  // shape a call the worker makes.
+  pi.on("message_end", async (event, context) => {
+    if (!phaseWorkerSession(context)) return;
+    if (assistantRanTool(event.message)) phaseReminder.apply({ kind: "tool-call" });
   });
 
   // The run is about to settle with nothing left for the host to continue: a phase still open
-  // gets its follow-up, one a stall, or two when the follow-up to a tool call written as text is
-  // answered with another (src/phase-stall.ts), which the host sends as the next turn of this same
-  // session.
+  // earns a reminder (src/phase-stall.ts). The first of a run comes back as the host's own
+  // continuation, one more turn of this same session; every one after it is a timer, so the run
+  // settles and the daemon sees the turn end (src/phase-reminder.ts).
   pi.on("session_stop", async (event, context) => {
     if (event.signal.aborted || !phaseWorkerSession(context)) return undefined;
-    const followUp = advancePhaseStall({
-      kind: "settle",
-      lastAssistantText: assistantText(event.last_assistant_message),
-    });
-    return followUp === undefined ? undefined : { continue: true, additionalContext: followUp };
+    const reminder = await phaseReminder.settle(assistantText(event.last_assistant_message));
+    return reminder === undefined ? undefined : { continue: true, additionalContext: reminder };
   });
 
   const onPhaseCompleted = (context: SessionContext): void => {
-    if (phaseWorkerSession(context)) advancePhaseStall({ kind: "handoff-complete" });
+    if (phaseWorkerSession(context)) phaseReminder.apply({ kind: "phase-closed" });
   };
 
   const activateLegionTool = async (): Promise<void> => {

@@ -1,37 +1,51 @@
 import { LOCAL_ENVOY_NOTICE } from "@legion/pi-shared/interface";
 
 /**
- * The phase-stall check (LEGION-208 Stage 4b, task 4b.15). A phase worker whose turn ends with its
- * phase still open, without the `legion` tool's `handoff_complete` having succeeded since the
- * daemon's last assignment, would otherwise sit idle while nothing wakes anyone: in Stage 3 at
- * 1ee62d31 the round-2 implementer wrote its final `legion handoff complete` as text instead of a
- * tool call, so it never ran. `extensions/legion.ts` feeds this state machine from the session's
- * own hooks and returns its follow-up from `session_stop`, Oh My Pi's hook for a top-level run
- * about to settle, which the host turns into one more turn in the same session.
+ * The phase-stall check (LEGION-208 Stage 4b, task 4b.15; made endless by INFRA-220). A phase
+ * worker whose turn ends with its phase still open, without the `legion` tool's `handoff_complete`
+ * having succeeded since the daemon's last assignment, would otherwise sit idle while nothing wakes
+ * anyone: in Stage 3 at 1ee62d31 the round-2 implementer wrote its final `legion handoff complete`
+ * as text instead of a tool call, so it never ran, and two trees later waited six hours each on a
+ * worker that had had its one follow-up. So the worker is reminded at the end of every turn, for as
+ * long as its phase stays open. `extensions/legion.ts` feeds this state machine from the session's
+ * own hooks and `src/phase-reminder.ts` delivers each reminder: the first of a run from
+ * `session_stop`, Oh My Pi's hook for a top-level run about to settle, which the host turns into one
+ * more turn in the same session, and every one after it from a timer, so the run settles and the
+ * daemon sees the turn end. When `LEGION_STALL_ARCHITECT_AFTER` reminders in a row change nothing,
+ * the session tells the architect over Envoy.
  */
 
 /** Where the worker's phase stands between the daemon's assignment and a successful
  * `handoff_complete`:
  * - `closed`: no assignment since the last successful completion, or none seen yet;
- * - `open`: assigned and not completed, so a turn that settles now gets the follow-up;
- * - `text-call`: still open, and this stall's follow-up went to a final message holding a tool
- *   call written as text, so a turn that settles on such a call again gets one more, the last;
- * - `quiet`: still open, and this stall already had its follow-ups or a WAITING reply, so nothing
- *   more is sent until the next inbound event or assignment.
- * A stall is the span between two inbound events (an assignment or an Envoy delivery), which no
- * follow-up causes, so it gets at most two follow-ups whatever the model answers. */
-export type PhaseStall = "closed" | "open" | "text-call" | "quiet";
+ * - `open`: assigned and not completed, so a turn that settles now earns a reminder;
+ * - `waiting`: still open, and the worker's last reply said with a WAITING line what it waits on,
+ *   which buys the longer quiet wait `LEGION_STALL_WAITING_MS` before the next reminder.
+ * The reminding never stops: a reminder that changes nothing is followed by another. */
+export type PhaseStall = "closed" | "open" | "waiting";
+
+/** The state and how many reminders the worker has done nothing about: `count` climbs by one on
+ * every reminder the host actually put in front of the worker and drops to 0 as soon as the worker,
+ * or the daemon, does anything at all. */
+export interface PhaseStallState {
+  readonly state: PhaseStall;
+  readonly count: number;
+}
 
 export type PhaseStallInput =
   | { readonly kind: "assignment" }
   | { readonly kind: "inbound-event" }
-  | { readonly kind: "handoff-complete" }
-  | { readonly kind: "settle"; readonly lastAssistantText: string };
+  | { readonly kind: "phase-closed" }
+  /** The settling assistant message ran at least one real tool call (`assistantRanTool`). */
+  | { readonly kind: "tool-call" }
+  | { readonly kind: "settle"; readonly lastAssistantText: string }
+  /** The host has just delivered a reminder to the worker. */
+  | { readonly kind: "reminded" };
 
 export interface PhaseStallStep {
-  readonly state: PhaseStall;
-  /** The model-visible follow-up for this settle, when one is due. */
-  readonly followUp?: string;
+  readonly state: PhaseStallState;
+  /** The model-visible reminder this settle earns, when one is due. */
+  readonly reminder?: string;
 }
 
 /** The custom transcript entry (`pi.appendEntry`) holding the state after each change, so a worker
@@ -45,38 +59,56 @@ const WAITING_REPLY = /^\W*WAITING\b/m;
  * namespace prefix: the shape the Stage 3 model emitted in place of a `tool_use` block. */
 const TOOL_CALL_SHAPED = /<(?:[\w-]+:)?(?:function_calls\b|invoke\s+name\s*=|parameter\s+name\s*=)/;
 
-const FOLLOW_UP =
+/** What a worker whose turn ended with its phase open is told. The Claude Code bridge's own copy
+ * (`packages/daemon/internal/claudebridge/stall.go`) is pinned to this text character for
+ * character, so a change here is a change there. */
+export const REMINDER =
   "Your turn ended with your Legion phase still open: the `legion` tool's `handoff_complete` has " +
   "not succeeded since your assignment. If your phase's work is done, call the `legion` tool now " +
   "with op `handoff_complete` and the fields your role's instructions give. If you are waiting on " +
   "something (CI, a review, a person), reply with a line starting WAITING that names what you are " +
-  "waiting on; nothing more will be sent until a new event arrives.";
+  "waiting on: that buys a quiet wait, and then this reminder comes again. This reminder repeats " +
+  "at the end of every turn for as long as your phase is open.";
 
 const TEXT_TOOL_CALL =
   "Your last message holds a tool call written as text, so it did not run: make it a real tool call. ";
 
-export function stepPhaseStall(state: PhaseStall, input: PhaseStallInput): PhaseStallStep {
+/** The reminder a settling message earns: `REMINDER`, led by `TEXT_TOOL_CALL` when that message
+ * holds a tool call written as text, which is the step the worker failed to take. A reminder no
+ * settling message decided (the resume timer's) passes `""` and gets `REMINDER` alone. */
+export function reminderText(lastAssistantText: string): string {
+  return TOOL_CALL_SHAPED.test(lastAssistantText) ? TEXT_TOOL_CALL + REMINDER : REMINDER;
+}
+
+/**
+ * The next state, and the reminder the worker has earned by settling. The count moves only on
+ * `reminded`, which the host applies once it has actually put the reminder in front of the worker,
+ * so a reminder dropped because a task arrived first counts for nothing; `settle` never changes it.
+ * `reminded` from `waiting` goes back to `open`, because the wait is over.
+ */
+export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): PhaseStallStep {
   switch (input.kind) {
     case "assignment":
-      return { state: "open" };
-    case "handoff-complete":
-      return { state: "closed" };
+      return { state: { state: "open", count: 0 } };
+    case "phase-closed":
+      return { state: { state: "closed", count: 0 } };
     case "inbound-event":
-      return { state: state === "quiet" || state === "text-call" ? "open" : state };
+      // A delivery may be what the worker waited on, and it is something happening: an open phase
+      // starts its count again. A closed phase is not reopened by one.
+      return state.state === "closed" ? { state } : { state: { state: "open", count: 0 } };
+    case "tool-call":
+      // The worker is working, whatever it is working on: nothing is unanswered any more.
+      return { state: { state: state.state, count: 0 } };
+    case "reminded":
+      return state.state === "closed"
+        ? { state }
+        : { state: { state: "open", count: state.count + 1 } };
     case "settle": {
-      if (state !== "open" && state !== "text-call") return { state };
-      if (WAITING_REPLY.test(input.lastAssistantText)) return { state: "quiet" };
-      const textCall = TOOL_CALL_SHAPED.test(input.lastAssistantText);
-      // A stall's one follow-up, unless that one answered a tool call written as text: then a
-      // second text call gets one more, since the call it failed to make is still the next step.
-      if (state === "text-call") {
-        return textCall
-          ? { state: "quiet", followUp: TEXT_TOOL_CALL + FOLLOW_UP }
-          : { state: "quiet" };
+      if (state.state !== "open") return { state };
+      if (WAITING_REPLY.test(input.lastAssistantText)) {
+        return { state: { state: "waiting", count: state.count } };
       }
-      return textCall
-        ? { state: "text-call", followUp: TEXT_TOOL_CALL + FOLLOW_UP }
-        : { state: "quiet", followUp: FOLLOW_UP };
+      return { state, reminder: reminderText(input.lastAssistantText) };
     }
   }
 }
@@ -86,8 +118,10 @@ export function stepPhaseStall(state: PhaseStall, input: PhaseStallInput): Phase
  * `envoy-message` custom message. A person's direct message from Dispatch that the Envoy extension
  * sent in as the user's own turn is a user message as well, or for a `/skill:` the host's
  * `skill-prompt` custom message, which `extensions/legion.ts` tells apart before asking this
- * (`matchInjectedUserTurn`). Anything else (the host's own continuations, this check's follow-up
- * among them, the Envoy extension's own notices, tool results, the model's replies) is neither. */
+ * (`matchInjectedUserTurn`). Anything else (the host's own continuations, this check's reminder
+ * among them, the Envoy extension's own notices, tool results, the model's replies) is neither.
+ * A reminder the plugin sends through `pi.sendMessage` carries its own custom type for that reason:
+ * a `role: "user"` message or an `envoy-message` would make the reminder reset its own count. */
 export function inboundKind(message: unknown): "assignment" | "inbound-event" | undefined {
   if (typeof message !== "object" || message === null || !("role" in message)) return undefined;
   if (message.role === "user") return "assignment";
@@ -126,13 +160,44 @@ export function assistantText(message: unknown): string {
     .join("\n");
 }
 
-function isPhaseStall(value: unknown): value is PhaseStall {
-  return value === "closed" || value === "open" || value === "text-call" || value === "quiet";
+/** Whether a settled assistant message ran at least one real tool call: its `content` holds a
+ * `tool_use` block. The plugin reads this from the host's `message_end`; it registers no
+ * `tool_call` hook, so nothing it does can block or shape a call the worker makes. */
+export function assistantRanTool(message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false;
+  if (!("role" in message) || message.role !== "assistant" || !("content" in message)) return false;
+  if (!Array.isArray(message.content)) return false;
+  return message.content.some(
+    (block: unknown) =>
+      typeof block === "object" && block !== null && "type" in block && block.type === "tool_use"
+  );
 }
 
-/** The state the branch's last phase-stall entry recorded; `closed` when it holds none (a fresh
- * session, before the daemon's first assignment). */
-export function restorePhaseStall(branch: readonly unknown[]): PhaseStall {
+/** The state one recorded entry holds, or undefined when it holds none this build understands.
+ * `quiet` and `text-call` are the build now in the pods: both mean the phase is open and nothing
+ * has been reminded about it yet, so a session resumed on one is reminded rather than left alone. */
+function phaseStallFrom(data: object): PhaseStallState | undefined {
+  if (!("state" in data) || typeof data.state !== "string") return undefined;
+  const recorded = "count" in data ? data.count : undefined;
+  const count =
+    typeof recorded === "number" && Number.isInteger(recorded) && recorded >= 0 ? recorded : 0;
+  switch (data.state) {
+    case "closed":
+    case "open":
+    case "waiting":
+      return { state: data.state, count };
+    case "quiet":
+    case "text-call":
+      return { state: "open", count: 0 };
+    default:
+      return undefined;
+  }
+}
+
+/** The data of the branch's last entry this build understands, or undefined when it holds none:
+ * the one place the restore reads, so the state and the plugin's own report fields come from one
+ * entry rather than two scans that could disagree. */
+function lastPhaseStallData(branch: readonly unknown[]): object | undefined {
   for (let index = branch.length - 1; index >= 0; index -= 1) {
     const entry = branch[index];
     if (
@@ -145,11 +210,35 @@ export function restorePhaseStall(branch: readonly unknown[]): PhaseStall {
       "data" in entry &&
       typeof entry.data === "object" &&
       entry.data !== null &&
-      "state" in entry.data &&
-      isPhaseStall(entry.data.state)
+      phaseStallFrom(entry.data) !== undefined
     ) {
-      return entry.data.state;
+      return entry.data;
     }
   }
-  return "closed";
+  return undefined;
+}
+
+/** The state the branch's last phase-stall entry recorded; closed with no reminders when it holds
+ * none (a fresh session, before the daemon's first assignment). */
+export function restorePhaseStall(branch: readonly unknown[]): PhaseStallState {
+  const data = lastPhaseStallData(branch);
+  return (data === undefined ? undefined : phaseStallFrom(data)) ?? { state: "closed", count: 0 };
+}
+
+/** Whether the architect has already been told about the run of reminders the restored state
+ * belongs to, and the idempotency key that notice was sent under. These two are the plugin's
+ * alone — the Claude Code bridge writes neither and the machine reads neither — but they ride the
+ * same entry, so a relaunch mid-run neither repeats an accepted notice nor loses the key a
+ * refused one must be retried under. */
+export function restorePhaseStallReport(branch: readonly unknown[]): {
+  readonly reported: boolean;
+  readonly reportKey: string | undefined;
+} {
+  const data = lastPhaseStallData(branch);
+  const reported = data !== undefined && "reported" in data && data.reported === true;
+  const key =
+    data !== undefined && "reportKey" in data && typeof data.reportKey === "string"
+      ? data.reportKey
+      : undefined;
+  return { reported, reportKey: key };
 }

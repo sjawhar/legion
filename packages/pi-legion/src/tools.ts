@@ -174,7 +174,11 @@ export function createLegionTool(deps: {
             { daemon: daemon(), claim: active, handoffCommit },
             parameters
           );
-          if (operation === "handoff_complete") onPhaseCompleted(context);
+          // A call that returned without throwing: a completion, and a backward move, which hands
+          // the issue to another phase. Either way this session's phase is no longer open.
+          if (operation === "handoff_complete" || operation === "request_backward_move") {
+            onPhaseCompleted(context);
+          }
           return jsonSuccess(answer);
         }
         assertOperationInput(parameters, operation);
