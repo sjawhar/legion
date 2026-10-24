@@ -94,16 +94,15 @@ type Options struct {
 	// default (runtime.kubernetes.issue_volume, config.defaultIssueVolume when the file sets none).
 	IssueVolume resource.Quantity
 	Scheduling  Scheduling
-	// Resources are each role's container requirements, the controller's included: the daemon
-	// hands one for every role (config.DefaultResources fills what its file leaves out), and every
-	// container of every pod the runtime builds takes its role's — an issue pod's init containers
-	// the launching role's. At the defaults each cpu and memory request equals its limit, so every
-	// pod is Guaranteed; a role the deployment gives a lower request makes every pod holding its
-	// container Burstable. The image probe carries its own (ImageProbe.Resources). New refuses a
-	// map that lacks a role of claim.Roles or the controller, or whose entry is not a reservation:
-	// cpu and memory each a positive request no greater than its positive limit, and no other
-	// resource named but ephemeral storage (checkReservation).
-	Resources map[claim.Role]corev1.ResourceRequirements
+	// Resources are the two pods' requirements: every issue pod's one container and its two init
+	// containers carry Issue, the controller's pod's one container and its init container
+	// Controller. The daemon hands both (config.DefaultResources fills what its file leaves out). At
+	// the defaults each cpu and memory request equals its limit, so every pod is Guaranteed; a pod
+	// the deployment gives a lower request is Burstable. The image probe carries its own
+	// (ImageProbe.Resources). New refuses either when it is not a reservation: cpu and memory each a
+	// positive request no greater than its positive limit, ephemeral storage bounded the same way,
+	// and no other resource named (checkRequirements).
+	Resources PodResources
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
 	// DaemonURL, EnvoyURL, and DispatchURL are the pane values LEGION_DAEMON_URL, ENVOY_URL, and
@@ -208,6 +207,12 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
 	Log *slog.Logger
+}
+
+// PodResources are the requirements of the two pods the runtime builds, each a whole pod's: an
+// issue pod's, whose one container runs every workflow role, and the project controller's.
+type PodResources struct {
+	Issue, Controller corev1.ResourceRequirements
 }
 
 // AgentSecrets is the secrets broker the runtime enrolls every pod with: the URL the

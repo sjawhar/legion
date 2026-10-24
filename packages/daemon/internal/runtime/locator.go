@@ -43,11 +43,11 @@ type TmuxLocator struct {
 	Pane   string `json:"pane"`
 }
 
-// SandboxLocator identifies one role process in an Agent Sandbox: an issue's, whose six role
-// launchers share one Sandbox and pod, or the project controller's, whose pod runs the controller's
-// launcher alone. The pod UID, container (the claim's role) and generation are required because a
-// pod's launchers start one generation after another. A process incarnation is
-// `PodUID/Generation`, rather than a pod UID alone.
+// SandboxLocator identifies one role process in an Agent Sandbox: an issue's, whose six roles share
+// one Sandbox, pod and container (IssuePodContainer), or the project controller's, whose pod runs
+// the controller's launcher alone in its container ControllerPodContainer. The pod UID, container
+// and generation are required because a pod's launchers start one generation after another. A
+// process incarnation is `PodUID/Generation`, rather than a pod UID alone.
 type SandboxLocator struct {
 	Namespace  string `json:"namespace"`
 	Name       string `json:"name"`
@@ -55,6 +55,13 @@ type SandboxLocator struct {
 	Container  string `json:"container"`
 	Generation uint64 `json:"generation"`
 }
+
+// The containers a sandbox locator names: an issue pod's one container, in which every workflow
+// role of the issue runs, and the project controller's pod's one container.
+const (
+	IssuePodContainer      = "roles"
+	ControllerPodContainer = "controller"
+)
 
 // Validate is the refusal `encoding/json` cannot make. Unmarshalling leaves an absent member at
 // its zero value and reports nothing, so a locator is checked wherever one is read back — the
@@ -101,7 +108,7 @@ func (l Locator) Validate() error {
 			return fmt.Errorf("locator %s: sandbox member with no pod UID", l.Claim)
 		}
 		if l.Sandbox.Container == "" {
-			return fmt.Errorf("locator %s: sandbox member with no role container", l.Claim)
+			return fmt.Errorf("locator %s: sandbox member with no container", l.Claim)
 		}
 		if l.Sandbox.Generation == 0 {
 			return fmt.Errorf("locator %s: sandbox member with no process generation", l.Claim)
@@ -110,8 +117,13 @@ func (l Locator) Validate() error {
 			return fmt.Errorf("locator %s: sandbox incarnation %q, want %q from pod UID and generation", l.Claim, l.Incarnation, want)
 		}
 		role, ok := l.Claim.Role()
-		if !ok || l.Sandbox.Container != string(role) {
-			return fmt.Errorf("locator %s: sandbox container %q does not match claim role", l.Claim, l.Sandbox.Container)
+		switch {
+		case !ok:
+			return fmt.Errorf("locator %s: the claim names no role", l.Claim)
+		case role == claim.RoleController && l.Sandbox.Container != ControllerPodContainer:
+			return fmt.Errorf("locator %s: sandbox container %q; the controller's process runs in container %q", l.Claim, l.Sandbox.Container, ControllerPodContainer)
+		case role != claim.RoleController && l.Sandbox.Container != IssuePodContainer:
+			return fmt.Errorf("locator %s: sandbox container %q; an issue pod's role runs in its one container %q", l.Claim, l.Sandbox.Container, IssuePodContainer)
 		}
 	default:
 		return fmt.Errorf("locator %s: no runtime answers to %q", l.Claim, l.Runtime)
@@ -119,10 +131,10 @@ func (l Locator) Validate() error {
 	return nil
 }
 
-// Label is how a log line or a capability row names the process l addresses: its pod and role
-// container under a sandbox (`pod <name>/<container>`), its pane under tmux
-// (`pane <window>:<pane>`), and the claim alone (`claim <token>`) for a locator naming no process,
-// which Validate refuses and a ready records for a claim whose machine holds none.
+// Label is how a log line or a capability row names the process l addresses: its pod and
+// container under a sandbox (`pod <name>/<container>`), its pane under tmux (`pane
+// <window>:<pane>`), and the claim alone (`claim <token>`) for a locator naming no process, which
+// Validate refuses and a ready records for a claim whose machine holds none.
 func (l Locator) Label() string {
 	switch {
 	case l.Sandbox != nil:

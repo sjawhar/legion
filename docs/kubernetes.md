@@ -47,7 +47,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   probes run, and its last step refuses a git anywhere but `/usr/bin/git`;
 - `socat` from Debian trixie's archive, at `/usr/bin/socat`: a byte pipe that carries a connection over
   `kubectl exec` to a port the pod listens on at `127.0.0.1`, such as a dev server an agent runs
-  (`kubectl -n legion exec -i <pod> -c <role> -- socat - TCP:127.0.0.1:<port>`). `kubectl port-forward`
+  (`kubectl -n legion exec -i <pod> -c roles -- socat - TCP:127.0.0.1:<port>`). `kubectl port-forward`
   reaches no listener in the pod under gVisor: the kubelet dials the pod's host-side network namespace,
   while the pod's sockets live in gVisor's own network stack. socat is one such pipe; `python3` or bash's
   `/dev/tcp` over the same `kubectl exec` works too. A listener bound to `0.0.0.0` is also reachable on
@@ -86,7 +86,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
   on it), `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
   installing launch serialises on the issue's shared bun install cache with `/usr/bin/flock`, so a
-  role container whose image lacks it fails every installing launch; the apt line names the package
+  `roles` container whose image lacks it fails every installing launch; the apt line names the package
   even though Debian's `priority:required` set already brings it into the base, so the day a base
   drops it the build fails instead of every launch in the fleet), `ssh-keygen` (from
   `openssh-client`, which also brings `ssh`, `scp` and
@@ -730,26 +730,29 @@ build, not the host's.
 
 Under the Go coordinator, `runtime: kubernetes` runs every issue as one Agent Sandbox: an
 `agents.x-k8s.io` `Sandbox` (kubernetes-sigs/agent-sandbox, LEGION-206) named for the issue,
-`legion-<project>-<issue>`, whose one pod runs under gVisor on the Legion pool. The pod holds the
-two init containers and six role containers — `architect`, `planner`, `implementer`, `tester`,
-`reviewer`, `merger` — each of which runs `legion launcher`, a supervisor with no workflow policy
-that authenticates to the daemon's worker stream with its role's own token and starts or stops
-that role's `legion worker-shim` and Oh My Pi when the daemon tells it to. Every role of the issue
+`legion-<project>-<issue>`, whose one pod runs under gVisor on the Legion pool. The pod holds two
+init containers and one container, `roles`, whose PID 1 is one `legion launcher`, a supervisor
+with no workflow policy that runs every workflow role — `architect`, `planner`, `implementer`,
+`tester`, `reviewer`, `merger`: it holds one connection to the daemon's worker stream per role,
+each authenticated with that role's own token, and starts or stops that role's
+`legion worker-shim` and Oh My Pi when the daemon tells it to, each role's generation in Linux
+namespaces of its own. Every role of the issue
 shares the issue's checkout, the issue's own volume, the sessions directory on it and the pod's network;
 each role keeps its own state directory, agent-secrets key, GitHub App credential and launch credentials. A role's Secret holds
-its launcher token, projected into that role's container alone and bound to the pod's uid, and the
+its launcher token, projected under that role's own directory of the container and bound to the
+pod's uid, which no role's process sees, and the
 two gh files its `gh` and `git` read the role's App token from
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); the
-daemon accepts a launcher only for that role, that pod and that token. Each generation's boot token
+daemon accepts a launcher connection only for that role, that pod and that token. Each generation's boot token
 and launch credentials (the Envoy and Dispatch bearers, a spec's secrets) travel in the authenticated
 start command, and the launcher writes them owner-only and exclusively into a fresh `g<generation>`
 directory of its role's memory-backed private directory, removing anything already there without
 following it, and removes that directory when the generation ends: a role started in a running pod
 never waits on the kubelet to refresh a Secret, and no credential is in an argv, an environment
-value, a log or an error. The role's own agent runs as the same user in the same container, so it
-can read its own generation's credentials, as a pane can; it cannot read another role's. A role
-process is addressed by the pod's uid, its
-container and its generation (the incarnation `<pod uid>/<generation>`): in a healthy running pod,
+value, a log or an error. The role's own agent sees only its own private directory, inside its
+namespaces, so it can read its own generation's credentials, as a pane can; it cannot read another
+role's. A role process is addressed by the pod's uid, its role and its generation (the
+incarnation `<pod uid>/<generation>`): in a healthy running pod,
 starting, suspending or recovering one role never restarts the pod or touches another role. A new generation of a role
 in a running pod is a new child of its launcher. A pod is replaced after it dies, when it was not
 made by this runtime, or when a closed issue is re-admitted after suspension
@@ -981,9 +984,9 @@ runs the earlier release:
    ([Rolling back](#rolling-back-the-upgrade)).
 6. **Roll this release out in one step:**
    - the daemon at this release, with its `legion.yaml` at this release's shape:
-     `runtime.kubernetes.issue_volume` where the file set `tree_volume`, and `resources.<role>` as
-     `{cpu, memory}` where it set `requests` and `limits` ([Configuration](#configuration) names each
-     refusal);
+     `runtime.kubernetes.issue_volume` where the file set `tree_volume`, and one
+     `resources.issue` entry where it set a `resources.<role>` entry per role
+     ([Configuration](#configuration) names each refusal);
    - `runtime.kubernetes.image` pinned to a worker image built from it, since the image probe
      refuses a worker image whose `pi-legion` declares another daemon API contract (`ProbeImage` in
      `internal/runtime/sandbox/probe.go`); and
@@ -1078,6 +1081,20 @@ speaks (the launcher, the shim, `workspace-init`): an install refreshes no binar
 image carries that change, and such a release is still pinned only after every tree is drained or
 every issue pod is relaunched onto the new image.
 
+**Moving from one container per role to one `roles` container (daemon API contract 36).** A
+release at contract 36 builds an issue pod with one container, `roles`, whose launcher runs every
+role in multi-role mode, which only an image of that release's `legion` has: pin the worker image
+with the daemon release, since the image probe refuses an image whose `pi-legion` declares another
+contract. At boot, store migration 0050 rewrites every stored claim locator naming a per-role
+container to `roles`, and the boot census passes a pod of either layout and refuses everything
+else as before. A running issue pod whose containers are exactly the six role names is reported
+moved for every role recorded in it, with the detail `the pod's containers architect, planner,
+implementer, tester, reviewer, merger, now roles`, and the supervisor relaunches each uncharged.
+The first relaunch replaces the pod — even an installing (stale-plugin) launch — on the configured
+image, and its siblings resume into the new pod; a turn a role was in is sent again once its
+session resumes, as a moved address's relaunch does. `legion.yaml`'s `resources` takes one
+`issue` entry in place of the per-role entries ([Configuration](#configuration)).
+
 ### Contract discipline
 
 `DaemonAPIVersion` (`packages/daemon/internal/api/version.go`) is the Go daemon's own contract
@@ -1099,7 +1116,7 @@ refuses leaves the claim live and stale, so the orphan sweep — the one periodi
 reads every claim — posts it again until one attempt starts).
 
 Under Kubernetes that relaunch keeps the pod — even one built from another image — rather than
-replacing it: the role container's shim runs the start wrapper,
+replacing it: the role's shim runs the start wrapper,
 `/bin/sh -c '<start script>' legion-start <n> <setup command…> <omp argv…>` (`startArgv`,
 `internal/runtime/sandbox/plugins.go`; `<n>` is the setup command's word count, 0 with none),
 whose install step runs
@@ -1181,14 +1198,12 @@ runtime:
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
       priority_class: legion
-    resources:                  # optional; a role's reservation: cpu and memory limits, each requested in full
-                                # unless cpu_request or memory_request sets less (Issue sizing: Guaranteed or
-                                # Burstable), so every role is covered for the resource-limits capability with or
-                                # without this block, and an ephemeral-storage limit over a small request (the
-                                # role's bound on the node's disk)
-      tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # requests 1 and 6Gi; the disk request stays the default 1Gi
-      reviewer: { memory: 2Gi }            # cpu stays the default, 750m; disk bound the default, 10Gi over 1Gi
-      implementer: { memory: 32Gi, memory_request: 8Gi }   # Burstable: reserves 8Gi, may use 32Gi
+    resources:                  # optional; two keys, each a pod's reservation: cpu and memory limits, each requested
+                                # in full unless cpu_request or memory_request sets less (Issue sizing: Guaranteed
+                                # or Burstable), so every pod is covered for the resource-limits capability with or
+                                # without this block, and an ephemeral-storage limit over a smaller request (the
+                                # pod's bound on the node's disk)
+      issue: { memory: 32Gi, memory_request: 19Gi }   # every issue pod: Burstable, reserves 19Gi, may use 32Gi
       controller: { cpu: 2, memory: 8Gi }  # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
       service_account: legion-worker
@@ -1200,7 +1215,7 @@ runtime:
       refresh_minutes: 10       # default 10; how long between the cache's fetches from GitHub
       retain_hours: 168         # default 168; how long a cache outlives its repository leaving the mapping
       resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # the defaults
-    setup: [/bin/sh, -c, '<command>']   # optional: run in every role's container before each start of its Oh My Pi (below)
+    setup: [/bin/sh, -c, '<command>']   # optional: run in every role's namespace before each start of its Oh My Pi (below)
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: <the port advertise_host or bind serves it on>
@@ -1211,36 +1226,43 @@ capabilities:                   # optional: the deployment capabilities decided 
 
 Every container of every Legion pod carries a cpu and memory limit and a request no greater than it,
 and an ephemeral-storage limit, its bound on the node's disk, over a smaller ephemeral-storage
-request. `runtime.kubernetes.resources.<role>` sets a role's reservation: `cpu` and `memory` (the
-limits), `cpu_request` and `memory_request`, `ephemeral_storage` (the limit) and
-`ephemeral_storage_request`, any of them. A limit the file leaves out takes the daemon's default
-(`config.DefaultResources()`, `packages/daemon/internal/config/kubernetes.go`); a `cpu_request` or
-`memory_request` it leaves out takes the file's limit where it set one, else the default's request
-(`settledRequest`), so a file that raises `memory` alone keeps the role's request equal to it.
-With no request set below a limit, as at the defaults, every
-Legion pod is `Guaranteed`; a role with a lower request makes every pod holding its container
-`Burstable` ([Issue sizing](#issue-sizing-one-reservation-per-pod), "Guaranteed or Burstable").
+request. `runtime.kubernetes.resources` takes exactly two keys: `issue`, the one reservation every
+issue pod's `roles` container and both its init containers carry, and `controller`, the
+daemon-launched controller's pod's, only under `controller: daemon`. Each takes the six fields
+`cpu` and `memory` (the limits), `cpu_request` and `memory_request`, `ephemeral_storage` (the
+limit) and `ephemeral_storage_request`, any of them. A limit the file leaves out takes the
+daemon's default (`config.DefaultResources()`, `packages/daemon/internal/config/kubernetes.go`);
+a `cpu_request` or `memory_request` it leaves out takes the file's limit where it set one, else the
+default's request (`settledRequest`), so a file that raises `memory` alone is requested in full.
+With no request set below a limit, as at the defaults, every Legion pod is `Guaranteed`; a lower
+request makes that pod `Burstable` ([Issue sizing](#issue-sizing-one-reservation-per-pod),
+"Guaranteed or Burstable").
 
-| role | cpu | memory | ephemeral-storage (limit / request) |
+| key | cpu (limit / request) | memory (limit / request) | ephemeral-storage (limit / request) |
 | :--- | :--- | :--- | :--- |
-| `implementer`, `tester` | 750m | 6Gi | 20Gi / 1Gi |
-| `reviewer` | 750m | 4Gi | 10Gi / 1Gi |
-| `architect`, `planner`, `merger` | 250m | 1Gi | 10Gi / 1Gi |
-| `controller` (`controller: daemon`) | 1 | 4Gi | 10Gi / 1Gi |
-| the image probe (fixed, not a `resources` key) | 250m | 1Gi | 5Gi / 1Gi |
+| `issue` | 3 / 3 | 19Gi / 19Gi | 80Gi / 6Gi |
+| `controller` (`controller: daemon`) | 1 / 1 | 4Gi / 4Gi | 10Gi / 1Gi |
+| the image probe (fixed, not a `resources` key) | 250m / 250m | 1Gi / 1Gi | 5Gi / 1Gi |
 
-Each default cpu and memory is both the request and the limit.
+The `issue` default is the sum of the six per-role defaults of the layout that ran one container
+per role. One number frees nothing at run time: under gVisor every process of a pod already used
+whatever the pod had free, so the pod's peak must fit its reservation — an issue pod measured at
+1-minute resolution used its whole 19Gi for minutes while its reviewer ran a review (2026-10-21).
+On GKE Autopilot the cap is 10Gi of ephemeral storage for the main containers' sum and 10Gi for
+each init container (server dry runs, 2026-10-24), and GKE clamps a container's limit to its
+request, so a GKE deployment sets
+`issue: {ephemeral_storage: 10Gi, ephemeral_storage_request: 10Gi}`.
 
 The image probe pod's reservation is the daemon's own and no role's share (`probeReservation`,
 `packages/daemon/internal/daemon/kubernetes.go`): `legion probe-image` starts one Oh My Pi at a
 time and runs no lane or browser, so 250m and 1Gi hold it, and the probe runs at every boot before
-anything is served — a probe that reserved a role's share, as it did the controller's 1 CPU and 4Gi
+anything is served — a probe that reserved a larger share, as it did the controller's 1 CPU and 4Gi
 until LEGION-632, could leave the daemon unable to boot on a pool with no room for a pod that
 large ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The bound").
 
-At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, its ephemeral-storage limits to 80Gi
-and its requests to 6Gi. `issue_volume` sizes each issue's own volume: the clone, the workspace,
-uv's Pythons and packages, the roles' sessions, and everything a role container writes without
+At the defaults an issue pod reserves 3 CPU and 19 GiB, an ephemeral-storage limit of 80Gi and a
+request of 6Gi. `issue_volume` sizes each issue's own volume: the clone, the workspace,
+uv's Pythons and packages, the roles' sessions, and everything a role writes without
 being told where to put it. Four of those directories are the issue's, one set its roles share —
 `/legion/scratch/tmp`, `/legion/scratch/cache`, `/legion/scratch/data` and
 `/legion/scratch/bun/install/cache`, the cache home holding the issue's one Playwright browser
@@ -1254,8 +1276,9 @@ leaves 751 MiB and 375 MiB, the reproducible cold-build measurement that
 the role's own, its state home at `/legion/scratch/state/<role>`, holding Oh My Pi's logs,
 Chromium's `browser-profiles` and the plugin generation an installing launch puts there; it is the
 role's for a mechanism, not caution: Oh My Pi names its browser broker's lock from the state
-root, the name is an abstract unix socket, an abstract socket name is one name across every
-container of a pod, so one state home would block every role's broker but the first. An
+root, the name is an abstract unix socket, an abstract socket name is one name across a network
+namespace, and every role of a pod shares the pod's, so one state home would block every role's
+broker but the first. An
 operator's arithmetic is therefore the issue's: one set of four, one Go pair, and one state home
 per role the issue runs. The controller's pod owns a volume of the same size,
 holding its sessions alone.
@@ -1273,7 +1296,7 @@ cache and one Go pair — against live volumes measured at 2.1 to 2.7 GiB of the
 2026-10-21). A larger figure is on record and is not a production one: the volume this change was
 written on reached **17 GiB of its 20, 3.0 GiB free** (01:32Z on 2026-10-21) with 14 GiB of that
 in six per-role copies of the Go build and module caches — an intermediate layout no shipped image
-ever produced, since a role container at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
+ever produced, since a role at the merge base is told no `GOCACHE`, no `GOMODCACHE` and
 no `BUN_INSTALL_CACHE_DIR`, and the Go pair is new on the volume here. The remedy for a volume
 near full is manual, because nothing prunes, and it accounts for every directory this layout
 creates: each is on the delete list or among the exemptions under it, and a test holds
@@ -1312,9 +1335,9 @@ whose only creator is a role's **next shim start**: `podsafety.EnsureScratch` ma
 directories once, as the shim starts Oh My Pi (`worker_shim.go`), and a role's shim lives across
 turns, so a `tmp` deleted under a live role stays gone until that role is relaunched. What a
 live role then does with it splits two ways, and the quiet half is the dangerous one: `mktemp -d`
-fails with exit 1, where Python's `tempfile` silently falls back to `/tmp` — which in a role
-container is the container's own filesystem, charged to the ephemeral-storage limit this whole
-layout exists to get out from under. So delete `tmp` with the role stopped, not merely between
+fails with exit 1, where Python's `tempfile` silently falls back to `/tmp` — which in a role's
+namespace is the role's own directory on the `role-homes` volume, on the node's disk and charged to
+the ephemeral-storage limit this whole layout exists to get out from under. So delete `tmp` with the role stopped, not merely between
 its turns; the rest of the list is reclaimable between turns, when no role is mid-build or
 mid-install. Do not leave it out of the list either, because a temporary directory sounds
 transient: a role at the merge base is told no `TMPDIR` at all and its temporaries died with the
@@ -1344,14 +1367,15 @@ eviction with a pod event naming the container, where ENOSPC on the PVC is no ev
 surfaces as unexplained failures in jj, in the session transcripts, in `workspace-init` and in
 the CodeGraph build — and nothing in this repository reads a PVC's usage.
 
-Ephemeral storage is what a role container writes outside every volume: its root filesystem, the
-node's disk — the role's `$HOME`, with the image's own content under it, and whatever a recipe
-writes elsewhere under the home directory (a role container mounts no `/tmp`; its private and
-state directories and the config home are in-memory `emptyDir`s, whose pages the bound does not
-count, and the issue's temporary directory, cache and data homes and bun install cache, the role's
-own state home and the issue's shared Go caches are on the issue's volume, which the bound does
-not count either).
-Pods of unrelated trees share a node, so one role filling the node's disk would put every pod on
+Ephemeral storage is what the `roles` container writes outside every volume: its root filesystem,
+the node's disk — the image's own content and whatever a recipe writes outside the told
+directories — and the `role-homes` disk `emptyDir`, which holds each role's home overlay and its
+`/tmp` and `/var/tmp` ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). Each role's
+private and state directories and the config home are in-memory `emptyDir`s, whose pages the bound
+does not count, and the issue's temporary directory, cache and data homes and bun install cache,
+the role's own state home and the issue's shared Go caches are on the issue's volume, which the
+bound does not count either.
+Pods of unrelated trees share a node, so one issue filling the node's disk would put every pod on
 it under `DiskPressure`; the limit has the kubelet evict the pod of the container that passed it,
 the offending issue's alone, and the request is what the scheduler fits to the node's allocatable
 ephemeral storage, its root volume. The request is small by default so
@@ -1362,29 +1386,30 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
 `packages/daemon/internal/config/kubernetes.go` reads the block and refuses, naming the key:
 - `tree_volume`, the tree-volume layout's key: `runtime.kubernetes.tree_volume is now issue_volume:
   one volume per issue`;
-- `role_profiles`: `unknown key runtime.kubernetes.role_profiles: a role's reservation is
-  runtime.kubernetes.resources.<role>, its cpu and memory limits with optional lower cpu_request and
-  memory_request, and a role absent there takes the daemon's default`;
-- a `resources` key that is none of the seven roles: `runtime.kubernetes.resources key "small" must
-  be a role (architect, planner, implementer, tester, reviewer, merger, controller)`; and
+- `role_profiles`: `unknown key runtime.kubernetes.role_profiles: an issue pod's reservation is
+  runtime.kubernetes.resources.issue, its cpu and memory limits with optional lower cpu_request and
+  memory_request, and a field absent there takes the daemon's default`;
+- a workflow role's key under `resources`: `runtime.kubernetes.resources.<role> is gone: an issue
+  pod has one reservation, runtime.kubernetes.resources.issue`; any other key but `issue` and
+  `controller`: `runtime.kubernetes.resources key "<k>" must be issue or controller`; and
   `resources.controller` unless `controller: daemon`, the one setting under which the daemon
   launches the controller's pod (`runtime.kubernetes.resources.controller sizes the pod of the
   controller the daemon launches, and controller: operator launches none: set controller: daemon or
   drop the key`);
-- the earlier shape inside a role's entry: `runtime.kubernetes.resources.<role>.requests is gone: a
-  role's reservation is its cpu and memory limits, with cpu_request and memory_request below them
-  where set` (`limits` likewise); any other member of a role's entry but `cpu`, `cpu_request`,
+- the earlier shape inside an entry: `runtime.kubernetes.resources.issue.requests is gone: a
+  reservation is its cpu and memory limits, with cpu_request and memory_request below them
+  where set` (`limits` likewise); any other member of an entry but `cpu`, `cpu_request`,
   `memory`, `memory_request`, `ephemeral_storage` and `ephemeral_storage_request` is an unknown key,
   and any of those six or `issue_volume` that is not a positive Kubernetes quantity is refused as
   such (`… must be a positive Kubernetes quantity (e.g. 20Gi or 500m)`);
 - a request past its limit, once both are settled — the file set one side or both, since the
-  defaults never exceed: `runtime.kubernetes.resources.<role>.memory_request <request> exceeds
-  memory <limit>`, and likewise `cpu_request … exceeds cpu …` and `ephemeral_storage_request …
-  exceeds ephemeral_storage …`, and `runtime.kubernetes.repository_cache.resources.…` likewise;
+  defaults never exceed: `runtime.kubernetes.resources.issue.memory_request 20Gi exceeds memory
+  19Gi`, and likewise `cpu_request … exceeds cpu …` and `ephemeral_storage_request …
+  exceeds ephemeral_storage …`, for `controller` too, and `runtime.kubernetes.repository_cache.resources.…` likewise;
 - a `repository_cache` that is not a mapping, or names a member but `volume`, `refresh_minutes`,
   `retain_hours` and `resources`; a `volume` that is not a positive Kubernetes quantity; a
-  `refresh_minutes` or `retain_hours` that is not a positive integer; its `resources` take a role
-  entry's six members and nothing else;
+  `refresh_minutes` or `retain_hours` that is not a positive integer; its `resources` take a
+  reservation's six members and nothing else;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - `agent_secrets.operator`, removed with LEGION-664: the daemon logs in with its own ServiceAccount
   token (`token_file`), which no person approves, so it names no approver;
@@ -1401,16 +1426,18 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
   `OMP_SESSION_SQL_DSN_FILE` ([Selecting the store](#selecting-the-store)).
 
 `legion start --check-config` shows each of these before anything starts: a file carrying
-`tree_volume: 20Gi` is refused naming `issue_volume`; one carrying `resources: {tester: {limits:
-{memory: 8Gi}}}` naming `limits`; one carrying `resources: {small: {cpu: 500m}}` naming the seven
-roles; one carrying `resources: {implementer: {memory: 32Gi, memory_request: 40Gi}}` naming
-`memory_request`; and a file with no `resources` block passes, as does one with `resources:
-{tester: {cpu: 2, memory: 8Gi}}` or `resources: {tester: {ephemeral_storage: 40Gi}}`, the daemon
-filling every field the file leaves unset. A file that gives a role a request below its limit
-passes and prints, after the capability gaps, which pods that makes `Burstable`:
+`tree_volume: 20Gi` is refused naming `issue_volume`; one carrying `resources: {issue: {limits:
+{memory: 8Gi}}}` naming `limits`; one carrying `resources: {tester: {cpu: 2}}` naming
+`resources.issue`; one carrying `resources: {small: {cpu: 500m}}` naming `issue or controller`;
+one carrying `resources: {issue: {memory_request: 20Gi}}` naming `memory_request`; and a file with
+no `resources` block passes, as does one with `resources: {issue: {cpu: 4, memory: 24Gi}}` or
+`resources: {issue: {ephemeral_storage: 10Gi, ephemeral_storage_request: 10Gi}}`, the daemon
+filling every field the file leaves unset. A file that gives a pod a request below its limit
+passes and prints, after the capability gaps, which pods that makes `Burstable` — `the issue pod`,
+`the controller's pod`, or `the issue pod and the controller's pod`:
 
 ```text
-resources: Burstable roles (a request below the limit): implementer, so every issue pod is Burstable; every other pod is Guaranteed
+resources: Burstable (a request below the limit): the issue pod; every other pod is Guaranteed
 ```
 
 Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
@@ -1432,8 +1459,8 @@ overlay, and the pod that mounts them; the operator keeps their own copies of th
 directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b
 proofs run on the example, each with its own copy of its ConfigMap.
 
-`setup` is the deployment's setup command, an argv run in every role's container — each workflow
-role's in an issue pod, and the controller's under `controller: daemon` — before each start of
+`setup` is the deployment's setup command, an argv run for every role — each workflow role in its
+own namespaces of an issue pod, and the controller in its container under `controller: daemon` — before each start of
 that role's Oh My Pi: a fresh role's, a resumed one's and a replaced pod's alike, since a relaunch
 may come up in a new pod, whose filesystem outside its volumes is new. It is one command for every
 role; a shell command is `[/bin/sh, -c, '<command>']`. It runs as the role's
@@ -1684,16 +1711,18 @@ configuration and its own boot, since no image or pod can show them:
   has passed. The example overlay turns it on ([Operator configuration](#operator-configuration)).
   The mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My
   Pi settings (the probe pod's log says why), and the daemon's report shows the row open.
-- `resource-limits`: every workflow role — and the controller's, under `controller: daemon` —
-  reserves CPU and memory (`config.RoleResources.Reserved`: `runtime.kubernetes.resources.<role>`
-  or the daemon's default, a limit with a request no greater than it,
+- `resource-limits`: the issue pod — and the controller's pod, under `controller: daemon` —
+  reserves CPU and memory (`config.Reservation.Reserved`: `runtime.kubernetes.resources.issue` and
+  `.controller` or the daemon's default, a limit with a request no greater than it,
   [Issue sizing](#issue-sizing-one-reservation-per-pod)), which a loaded Kubernetes configuration
-  always satisfies; the row would name each role that did not. Its detail also says each pod's QoS
-  class: `each request equal to its limit, so every pod is Guaranteed`, or `Burstable roles (a
-  request below the limit): <roles>, so every issue pod is Burstable; every other pod is
-  Guaranteed` (the controller's pod in place of the issue pods when the role is the controller), so
-  `legion state --json` shows which roles reserve less than they may use. Under tmux it is open
-  unless decided: a pane has no requests or limits.
+  always satisfies; open, the detail would read `no CPU and memory requests and limits under
+  runtime.kubernetes.resources for <pods>`. Present, it says each pod's QoS class: `every pod has
+  CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its
+  limit, so every pod is Guaranteed`, or `every pod has CPU and memory requests and limits under
+  runtime.kubernetes.resources; Burstable (a request below the limit): <pods>; every other pod is
+  Guaranteed`, `<pods>` being `the issue pod`, `the controller's pod`, or `the issue pod and the
+  controller's pod`, so `legion state --json` shows which pods reserve less than they may use.
+  Under tmux it is open unless decided: a pane has no requests or limits.
 - `pool-capacity`: the Legion pool had room for the image probe pod's own 250m / 1Gi reservation at
   boot — the probe pod scheduled at its first attempt. While it did not (`stuck`,
   `internal/runtime/sandbox/probe.go`: the pod `Pending` with `PodScheduled=False Unschedulable`
@@ -1799,8 +1828,8 @@ daemon's defaults reserve CPU and memory for every role, and decides `secrets`.
 
 Each Sandbox carries `legion.dev/project`, `legion.dev/tree` and `legion.dev/issue` (`names.go`):
 one Sandbox per issue, shared by every role that works it, owning the issue's volume. The pod
-template (`manifest.go`) has two init containers and one container per role (`claim.Roles`:
-architect, planner, implementer, tester, reviewer, merger), named for its role:
+template (`manifest.go`) has two init containers and one container, `roles`, which runs every
+workflow role (`claim.Roles`: architect, planner, implementer, tester, reviewer, merger):
 
 1. `workspace-fetch` fills the pod's feed, the bare repository at `/legion/feed/<owner>/<repo>.git`
    on the issue's own volume. It is told its repository's cache (`LEGION_REPOSITORY_CACHE_URL`,
@@ -1863,22 +1892,29 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    it, and logs each with its path and age (`RemoveStaleGitLocks`,
    `internal/workspace/stalelock.go`): a git or jj interrupted mid-write leaves its lock, and every
    later write of that file fails on it,
-   but no process can hold one now, since no role container of the pod has started and no other pod
+   but no process can hold one now, since the pod's `roles` container has not started and no other pod
    mounts the volume. Another worktree entry of the clone keeps its locks; a lock it cannot remove,
    and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it
    would take the removal outside the clone), fail the container naming the path. jj's own locks
    are `flock(2)` locks, which end with their holder, so it leaves them. Under a running pod nothing
-   removes a lock, since another role's git, which a role's container cannot see, may hold it: the
+   removes a lock, since another role's git, which a role's namespace cannot see, may hold it: the
    `jj` the shim's working-copy adoption and a `handoff_complete` run name each lock still on disk
    that they failed on, with its age, in their error, say not to remove it while the pod runs, and
    that replacing the issue's pod removes it.
-3. Each role container runs `legion launcher --connect tcp://<advertise_host, or bind with none
-   set>:<worker_stream_port> --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1
-   of that role, starting and stopping the role's `legion worker-shim` (Oh My Pi) child on the
-   daemon's command, never a worker process of its own. Its log has one line for each connection
-   the daemon accepted, `launcher: connected to the daemon at <address> as launcher <id> (sandbox
-   <name>, role <role>, pod <uid>)`, and one for each connection that ended, `launcher: daemon
-   connection: <why>; reconnecting`, so a connected launcher reads apart from one still dialing.
+3. The `roles` container's PID 1 is one `legion launcher` in multi-role mode:
+   `/opt/legion/bin/legion launcher --connect tcp://<advertise_host, or bind with none
+   set>:<worker_stream_port> --sandbox <name> --roles-dir /var/run/legion/roles --role architect
+   --role planner --role implementer --role tester --role reviewer --role merger --stop-grace <d>`,
+   the pod's uid from `POD_UID` (the downward API). It holds one authenticated worker-stream
+   connection per role, each with that role's own launcher token, read from
+   `/var/run/legion/roles/<role>/launcher/LAUNCHER_TOKEN`, and starts and stops each role's
+   `legion worker-shim` (Oh My Pi) child on the daemon's command, never a worker process of its
+   own. Its log has one line for each connection the daemon accepted, `launcher: connected to the
+   daemon at <address> as launcher <id> (sandbox <name>, role <role>, pod <uid>)`, and one for each
+   connection that ended, `launcher: daemon connection: <why>; reconnecting`, so a connected
+   launcher reads apart from one still dialing. The launcher's own lines, and each role child's
+   stdout and stderr lines, are prefixed `<role>: `, so the container's one log interleaves every
+   role's lines and `kubectl logs <pod> -c roles | grep '^<role>: '` reads one role's.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
 `runtime.kubernetes.issue_volume` (50Gi by default) and `storage_class`, labelled
@@ -1887,11 +1923,11 @@ The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `
 the tree's — its tree changes when a child is re-admitted as a root, and the claim is never
 relabelled. From it Agent Sandbox creates the PVC `issue-legion-<project>-<issue key lowercased>`
 (`IssueClaimName`, `names.go`) with the Sandbox as its owner, so `kubectl -n legion get pvc -l
-legion.dev/issue=<KEY>` finds it and the Sandbox's deletion takes it. `workspace-init` and every
-role container mount it at `/legion`, and each role container again at Oh My Pi's sessions directory
+legion.dev/issue=<KEY>` finds it and the Sandbox's deletion takes it. `workspace-init` and the
+`roles` container mount it at `/legion`, and `roles` again at Oh My Pi's sessions directory
 through a `subPath`, so a session survives its pod. The feed is the volume's `feed` directory:
 `workspace-fetch` mounts that `subPath` alone, read-write, at `/legion/feed`, and `workspace-init`
-and every role container mount the same `subPath` again, read-only, at `/legion/feed` over their
+and `roles` mount the same `subPath` again, read-only, at `/legion/feed` over their
 whole-volume mount, so the path the clone's alternates names is one in every container and no
 agent writes what the token-holding container reads. The kubelet makes the directory on first use,
 so a volume that has none is relaunched as it is: nothing on it moves. Each role's Secret,
@@ -1901,44 +1937,80 @@ under user `x-access-token`, and `github-config-<owner>`, a `config.yml` of `ver
 `github-default`, the owner of the issue's repository. The token for that owner is the role's App's
 (the implement App's for the implementer and the merger, the review App's for every other role);
 every other owner's is the same App's narrowed to reading contents, pull requests and metadata.
-All of it is projected read-only into the role's own container: the token where the launcher
-reads it, the gh files through a per-role `gh-<role>` volume mounted at `/var/run/legion/gh` in that
-role's container alone, each owner's two keys as `<owner>/hosts.yml` and `<owner>/config.yml`. A
-pod's projection names the owners of its creation, so an owner added to the project reaches the
-issue's next pod. The issue's `-boot`
-Secret holds the provisioning token, projected into `workspace-fetch` alone. The operator's volumes and mounts
-join every role container's, and the providers Secret's configured keys when there are any, with its
-`NATS_NKEY_SEED` key when the daemon has a NATS nkey seed. Each role's private and state directories
-and the XDG config home are in-memory, one set per role so no role's launcher or state collides
-with a sibling's; a role container mounts no `/tmp` (the `tmp` memory volume is `workspace-fetch`'s
-alone, `podkind.go`), so the `/tmp` directory itself and its `$HOME` are its root filesystem, the
-node's disk, under the role's ephemeral-storage limit. What it writes without being told where is
-not: the issue's temporary directory, its cache and data homes and bun's install cache are one set
-on the issue's volume, every role container of the pod told the same four, and the two Go caches
-are one pair on that volume shared by the issue's roles (below). The one directory of that scratch
-a role has to itself is its state home, `XDG_STATE_HOME=/legion/scratch/state/<role>`
-(`roleStateHome`, `manifest.go`), and its shim makes Oh My Pi's profile directory under it,
-`omp/profiles/legion`, before Oh My Pi starts (`podsafety.EnsureStateHome`; Oh My Pi reads the
-variable only where that directory already exists, falling back to the profile's config root
-otherwise). The role containers share the pod's network namespace, the workspace path and the Oh My
-Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named from the lock
-path under its state root — with one state root that name would be the same in every container, the
-first role's lock would block every other role's broker, and their `browser.open` would fail
-(`Shared browser daemon unavailable`) while `broker.sock` sat on the first container's own
-filesystem. `workspace-init`, which runs alone, keeps the plain `/home/legion/.local/state` and
-the image's own cache and data homes; `workspace-fetch` is told no XDG home at all, only a
-`TMPDIR` of its own on the pod's `tmp` memory volume.
+
+The `roles` container mounts each role `<r>`'s own volumes under its directory of
+`/var/run/legion/roles`: `/var/run/legion/roles/<r>/launcher` (volume `launcher-<r>`, read-only:
+the launcher token), `/var/run/legion/roles/<r>/gh` (`gh-<r>`, read-only: the role's gh bundle,
+each owner's two keys as `<owner>/hosts.yml` and `<owner>/config.yml`),
+`/var/run/legion/roles/<r>/private` (`private-<r>`, memory), `/var/run/legion/roles/<r>/state`
+(`state-<r>`, memory) and, only when the pod enrolls with the secrets broker,
+`/var/run/legion/roles/<r>/agent-secrets` (`agent-secrets-key-<r>`, memory). One disk `emptyDir`,
+`role-homes`, is at `/var/run/legion/roles/.homes`. The pod's shared mounts appear once: the issue
+volume at `/legion`, the sessions `subPath`, the config home, the feed read-only, the providers
+Secret's configured keys when there are any (with its `NATS_NKEY_SEED` key when the daemon has a
+NATS nkey seed), the broker's token when the pod enrolls, and the operator's volumes and mounts.
+A pod's gh projection names the owners of its creation, so an owner added to the project reaches
+the issue's next pod. The issue's `-boot` Secret holds the provisioning token, projected into
+`workspace-fetch` alone.
+
+**Each role in namespaces of its own.** The launcher starts each role generation through the hidden
+`legion launcher role-init`, in its own Linux user, mount, PID and IPC namespaces. Inside them
+`/var/run/legion/roles` is covered by an empty memory filesystem, and the role's own gh, private,
+state and agent-secrets directories are bound back at the fixed paths `/var/run/legion/gh`,
+`/var/run/legion/private`, `/var/run/legion/state` and `/var/run/legion/agent-secrets`; its
+launcher token is bound nowhere, so no role's process reads it, and no role sees a sibling's
+directories. `/home/legion` is an overlay whose lower is the image's and whose upper and work
+directories are the role's on `role-homes`, with every mount that was under `/home/legion` (the
+sessions `subPath`, the config home, an operator's mount) bound back on top; `/tmp` and
+`/var/tmp` are binds of the role's own directories on `role-homes`; `/run/lock`, `/var/lock` and
+`/dev/shm` are private small memory filesystems; `/proc` is the role's own. role-init then starts
+the shim's argv unchanged as its child, cloned into a nested user namespace that maps uid and gid
+1000 with no capabilities, and stays the PID namespace's init, so when a generation ends every
+process it started ends with it and a role's `kill -9 -1` reaches none of its siblings'. The
+isolation rests on ownership and private mounts, not on a read-only root, which a nested user
+namespace could undo
+(`docs/solutions/legion/namespace-isolation-under-gvisor-holds-on-locked-mounts-and-ownership-not-a-read-only-root-INFRA-208.md`). An operator mount
+(`runtime.kubernetes.pod.volume_mounts`) at or above `/tmp`, `/var/tmp`, `/run/lock`, `/var/lock`
+or `/dev/shm`, or at or above the image's other spellings of them (`/var/run/lock`, `/run/shm`,
+`/var/run/shm`), is refused: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above
+<dir>, which every role's namespace in an issue pod covers with its own: mount under it instead`.
+A mount under `/tmp` and the like is allowed, and role-init carries it back. A mount at, under or
+above `/var/run/legion/roles` is refused as any other path Legion mounts is:
+`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
+Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`.
+
+What a role writes without being told where is not on the node's disk: the issue's temporary
+directory, its cache and data homes and bun's install cache are one set on the issue's volume,
+every role of the pod told the same four, and the two Go caches are one pair on that volume shared
+by the issue's roles (below). The one directory of that scratch a role has to itself is its state
+home, `XDG_STATE_HOME=/legion/scratch/state/<role>` (`roleStateHome`, `manifest.go`), and its shim
+makes Oh My Pi's profile directory under it, `omp/profiles/legion`, before Oh My Pi starts
+(`podsafety.EnsureStateHome`; Oh My Pi reads the variable only where that directory already exists,
+falling back to the profile's config root otherwise). The roles share the pod's network namespace,
+the workspace path and the Oh My Pi profile path, and Oh My Pi's browser broker lock is an abstract
+unix socket named from the lock path under its state root — with one state root that name would be
+the same for every role, the first role's lock would block every other role's broker, and their
+`browser.open` would fail (`Shared browser daemon unavailable`). `workspace-init`, which runs
+alone, keeps the plain `/home/legion/.local/state` and the image's own cache and data homes;
+`workspace-fetch` is told no XDG home at all, only a `TMPDIR` of its own on the pod's `tmp` memory
+volume.
+
+**One container, one fate.** Each role is judged by its own launcher connection's state: one role's
+process exiting is that role's `gone` alone. The `roles` container ending — its PID 1 exiting,
+`OOMKilled`, an eviction — ends every role of the issue: each is `gone`, its detail naming the
+container's reason and exit code and quoting only that role's own prefixed lines (`roleLines`,
+`observe.go`), and the supervisor relaunches each as it relaunches any `gone` role.
 
 Every container carries a reservation, a cpu and memory limit with a request no greater than it,
-and an ephemeral-storage limit over a smaller request: each role container its role's
-(`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init containers the
-reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). At
-the default reservations every request equals its limit and the pod is `Guaranteed`; a role whose
-`cpu_request` or `memory_request` is below its limit makes the pod `Burstable`. Each container is
-bounded on the node's disk, and Legion sets no affinity on the pod (GKE Autopilot adds its own,
-below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
+and an ephemeral-storage limit over a smaller request: the `roles` container and both init
+containers the issue pod's one reservation (`runtime.kubernetes.resources.issue`, or the daemon's
+default). At the default every request equals its limit and the pod is `Guaranteed`; a
+`cpu_request` or `memory_request` below its limit makes the pod `Burstable`. The pod is bounded on
+the node's disk, and Legion sets no affinity on it (GKE Autopilot adds its own, below;
+[Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
-Every role container is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root,
+Every role is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root (its own, bound
+there in its namespaces),
 `GH_CONFIG_DIR=/var/run/legion/gh/<owner>`, the issue's repository's owner's directory, and
 `LEGION_GH_PATH=/usr/local/bin/gh`, the image's real gh. The `gh` first on its PATH is
 `/opt/legion/bin/gh`, which runs `legion gh`: it runs the real gh with `GH_CONFIG_DIR` at the
@@ -1950,7 +2022,7 @@ reads the same files through `!legion git-credential`
 (`workspace.GitHubCredentialHelper`) with `credential.useHttpPath` on, so the helper answers from
 the `hosts.yml` of the owner in the path git asks about and from nothing else. The shared clone
 names it as its `credential.helper`: `workspace-init provision` is passed it as
-`--credential-helper '!legion git-credential'`. Every role container is also told it outside any
+`--credential-helper '!legion git-credential'`. Every role is also told it outside any
 clone, as three git configuration entries git reads after every configuration file
 (`gitCredentialEnv`, `manifest.go`): `GIT_CONFIG_COUNT=3`,
 `credential.https://github.com.helper` reset to empty and then set to `!legion git-credential`,
@@ -1978,7 +2050,7 @@ old token valid until its own expiry. `gh config set`, `gh alias set` and `gh au
 write the read-only directory, and `gh auth status` reports the account as `x-access-token`. A
 `task` subagent inherits the container's environment, so its `gh` acts as the same App.
 
-Every role container is told where to put what it writes without being told where, and every one
+Every role is told where to put what it writes without being told where, and every one
 of those values names a path on the issue's volume. Four of them are the issue's, one directory
 each that every role of it is told the same, under the issue's scratch `/legion/scratch`
 (`scratchRoot`, `manifest.go`): `TMPDIR=/legion/scratch/tmp`,
@@ -2020,8 +2092,9 @@ runs from, whatever we do about caches; what a cache per role confined was after
 role's later installs would put the changed copy back (LEGION-198, where bun's hardlinking was
 first met). The state home is the one that stays the role's, and for a mechanism rather than
 caution: Oh My Pi names its browser broker's lock from the state root, the name is an abstract
-unix socket, and an abstract socket name is one name across every container of a pod, so one
-state home would block every role's browser broker but the first (above).
+unix socket, and an abstract socket name is one name across every process that shares a network
+namespace, which every role of a pod does, so one state home would block every role's browser
+broker but the first (above).
 
 Sharing the cache home gives the issue's roles one Playwright browser registry, since
 playwright-core resolves it to `$XDG_CACHE_HOME/ms-playwright`, and `Registry.install()` takes an
@@ -2063,7 +2136,7 @@ would break, which `TestTheInstallLockWaitIsABoundInProportionToTheRegistrationD
 against the installs rather than against the derivation. A wait that
 times out exits 1, so it takes the retry and then the script's named failure — that one bump's
 launch fails the way it did before the lock existed, rather than hanging. `flock` is advisory
-and per-inode, which holds exactly where this needs it — the six containers of one pod share a
+and per-inode, which holds exactly where this needs it — every role of one pod shares a
 kernel and that inode on the issue's volume — and nowhere wider, so two pods would not be covered.
 Two agents of one issue running `bun install` at once against a cold shared cache can fail the
 same way, nothing Legion renders wraps those, and the failure is a failed install with a clear
@@ -2082,21 +2155,22 @@ plus the shared Go pair — before Oh My Pi starts (`podsafety.EnsureScratch`), 
 temporary directory nothing created cannot run; `podsafety.EnsureStateHome` makes Oh My Pi's
 profile directory under the state home.
 What puts them off the container's own filesystem is the ephemeral-storage bound: on GKE Autopilot
-a role container is admitted with about a gigabyte (Warden refuses a pod whose containers' summed
-ephemeral-storage requests pass 10Gi and clamps each container's limit to its request, so the 1Gi
-default request is the whole bound; [Issue sizing](#issue-sizing-one-reservation-per-pod)), while
+an issue pod is admitted with at most 10Gi for all six roles together (Warden caps a pod's main
+containers' summed ephemeral-storage requests at 10Gi and clamps each container's limit to its
+request; [Issue sizing](#issue-sizing-one-reservation-per-pod)), while
 ordinary work measurably needs more: this repository's Go build cache 751 MiB and its Go module
 cache 375 MiB (the measurement above), a Playwright Chromium about 400 MB, a Postgres with a data
-directory about 300 MB, and a cold bun install cache 1.4 GB. A container past its
-ephemeral-storage limit has its whole pod evicted by the kubelet, and all six roles of an issue
-run in one pod, so one role's overrun takes every role of that issue down with it — which is
+directory about 300 MB, and a cold bun install cache 1.4 GB. A pod past its
+ephemeral-storage limit is evicted whole by the kubelet, and all six roles of an issue
+run in its one container, so one role's overrun takes every role of that issue down with it — which is
 what those caches did on GKE Autopilot. The volume is the issue's alone and outlives the pod, so
 a later pod of the issue reuses what an earlier one downloaded and built. The role's `$HOME`
-stays on the container's filesystem: the image's own content is there (`~/.omp`, its profile's
-plugins, natives and agent directory) and every pod must keep reading it, so a recipe that
-writes somewhere else under the home directory is still bounded by that gigabyte.
+stays off the volume: it is an overlay of the image's own content (`~/.omp`, its profile's
+plugins, natives and agent directory), which every pod must keep reading, with the role's writes
+on the pod's `role-homes` disk `emptyDir`, so a recipe that writes somewhere else under the home
+directory is still bounded by the pod's ephemeral-storage limit.
 
-Every role container is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a
+Every role is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a
 DNS label), `UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs
 and its cache on the issue's volume beside the workspace, so a project's `.venv`, which links to its
 interpreter there, runs as it is in every later pod of the issue, which reuses the packages an earlier
@@ -2119,7 +2193,7 @@ not a prompt. Six role shims share one workspace, so the warm-up holds a lease a
 every 10 s, taken over once it is 60 s stale, the takeover itself under a second exclusive create
 beside it so two shims that both read one stale lease never both build — and a shim that finds the
 lease held leaves the build to its holder. When a build finishes, the shim's warm-up logs one line in
-the role container's log, `codegraph warm-up for <workspace> built the index: codegraph init took
+the `roles` container's log, prefixed `<role>: `, `codegraph warm-up for <workspace> built the index: codegraph init took
 <duration>, done <duration> after launch` — the build's own duration and the time since the role's
 launch (`codegraph index` in place of `init` for a repair) — which stage 4b's `repository-tools`
 checkpoint reads (`kubectl logs <pod> --all-containers`). A stop mid-build — the launcher's one
@@ -2145,9 +2219,10 @@ Every pod runs:
 - on the Legion pool, with its node selector and toleration, and nothing else of its placement that
   Legion itself sets: no affinity (GKE Autopilot adds its own to an annotated pod, below);
 - `Guaranteed` at the default reservations: every container's cpu and memory request equal to its
-  limit (the two quantities the kubelet's QoS class reads); `Burstable` when a role the pod holds
-  sets a lower `cpu_request` or `memory_request`; and its ephemeral storage a 1Gi request under a
-  per-role limit ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
+  limit (the two quantities the kubelet's QoS class reads); `Burstable` when its `resources` key
+  (`issue` or `controller`) sets a lower `cpu_request` or `memory_request`; and its ephemeral
+  storage a request under a larger limit ([Issue sizing](#issue-sizing-one-reservation-per-pod),
+  "The node-disk bound");
 - annotated against autoscaler eviction:
   - `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own, which GKE's cluster-autoscaler ignores;
   - the issue pod and the project controller's additionally carry
@@ -2312,7 +2387,7 @@ makes to the daemon's API (its phase completion, its record read) while its stre
 So the runtime compares a role's addresses with what it hands now on every evaluation of the role
 (each watch event, the probe-interval sweep, each probe):
 
-- **The stream** is read from the role container's launcher command in the pod spec, before the
+- **The stream** is read from the `roles` container's launcher command in the pod spec, before the
   launcher's own state, since a launcher on a stale stream would only ever read as disconnected.
 - **The secrets broker's enrollment**, for a role that enrolls, is read from the pod spec at the
   same point: the `agent-secrets-token` volume's projection of the broker's token (its audience,
@@ -2393,17 +2468,17 @@ The clone is only on the issue's volume, so the commands run in a pod that mount
 operator's context: the daemon's identity creates no pod and has no exec
 ([RBAC](#rbac-the-go-daemon-needs)).
 
-**The issue's pod is running.** Each of its role containers mounts the volume at `/legion`:
+**The issue's pod is running.** Its `roles` container mounts the volume at `/legion`:
 
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY> --field-selector=status.phase=Running
-kubectl -n legion exec -it <pod> -c architect -- sh
+kubectl -n legion exec -it <pod> -c roles -- sh
 export XDG_STATE_HOME=/legion/scratch/state/architect   # the role's state home (below)
 jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
 ```
 
 The shell runs as the issue's agents do, user 1000 under gVisor, but it carries the container's
-environment, not the agent's: a role container's spec holds only what the kubelet resolves, which
+environment, not any agent's: the `roles` container's spec holds only what the kubelet resolves, which
 is `POD_UID` from the downward API, and every other variable the agent is told — the operator's
 `runtime.kubernetes.pod.env` included, and among them
 `XDG_STATE_HOME=/legion/scratch/state/<role>`, the role's state home — arrives in its
@@ -2496,45 +2571,48 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 ### Issue sizing: one reservation per pod
 
 Every container of a Legion pod carries a cpu and memory limit with a request no greater than it
-(`roleRequirements`, `internal/daemon/kubernetes.go`), and an ephemeral-storage limit over a smaller
-ephemeral-storage request (the node-disk bound, below): each role container its role's reservation
-(`runtime.kubernetes.resources.<role>`, the daemon's default where the file sets none —
-[Configuration](#configuration)), both init containers the reservation of the role whose launch
-created the pod (`issuePod.initContainers`, `internal/runtime/sandbox/podkind.go`), the controller's
-launcher and init container the controller's, and the image probe's one container the probe's own
-fixed 250m / 1Gi, request equal to limit (`probeReservation`, [Configuration](#configuration)), no
-role's share. Inside a pod, under gVisor, one role may use what its idle siblings reserved (below).
-At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, the init containers adding nothing: a
-pod's effective request is the larger of its containers' sum and its largest init container, and no
-one role's reservation exceeds the sum of the six. Every role reserved is what the `resource-limits`
-row of [The deployment's capability report](#the-deployments-capability-report) measures, so on a
+(`requirements`, `internal/daemon/kubernetes.go`), and an ephemeral-storage limit over a smaller
+ephemeral-storage request (the node-disk bound, below): an issue pod's `roles` container and both
+its init containers the issue pod's one reservation (`runtime.kubernetes.resources.issue`, the
+daemon's default where the file sets none — [Configuration](#configuration)), the controller's
+launcher and init container the controller's (`runtime.kubernetes.resources.controller`), and the
+image probe's one container the probe's own fixed 250m / 1Gi, request equal to limit
+(`probeReservation`, [Configuration](#configuration)). At the default an issue pod reserves 3 CPU
+and 19 GiB, the init containers adding nothing: a pod's effective request is the larger of its
+containers' sum and its largest init container, and they carry the same reservation. Every pod
+reserved is what the `resource-limits` row of
+[The deployment's capability report](#the-deployments-capability-report) measures, so on a
 Kubernetes deployment it is `present` with or without a `resources` block; its detail names the
-roles, if any, that make a pod `Burstable`.
+pods, if any, that are `Burstable`.
+
+One number frees nothing at run time. Under gVisor every process of a pod already used whatever the
+pod had free (below), so the pod's peak must fit its reservation: an issue pod on the production
+cluster, measured at 1-minute resolution, used its whole 19Gi for minutes while its reviewer ran a
+review (2026-10-21).
 
 **Guaranteed or Burstable.** The kubelet's QoS class reads cpu and memory alone (the disk bound's
 request under its limit changes no pod's class). A deployment that sets no `cpu_request` or
 `memory_request` below its limit runs only `Guaranteed` pods: each reserves its peak for its whole
 life and bursts past nothing, and it is never the class the kubelet evicts first under node memory
-pressure. A role given a lower request — `implementer: {memory: 32Gi, memory_request: 8Gi}`, for an
-agent whose `lean` processes each map a few GiB at import and can pass 20 GiB on a large proof, but
-which uses little between builds — makes every pod holding its container `Burstable`: every issue
-pod for a workflow role, since each holds all six, and the controller's pod for the controller; the
-image probe pod stays `Guaranteed`. The init containers take the launching role's reservation as
-they always do, so they never raise the pod's effective request above its containers' sum. The
+pressure. An issue pod given a lower request — `issue: {memory: 32Gi, memory_request: 8Gi}`, for
+issues whose `lean` processes each map a few GiB at import and can pass 20 GiB on a large proof,
+but which use little between builds — is `Burstable`, as is the controller's pod given a lower
+`controller` request; the image probe pod stays `Guaranteed`. The init containers carry the same
+reservation, so they never raise the pod's effective request above its container's. The
 scheduler and the pool's limits count the requests, so more pods fit a node and a request-billed
 cluster bills less. The cost is that the burst is not reserved: a node whose pods together use more
 memory than it has is under memory pressure, and the kubelet evicts `Burstable` pods using more than
-their request before any `Guaranteed` pod, or the kernel OOM-kills a container. Either stalls the
+their request before any `Guaranteed` pod, or the kernel OOM-kills the container. Either stalls the
 tree as an OOM kill of a `Guaranteed` pod does — the pod is relaunched and its roles resume their
-sessions, but the turn in flight is lost. Request at least what a role needs to boot and to idle,
-and set `Burstable` roles only where losing a turn under pressure is cheaper than reserving the
-peak.
+sessions, but the turn in flight is lost. Request at least what the issue's roles need to boot and
+to idle together, and set a `Burstable` pod only where losing a turn under pressure is cheaper than
+reserving the peak.
 
 On GKE Autopilot, which bills a pod by its requests, a pod on the default general-purpose platform
 or the `Balanced` or `Scale-Out` class is honoured a request below its limit only in a cluster that
 supports bursting: GKE 1.30.2-gke.1394000 or later on cgroup v2, with the GKE-managed
 `efficiency-daemon` DaemonSet running (`kubectl get daemonset -n kube-system efficiency-daemon`); a
-cluster that does not support it sets each limit to the request, so the implementer above would run
+cluster that does not support it sets each limit to the request, so the issue pod above would run
 `Guaranteed` at an 8Gi limit
 ([Resource requests in Autopilot](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests#resource-limits),
 "Setting resource limits in Autopilot"). A pod that requests an accelerator or a specific machine
@@ -2553,13 +2631,11 @@ them, and Autopilot bills that VM
 every class sets the burst ceiling from the requests. Legion's issue and controller pods carry
 `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, which on Autopilot gives each a node of
 its own whenever possible ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so on the
-general-purpose platform an issue pod's ceiling is about its own summed requests, whatever its
-limits say: with the implementer at `memory_request: 8Gi` and every other role at its default, the
-pod requests 1 + 1 + 8 + 6 + 4 + 1 = 21Gi, so the implementer peaks near 21Gi even while every
-sibling idles, and never reaches its 32Gi limit. On a `Performance` node the ceiling is those
-requests rounded up to a machine type, and a lower request still picks a smaller, cheaper VM. To
-give a role real headroom on Autopilot, raise the pod's summed requests — the role's own request,
-or that of a sibling that sits idle while it works — rather than its limit alone.
+general-purpose platform an issue pod's ceiling is about its own requests, whatever its limits
+say: with `issue: {memory: 32Gi, memory_request: 8Gi}` the pod requests 8Gi and never reaches
+its 32Gi limit. On a `Performance` node the ceiling is those requests rounded up to a machine
+type, and a lower request still picks a smaller, cheaper VM. To give an issue real headroom on
+Autopilot, raise its request rather than its limit alone.
 
 The defaults were sized from an issue pod on the production cluster (measured 2026-10-09, under
 `GOMAXPROCS=3`): `go test ./...` of `packages/daemon` peaks at about 1.45 GiB of summed RSS, a cold
@@ -2568,9 +2644,9 @@ The defaults were sized from an issue pod on the production cluster (measured 20
 1 GiB after half an hour of work, and a headless Chromium's largest process about 0.45 GiB. A
 lane-running role's Go test lane, its agent and a browser sum to about 3.9 GiB, at the limit of the
 4Gi they were first given, and a `Guaranteed` pod OOM-killed mid-turn stalls its tree; so the
-implementer's and tester's 6Gi holds its agent, one lane and a browser with room over that sum,
-the reviewer's 4Gi holds its agent, a browser and its review pair, and the pod's 19 GiB holds six
-agents beside them.
+implementer's and tester's 6Gi held its agent, one lane and a browser with room over that sum,
+the reviewer's 4Gi its agent, a browser and its review pair, and 1Gi each the architect, planner and
+merger. The `issue` default, 19 GiB, is the sum of those six figures.
 
 Legion sets no affinity itself (GKE Autopilot adds its own to an annotated pod, [Anatomy of a
 Sandbox pod](#anatomy-of-a-sandbox-pod)): each pod owns its volume and shares nothing with another
@@ -2586,7 +2662,7 @@ than this two-per-node packing. A pod relaunched onto another node waits for its
 volume to detach from the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach`
 events until the old pod is gone; then it runs on.
 
-Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
+Under gVisor the container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
 from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) — except on GKE Autopilot,
 confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md): there `nproc` reflects
 gVisor's own host-vCPU presentation instead, a known gap
@@ -2594,14 +2670,13 @@ gVisor's own host-vCPU presentation instead, a known gap
 pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu
 limits there — and `/proc/meminfo`'s `MemTotal` is about Σ memory limits of the pod's containers,
 and an active role may use the pod's whole reservation while its siblings idle. The reservation is
-the pod's working set, not one container's; each container's own request and limit are what the
-API shows, and its requests are what the scheduler counts.
+the pod's working set, and its request is what the scheduler counts.
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
 `limits.memory` leave for pods of the per-pod sum of requests: at the defaults, two pods fit a floor
 node and `limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold),
-and `limits.memory` divided by 19 GiB bounds them too when that is the smaller (a `Burstable` role's
-lower request lowers the sum, and so places more) — where the
+and `limits.memory` divided by 19 GiB bounds them too when that is the smaller (a `Burstable`
+issue pod's lower request places more) — where the
 tree-volume layout ran one tree per node, each pinned to a node of its own. `admission_cap` bounds
 roots alone: a tree of N children runs N+1 pods at once, and nothing caps concurrent child pods. A
 pod the pool cannot place stays `Pending`, unscheduled; once it has been for longer than
@@ -2636,41 +2711,40 @@ probe pod is placed and passes, the `pool-capacity` row of
 waited and the scheduler's last reason, open until `capabilities.decided.pool-capacity` names a
 reason; a boot whose probe pod scheduled at its first attempt reads it `present`.
 
-**The node-disk bound.** Pods of unrelated trees share a node, and what a role writes outside every
-volume — its root filesystem: `$HOME`, with the image's own content under it, and whatever a recipe
-writes elsewhere under the home directory (the issue's temporary directory, its cache and data
-homes and bun's install cache are one set its roles share on the issue's volume, each role's state
-home is its own directory there, and the two
-Go caches are one pair on that volume shared by the issue's roles) — is the
-node's disk, the node's allocatable ephemeral storage
+**The node-disk bound.** Pods of unrelated trees share a node, and what an issue pod writes outside
+every volume — the `roles` container's root filesystem (the image's own content and whatever a
+recipe writes outside the told directories) and the `role-homes` disk `emptyDir`, which holds each
+role's home overlay and its `/tmp` and `/var/tmp` (the issue's temporary directory, its cache and
+data homes and bun's install cache are one set its roles share on the issue's volume, each role's
+state home is its own directory there, and the two Go caches are one pair on that volume shared by
+the issue's roles) — is the node's disk, the node's allocatable ephemeral storage
 (its root volume; read it with `kubectl get node <n> -o
 jsonpath='{.status.allocatable.ephemeral-storage}'`). That disk must hold the sum of the pods'
-actual disk use, which Σ of their containers' `ephemeral_storage` limits bounds above: a six-role
-issue pod's limits sum to 80Gi at the defaults (20Gi for the implementer and tester, 10Gi for each
-other role), its requests to 6Gi. A container past its own limit has its pod evicted — the
-offending issue's pod alone — rather than the node reaching `DiskPressure`, where the kubelet
-evicts by its own ranking and another tree's pod can go. The request is what the
-scheduler counts against the node's allocatable ephemeral storage; at the default 1Gi it binds
-almost nothing, so a node's disk can be oversubscribed by the pods' limits. In production (read
-2026-10-09) the Legion node class carries one 700Gi gp3 root device, and a node's allocatable
-ephemeral storage is about 629 GiB of it; with CPU and memory placing about two issue pods per node,
-their limits sum to about 160Gi of those 629 GiB, so the bound has room before any request is
-raised. An operator with a known root volume raises `ephemeral_storage_request` toward the role's
-expected use so the scheduler reserves disk and places no pod a full node could not hold.
+actual disk use, which Σ of their `ephemeral_storage` limits bounds above: an issue pod's limit is
+80Gi at the default, its request 6Gi. A pod past its limit is evicted — the offending issue's pod
+alone — rather than the node reaching `DiskPressure`, where the kubelet evicts by its own ranking
+and another tree's pod can go. The request is what the scheduler counts against the node's
+allocatable ephemeral storage; at the default 6Gi it binds little, so a node's disk can be
+oversubscribed by the pods' limits. In production (read 2026-10-09) the Legion node class carries
+one 700Gi gp3 root device, and a node's allocatable ephemeral storage is about 629 GiB of it; with
+CPU and memory placing about two issue pods per node, their limits sum to about 160Gi of those 629
+GiB, so the bound has room before any request is raised. An operator with a known root volume
+raises `ephemeral_storage_request` toward the issue's expected use so the scheduler reserves disk
+and places no pod a full node could not hold.
 
 **GKE Autopilot's bound is per pod, not per node.** The node-disk framing above is AWS/self-managed
 EKS's: ephemeral storage there is the shared node's own root volume, and raising
-`ephemeral_storage_request` toward a role's real use is an operator's own call, bounded only by
-what the node has. GKE Autopilot has no such headroom: Warden, its admission webhook, refuses a
-pod outright once its containers' *summed ephemeral-storage requests* pass 10Gi — a hard ceiling
-*per pod*, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md) raising every role's
-request to its configured limit (the defaults above: 80Gi summed, two init containers' 10Gi each
-beside them) and having the webhook refuse to schedule the pod at all
-(`autogke-pod-limit-constraints`). Because Legion runs every role of one issue as containers of a
-single pod, that 10Gi is a budget shared across all six roles together: no `legion.yaml`
-`ephemeral_storage_request` can raise more than a small fraction of them past today's 1Gi-request
-default on GKE Autopilot without hitting it — unlike the per-node bound above, this is not
-something an operator's own configuration can size around.
+`ephemeral_storage_request` toward an issue's real use is an operator's own call, bounded only by
+what the node has. GKE Autopilot has no such headroom: Warden, its admission webhook, caps
+ephemeral storage at 10Gi for the sum of a pod's main containers and 10Gi for each init container
+(server dry runs on the production cluster, 2026-10-24: two init containers at 10Gi beside a 10Gi
+main container are admitted; a main container at 11Gi is refused, `Total ephemeral-storage
+requested by containers … higher than the Autopilot maximum of '10Gi'`; an init container at 11Gi
+is refused, `Max ephemeral-storage requested by init containers …`), and it clamps a container's
+limit to its request. The init containers carrying the pod's reservation add nothing against that
+cap, so a GKE deployment sets
+`issue: {ephemeral_storage: 10Gi, ephemeral_storage_request: 10Gi}`: the issue pod's whole 10Gi,
+shared by its six roles.
 
 ### Volume retention
 
@@ -2832,13 +2906,16 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
 - the Sandbox's `Ready` condition reports `MultiplePods` or `ReconcilerError` → **unknown**: the
   Sandbox controller itself cannot resolve the pod it owns, so nothing here can either;
 - `Pending` otherwise → **alive**;
-- `Running`: judged through the recorded role's own container, never the whole pod — a neighbour
-  role's container restart changes nothing here. No status at all for that container → **unknown**.
-  A connected role `legion launcher` reporting a child of the recorded generation is **alive**,
-  even when Kubernetes still shows the container's previous instance terminated for a moment after
-  a restart: that one answer is asked first, and it alone outranks the terminated status. Otherwise
-  a terminated role container → **dead (gone)**, its log tail quoted. Otherwise, with no launcher
-  connected → **unknown** (a booting or redialing launcher is not death; the boot watchdog
+- `Running`: each role judged by its own launcher connection's state, never the whole pod — one
+  role's process exiting is that role's **dead (gone)** alone, and changes nothing for its
+  siblings. The `roles` container terminated (its PID 1 exited, `OOMKilled`, an eviction) ends
+  every role of the issue: each is **dead (gone)**, its detail naming the container's reason and
+  exit code and quoting only that role's own `<role>: ` lines of the container's log (`roleLines`,
+  `observe.go`). No status at all for the container → **unknown**. A connected launcher reporting
+  a child of the recorded generation for the role is **alive**, even when Kubernetes still shows
+  the container's previous instance terminated for a moment after a restart: that one answer is
+  asked first, and it alone outranks the terminated status. Otherwise, with no launcher connection
+  for the role → **unknown** (a booting or redialing launcher is not death; the boot watchdog
   decides). Otherwise the connected launcher's remaining answers: a child of another generation is
   **dead (not the recorded process)**, a last-reported exit matching the recorded generation is
   **dead (gone)**, a last exit of another generation is again **dead (not the recorded process)**,
@@ -2981,21 +3058,21 @@ the tmux runtime, which runs the host's jj through the same code, the daemon ref
 jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38
 `.jj/repo/config.toml` is the repository's live configuration.
 
-What the boundary protects is identity. Since LEGION-631 each role container holds its own App's
-tokens, read-only, in the gh bundle its `LEGION_GH_OWNERS_DIR` names
-([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)): an implement-role container (the
-implementer's, the merger's) holds the implement App's tokens — for the issue's owner the same App,
-from the same lease, as the provisioning token — and a review-role container (the architect's,
-planner's, tester's, reviewer's) the review App's, every owner but the issue's narrowed to reading;
-and each role's `gh` and `git` run in a container that mounts
-the issue's volume, with whatever an agent of the issue planted in the clone's configuration. A plant in the
-implementer's container, then, reaches a token the implementer already holds for its push and its
-pull request. What no plant reaches is the other App: no review-role container ever holds the
+What the boundary protects is identity. Since LEGION-631 each role holds its own App's
+tokens, read-only, in the gh bundle its `LEGION_GH_OWNERS_DIR` names, which only its own
+namespaces bind ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)): an implement role (the
+implementer, the merger) holds the implement App's tokens — for the issue's owner the same App,
+from the same lease, as the provisioning token — and a review role (the architect,
+planner, tester, reviewer) the review App's, every owner but the issue's narrowed to reading;
+and each role's `gh` and `git` run in a pod that mounts
+the issue's volume, with whatever an agent of the issue planted in the clone's configuration. A plant
+run by the implementer, then, reaches a token the implementer already holds for its push and its
+pull request. What no plant reaches is the other App: no review role ever holds the
 implement App's token (the review App cannot resolve a review thread on the implementer's pull
 request, so the reviewer names the bot threads it accepted to the implementer, which resolves them
-with its own `gh`; the daemon serves no thread route), and no implement-role container the review
-App's, so an approval posted as the review App is a review-role container's, and a push or a pull
-request as the implement App an implement-role container's.
+with its own `gh`; the daemon serves no thread route), and no implement role the review
+App's, so an approval posted as the review App is a review role's, and a push or a pull
+request as the implement App an implement role's.
 
 On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
 0600 credential files, and the daemon's credentialed clone and fetch run in the host's shared clone
@@ -3289,7 +3366,7 @@ Four prerequisites and caveats the configuration cannot check for you:
 
 The Go coordinator's. Legion holds no model, provider or route. Everything a pod's Oh My Pi needs to
 reach a model is the operator's, and the daemon hands the same pieces to every pod it runs: each
-issue's pod (every role container of it alike) and the image probe's.
+issue's pod (every role of it alike) and the image probe's.
 
 - **The project's repositories** are Dispatch's mapping (Settings → Repositories → Projects), one of
   them the project's default; `legion.yaml`'s `projects.<KEY>` names none and refuses `repo`. The
@@ -3478,8 +3555,8 @@ issue's pod (every role container of it alike) and the image probe's.
   shim without the broker's flags, so nothing Legion runs renews that enrollment, and the daemon,
   with no broker configured, cannot revoke it (it logs
   `supervise: agent-secrets: enrollment recorded with no broker configured; its lease ends it`).
-  Anything in that role's container that knows the broker's URL can renew it, though: the role's
-  key directory and the broker's projected token are mounted into that container and no other, the
+  Anything in that role's namespaces that knows the broker's URL can renew it, though: the role's
+  key directory is bound there and in no sibling's, the broker's projected token is mounted in the pod, the
   broker accepts a renewal on the key's proof and that pod's current token, and
   `agent-secrets renew`, which the image ships, needs only that URL, the key directory and the
   token file. So the enrollment can stay live until the pod is replaced, at the latest when its
@@ -3876,7 +3953,7 @@ its own launcher token and starts and stops the controller's `legion worker-shim
 the pod baseline (`--pod-safety`: the turn-scoping overlay first in `PI_CONFIG_FILES`, the two
 session-placing variables, [Settings order](#operator-configuration), and Oh My Pi's profile
 directory made under its state home, `/legion/scratch/state/controller`), on the daemon's
-command, as an issue pod's role containers do theirs, so a relaunch in a healthy pod is a new
+command, as an issue pod's launcher does each role's, so a relaunch in a healthy pod is a new
 generation of that child rather than a new pod. Its role Secret,
 `legion-<project>-controller-controller-boot`, holds the launcher's token and its gh bundle (each
 owner's `github-hosts-<owner>` and `github-config-<owner>`, the review App's read-only `hosts.yml`
@@ -3929,7 +4006,7 @@ controller as an address that moved and relaunches it, resuming its session;
 the launch secrets' `<NAME>_FILE` pointers, and the six gh variables exactly as an issue pod's role
 container is told them (`LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, `GH_CONFIG_DIR` its first owner's
 directory there, `LEGION_GH_PATH=/usr/local/bin/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`)
-and the git credential entries every role container is told
+and the git credential entries every role of an issue pod is told
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role
 prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, the

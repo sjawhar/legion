@@ -89,7 +89,7 @@ func observationOf(t *testing.T, seen []runtime.Observation, loc runtime.Locator
 	return seen[i]
 }
 
-// connectOf is the --connect value the named role container's launcher dials.
+// connectOf is the --connect value the launcher in the pod's container named container dials.
 func connectOf(t *testing.T, pod *corev1.Pod, container string) string {
 	t.Helper()
 	command := containerNamed(t, pod.Spec, container).Command
@@ -163,10 +163,8 @@ func TestAnIssuePodDialingAStaleStreamIsReplacedAndEveryRoleResumesIntoTheNewPod
 		t.Fatalf("Resume kept the pod %s; the pod dialing the stale stream was not replaced", testerLoc.Sandbox.PodUID)
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
-	for _, role := range claim.Roles {
-		if dialed := connectOf(t, pod, string(role)); dialed != movedStreamURL {
-			t.Errorf("the replaced pod's %s launcher dials %q, want the new stream %q", role, dialed, movedStreamURL)
-		}
+	if dialed := connectOf(t, pod, workerContainer); dialed != movedStreamURL {
+		t.Errorf("the replaced pod's launcher dials %q, want the new stream %q", dialed, movedStreamURL)
 	}
 	if start := lastStart(t, g, workerToken); start.ResumeFile != resumeSession || start.Generation != 2 {
 		t.Errorf("the tester started generation %d resuming %q, want generation 2 resuming its saved session", start.Generation, start.ResumeFile)
@@ -274,13 +272,11 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 	if held := heldInPod(r2, pod, claim.Roles); len(held) > 0 {
 		t.Fatalf("the replaced pod holds %+v, which a pod created now is not handed", held)
 	}
-	for _, role := range claim.Roles {
-		mounted := slices.ContainsFunc(containerNamed(t, pod.Spec, string(role)).VolumeMounts, func(m corev1.VolumeMount) bool {
-			return m.Name == agentSecretsTokenVolume && m.MountPath == AgentSecretsTokenDir
-		})
-		if !mounted {
-			t.Errorf("the replaced pod's %s launcher does not mount the broker's token at %s", role, AgentSecretsTokenDir)
-		}
+	mounted := slices.ContainsFunc(containerNamed(t, pod.Spec, workerContainer).VolumeMounts, func(m corev1.VolumeMount) bool {
+		return m.Name == agentSecretsTokenVolume && m.MountPath == AgentSecretsTokenDir
+	})
+	if !mounted {
+		t.Errorf("the replaced pod's launcher does not mount the broker's token at %s", AgentSecretsTokenDir)
 	}
 	if start := lastStart(t, g, workerToken); start.Generation != 2 || !slices.Contains(start.Argv, AgentSecretsTokenDir+"/"+AgentSecretsTokenFile) {
 		t.Errorf("the tester started generation %d with %q, want generation 2 pointed at the pod's token file", start.Generation, start.Argv)

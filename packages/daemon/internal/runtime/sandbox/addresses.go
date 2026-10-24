@@ -16,11 +16,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // A role process's addresses are fixed when it is launched, and a daemon restarted with its key
 // changed hands other ones (handedAddresses): the worker stream is fixed for the issue pod's life,
-// in every role container's launcher command, and the other five for one generation's life, in the
+// in the pod's one container's launcher command, and the other five for one generation's life, in the
 // start command the launcher keeps to itself. So the stream is read from the pod spec, and each
 // role's five are recorded on the issue Sandbox when the daemon starts a generation, one annotation
 // per role, which a later daemon reads from its informer cache (evaluate).
@@ -175,10 +176,10 @@ func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint6
 	return moved, nil
 }
 
-// movedStream compares the stream the named role container's launcher dials with the one a pod
-// created now is handed; ok is whether it moved. A container that is absent or runs no connectFlag
-// (never one this runtime built) has nothing to compare. The handed value is compared as the pod
-// spec carries it, escaped against the kubelet's expansion (kubeletLiteral).
+// movedStream compares the stream the launcher in pod's container named container dials with the
+// one a pod created now is handed; ok is whether it moved. A container that is absent or runs no
+// connectFlag (never one this runtime built) has nothing to compare. The handed value is compared
+// as the pod spec carries it, escaped against the kubelet's expansion (kubeletLiteral).
 func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, bool) {
 	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == container })
 	if i < 0 {
@@ -193,6 +194,32 @@ func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, 
 		return movedAddress{connectFlag, namedURL(held), namedURL(handed)}, true
 	}
 	return movedAddress{}, false
+}
+
+// earlierLayout is whether names, a pod's containers, are an issue pod's of the layout before one
+// container: one container per workflow role, each named for its role. No other code reads that
+// layout: the boot census passes such a pod (legacyIssueSandbox) and movedLayout replaces it.
+func earlierLayout(names []string) bool {
+	roles := make([]string, len(claim.Roles))
+	for i, role := range claim.Roles {
+		roles[i] = string(role)
+	}
+	return len(names) == len(roles) && !slices.ContainsFunc(roles, func(role string) bool { return !slices.Contains(names, role) })
+}
+
+// movedLayout is a running issue pod of the layout before one container (earlierLayout); ok is
+// whether pod is one. Its launchers run one role each and read the per-role paths a pod of that
+// layout mounted, so no role of it can run as one launched now: every role of it is StaleAddress,
+// and the next launch of any of them replaces the pod, an installing launch included.
+func movedLayout(pod *corev1.Pod) (movedAddress, bool) {
+	names := make([]string, len(pod.Spec.Containers))
+	for i, c := range pod.Spec.Containers {
+		names[i] = c.Name
+	}
+	if !earlierLayout(names) {
+		return movedAddress{}, false
+	}
+	return movedAddress{"the pod's containers", strings.Join(names, ", "), runtime.IssuePodContainer}, true
 }
 
 // movedEnrollment compares the agent-secrets volumes a generation of role started now runs against
@@ -257,16 +284,19 @@ func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool 
 		held.ExpirationSeconds != nil && *held.ExpirationSeconds == *want.ExpirationSeconds
 }
 
-// movedInPod is what pod holds, for role, that a pod created now is not handed: the stream its
-// launcher dials (movedStream), the secrets broker's enrollment its next generation is started
-// against (movedEnrollment), and the session store its providers volume projects
-// (movedSessionStore). All are fixed for the pod's life, so any moved means the pod must be
-// replaced before role can run as one launched now. It is the one rule for all: evaluate reads a
-// role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one for any
-// of its roles.
+// movedInPod is what pod holds, for role, that a pod created now is not handed: the layout before
+// one container (movedLayout), the stream its launcher dials (movedStream), the secrets broker's
+// enrollment its next generation is started against (movedEnrollment), and the session store its
+// providers volume projects (movedSessionStore). All are fixed for the pod's life, so any moved
+// means the pod must be replaced before role can run as one launched now. It is the one rule for
+// all: evaluate reads a role whose pod holds a move as StaleAddress, and relaunch replaces a pod
+// that holds one for any of its roles.
 func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
-	if stream, ok := r.movedStream(pod, string(role)); ok {
+	if layout, ok := movedLayout(pod); ok {
+		moved = append(moved, layout)
+	}
+	if stream, ok := r.movedStream(pod, podContainer(role)); ok {
 		moved = append(moved, stream)
 	}
 	if enrollment, ok := r.movedEnrollment(pod, role); ok {

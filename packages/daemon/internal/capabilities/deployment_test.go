@@ -108,8 +108,8 @@ func rows(failing map[Name]string) []Row {
 	return report
 }
 
-// podSession is a live session in an issue's pod — the role's container of the pod
-// legion-omp-<issue> — which measured at measuredAt and whose report fails the given rows.
+// podSession is a live session of role in an issue's pod — the pod legion-omp-<issue>'s one
+// container, `roles` — which measured at measuredAt and whose report fails the given rows.
 func podSession(issue string, role claim.Role, measuredAt time.Time, failing map[Name]string) Session {
 	token := claim.Token(fmt.Sprintf("legion-omp-%s-%s", issue, role))
 	return Session{Role: role, Issue: issue, Report: Report{
@@ -118,7 +118,7 @@ func podSession(issue string, role claim.Role, measuredAt time.Time, failing map
 			Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: runtime.SandboxIncarnation("3f2b1c7e", 2),
 			Sandbox: &runtime.SandboxLocator{
 				Namespace: "legion", Name: "legion-omp-" + strings.ToLower(issue), PodUID: "3f2b1c7e",
-				Container: string(role), Generation: 2,
+				Container: runtime.IssuePodContainer, Generation: 2,
 			},
 		},
 		MeasuredAt: measuredAt, ReportedAt: measuredAt.Add(time.Second), ElapsedMs: 1200,
@@ -177,8 +177,8 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 			name:     "present with one session",
 			sessions: []Session{podSession("LEGION-663", claim.RoleImplementer, measured, nil)},
 			want: map[Name]State{
-				Subagents: {Name: Subagents, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/implementer (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: subagents proved"},
-				GitHub:    {Name: GitHub, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/implementer (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: github proved"},
+				Subagents: {Name: Subagents, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/roles (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: subagents proved"},
+				GitHub:    {Name: GitHub, Status: StatusPresent, Detail: "proved by 1 live session(s); latest pod legion-omp-legion-663/roles (implementer, LEGION-663) measured 2026-10-10T02:18:59Z: github proved"},
 			},
 		},
 		{
@@ -189,14 +189,14 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 				podSession("LEGION-665", claim.RoleArchitect, measured, nil),
 			},
 			want: map[Name]State{
-				MCP: {Name: MCP, Status: StatusPresent, Detail: "proved by 3 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
+				MCP: {Name: MCP, Status: StatusPresent, Detail: "proved by 3 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
 			},
 		},
 		{
 			name:     "open with one failing session",
 			sessions: []Session{podSession("LEGION-663", claim.RoleImplementer, measured, noSearch)},
 			want: map[Name]State{
-				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools"},
+				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools"},
 			},
 		},
 		{
@@ -216,9 +216,9 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 				podSession("LEGION-667", claim.RoleReviewer, measured, noSearch),
 			},
 			want: map[Name]State{
-				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools; " +
-					"pod legion-omp-legion-664/tester (tester, LEGION-664): web_search is not among the active tools; " +
-					"pod legion-omp-legion-665/architect (architect, LEGION-665): web_search is not among the active tools +2 more"},
+				WebSearch: {Name: WebSearch, Status: StatusOpen, Detail: "pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools; " +
+					"pod legion-omp-legion-664/roles (tester, LEGION-664): web_search is not among the active tools; " +
+					"pod legion-omp-legion-665/roles (architect, LEGION-665): web_search is not among the active tools +2 more"},
 			},
 		},
 		{
@@ -228,12 +228,12 @@ func TestLiveRowsRenderWhatTheSessionsReported(t *testing.T) {
 				podSession("LEGION-664", claim.RoleTester, later, map[Name]string{Subagents: "task agents are disabled"}),
 			},
 			want: map[Name]State{
-				Subagents:            {Name: Subagents, Status: StatusOpen, Detail: "pod legion-omp-legion-664/tester (tester, LEGION-664): task agents are disabled"},
-				WebSearch:            {Name: WebSearch, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: web-search proved"},
-				MCP:                  {Name: MCP, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
-				RepositoryExtensions: {Name: RepositoryExtensions, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: repository-extensions proved"},
-				DispatchEnvoyTools:   {Name: DispatchEnvoyTools, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: dispatch-envoy-tools proved"},
-				GitHub:               {Name: GitHub, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/tester (tester, LEGION-664) measured 2026-10-10T02:20:29Z: github proved"},
+				Subagents:            {Name: Subagents, Status: StatusOpen, Detail: "pod legion-omp-legion-664/roles (tester, LEGION-664): task agents are disabled"},
+				WebSearch:            {Name: WebSearch, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: web-search proved"},
+				MCP:                  {Name: MCP, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: mcp proved"},
+				RepositoryExtensions: {Name: RepositoryExtensions, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: repository-extensions proved"},
+				DispatchEnvoyTools:   {Name: DispatchEnvoyTools, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: dispatch-envoy-tools proved"},
+				GitHub:               {Name: GitHub, Status: StatusPresent, Detail: "proved by 2 live session(s); latest pod legion-omp-legion-664/roles (tester, LEGION-664) measured 2026-10-10T02:20:29Z: github proved"},
 			},
 		},
 	} {
@@ -315,9 +315,9 @@ func TestLogWarnsOfAnOpenLiveRow(t *testing.T) {
 	}
 	for _, want := range []string{
 		`level=WARN`,
-		`msg="capability web-search is open: pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools"`,
+		`msg="capability web-search is open: pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools"`,
 		`capability=web-search`,
-		`detail="pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools"`,
+		`detail="pod legion-omp-legion-663/roles (implementer, LEGION-663): web_search is not among the active tools"`,
 		`configLine=""`,
 		`source=""`,
 	} {
@@ -381,14 +381,14 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 		{"a decided fallback gap", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackOff, Decided: decided}, ModelFallback, StatusDecided, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
 
 		{"tmux sets no limits", Deployment{Runtime: "tmux"}, ResourceLimits, StatusOpen, "the tmux runtime sets no requests or limits on a pane"},
-		{"every role reserved", satisfied, ResourceLimits, StatusPresent, "every role has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"},
-		{"a workflow role burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleImplementer, claim.RoleTester}}, ResourceLimits, StatusPresent,
-			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): implementer, tester, so every issue pod is Burstable; every other pod is Guaranteed"},
-		{"the controller burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleController}}, ResourceLimits, StatusPresent,
-			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): controller, so the controller's pod is Burstable; every other pod is Guaranteed"},
-		{"both pod kinds burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleImplementer, claim.RoleController}}, ResourceLimits, StatusPresent,
-			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): implementer, controller, so every issue pod and the controller's pod are Burstable; every other pod is Guaranteed"},
-		{"roles without a reservation", Deployment{Runtime: "kubernetes", RolesWithoutResources: []claim.Role{claim.RoleTester, claim.RoleController}}, ResourceLimits, StatusOpen, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester, controller"},
+		{"every pod reserved", satisfied, ResourceLimits, StatusPresent, "every pod has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"},
+		{"the issue pod burstable", Deployment{Runtime: "kubernetes", BurstablePods: []Pod{PodIssue}}, ResourceLimits, StatusPresent,
+			"every pod has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable (a request below the limit): the issue pod; every other pod is Guaranteed"},
+		{"the controller's pod burstable", Deployment{Runtime: "kubernetes", BurstablePods: []Pod{PodController}}, ResourceLimits, StatusPresent,
+			"every pod has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable (a request below the limit): the controller's pod; every other pod is Guaranteed"},
+		{"both pods burstable", Deployment{Runtime: "kubernetes", BurstablePods: []Pod{PodIssue, PodController}}, ResourceLimits, StatusPresent,
+			"every pod has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable (a request below the limit): the issue pod and the controller's pod; every other pod is Guaranteed"},
+		{"pods without a reservation", Deployment{Runtime: "kubernetes", UnreservedPods: []Pod{PodIssue, PodController}}, ResourceLimits, StatusOpen, "no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod and the controller's pod"},
 		{"a decided limits gap", Deployment{Runtime: "tmux", Decided: decided}, ResourceLimits, StatusDecided, "the tmux runtime sets no requests or limits on a pane"},
 
 		{"tmux runs no probe pod", Deployment{Runtime: "tmux"}, PoolCapacity, StatusPresent, "the tmux runtime runs no probe pod"},
@@ -421,7 +421,7 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 // the gap and the line that records a decision, as attributes too — and nothing for the rest.
 func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 	d := Deployment{Runtime: "kubernetes", Probed: true, ModelFallback: bootprobe.ModelFallbackOn, Decided: map[Name]string{Secrets: "dispatch://LEGION-205 enrolls pods later"},
-		RolesWithoutResources: []claim.Role{claim.RoleTester}}
+		UnreservedPods: []Pod{PodIssue}}
 
 	if got, want := d.Open(), []Name{ResourceLimits}; !slices.Equal(got, want) {
 		t.Errorf("Open() = %v, want %v", got, want)
@@ -434,9 +434,9 @@ func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 	}
 	for _, want := range []string{
 		`level=WARN`,
-		`msg="capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\""`,
+		`msg="capability resource-limits is open: no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\""`,
 		`capability=resource-limits`,
-		`detail="roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester"`,
+		`detail="no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod"`,
 		`configLine="capabilities.decided.resource-limits: \"<reason>\""`,
 		`source=configuration`,
 	} {
@@ -453,20 +453,20 @@ func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 
 // OpenFromConfiguration is what `legion start --check-config` prints: the open rows the file alone
 // decides, each as Report renders it — secrets where no broker is configured, resource-limits where
-// a role lacks a reservation — and never a configured broker's secrets row, whose login boot
+// a pod lacks a reservation — and never a configured broker's secrets row, whose login boot
 // measures, nor model fallback, which the probe or the plugin gate reads, nor pool capacity, which
 // the probe's run measures.
 func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
-	lacking := []claim.Role{claim.RoleTester}
+	lacking := []Pod{PodIssue}
 	for _, tc := range []struct {
 		name       string
 		deployment Deployment
 		want       []Name
 	}{
-		{"no broker, a role lacking", Deployment{Runtime: "kubernetes", RolesWithoutResources: lacking}, []Name{Secrets, ResourceLimits}},
-		{"no broker, every role reserved", Deployment{Runtime: "kubernetes"}, []Name{Secrets}},
-		{"a broker whose login is not issued, a role lacking", Deployment{Runtime: "kubernetes", AgentSecrets: true, RolesWithoutResources: lacking}, []Name{ResourceLimits}},
-		{"a broker whose login is not issued, every role reserved", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
+		{"no broker, a pod lacking", Deployment{Runtime: "kubernetes", UnreservedPods: lacking}, []Name{Secrets, ResourceLimits}},
+		{"no broker, every pod reserved", Deployment{Runtime: "kubernetes"}, []Name{Secrets}},
+		{"a broker whose login is not issued, a pod lacking", Deployment{Runtime: "kubernetes", AgentSecrets: true, UnreservedPods: lacking}, []Name{ResourceLimits}},
+		{"a broker whose login is not issued, every pod reserved", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
 		{"a broker login failed", Deployment{Runtime: "kubernetes", AgentSecrets: true, SecretsLogin: "failed"}, nil},
 		{"fallback off alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackOff}, nil},
 		{"fallback unread alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackUnread}, nil},

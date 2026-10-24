@@ -55,12 +55,9 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		}
 		return []k8sruntime.Object{sandboxObject(t, name, sandboxUID, mode, labels, conditions...), pod}
 	}
-	running := corev1.PodStatus{Phase: corev1.PodRunning}
-	for _, role := range claim.Roles {
-		running.ContainerStatuses = append(running.ContainerStatuses, corev1.ContainerStatus{
-			Name: string(role), State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
-		})
-	}
+	running := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: workerContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}}
 	withStatus := func(name string, state corev1.ContainerState) corev1.PodStatus {
 		status := running
 		status.ContainerStatuses = slices.Clone(running.ContainerStatuses)
@@ -199,10 +196,11 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			detail:    []string{"is uid uid-pod-newer, not the recorded pod UID " + recorded, "the daemon replaced pod " + recorded},
 		},
 		{
-			row:     "5 the role container ended with the pod",
+			row:     "5 the pod's one container ended with the pod",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 0, "Completed"), terminated(workerContainer, 137, "Error"))),
 			want:    runtime.Gone,
-			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: role container tester terminated (Error, exit code 137)", "last lines of tester:\nfake logs"},
+			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: container roles terminated (Error, exit code 137)", "last lines of tester:\n"},
+			absent:  []string{"fake logs"},
 		},
 		{
 			row:           "5 workspace-init lost the workspace",
@@ -232,7 +230,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		{
 			row:     "5 the agent exited cleanly",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 0, "Completed")}}),
-			want:    runtime.Gone, detail: []string{"Succeeded: role container tester terminated (Completed, exit code 0)"},
+			want:    runtime.Gone, detail: []string{"Succeeded: container roles terminated (Completed, exit code 0)"},
 		},
 		{
 			row: "5 before 7, quoting Finished only when current",
@@ -289,19 +287,18 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			row:      "8 running",
 			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
 			launcher: alive,
-			want:     runtime.Alive, detail: []string{"(uid " + recorded + ") role container tester runs generation 1"},
+			want:     runtime.Alive, detail: []string{"(uid " + recorded + ") role tester runs generation 1"},
 		},
 		{
-			row: "8 a neighbour's container restarting leaves the role alive",
-			objects: withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", "ContainersNotReady", 2)}, recorded, sandboxUID,
-				withStatus(string(claim.RoleArchitect), corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}})),
+			row:      "8 the pod's Ready=False leaves a role its launcher runs alive",
+			objects:  withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", "ContainersNotReady", 2)}, recorded, sandboxUID, running),
 			launcher: alive,
 			want:     runtime.Alive,
 		},
 		{
-			row:     "8 the role launcher is not connected",
+			row:     "8 the role's launcher is not connected",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, running),
-			want:    runtime.Uncertain, detail: []string{"role launcher tester is disconnected"},
+			want:    runtime.Uncertain, detail: []string{"role tester's launcher is disconnected"},
 		},
 		{
 			row:      "8 the launcher runs a later generation",
@@ -316,21 +313,21 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:     runtime.Gone, detail: []string{"reports generation 1 exited (code 143, signal terminated)"},
 		},
 		{
-			row:     "8 the role container terminated with no launcher connected",
+			row:     "8 the pod's one container terminated with no launcher connected",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
-			want:    runtime.Gone, detail: []string{"role container tester terminated (OOMKilled, exit code 137)"},
+			want:    runtime.Gone, detail: []string{"container roles terminated (OOMKilled, exit code 137)"},
 		},
 		{
-			row:      "8 a terminated role container outranks a launcher reporting another generation",
+			row:      "8 a terminated container outranks a launcher reporting another generation",
 			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
 			launcher: &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 2, PID: 43}},
-			want:     runtime.Gone, detail: []string{"role container tester terminated (OOMKilled, exit code 137)"},
+			want:     runtime.Gone, detail: []string{"container roles terminated (OOMKilled, exit code 137)"},
 		},
 		{
 			row:      "8 a restarted launcher's recorded child outranks its previous container instance's terminated status",
 			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}})),
 			launcher: alive,
-			want:     runtime.Alive, detail: []string{"role container tester runs generation 1"},
+			want:     runtime.Alive, detail: []string{"role tester runs generation 1"},
 		},
 		{
 			row:      "8 a pod being deleted is alive until it is gone",
@@ -361,13 +358,13 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want: runtime.Alive,
 		},
 		{
-			row:      "8 a role launcher dialing the stream a pod created now is handed, with no record, is alive",
+			row:      "8 a launcher dialing the stream a pod created now is handed, with no record, is alive",
 			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)),
 			launcher: alive,
 			want:     runtime.Alive,
 		},
 		{
-			row:      "8 a role launcher with no --connect is never read as stale for want of it",
+			row:      "8 a launcher with no --connect is never read as stale for want of it",
 			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream), withoutConnect),
 			launcher: alive,
 			want:     runtime.Alive,
@@ -396,7 +393,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 1)),
 			launcher: alive,
 			want:     runtime.StaleAddress,
-			detail:   []string{"role container tester runs generation 1", movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String()},
+			detail:   []string{"role tester runs generation 1", movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String()},
 			absent:   []string{connectFlag, "ENVOY_URL"},
 		},
 		{

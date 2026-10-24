@@ -197,45 +197,34 @@ tree1_children=2
 # every one an issue pod. The run launches no controller pod: its controller starts from the
 # operator shell (controller). preflight refuses, BLOCKED, a pool with room for fewer.
 run_pods_at_once=$((admission_cap + tree1_children))
-# The run's reservations: the cpu and memory every container of a role carries as both its request
-# and its limit, and the ephemeral storage it carries as a limit over a smaller request
-# (runtime.kubernetes.resources, write_legion_config), which preflight sizes the pool's room by (cpu
-# and memory) and pod-shape holds every container of every pod to. The defaults are the daemon's,
-# config.DefaultResources() in packages/daemon/internal/config/kubernetes.go, written once here as
-# data. The overrides are this run's, chosen so that an issue pod carries a reservation from each
-# path the loader has — the tester's cpu, memory and ephemeral-storage limit overridden, the
-# reviewer's cpu and memory, the merger's cpu alone with its memory the default, and the architect's,
-# planner's and implementer's the defaults, every ephemeral-storage request the default 1Gi — while
-# the pod's sum (2.95 CPU, 16 GiB) stays within the defaults' 3 CPU and 19 GiB. The controller's
-# default is data for the checks alone: the file names the controller only while controller_cpu is
-# set (daemon-controller-liveness, under `controller: daemon`), and the image probe pod carries its
-# own fixed 250m / 1Gi (internal/daemon/kubernetes.go probeReservation), never the controller's —
-# so that checkpoint's restart with the controller at 100000 CPU still places its probe pod.
-declare -A default_cpu=([architect]=250m [planner]=250m [implementer]=750m [tester]=750m [reviewer]=750m [merger]=250m [controller]=1)
-declare -A default_memory=([architect]=1Gi [planner]=1Gi [implementer]=6Gi [tester]=6Gi [reviewer]=4Gi [merger]=1Gi [controller]=4Gi)
-declare -A default_ephemeral_storage=([architect]=10Gi [planner]=10Gi [implementer]=20Gi [tester]=20Gi [reviewer]=10Gi [merger]=10Gi [controller]=10Gi)
-declare -A default_ephemeral_storage_request=([architect]=1Gi [planner]=1Gi [implementer]=1Gi [tester]=1Gi [reviewer]=1Gi [merger]=1Gi [controller]=1Gi)
-declare -A override_cpu=([tester]=1 [reviewer]=500m [merger]=200m)
-declare -A override_memory=([tester]=5Gi [reviewer]=2Gi)
-declare -A override_ephemeral_storage=([tester]=30Gi)
-declare -A override_ephemeral_storage_request=()
-run_roles="architect planner implementer tester reviewer merger controller"
-# expected_cpu ROLE, expected_memory ROLE, expected_ephemeral_storage ROLE and
-# expected_ephemeral_storage_request ROLE are ROLE's reservation: the override where the run sets
-# one, the default otherwise, as resolveKubernetes settles the file's block field by field.
-expected_cpu() { printf '%s' "${override_cpu[$1]:-${default_cpu[$1]}}"; }
-expected_memory() { printf '%s' "${override_memory[$1]:-${default_memory[$1]}}"; }
-expected_ephemeral_storage() { printf '%s' "${override_ephemeral_storage[$1]:-${default_ephemeral_storage[$1]}}"; }
-expected_ephemeral_storage_request() { printf '%s' "${override_ephemeral_storage_request[$1]:-${default_ephemeral_storage_request[$1]}}"; }
-# run_resources is every role's expected reservation as JSON, {role: {cpu, memory, ephemeral_storage,
-# ephemeral_storage_request}}: the shape the jq rules take (lib/stage4b-pods.jq reservation_problems;
-# lib/stage4b-room.jq, which reads cpu and memory).
-run_resources='{'
-for role in $run_roles; do
-  run_resources+="\"$role\":{\"cpu\":\"$(expected_cpu "$role")\",\"memory\":\"$(expected_memory "$role")\",\"ephemeral_storage\":\"$(expected_ephemeral_storage "$role")\",\"ephemeral_storage_request\":\"$(expected_ephemeral_storage_request "$role")\"},"
-done
-run_resources="${run_resources%,}}"
-unset role
+# The run's reservations: the cpu and memory every container of an issue pod carries as both its
+# request and its limit, and the ephemeral storage it carries as a limit over a smaller request
+# (runtime.kubernetes.resources.issue, write_legion_config), which preflight sizes the pool's room by
+# (cpu and memory) and pod-shape holds every container of every issue pod to. The defaults are the
+# daemon's, config.DefaultResources() in packages/daemon/internal/config/kubernetes.go, written once
+# here as data. The override is this run's, chosen so that the issue pod's reservation comes from
+# both paths the loader has — its cpu and memory set, its ephemeral-storage limit and request the
+# defaults — while staying within the defaults' 3 CPU and 19 GiB. The controller's default is data
+# for the checks alone: the file names the controller only while controller_cpu is set
+# (daemon-controller-liveness, under `controller: daemon`), and the image probe pod carries its own
+# fixed 250m / 1Gi (internal/daemon/kubernetes.go probeReservation), never the controller's — so
+# that checkpoint's restart with the controller at 100000 CPU still places its probe pod.
+declare -A default_issue=([cpu]=3 [memory]=19Gi [ephemeral_storage]=80Gi [ephemeral_storage_request]=6Gi)
+declare -A default_controller=([cpu]=1 [memory]=4Gi [ephemeral_storage]=10Gi [ephemeral_storage_request]=1Gi)
+declare -A override_issue=([cpu]=2950m [memory]=16Gi)
+reservation_fields="cpu memory ephemeral_storage ephemeral_storage_request"
+# expected_issue FIELD is the issue pod's FIELD: the override where the run sets one, the default
+# otherwise, as resolveKubernetes settles the file's block field by field.
+expected_issue() { printf '%s' "${override_issue[$1]:-${default_issue[$1]}}"; }
+# run_resources is each pod's expected reservation as JSON, {issue: {cpu, memory, ephemeral_storage,
+# ephemeral_storage_request}, controller: {…}}: the shape the jq rules take (lib/stage4b-pods.jq
+# reservation_problems; lib/stage4b-room.jq, which reads the issue pod's cpu and memory).
+run_resources='{"issue":{'
+for field in $reservation_fields; do run_resources+="\"$field\":\"$(expected_issue "$field")\","; done
+run_resources="${run_resources%,}},\"controller\":{"
+for field in $reservation_fields; do run_resources+="\"$field\":\"${default_controller[$field]}\","; done
+run_resources="${run_resources%,}}}"
+unset field
 # The daemon's log texts the children's and tree 1's volumes are judged by: the release a child's
 # close as done logs (internal/runtime/sandbox/issue_suspend.go); the lost volume a resume finds
 # (internal/supervise/machine.go), which child-release requires absent, re-admission exactly once
@@ -739,8 +728,8 @@ claim_relaunched() {
     | .generation == $was.generation + 1 and .locator != null and .locator.incarnation != $was.incarnation
       and (.state | IN("ready", "idle", "working"))' >/dev/null
 }
-# pod_connect POD prints the one address every role launcher of pod POD dials (stage4b-pods.jq's
-# launcher_connect), empty when they name none or differ, as the operator reads the pod.
+# pod_connect POD prints the address the launcher of pod POD's `roles` container dials
+# (stage4b-pods.jq's launcher_connect), empty when the pod has none, as the operator reads the pod.
 pod_connect() { op get pod "$1" -o json | jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; launcher_connect // ""'; }
 # pod_resume POD ROLE prints the --resume=<session file> word ROLE's running generation was started
 # with, read from the command lines in its container (pod_commands), empty with none.
@@ -749,13 +738,13 @@ pod_resume() { pod_commands "$1" "$2" | { grep -o -- '--resume=[^ ]*' || true; }
 # with its authority upper-cased: the same server, since a host is named case-insensitively, spelled
 # as another address.
 upper_host() { printf '%s://%s\n' "${1%%://*}" "$(tr '[:lower:]' '[:upper:]' <<<"${1#*://}")"; }
-# on_handed_addresses POD ROLE WHO: every role launcher of pod POD dials the worker stream the daemon
-# serves now (pod_connect), and ROLE's Oh My Pi there is told the daemon's API and the run's services
-# as the daemon hands them now (pod_endpoint_mismatch), or the check fails naming WHO.
+# on_handed_addresses POD ROLE WHO: the launcher of pod POD dials the worker stream the daemon serves
+# now (pod_connect), and ROLE's Oh My Pi there is told the daemon's API and the run's services as
+# the daemon hands them now (pod_endpoint_mismatch), or the check fails naming WHO.
 on_handed_addresses() {
   local connect mismatch stream=tcp://$host:$port_worker_stream
   connect=$(pod_connect "$1") || fail "the operator could not read pod $1"
-  [ "$connect" = "$stream" ] || fail "$3's role launchers dial ${connect:-no one address}, not $stream"
+  [ "$connect" = "$stream" ] || fail "$3's launcher dials ${connect:-nothing}, not $stream"
   if mismatch=$(pod_endpoint_mismatch "$1" "$2"); then fail "$3 has $mismatch"; fi
 }
 # claims_on_handed_addresses: from one read of `legion claims`, every claim of the run that runs a
@@ -769,7 +758,7 @@ claims_on_handed_addresses() {
     pod=$(jq -r --arg t "$token" '.[] | select(.token == $t) | .pod' <<<"$claims")
     role=$(jq -r --arg t "$token" '.[] | select(.token == $t) | .role' <<<"$claims")
     on_handed_addresses "$pod" "$role" "$token's $role in pod $pod"
-    note "$token: pod $pod's launchers dial tcp://$host:$port_worker_stream; its $role is told LEGION_DAEMON_URL http://$host:$port_daemon and the run's services"
+    note "$token: pod $pod's launcher dials tcp://$host:$port_worker_stream; its $role is told LEGION_DAEMON_URL http://$host:$port_daemon and the run's services"
   done
   note "all $(jq length <<<"$claims") claims that run a process are on the addresses the daemon hands now"
 }
@@ -1198,25 +1187,19 @@ EOF
     echo "controller: daemon" >>"$work/legion.yaml"
   fi
 }
-# resources_block prints the run's `runtime.kubernetes.resources` block: one entry per role the run
-# overrides (override_cpu, override_memory, override_ephemeral_storage,
-# override_ephemeral_storage_request), with only the fields it sets, so the daemon fills the rest
-# from config.DefaultResources() and the file exercises both paths; and, while controller_cpu is set
+# resources_block prints the run's `runtime.kubernetes.resources` block: the issue pod's entry with
+# only the fields the run overrides (override_issue), so the daemon fills the rest from
+# config.DefaultResources() and the file exercises both paths; and, while controller_cpu is set
 # (daemon-controller-liveness, under `controller: daemon`), the controller's entry with that cpu as
 # both request and limit — this run configures request = limit — and 1Gi of memory. The data is the
 # reservations' (run_resources), so the file and the checks cannot drift apart.
 resources_block() {
-  local role fields
+  local field fields=
   echo "    resources:"
-  for role in $run_roles; do
-    [ -n "${override_cpu[$role]:-}${override_memory[$role]:-}${override_ephemeral_storage[$role]:-}${override_ephemeral_storage_request[$role]:-}" ] || continue
-    fields=
-    [ -z "${override_cpu[$role]:-}" ] || fields="cpu: ${override_cpu[$role]}"
-    [ -z "${override_memory[$role]:-}" ] || fields="${fields:+$fields, }memory: ${override_memory[$role]}"
-    [ -z "${override_ephemeral_storage[$role]:-}" ] || fields="${fields:+$fields, }ephemeral_storage: ${override_ephemeral_storage[$role]}"
-    [ -z "${override_ephemeral_storage_request[$role]:-}" ] || fields="${fields:+$fields, }ephemeral_storage_request: ${override_ephemeral_storage_request[$role]}"
-    echo "      $role: { $fields }"
+  for field in $reservation_fields; do
+    [ -z "${override_issue[$field]:-}" ] || fields="${fields:+$fields, }$field: ${override_issue[$field]}"
   done
+  [ -z "$fields" ] || echo "      issue: { $fields }"
   [ -z "$controller_cpu" ] || echo "      controller: { cpu: \"$controller_cpu\", memory: 1Gi }"
 }
 # render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
@@ -1821,17 +1804,18 @@ hog_oomkilled() {
 
 # ---- the pod-shape watcher (checkpoint pod-shape) --------------------------------------------------
 
-# check_pod_shape SPEC prints each way the pod object SPEC departs from the shared issue-pod shape,
-# or nothing, with its Secrets' values as they are now: gVisor; the operator's ServiceAccount and one
-# projected token; all six fixed role launchers with the route ConfigMap where their profiles read
-# it; the pool; restricted security; every container, the init containers included, reserving cpu
-# and memory as both request and limit and ephemeral-storage as a request under its limit, a role
-# container its role's reservation under the run's overrides and defaults (run_resources) and an
-# init container the launching role's, so the pod is Guaranteed and bounded on the node's disk, and
-# no affinity (lib/stage4b-pods.jq reservation_problems); every role launcher
-# dialing the worker stream the daemon served when the pod was created, at advertise_host; no
-# Secret value in a container's environment, command or args; and split provisioning (only
-# workspace-fetch reaches the provisioning credential).
+# check_pod_shape SPEC prints each way the pod object SPEC departs from the issue-pod shape, or
+# nothing, with its Secrets' values as they are now: gVisor; the operator's ServiceAccount and one
+# projected token; the one `roles` container, mounting the route ConfigMap where every role's
+# profile reads it; the pool; restricted security; every container, the init containers included,
+# reserving cpu and memory as both request and limit and ephemeral-storage as a request under its
+# limit, each the issue pod's one reservation under the run's override and the defaults
+# (run_resources), so the pod is Guaranteed and bounded on the node's disk, and no affinity
+# (lib/stage4b-pods.jq reservation_problems); the launcher dialing the worker stream the daemon
+# served when the pod was created, at advertise_host; each role's gh files in a volume of its own
+# under its directory of the roles directory, read-only; no Secret value in a container's
+# environment, command or args; and split provisioning (only workspace-fetch reaches the
+# provisioning credential).
 # shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
 # judges the object alone, so a pod the watch recorded is judged after it is gone, and it reads the
 # streams the run's daemons served from record_stream's record each time, so the shape watcher,
@@ -1841,43 +1825,44 @@ shape_problems() {
   jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --slurpfile streams "$evidence/worker-streams.jsonl" --argjson expected "$run_resources" '
     include "stage4b-pods";
     ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
-    | def role_containers: [.containers[] | select(.name as $name | $roles | index($name))];
-    .spec as $s
+    | "/var/run/legion/roles" as $dir
+    | .spec as $s
+    | ([$s.containers[] | select(.name == "roles")] | first) as $c
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
       (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
       (if $s.automountServiceAccountToken != false then "automountServiceAccountToken \($s.automountServiceAccountToken)" else empty end),
       (if ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken)] | length) != 1
         or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != [$audience])
         then "the projected token source of the operator pod is not the one token for LEGION_E2E_MODEL_GATEWAY_AUDIENCE" else empty end),
-      (if (($s.containers | map(.name) | sort) != ($roles | sort)) then "pod containers \($s.containers | map(.name) | sort), want only \($roles | sort)" else empty end),
+      (if ($s.containers | map(.name)) != ["roles"] then "pod containers \($s.containers | map(.name)), want only [\"roles\"]" else empty end),
       ([$s.volumes[] | select(.configMap.name == $route) | .name] as $route_volumes
         | if ($route_volumes | length) != 1 then "no one volume of the route ConfigMap \($route)"
-          elif ([$s | role_containers[] | .volumeMounts[]? | select(.name == $route_volumes[0] and .mountPath == "/home/legion/.omp/profiles/legion/agent/models.yml")] | length) != ($roles | length)
-          then "each role launcher does not mount models.yml of \($route) where its profile reads it" else empty end),
+          elif ([$c.volumeMounts[]? | select(.name == $route_volumes[0] and .mountPath == "/home/legion/.omp/profiles/legion/agent/models.yml")] | length) != 1
+          then "the roles container does not mount models.yml of \($route) where every role profile reads it" else empty end),
       (if $s.nodeSelector["legion.dev/pool"] != "legion" then "nodeSelector \($s.nodeSelector)" else empty end),
       (if ([$s.tolerations[]? | select(.key == "legion.dev/pool")] | length) == 0 then "no legion.dev/pool toleration" else empty end),
       # Pod Security "restricted": non-root and RuntimeDefault seccomp may be set on the pod; the
       # escalation and capability rules are set on each container.
-      ([$s.initContainers[]?, $s.containers[]] | .[] as $c
-        | (if $c.securityContext.allowPrivilegeEscalation != false
-             or ($c.securityContext.runAsNonRoot // $s.securityContext.runAsNonRoot) != true
-             or ($c.securityContext.seccompProfile.type // $s.securityContext.seccompProfile.type) != "RuntimeDefault"
-             or ($c.securityContext.capabilities.drop // []) != ["ALL"]
-            then "container \($c.name) is not restricted: \({container: $c.securityContext, pod: $s.securityContext} | tostring)" else empty end)),
-      # Every role launcher dials the worker stream the daemon served when the pod was created, at
+      ([$s.initContainers[]?, $s.containers[]] | .[] as $k
+        | (if $k.securityContext.allowPrivilegeEscalation != false
+             or ($k.securityContext.runAsNonRoot // $s.securityContext.runAsNonRoot) != true
+             or ($k.securityContext.seccompProfile.type // $s.securityContext.seccompProfile.type) != "RuntimeDefault"
+             or ($k.securityContext.capabilities.drop // []) != ["ALL"]
+            then "container \($k.name) is not restricted: \({container: $k.securityContext, pod: $s.securityContext} | tostring)" else empty end)),
+      # The launcher dials the worker stream the daemon served when the pod was created, at
       # advertise_host, never the unspecified address the daemon binds.
       (served_stream($streams) as $stream
-        | if $stream == null then "the role launchers dial \(launcher_connect // "no one address"), but no worker stream was served when the pod was created (\(.metadata.creationTimestamp))"
-          else launcher_connects[] | select(.connect != $stream)
-            | "the \(.role) launcher dials \(.connect // "nothing (no --connect)"), not advertise_host at \($stream)" end),
+        | if $stream == null then "the launcher dials \(launcher_connect // "nothing"), but no worker stream was served when the pod was created (\(.metadata.creationTimestamp))"
+          elif launcher_connect != $stream then "the launcher dials \(launcher_connect // "nothing (no --connect)"), not advertise_host at \($stream)"
+          else empty end),
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
-      ([$s | role_containers[] | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "a role launcher mounts the provision volume" else empty end),
+      ([$c.volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the roles container mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end),
       # Each role holds its GitHub App tokens in a gh volume of its own (LEGION-631): gh-<role>
       # projects the two gh keys of each owner in that role Secret as <owner>/hosts.yml and
-      # <owner>/config.yml, read-only at LEGION_GH_OWNERS_DIR in that role container alone, so no
-      # container reads another role token; the clone helper is legion git-credential; and the
-      # containers share no process namespace, which would let one read another /proc.
+      # <owner>/config.yml, read-only under the role directory of the roles directory, which only
+      # that role namespace binds back at LEGION_GH_OWNERS_DIR; no init container mounts one; the
+      # clone helper is legion git-credential; and no process namespace is shared with another pod.
       ($roles[] | . as $role | ([$s.volumes[] | select(.name == "gh-\($role)")] | first) as $v
         | ([$s.volumes[] | select(.name == "launcher-\($role)")] | first | .secret.secretName) as $own
         | if $v == null then "no gh-\($role) volume" else
@@ -1889,18 +1874,17 @@ shape_problems() {
                 then "gh-\($role) projects \($items | tostring), not <owner>/hosts.yml and <owner>/config.yml for each owner" else empty end),
             (if $v.secret.defaultMode != 288 then "gh-\($role) has defaultMode \($v.secret.defaultMode), not 0440" else empty end)
           end),
-      ($s | role_containers[] | .name as $role
-        | ([.volumeMounts[]? | select(.name | startswith("gh-"))]) as $gh
-        | if ($gh | length) != 1 or $gh[0].name != "gh-\($role)" or $gh[0].mountPath != "/var/run/legion/gh" or $gh[0].readOnly != true
-          then "container \($role) mounts gh volumes \($gh | map("\(.name) at \(.mountPath)\(if .readOnly then " read-only" else "" end)") | join(", ")), want gh-\($role) alone, read-only at /var/run/legion/gh" else empty end),
-      ([$s.initContainers[]?, $s.containers[]] | .[] as $c | [$c.volumeMounts[]? | select(.mountPath | startswith("/var/run/legion/gh")) | select(.name != "gh-\($c.name)")] | .[]
-        | "container \($c.name) mounts \(.name) under /var/run/legion/gh"),
+      ([$c.volumeMounts[]? | select(.name | startswith("gh-"))] as $gh
+        | ($roles | map({name: "gh-\(.)", mountPath: "\($dir)/\(.)/gh", readOnly: true})) as $want
+        | if ($gh | map({name, mountPath, readOnly: (.readOnly // false)}) | sort_by(.name)) != ($want | sort_by(.name))
+          then "the roles container mounts gh volumes \($gh | map("\(.name) at \(.mountPath)\(if .readOnly then " read-only" else "" end)") | join(", ")), want each gh-<role> alone, read-only at \($dir)/<role>/gh" else empty end),
+      ([$s.initContainers[]? | .name as $n | .volumeMounts[]? | select(.name | startswith("gh-")) | "init container \($n) mounts \(.name)"] | .[]),
       (if $s.shareProcessNamespace == true then "shareProcessNamespace is set" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init")] | .[] | (.command | index("--credential-helper")) as $i
         | if $i == null or .command[$i + 1] != "!legion git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !legion git-credential" else empty end),
-      # Every container reserves the cpu and memory of its role, request and limit alike, and its
-      # ephemeral-storage bound, request under limit; the pod is Guaranteed and asks nothing of its
-      # placement.
+      # Every container reserves the issue pod reservation, cpu and memory as request and limit
+      # alike and its ephemeral-storage bound, request under limit; the pod is Guaranteed and asks
+      # nothing of its placement.
       reservation_problems($expected)
   '
 }
@@ -2510,16 +2494,14 @@ remove_run_branches() {
   return 0
 }
 # collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: each
-# issue pod's, from the issue's own volume (the roots' and tree 1's children's, a child's planner
-# container the one that ran there), and the operator's controller's, which lives in the run's own
+# issue pod's, from the issue's own volume, which the pod's one `roles` container mounts at the
+# sessions directory for every role, and the operator's controller's, which lives in the run's own
 # profile on this machine and goes with that profile at teardown (transcripts/controller).
 collect_transcripts() {
-  local issue role pod
+  local issue pod
   for issue in $tree1 $tree2 $tree3 $tree4 $child1 $child2 $child3 $child4; do
     pod=$(issue_pod "$issue") || continue
-    role=architect
-    case $issue in "$child1" | "$child2" | "$child3" | "$child4") role=planner ;; esac
-    op exec "$pod" -c "$role" -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
+    op exec "$pod" -c roles -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
       tar -C "$evidence/transcripts" -xf - 2>/dev/null || true
   done
   if [ -d "$profile_agent/sessions" ]; then

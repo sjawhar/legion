@@ -106,6 +106,12 @@
 
 ### Changed
 
+- The daemon API fixtures (`fixtures/daemon-api/`) are at contract 36 (INFRA-208): `state.json`'s
+  `settings.runtime.kubernetes.resources` is `{issue, controller}`, each pod's six reservation
+  fields, in place of one entry per role, and the `resource-limits` capability row's detail names
+  pods (`no CPU and memory requests and limits under runtime.kubernetes.resources for the issue
+  pod`) rather than roles. `LegionStateResponse` reads `settings` loosely, so its schema is
+  unchanged.
 - `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
   broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
   `POST /api/v1/.../comments` and `POST /api/v1/broadcasts` accept, generated into Go as

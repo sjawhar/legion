@@ -87,12 +87,12 @@ type RuntimeSettings struct {
 // (`kubeconfig`, `context`), its credential source (`session_dsn_secret`) and the operator's `pod`
 // pieces, which every pod reads from its own spec.
 type KubernetesSettings struct {
-	Namespace    string                           `json:"namespace"`
-	Image        string                           `json:"image"`
-	StorageClass string                           `json:"storage_class"`
-	IssueVolume  string                           `json:"issue_volume"`
-	Scheduling   SchedulingSettings               `json:"scheduling"`
-	Resources    map[string]RoleResourcesSettings `json:"resources"`
+	Namespace    string               `json:"namespace"`
+	Image        string               `json:"image"`
+	StorageClass string               `json:"storage_class"`
+	IssueVolume  string               `json:"issue_volume"`
+	Scheduling   SchedulingSettings   `json:"scheduling"`
+	Resources    PodResourcesSettings `json:"resources"`
 	// SessionStore is "postgres" when the file names a session DSN secret, else "pvc".
 	SessionStore string                `json:"session_store"`
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
@@ -120,8 +120,15 @@ type TolerationSettings struct {
 	Effect   string `json:"effect"`
 }
 
-// RoleResourcesSettings is one role's settled reservation, every field filled.
-type RoleResourcesSettings struct {
+// PodResourcesSettings is the settled reservations of the two pods the daemon builds: every issue
+// pod's, whose one container runs all six workflow roles, and the controller's pod's.
+type PodResourcesSettings struct {
+	Issue      ReservationSettings `json:"issue"`
+	Controller ReservationSettings `json:"controller"`
+}
+
+// ReservationSettings is one settled reservation, every field filled.
+type ReservationSettings struct {
 	CPU                     string `json:"cpu"`
 	CPURequest              string `json:"cpu_request"`
 	Memory                  string `json:"memory"`
@@ -132,12 +139,12 @@ type RoleResourcesSettings struct {
 
 // RepositoryCacheSettings is the settled `runtime.kubernetes.repository_cache`: each repository
 // cache's volume, its fetch period, how long an unmapped repository's cache is kept, and its one
-// container's reservation in a role's shape.
+// container's reservation in a pod's shape.
 type RepositoryCacheSettings struct {
-	Volume         string                `json:"volume"`
-	RefreshMinutes int                   `json:"refresh_minutes"`
-	RetainHours    int                   `json:"retain_hours"`
-	Resources      RoleResourcesSettings `json:"resources"`
+	Volume         string              `json:"volume"`
+	RefreshMinutes int                 `json:"refresh_minutes"`
+	RetainHours    int                 `json:"retain_hours"`
+	Resources      ReservationSettings `json:"resources"`
 }
 
 // AgentSecretsSettings is `runtime.kubernetes.agent_secrets` without `token_file`, the path of the
@@ -281,22 +288,22 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			Tolerations:   make([]TolerationSettings, len(block.Scheduling.Tolerations)),
 			PriorityClass: block.Scheduling.PriorityClass,
 		},
-		Resources:    make(map[string]RoleResourcesSettings, len(block.Resources)),
+		Resources: PodResourcesSettings{
+			Issue:      reservationSettingsOf(block.Resources.Issue),
+			Controller: reservationSettingsOf(block.Resources.Controller),
+		},
 		SessionStore: "pvc",
 		Setup:        stringsOf(block.Setup),
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
 			RefreshMinutes: block.RepositoryCache.RefreshMinutes,
 			RetainHours:    block.RepositoryCache.RetainHours,
-			Resources:      roleResourcesSettingsOf(block.RepositoryCache.Resources),
+			Resources:      reservationSettingsOf(block.RepositoryCache.Resources),
 		},
 	}
 	maps.Copy(settings.Scheduling.NodeSelector, block.Scheduling.NodeSelector)
 	for i, toleration := range block.Scheduling.Tolerations {
 		settings.Scheduling.Tolerations[i] = TolerationSettings{Key: toleration.Key, Operator: toleration.Operator, Value: toleration.Value, Effect: toleration.Effect}
-	}
-	for role, reservation := range block.Resources {
-		settings.Resources[string(role)] = roleResourcesSettingsOf(reservation)
 	}
 	if block.SessionDSNSecret != "" {
 		settings.SessionStore = "postgres"
@@ -310,9 +317,9 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	return settings
 }
 
-// roleResourcesSettingsOf is one settled reservation as the state shows it.
-func roleResourcesSettingsOf(reservation config.RoleResources) RoleResourcesSettings {
-	return RoleResourcesSettings{
+// reservationSettingsOf is one settled reservation as the state shows it.
+func reservationSettingsOf(reservation config.Reservation) ReservationSettings {
+	return ReservationSettings{
 		CPU: reservation.CPU, CPURequest: reservation.CPURequest,
 		Memory: reservation.Memory, MemoryRequest: reservation.MemoryRequest,
 		EphemeralStorage: reservation.EphemeralStorage, EphemeralStorageRequest: reservation.EphemeralStorageRequest,

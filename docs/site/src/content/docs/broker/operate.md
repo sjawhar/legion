@@ -381,8 +381,8 @@ broker records the signed-in person as who revoked it. Never pick the row by its
 login's host is the name its machine reported.
 
 A line whose own enrollment's `subject` is a daemon's account names an enrollment made under that
-daemon's one credential: by the daemon itself, renewed by someone holding the enrollment's key from
-that pod's role container, or by someone holding a token for the daemon's ServiceAccount. Each
+daemon's one credential: by the daemon itself, renewed by someone holding the enrollment's key in
+that pod (the role whose namespace holds it), or by someone holding a token for the daemon's ServiceAccount. Each
 login under the account is in the audit table, with the pod the token was bound to; the daemon's
 own token is bound to the daemon's own pod, so a login whose `pod_uid` is another pod's, or none
 (a token `kubectl create token` minted), did not use the daemon's own token unless you ran the
