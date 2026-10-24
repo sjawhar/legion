@@ -177,6 +177,12 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			Rank         string          `json:"rank"`
 			Labels       []string        `json:"labels"`
 			ResolvedRepo json.RawMessage `json:"resolved_repo"`
+			Claim        *struct {
+				Actor struct {
+					Kind string `json:"kind"`
+					ID   string `json:"id"`
+				} `json:"actor"`
+			} `json:"claim"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
@@ -202,6 +208,13 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			parent = *issue.Parent
 		}
+		claimedBy := ""
+		if issue.Claim != nil {
+			if issue.Claim.Actor.Kind == "" || issue.Claim.Actor.ID == "" {
+				return nil, fmt.Errorf("Dispatch issue event payload has an invalid claim actor")
+			}
+			claimedBy = issue.Claim.Actor.Kind + ":" + issue.Claim.Actor.ID
+		}
 		actorSession := ""
 		daemonActor := event.Actor.Kind == "session" && event.Actor.ID == dispatch.DaemonSession(event.IssueKey)
 		if event.Actor.Kind == "session" && !daemonActor {
@@ -209,7 +222,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		}
 		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
 			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
-			ResolvedRepoMissing: missing}, nil
+			ResolvedRepoMissing: missing, ClaimedBy: claimedBy}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -250,6 +263,75 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
 		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+	case "ask.opened":
+		var ask struct {
+			ID     string `json:"id"`
+			Kind   string `json:"kind"`
+			Author struct {
+				Kind string `json:"kind"`
+				ID   string `json:"id"`
+			} `json:"author"`
+		}
+		if err := json.Unmarshal(event.Payload, &ask); err != nil {
+			return nil, fmt.Errorf("decode Dispatch ask.opened payload: %w", err)
+		}
+		if ask.ID == "" || ask.Kind == "" {
+			return nil, fmt.Errorf("Dispatch ask.opened payload has no id or kind")
+		}
+		session := ""
+		if ask.Author.Kind == "session" {
+			if ask.Author.ID == "" {
+				return nil, fmt.Errorf("Dispatch ask.opened payload has a session author with no id")
+			}
+			session = ask.Author.ID
+		}
+		return DispatchAskOpened{Key: event.IssueKey, Ask: ask.ID, Kind: ask.Kind, AuthorSession: session}, nil
+	case "ask.answered", "ask.resolved":
+		var ask struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Payload, &ask); err != nil {
+			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
+		}
+		if ask.ID == "" {
+			return nil, fmt.Errorf("Dispatch %s payload has no id", event.Type)
+		}
+		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID}, nil
+	case "comment.created":
+		var comment struct {
+			Ask       string `json:"ask_id"`
+			WaitingOn string `json:"ask_waiting_on"`
+		}
+		if err := json.Unmarshal(event.Payload, &comment); err != nil {
+			return nil, fmt.Errorf("decode Dispatch comment.created payload: %w", err)
+		}
+		if comment.Ask == "" {
+			return nil, nil
+		}
+		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn}, nil
+	case "issue.claimed", "issue.released":
+		var claim struct {
+			Claim *struct {
+				Actor struct {
+					Kind string `json:"kind"`
+					ID   string `json:"id"`
+				} `json:"actor"`
+			} `json:"claim"`
+		}
+		if err := json.Unmarshal(event.Payload, &claim); err != nil {
+			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
+		}
+		claimedBy := ""
+		if claim.Claim != nil {
+			if claim.Claim.Actor.Kind == "" || claim.Claim.Actor.ID == "" {
+				return nil, fmt.Errorf("Dispatch %s payload has an invalid claim actor", event.Type)
+			}
+			claimedBy = claim.Claim.Actor.Kind + ":" + claim.Claim.Actor.ID
+		}
+		if event.Type == "issue.claimed" && claim.Claim == nil {
+			return nil, fmt.Errorf("Dispatch issue.claimed payload has no claim")
+		}
+		return DispatchClaim{Key: event.IssueKey, Seq: event.Seq, ClaimedBy: claimedBy}, nil
 	case "issue.deployed":
 		var deployed struct {
 			Repo        string `json:"repo"`

@@ -210,6 +210,8 @@ func (d *pilotDispatch) ListIssues(context.Context, string, []string) ([]dispatc
 func (d *pilotDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, nil
 }
+
+func (*pilotDispatch) Ask(context.Context, string) (dispatch.Ask, error)   { return dispatch.Ask{}, nil }
 func (d *pilotDispatch) SetStatus(context.Context, string, string) error   { return nil }
 func (d *pilotDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *pilotDispatch) HandOver(context.Context, dispatch.Issue, string) error {
@@ -251,6 +253,10 @@ func (d *filteringDispatch) ListIssues(_ context.Context, _ string, statuses []s
 }
 func (d *filteringDispatch) GetIssue(context.Context, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, nil
+}
+
+func (*filteringDispatch) Ask(context.Context, string) (dispatch.Ask, error) {
+	return dispatch.Ask{}, nil
 }
 func (d *filteringDispatch) SetStatus(context.Context, string, string) error   { return nil }
 func (d *filteringDispatch) PostMessage(context.Context, string, string) error { return nil }

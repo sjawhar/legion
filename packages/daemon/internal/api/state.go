@@ -269,9 +269,21 @@ type Issue struct {
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
 	Slot        *SlotView                `json:"slot,omitempty"`
+	// WaitingOn is present only while the root is in awaiting_person. It names the gate version or
+	// question that released its slot, and AnsweredAt once the root has rejoined admission's line.
+	WaitingOn *WaitingOnView `json:"waitingOn,omitempty"`
 	// Check is the issue's open production check, the work after its close (record.ProductionCheck):
 	// present only while the check is open, and absent once it closed or while none was opened.
 	Check *CheckView `json:"check,omitempty"`
+}
+
+// WaitingOnView explains what a root in awaiting_person needs from a person. Kind is `gate` with
+// GateVersion, or `ask` with Ask. AnsweredAt is omitted until the person answers.
+type WaitingOnView struct {
+	Kind        string     `json:"kind"`
+	GateVersion int        `json:"gateVersion,omitempty"`
+	Ask         string     `json:"ask,omitempty"`
+	AnsweredAt  *time.Time `json:"answeredAt,omitempty"`
 }
 
 // MarshalJSON keeps `workers` an object on the wire for an issue that has no worker yet.

@@ -21,11 +21,13 @@ const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 const timestamp = z.iso.datetime({ offset: true });
 
 /** `api.Phase` — the state an admitted issue sits in, in the transition table's own order. Not
- * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `accepting` is the architect's
- * acceptance between the reviewer's approval and retro: no worker runs it. The merge closes the
- * issue (`done`); the production check after it is no phase (`check` on the issue record). */
+ * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` holds no
+ * slot while its architect waits for a human answer. `accepting` is the architect's acceptance
+ * between the reviewer's approval and retro: no worker runs it. The merge closes the issue
+ * (`done`); the production check after it is no phase (`check` on the issue record). */
 export const LEGION_WORKFLOW_PHASES = [
   "admitted",
+  "awaiting_person",
   "planning",
   "implementing",
   "testing",
@@ -204,6 +206,21 @@ const legionCheckView = z.strictObject({
   last: z.boolean(),
 });
 
+/** `api.WaitingOnView` — why an `awaiting_person` root returned its admission slot. `answeredAt`
+ * appears when the person answered and the root is at the front of admission's waiting line. */
+const legionWaitingOn = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("gate"),
+    gateVersion: z.number().int().positive(),
+    answeredAt: timestamp.optional(),
+  }),
+  z.strictObject({
+    kind: z.literal("ask"),
+    ask: nonEmptyString,
+    answeredAt: timestamp.optional(),
+  }),
+]);
+
 /** `api.PendingStatusWrite` — one `dispatch_status` effect the outbox has not finished, due now or
  * backing off after a failed attempt: `nextAt` is the earliest it can run, and `attempts` and
  * `lastError` say why it is still pending. An issue's writes run in the order they were made, so a
@@ -243,8 +260,9 @@ const legionHeldOutboxRow = z.strictObject({
 });
 
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
- * (Zod's plain `record` over an enum demands every key). `check` is the issue's open production
- * check, present only on a `done` issue while the check is open. */
+ * (Zod's plain `record` over an enum demands every key). `waitingOn` is present only in
+ * `awaiting_person`; `check` is the issue's open production check, present only on a `done` issue
+ * while the check is open. */
 const legionIssue = z.strictObject({
   key: nonEmptyString,
   generation: z.number().int().nonnegative(),
@@ -263,6 +281,7 @@ const legionIssue = z.strictObject({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
+  waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional(),
 });
 

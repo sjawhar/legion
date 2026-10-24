@@ -247,6 +247,48 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			want:    DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
 		},
 		{
+			name:    "Dispatch ask opened",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.opened",
+			file:    "dispatch/ask-opened.json",
+			want:    DispatchAskOpened{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "question", AuthorSession: "session-architect"},
+		},
+		{
+			name:    "Dispatch ask answered",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.answered",
+			file:    "dispatch/ask-answered.json",
+			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007"},
+		},
+		{
+			name:    "Dispatch ask resolved",
+			subject: "notifications.dispatch.issue.CAPTURE-4.ask.resolved",
+			file:    "dispatch/ask-resolved.json",
+			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007"},
+		},
+		{
+			name:    "Dispatch ask reply returning the turn to the agent",
+			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
+			file:    "dispatch/comment-ask-agent.json",
+			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent"},
+		},
+		{
+			name:    "Dispatch ask reply leaving the turn with the human",
+			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
+			file:    "dispatch/comment-ask-human.json",
+			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human"},
+		},
+		{
+			name:    "Dispatch issue claimed",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.claimed",
+			file:    "dispatch/issue-claimed.json",
+			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 11, ClaimedBy: "user:human"},
+		},
+		{
+			name:    "Dispatch issue released",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.released",
+			file:    "dispatch/issue-released.json",
+			want:    DispatchClaim{Key: "CAPTURE-4", Seq: 12},
+		},
+		{
 			name:    "pull request opened",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-opened.json",
@@ -379,6 +421,32 @@ func TestADispatchIssueEventWithoutResolvedRepoDecodesWithItsRepositoryMissing(t
 	decoded, err = decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(none))
 	if err != nil || decoded.Fact.(DispatchIssue).ResolvedRepoMissing || decoded.Fact.(DispatchIssue).ResolvedRepo != "" {
 		t.Fatalf("decode of an event resolving to none = %#v, %v; want an empty repository, not missing", decoded.Fact, err)
+	}
+}
+
+// An issue event carries the issue's claim. The hand-over that first records a root takes its
+// holder from it, so a person's claim taken before Legion had the issue still fences the root's
+// release (workflow's Unresumable). A claim with no actor is not a holder the record can name.
+func TestADispatchIssueEventCarriesItsClaimHolder(t *testing.T) {
+	original := string(capturedIssueUpdatedEnvelope(t))
+	anchor := `\"resolved_repo\":\"sjawhar/legion\"`
+	if !strings.Contains(original, anchor) {
+		t.Fatal("captured issue.updated fixture has no resolved_repo to place a claim beside")
+	}
+	claimed := strings.Replace(original, anchor, anchor+`,\"claim\":{\"actor\":{\"kind\":\"user\",\"id\":\"alice\"},\"at\":\"2026-09-23T00:46:36Z\"}`, 1)
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(claimed))
+	if err != nil {
+		t.Fatalf("decode of a claimed issue event: %v", err)
+	}
+	if got := decoded.Fact.(DispatchIssue).ClaimedBy; got != "user:alice" {
+		t.Fatalf("ClaimedBy = %q, want user:alice", got)
+	}
+	if decoded, err = decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(original)); err != nil || decoded.Fact.(DispatchIssue).ClaimedBy != "" {
+		t.Fatalf("decode of an unclaimed issue event = %#v, %v; want no holder", decoded.Fact, err)
+	}
+	broken := strings.Replace(original, anchor, anchor+`,\"claim\":{\"actor\":{\"kind\":\"user\",\"id\":\"\"}}`, 1)
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(broken)); err == nil {
+		t.Fatal("decode of a claim with no actor id succeeded, want it refused")
 	}
 }
 
@@ -1707,6 +1775,20 @@ func TestARateLimitedPermissionReadWaitsTheTimeGitHubNames(t *testing.T) {
 				t.Fatalf("the failed read was made again after %s, want the %s nak delay", gap, spec.NakDelay)
 			}
 		})
+	}
+}
+
+func TestDecodeAskOpenedAsAWorkflowFact(t *testing.T) {
+	data, err := os.ReadFile("testdata/dispatch/ask-opened.json")
+	if err != nil {
+		t.Fatalf("read ask.opened fixture: %v", err)
+	}
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-4.ask.opened", "CAPTURE", capturedRepositories, data)
+	if err != nil {
+		t.Fatalf("decode ask.opened: %v", err)
+	}
+	if decoded.Fact == nil {
+		t.Fatal("ask.opened decoded no workflow fact")
 	}
 }
 

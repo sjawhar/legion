@@ -189,11 +189,9 @@ leaf, an issue with no children, never an umbrella that holds other issues.
 sends each only while a controller is registered, and none while one of the same kind is still
 unsent:
 
-- `slot-free on <KEY>`: the daemon released `<KEY>`'s slot, because its tree finished or left the
-  workflow, and the slot is free by **How many** below.
-- `todo on <KEY>`: `<KEY>`, an issue nobody handed to Legion, changed while in `todo` and a slot
-  was free, so it may be a new candidate. The daemon holds it back half a minute and folds the
-  events of that window into it. Walk the whole list, not only `<KEY>`.
+- `slot-free on <KEY>`: the daemon released `<KEY>`'s slot because its tree finished or left the workflow, and the slot is free by **How many** below.
+- `awaiting-person on <KEY>`: the root returned its slot for a person's gate review or root question. Read `issues.<KEY>.waitingOn`; do not park or re-admit it. `answeredAt` means it resumes itself at the next free slot.
+- `todo on <KEY>`: `<KEY>`, an issue nobody handed to Legion, changed while in `todo` and a slot was free, so it may be a new candidate. The daemon holds it back half a minute and folds the events of that window into it. Walk the whole list, not only `<KEY>`.
 - `tick on <PROJECT>`: the daemon's periodic wake, a minute after it starts and then every
   `controller_wake_interval_seconds` (an hour by default), whatever the slots. An earlier walk
   that found nothing, a day with no event, and [a tree waiting on a root
@@ -406,6 +404,7 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `read_state`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `unslotted on <KEY>` from the Go daemon (payload `{kind: "unslotted", reason}`) | a root that held no slot and waited for none: a person or another session moved it from `todo` to the status `reason` names while it waited, so the daemon took it out of the workflow (`issues.<KEY>.phase` is `done`) and starts nothing for it ([reading admission](skill://legion-controller/references/admission.md)) | Re-admit nothing yourself: the move was someone else's, and `dispatch read` shows who claims it now. Name it in your summary to the human ("<KEY> left Legion's waiting line: it was set to <status> while it waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again") |
+| `awaiting-person on <KEY>` from the Go daemon (payload `{kind: "awaiting-person", reason}`) | a root whose architect waits only on a person, so the daemon returned its slot and suspended the session after its turn | Read `issues.<KEY>.waitingOn`. Do not park it or start anything: `answeredAt` means it is already ahead of never-run roots and admission resumes it at the next free slot. A missing label or foreign Dispatch claim causes the separate `unslotted` wake. |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `read_state`, and the live capabilities a running session's check failed, each with the detail naming the session (pod or pane), role, issue and fact, and no `configLine` | Recheck the trees waiting on a claim, then walk if a slot is free — a gap never stops the walk; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides a deployment row; the operator or the issue's architect fixes a live row's session; you take no other action) |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch ask` only for a human to-do |
 | Mention | GitHub PR @mention text | Answer, or route to the owning issue's architect role |

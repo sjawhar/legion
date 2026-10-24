@@ -14,15 +14,22 @@ import (
 
 // gateRegistered records the gate an architect registered for its root, and logs it. With the
 // design gate off it is approved at once, and an open gate advances the admitted tree and releases
-// any READY the gate refused, including one refused before any gate was registered.
+// any READY the gate refused, including one refused before any gate was registered. A registration
+// Dispatch already showed approved at its latest version (ApprovedVersion, read by register_gate)
+// is recorded open before the closed check, so a root a person approved before its architect
+// registered keeps its slot and starts planning, rather than returning its slot to wait for the
+// gate seed's read of that same approval.
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
-	if e.cfg.DesignGate == config.DesignGateOff {
+	switch {
+	case e.cfg.DesignGate == config.DesignGateOff:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version)
+	case fact.ApprovedVersion >= fact.Version:
+		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion)
 	}
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
@@ -33,7 +40,8 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, err
 	}
 	if !classify.DesignGateOpen(gate) {
-		return intake.Result{}, nil
+		return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{GateVersion: gate.LatestVersion},
+			fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
 	}
 	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
 		return intake.Result{}, err
@@ -105,6 +113,11 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 	case fact.Kind == intake.DispatchArtifactChangesRequested:
 		e.logOnCommit(ctx, "workflow: design gate changes requested", "issue", key, "artifact", fact.ArtifactID, "version", fact.Version)
 	}
+	if fact.Kind == intake.DispatchArtifactChangesRequested || !wasOpen && isOpen || fact.Kind == intake.DispatchArtifactVersion {
+		if err := e.answerAwaitedGate(ctx, tx, key, fact); err != nil {
+			return err
+		}
+	}
 	if fact.Kind == intake.DispatchArtifactChangesRequested {
 		if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
 			return err
@@ -128,4 +141,25 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		}
 	}
 	return e.advancePendingReady(ctx, tx, key, updated)
+}
+
+// answerAwaitedGate records the person result on an awaiting root. A later document version hands
+// its approval request back to the architect, so it is an answer too: the root resumes with the
+// latest version recorded and lets the architect continue it. Admission promotes the answered root
+// after this handler, so an opened gate never advances children before the root has its slot again.
+func (e *Engine) answerAwaitedGate(ctx context.Context, tx pgx.Tx, key string, fact intake.DispatchArtifact) error {
+	issue, err := e.store.Issue(ctx, tx, key)
+	if err != nil || issue == nil || !issue.AwaitingPerson() || issue.Awaiting.GateVersion == 0 || issue.Awaiting.AnsweredAt != nil {
+		return err
+	}
+	if fact.Kind == intake.DispatchArtifactVersion {
+		if fact.Version <= issue.Awaiting.GateVersion {
+			return nil
+		}
+		issue.Awaiting.GateVersion = fact.Version
+	}
+	at := e.now()
+	issue.Awaiting.AnsweredAt = &at
+	e.logOnCommit(ctx, "workflow: a person answered a design gate", "issue", issue.Key, "version", issue.Awaiting.GateVersion, "event", fact.Kind)
+	return e.store.PutIssue(ctx, tx, *issue)
 }

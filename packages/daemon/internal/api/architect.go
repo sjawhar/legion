@@ -219,33 +219,45 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	if !ok || !s.rootArchitectOf(w, r, grant, recorded, gateRoute) {
 		return
 	}
-	if !s.documentOfIssue(w, r, artifactID, req.Issue) {
+	approval, ok := s.documentOfIssue(w, r, artifactID, req.Issue)
+	if !ok {
 		return
 	}
 	// A re-admitted root's architect registers its spec again, often at the same version: each
-	// generation's registration is its own fact.
+	// generation's registration is its own fact. The approval this read found travels with it, so
+	// a spec a person approved before the architect registered opens the gate at registration,
+	// and the root keeps its admission slot instead of returning it to wait on a decision made.
 	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version),
-		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version}, GateRegisterResponse{})
+		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approvedLatest(approval)}, GateRegisterResponse{})
+}
+
+// approvedLatest is the version Dispatch shows approved when that approval is of its latest
+// version, and 0 otherwise: the gate seed's own reading of the same answer (daemon's seedGate).
+func approvedLatest(approval dispatch.Approval) int {
+	if approval.State == "approved" && approval.Version != nil && *approval.Version == approval.LatestVersion {
+		return *approval.Version
+	}
+	return 0
 }
 
 // documentOfIssue refuses a gate document the issue does not carry, as the shipped daemon does: an
 // already-approved document of any other issue would otherwise open this gate. A failed read
-// records nothing, so the architect's register_gate retries.
-func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifactID, issue string) bool {
+// records nothing, so the architect's register_gate retries. It returns the approval it read.
+func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifactID, issue string) (dispatch.Approval, bool) {
 	if s.dispatch == nil {
 		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
-		return false
+		return dispatch.Approval{}, false
 	}
 	approval, err := s.dispatch.Approval(r.Context(), artifactID)
 	switch {
 	case dispatch.Missing(err), err == nil && approval.IssueKey != issue:
 		writeFailure(w, http.StatusNotFound, "ARTIFACT_NOT_ON_ISSUE", fmt.Sprintf("%s is not a document of %s", artifactID, issue))
-		return false
+		return dispatch.Approval{}, false
 	case err != nil:
 		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed; retry register_gate", artifactID))
-		return false
+		return dispatch.Approval{}, false
 	}
-	return true
+	return approval, true
 }
 
 // releasableChild accepts an issue of the architect's tree that has not entered the workflow: a

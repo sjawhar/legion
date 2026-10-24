@@ -50,6 +50,12 @@ type DispatchIssue struct {
 	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
 	// never records an issue from a fact still missing it.
 	ResolvedRepoMissing bool
+	// ClaimedBy is the Dispatch claim holder this observation shows, `<kind>:<id>`, or empty when
+	// nobody holds it. The record takes it when it first records the issue, at the observation's
+	// Seq, so a claim a person took before the issue was handed to Legion, whose issue.claimed
+	// event found no record to apply to, still fences the root's release; later holders arrive as
+	// claim events (DispatchClaim).
+	ClaimedBy string
 	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
 	// fact was prepared (ObservedIssue), not from one event, so no actor is known to have written
 	// its state. It reaches only an issue still unrecorded when it applies: ApplyFact, under the fact
@@ -72,7 +78,7 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Observed: true}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, ClaimedBy: issue.Claim.Holder(), Observed: true}
 }
 
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
@@ -83,7 +89,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, ClaimedBy: issue.ClaimedBy}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -127,6 +133,45 @@ type DispatchArtifact struct {
 }
 
 func (DispatchArtifact) isFact() {}
+
+// DispatchAskOpened is an ordinary question a session opened on an issue. Approval asks belong to
+// the design gate and are distinguished by Kind.
+type DispatchAskOpened struct {
+	Key           string
+	Ask           string
+	Kind          string
+	AuthorSession string
+}
+
+func (DispatchAskOpened) isFact() {}
+
+// DispatchAskClosed is an answered or resolved ask. Both return a waiting architect to its tree.
+type DispatchAskClosed struct {
+	Key string
+	Ask string
+}
+
+func (DispatchAskClosed) isFact() {}
+
+// DispatchAskReply is a comment on an open ask that names whose turn it leaves. An agent turn
+// wakes a root that suspended itself on that ask; a human turn leaves it waiting.
+type DispatchAskReply struct {
+	Key       string
+	Ask       string
+	WaitingOn string
+}
+
+func (DispatchAskReply) isFact() {}
+
+// DispatchClaim is the holder Dispatch records for an issue at Seq. ClaimedBy is `<kind>:<id>`,
+// or empty when an issue.released event clears its claim.
+type DispatchClaim struct {
+	Key       string
+	Seq       int64
+	ClaimedBy string
+}
+
+func (DispatchClaim) isFact() {}
 
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
@@ -441,11 +486,15 @@ type SignOff struct{ Issue string }
 
 func (SignOff) isFact() {}
 
-// GateRegistered records a design document and its current version.
+// GateRegistered records a design document and its current version. ApprovedVersion is the version
+// Dispatch showed approved when register_gate read the document, set only when that approval is of
+// Dispatch's latest version (the read the gate seed makes), and 0 otherwise: a person who approved
+// before the architect registered has the gate open at registration itself.
 type GateRegistered struct {
-	Issue      string
-	ArtifactID string
-	Version    int
+	Issue           string
+	ArtifactID      string
+	Version         int
+	ApprovedVersion int
 }
 
 func (GateRegistered) isFact() {}

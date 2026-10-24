@@ -44095,6 +44095,7 @@ var issueKey = exports_external.string().regex(DISPATCH_KEY_PATTERN);
 var timestamp = exports_external.iso.datetime({ offset: true });
 var LEGION_WORKFLOW_PHASES = [
   "admitted",
+  "awaiting_person",
   "planning",
   "implementing",
   "testing",
@@ -44206,6 +44207,18 @@ var legionCheckView = exports_external.strictObject({
   nextWakeAt: timestamp,
   last: exports_external.boolean()
 });
+var legionWaitingOn = exports_external.discriminatedUnion("kind", [
+  exports_external.strictObject({
+    kind: exports_external.literal("gate"),
+    gateVersion: exports_external.number().int().positive(),
+    answeredAt: timestamp.optional()
+  }),
+  exports_external.strictObject({
+    kind: exports_external.literal("ask"),
+    ask: nonEmptyString,
+    answeredAt: timestamp.optional()
+  })
+]);
 var legionPendingStatusWrite = exports_external.strictObject({
   issue: nonEmptyString,
   payload: exports_external.record(exports_external.string(), exports_external.unknown()),
@@ -44238,6 +44251,7 @@ var legionIssue = exports_external.strictObject({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
+  waitingOn: legionWaitingOn.optional(),
   check: legionCheckView.optional()
 });
 var daemonInfo = exports_external.strictObject({
@@ -47071,7 +47085,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 35
+  daemonApiVersion: 36
 };
 
 // src/channel-forwarder.ts

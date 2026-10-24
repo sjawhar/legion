@@ -82,6 +82,54 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	}
 }
 
+// The list and the detail carry the issue's claim, which the record keeps as `<kind>:<id>`; an ask
+// detail carries whose turn an open ask waits on, which the boot catch-up reads for an agent-turn
+// reply it may have missed.
+func TestReadsCarryTheClaimHolderAndAnOpenAsksTurn(t *testing.T) {
+	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/issues":
+			writeJSON(t, w, []map[string]any{
+				{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed},
+				{"key": "LEGION-2", "status": "todo", "rank": "b", "claim": nil},
+			})
+		case "/api/v1/issues/LEGION-1":
+			writeJSON(t, w, map[string]any{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed})
+		case "/api/v1/asks/6c83cb7f-8f4e-4820-9e05-7c94fa725007":
+			writeJSON(t, w, map[string]any{"ask": map[string]any{
+				"id": "6c83cb7f-8f4e-4820-9e05-7c94fa725007", "issue_key": "LEGION-1", "kind": "question", "state": "open", "waiting_on": "agent",
+			}})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	listed, err := client.ListIssues(context.Background(), "LEGION", nil)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(listed) != 2 || listed[0].ClaimedBy != "user:alice" || listed[1].ClaimedBy != "" {
+		t.Fatalf("listed claims = %#v, want user:alice then none", listed)
+	}
+	detail, err := client.GetIssue(context.Background(), "LEGION-1")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got := detail.Claim.Holder(); got != "user:alice" {
+		t.Fatalf("detail claim = %q, want user:alice", got)
+	}
+	ask, err := client.Ask(context.Background(), "6c83cb7f-8f4e-4820-9e05-7c94fa725007")
+	if err != nil {
+		t.Fatalf("read ask: %v", err)
+	}
+	if ask != (Ask{ID: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", IssueKey: "LEGION-1", Kind: "question", State: "open", WaitingOn: "agent"}) {
+		t.Fatalf("ask = %#v, want the open question waiting on the agent", ask)
+	}
+}
+
 // An issue's resolved repository is Dispatch's to compute (its own, else its nearest ancestor's,
 // else the project's default); the list and the detail carry it, and null reads as none.
 func TestListAndDetailCarryTheResolvedRepository(t *testing.T) {

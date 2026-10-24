@@ -297,4 +297,9 @@ package api
 // 30; main then landed sjawhar/legion#1986 at 30, 31 and 32, LEGION-781 at 33 and INFRA-31 at 34,
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
-const DaemonAPIVersion = 35
+//
+// 36: a root waiting only on a person is `awaiting_person`, and its strict state issue view gains
+// `waitingOn`, the gate version or question that released its slot and, once answered, the time it
+// rejoined admission's line. A 35 plugin rejects both additions, so the daemon and plugin must not
+// meet across this boundary.
+const DaemonAPIVersion = 36

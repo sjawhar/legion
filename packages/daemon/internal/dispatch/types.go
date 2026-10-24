@@ -28,6 +28,7 @@ func MessageBodyLength(body string) int {
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
+	Ask(ctx context.Context, id string) (Ask, error)
 	SetStatus(ctx context.Context, key, status string) error
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
@@ -81,6 +82,8 @@ type IssueSummary struct {
 	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to: its own, else its
 	// nearest ancestor's, else its project's default; empty when it resolves to none.
 	ResolvedRepo string
+	// ClaimedBy is the issue's current claim holder as Claim.Holder writes it, or empty.
+	ClaimedBy string
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
@@ -97,8 +100,35 @@ type Issue struct {
 	HandedOver        bool
 	PrimaryArtifactID string
 	LastSeq           int64
+	// Claim is Dispatch's current issue claim, nil when no actor has it.
+	Claim *Claim
 	// ResolvedRepo is IssueSummary.ResolvedRepo.
 	ResolvedRepo string
+}
+
+// Claim is the actor Dispatch currently records as the issue's holder.
+type Claim struct {
+	Kind string
+	ID   string
+}
+
+// Holder is the claim as the issue record keeps it, `<kind>:<id>`, or empty for no claim.
+func (c *Claim) Holder() string {
+	if c == nil {
+		return ""
+	}
+	return c.Kind + ":" + c.ID
+}
+
+// Ask is the bounded portion of a Dispatch ask detail the daemon needs to catch up a suspended
+// architect after boot. WaitingOn is whose reply an open ask needs next, `human` or `agent`; Dispatch
+// leaves it empty on an answered or resolved ask.
+type Ask struct {
+	ID        string
+	IssueKey  string
+	Kind      string
+	State     string
+	WaitingOn string
 }
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying

@@ -202,9 +202,25 @@ tree. A waiting root moved to a status only a running tree has (`in_progress`, `
 parked root does, since no slot would ever reach it: the daemon records it `done`, starts nothing
 for it, and tells the controller (`unslotted`), and `todo` with the label queues it again. Each
 admission pass (a live event, the boot read, a tick) releases such a root, one an earlier release
-left behind included. The mark is a label rather than the issue's `route` because Dispatch
-publishes every event of a routed issue to the route's topic, where a label only marks the issue;
-it carries no workflow state.
+left behind included.
+
+An admitted root that waits only on a person has its own `awaiting_person` phase: when a closed
+design gate or its architect's root-level question leaves no worker running, it gives up its slot
+and suspends the architect's session after its current turn. The controller receives
+`awaiting-person`; state shows `waitingOn` with the gate version or ask and then `answeredAt`.
+Approval, requested changes, an answer or resolution of that ask, an ask reply handing the turn to
+the agent, or a newer spec version that now needs the architect puts the root at the front of the
+waiting line. Admission gives it the next free slot and resumes the same architect session. Its
+tree remains live while it waits, so children do not become orphans or start planning before the
+root returns. Taking the `legion` label off such a root, or a human or foreign session claiming it,
+takes it out of the workflow with an `unslotted` notice; it is never resumed under another owner.
+A root a person or foreign session already holds the Dispatch claim of never gives up its slot at
+all: its architect asks that holder whether to release the claim and keeps the slot at `admitted`,
+since no answer could resume it once it had none. The claim a person took before the hand-over
+arrives with the hand-over event that records the root.
+
+The mark is a label rather than the issue's `route` because Dispatch publishes every event of a
+routed issue to the route's topic, where a label only marks the issue; it carries no workflow state.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's
@@ -217,11 +233,24 @@ daemon reads the approval; it never writes one). A later spec version closes the
 someone approves the new version, which Dispatch does in the human's own name when the version is
 his answer to a decision block and that answer is the whole change since the version he approved
 (it records an `approved` review pinned to the new version and emits `artifact.approved`, and the
-gate reopens on that event), and a `changes_requested` review closes it with the reviewer's
-reason. `gates.design: off` is the only way past the gate without a human review — Legion has no
-operator approve command; with `off` the root architect is told so in its system prompt and adds
-no approval step. Whether a human must approve a pull request before it merges is the repository's
-own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. Only retro's commits
+gate reopens on that event), and a `changes_requested` review closes it with the reviewer's reason.
+
+When a root at `admitted` registers a closed gate and no child still runs or is held, the root
+enters `awaiting_person`, gives its admission slot back, and suspends its architect at the end of
+that turn. A registration Dispatch already shows approved at its latest version opens the gate at
+registration instead, and the root starts planning in its own slot. Approval and
+`changes_requested` both answer that wait; a newer version also answers it
+because Dispatch then waits on the architect. Once a slot is free the architect resumes its own
+session with a task naming the answer; an open gate advances the root and its admitted children
+together. A gate still closed sends the architect to revise the spec, request approval again and
+register the new version: that registration, closed again, starts the next wait and returns the
+slot. A new spec version alone starts no wait, since its approval request then waits on the
+architect. An approval ask is the gate's event, never a second ordinary wait.
+
+`gates.design: off` is the only way past the gate without a human review — Legion has no operator
+approve command; with `off` the root architect is told so in its system prompt and adds no approval
+step. Whether a human must approve a pull request before it merges is the repository's own
+branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. Only retro's commits
 may sit above the reviewer's approved head, those that change `docs/solutions/` and its removal of
 `.legion/<issue>/`: READY compares the review round's recorded approved head with READY's head on
 GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming

@@ -456,6 +456,132 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
 	committed()
+	if err := w.catchUpAwaiting(ctx); err != nil {
+		return fmt.Errorf("catch up roots awaiting people: %w", err)
+	}
+	return nil
+}
+
+type awaitingRoot struct {
+	issue record.Issue
+	gate  *record.DesignGate
+}
+
+// catchUpAwaiting reads the person-owned state a root may have missed while this daemon was down.
+// It runs after Reconcile committed its durable-consumer holds, so a synthetic answer observes the
+// same admission fences as a live event. Each fact has a deterministic id and is therefore safe
+// beside a later JetStream redelivery of the original event. A root it cannot read is logged and
+// skipped: it waits for its live event, as before this daemon booted, and blocks no other root's
+// catch-up nor the boot. Dispatch being unreachable is returned, since the boot's readiness retry
+// waits that out (dispatch.Unreachable).
+func (w *workflowRuntime) catchUpAwaiting(ctx context.Context) error {
+	if w.dispatch == nil {
+		return nil
+	}
+	var roots []awaitingRoot
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		issues, err := w.records.Issues(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for _, issue := range issues {
+			if issue.Project != w.dispatchProject || issue.Key != issue.Tree || !issue.AwaitingPerson() {
+				continue
+			}
+			gate, err := w.records.Gate(ctx, tx, issue.Key)
+			if err != nil {
+				return err
+			}
+			roots = append(roots, awaitingRoot{issue: issue, gate: gate})
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("list awaiting roots: %w", err)
+	}
+	for _, root := range roots {
+		err := w.catchUpAwaitingRoot(ctx, root)
+		if dispatch.Unreachable(err) || ctx.Err() != nil {
+			return err
+		}
+		if err != nil {
+			w.log.Warn("boot catch-up skipped a root waiting on a person; its live event still answers it", "issue", root.issue.Key, "error", err)
+		}
+	}
+	return nil
+}
+
+func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaitingRoot) error {
+	current, err := w.dispatch.GetIssue(ctx, root.issue.Key)
+	if err != nil {
+		return fmt.Errorf("read Dispatch claim of %s: %w", root.issue.Key, err)
+	}
+	if current.LastSeq > 0 {
+		if current.Claim != nil && (current.Claim.Kind == "" || current.Claim.ID == "") {
+			return fmt.Errorf("read Dispatch claim of %s: holder has no kind or id", root.issue.Key)
+		}
+		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("claim:%s:%d", root.issue.Key, current.LastSeq),
+			intake.DispatchClaim{Key: root.issue.Key, Seq: current.LastSeq, ClaimedBy: current.Claim.Holder()}); err != nil {
+			return err
+		}
+	}
+	if root.issue.Answered() {
+		return nil
+	}
+	if root.issue.Awaiting.GateVersion != 0 {
+		if root.gate == nil {
+			return fmt.Errorf("awaiting root %s has no design gate", root.issue.Key)
+		}
+		approval, err := w.dispatch.Approval(ctx, root.gate.ArtifactID)
+		if err != nil {
+			return fmt.Errorf("read approval of %s for %s: %w", root.gate.ArtifactID, root.issue.Key, err)
+		}
+		if approval.LatestVersion > root.gate.LatestVersion {
+			return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-version:%s:%d:%d", root.issue.Key, root.issue.Generation, approval.LatestVersion),
+				intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion})
+		}
+		if approval.Version == nil || *approval.Version < root.issue.Awaiting.GateVersion {
+			return nil
+		}
+		switch approval.State {
+		case "approved":
+			return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d", root.issue.Key, root.issue.Generation, *approval.Version),
+				intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactApproved, Version: *approval.Version})
+		case "changes_requested":
+			reason := "Dispatch reports changes requested"
+			if approval.Reason != nil && *approval.Reason != "" {
+				reason = *approval.Reason
+			}
+			return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d", root.issue.Key, root.issue.Generation, *approval.Version),
+				intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactChangesRequested, Version: *approval.Version, Reason: reason})
+		default:
+			return nil
+		}
+	}
+	ask, err := w.dispatch.Ask(ctx, root.issue.Awaiting.Ask)
+	if err != nil {
+		return fmt.Errorf("read ask %s for %s: %w", root.issue.Awaiting.Ask, root.issue.Key, err)
+	}
+	if ask.ID != root.issue.Awaiting.Ask || ask.IssueKey != root.issue.Key {
+		return fmt.Errorf("read ask %s for %s: Dispatch returned ask %s of %s", root.issue.Awaiting.Ask, root.issue.Key, ask.ID, ask.IssueKey)
+	}
+	switch {
+	case ask.State == "answered", ask.State == "resolved":
+		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-closed:%s:%d:%s:%s", root.issue.Key, root.issue.Generation, ask.ID, ask.State),
+			intake.DispatchAskClosed{Key: root.issue.Key, Ask: ask.ID})
+	case ask.State == "open" && ask.WaitingOn == "agent":
+		// A reply handed the turn back to the agent while this daemon was down: the live path's
+		// comment.created with ask_waiting_on agent (DispatchAskReply), read from the ask itself.
+		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-agent-turn:%s:%d:%s", root.issue.Key, root.issue.Generation, ask.ID),
+			intake.DispatchAskReply{Key: root.issue.Key, Ask: ask.ID, WaitingOn: ask.WaitingOn})
+	default:
+		return nil
+	}
+}
+
+func (w *workflowRuntime) applyAwaitingCatchUp(ctx context.Context, eventID string, fact intake.Fact) error {
+	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", "awaiting-catch-up:"+eventID, fact, w.handlers...); err != nil {
+		return fmt.Errorf("apply %s: %w", eventID, err)
+	}
 	return nil
 }
 

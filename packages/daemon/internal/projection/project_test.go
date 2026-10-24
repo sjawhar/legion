@@ -80,6 +80,34 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	var _ api.State = got
 }
 
+func TestProjectShowsWhatAnAwaitingRootWaitsOn(t *testing.T) {
+	answeredAt := projectedAt.Add(-time.Minute)
+	store := projectionStore{issues: []record.Issue{
+		{
+			Key: "LEGION-ASK", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-ASK",
+			Phase: phase.AwaitingPerson, Status: "in_progress", Rank: "A", HandedOver: true,
+			Awaiting: &record.Awaiting{Ask: "ask-1", AnsweredAt: &answeredAt},
+		},
+		{
+			Key: "LEGION-GATE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-GATE",
+			Phase: phase.AwaitingPerson, Status: "in_progress", Rank: "B", HandedOver: true,
+			Awaiting: &record.Awaiting{GateVersion: 4},
+		},
+	}}
+
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	ask, gate := got.Issues["LEGION-ASK"].WaitingOn, got.Issues["LEGION-GATE"].WaitingOn
+	if ask == nil || ask.Kind != "ask" || ask.Ask != "ask-1" || ask.AnsweredAt == nil || !ask.AnsweredAt.Equal(answeredAt) {
+		t.Fatalf("ask waitingOn = %#v, want the answered ask", ask)
+	}
+	if gate == nil || gate.Kind != "gate" || gate.GateVersion != 4 || gate.AnsweredAt != nil {
+		t.Fatalf("gate waitingOn = %#v, want unanswered gate version 4", gate)
+	}
+}
+
 func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	const issue = "S2-1"
 	architect := claim.Token("legion-s2-1-architect")

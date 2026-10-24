@@ -93,6 +93,7 @@ comes back, with everything it knew, the next time its role is needed.
 
 | Phase | Worker | What it does | GitHub identity |
 | --- | --- | --- | --- |
+| `awaiting_person` | none | The root returned its admission slot while its architect waits on a person's design-gate review or root-level question. The architect session is suspended until the answer returns it to admission. | none |
 | `planning` | planner | Writes the implementation plan into its handoff and the issue's document. | review App |
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
@@ -134,6 +135,15 @@ There are two ways an issue gets the label:
 A child issue needs no label: it runs under its tree once the root is admitted. Taking the label
 off a waiting root takes it out of line; taking it off a running tree does not stop the tree.
 
+A root at `admitted` that now waits only for a person returns its slot rather than blocking the
+project: a closed design gate or root-level `dispatch ask` moves it to `awaiting_person`, while the
+architect's same session is suspended after its current turn. The root stays live for its children.
+`waitingOn` in `legion state` names the gate version or ask; after an approval, changes request,
+answer, resolution, agent-turn reply or newer spec version, `answeredAt` shows that admission will
+resume it ahead of never-run roots. A label removal or foreign Dispatch claim removes it instead;
+Legion never resumes work another owner took. A root whose claim a person or another session
+already holds keeps its slot while its architect asks that holder to release it.
+
 ## The design gate
 
 By default (`gates.design: root-issues`), no phase starts until a person approves the root issue's
@@ -151,6 +161,16 @@ again, naming what changed since your approval. Work already in flight carries o
 on a person's behalf, and the approval Dispatch records at your answer is yours, in your name. A
 deployment that does not want the gate sets `gates.design: off`, and the tree starts as soon as the
 architect has written its spec.
+
+When the architect registers a closed gate while the root is at `admitted` and no child still runs
+or is held, the root enters `awaiting_person`, giving its slot to another root while the architect
+session waits. A spec you approved before the architect registered it opens the gate at
+registration, so the root starts planning in its own slot. Approval and changes requested resume
+that session; a later spec version also
+returns the root because the approval request now needs the architect. After changes are
+requested, the architect revises the spec, asks for approval again and registers the new version,
+which starts a new wait and returns the slot again. The gate opens and planning starts only after
+that root regains a slot, so no child starts ahead of it.
 
 ## Handoffs on the issue branch
 

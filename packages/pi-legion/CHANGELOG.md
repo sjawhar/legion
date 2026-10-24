@@ -7,6 +7,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 36: a root admitted tree that waits only on a person has the phase
+  `awaiting_person`, and its `legion state` and `read_state` issue carries `waitingOn`, the design
+  gate version (`kind: "gate"`, `gateVersion`) or the question (`kind: "ask"`, `ask`) that returned
+  its admission slot, and `answeredAt` once the person answered. The root architect's role prompt
+  and skill say to register each closed spec version with `register_gate` and end the turn, which
+  returns the slot until the person answers; the controller skill reads the new `awaiting-person`
+  notice. The strict state reader refuses a 35 state, and a 35 plugin refuses this one. Install this
+  release with a `legion` built from the same commit.
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
