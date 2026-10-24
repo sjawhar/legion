@@ -56,8 +56,8 @@ const (
 	// account (ParseGitHubOwners). A public App can be installed on any account, so the broker mints
 	// only for the accounts the deployment lists.
 	ReasonGitHubOwnersMissing = "github-owners-missing"
-	// ReasonGitHubOwnersMalformed: a github-app secret's github-owners tag holds a comma; its logins
-	// are separated by spaces (ParseGitHubOwners, ErrGitHubOwnersComma).
+	// ReasonGitHubOwnersMalformed: a github-app secret's github-owners tag holds a comma, its logins
+	// being separated by spaces, or an entry that is not a GitHub login (ParseGitHubOwners).
 	ReasonGitHubOwnersMalformed = "github-owners-malformed"
 )
 
@@ -222,10 +222,10 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 		if !ValidKind(kind) {
 			return Secret{}, ReasonKindUnknown, nil
 		}
-		if s.GitHubOwners, err = GitHubOwnersFor(kind, ls.Tags[TagGitHubOwners]); errors.Is(err, ErrGitHubOwnersComma) {
-			return Secret{}, ReasonGitHubOwnersMalformed, nil
-		} else if err != nil {
+		if s.GitHubOwners, err = GitHubOwnersFor(kind, ls.Tags[TagGitHubOwners]); errors.Is(err, ErrGitHubOwnersMissing) {
 			return Secret{}, ReasonGitHubOwnersMissing, nil
+		} else if err != nil {
+			return Secret{}, ReasonGitHubOwnersMalformed, nil
 		}
 		s.Source = KindSource(kind, ls.Source)
 	}

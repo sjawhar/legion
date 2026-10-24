@@ -78,12 +78,19 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		}
 		for _, g := range granted {
 			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
+				// A grant whose frozen source is not the one the name is served from now (its kind
+				// was changed or removed) ends for good: setting the kind back serves the same
+				// source again, and the grant must not come back with it.
+				if errors.Is(err, errSourceMoved) {
+					return nil, nil, m.endGrant(ctx, grantID, err)
+				}
 				return nil, nil, err
 			}
-			// A max-grant added or lowered since the request was decided bounds this grant too:
-			// the version covers the tag, so this runs whenever it moved.
+			// A max-grant added or lowered since the request was decided ends this grant for
+			// good, as a raise later must not bring it back: the version covers the tag, so this
+			// runs whenever it moved.
 			if limit, over := overMaxGrant(set, g.name, lifetime); over {
-				return nil, nil, fmt.Errorf("%w: %w: %s now allows grants of at most %s", ErrGrantNotLive, ErrGrantRequiresLifetime, g.name, limit)
+				return nil, nil, m.endGrant(ctx, grantID, fmt.Errorf("%w: %w: %s now allows grants of at most %s", ErrGrantNotLive, ErrGrantRequiresLifetime, g.name, limit))
 			}
 		}
 	}
@@ -105,6 +112,41 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		return nil, nil, err
 	}
 	return values, expires, nil
+}
+
+// GrantEndedActor is what a grant the broker itself ended at release records as having ended it,
+// as revoked_by and as its grant.revoked audit row's actor.
+const GrantEndedActor = "broker:release-recheck"
+
+// endGrant ends grantID for good in one transaction, revoking it and writing a grant.revoked audit
+// row naming GrantEndedActor and why (reason's text), then answers reason, an ErrGrantNotLive. A
+// release ends a grant this way when what it was granted cannot come back: its frozen source is
+// not the one served now (a kind change), or its lifetime is longer than the secret's max-grant
+// now. A secret the policy merely stops serving (no value, a malformed tag) pauses its grants
+// instead, which release again once it is served. A grant another writer revoked first is left as
+// it is, with no second audit row.
+func (m *Machine) endGrant(ctx context.Context, grantID string, reason error) error {
+	tx, err := m.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var enrollmentID, requestID string
+	err = tx.QueryRow(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null returning enrollment_id, request_id`, grantID, GrantEndedActor).
+		Scan(&enrollmentID, &requestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return reason
+	}
+	if err != nil {
+		return err
+	}
+	if err := audit(ctx, tx, "grant.revoked", enrollmentID, requestID, &grantID, GrantEndedActor, auditDetail{"reason": reason.Error()}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return reason
 }
 
 // release is one granted name's value. A stored secret reads its frozen source. A kind source
@@ -191,7 +233,7 @@ func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy
 		return err
 	}
 	if set.Secrets[name].Source != frozenSource {
-		return fmt.Errorf("%w: %s is now served from another source than this grant's", ErrGrantNotLive, name)
+		return fmt.Errorf("%w: %w: %s is now served from another source than this grant's", ErrGrantNotLive, errSourceMoved, name)
 	}
 	switch {
 	case d.Outcome == policy.Deny:
@@ -205,6 +247,11 @@ func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy
 	}
 	return nil
 }
+
+// errSourceMoved is stillAllowed's refusal of a name served from another source than its grant
+// froze: a kind changed or removed, a secret replaced on AWS, the broker moved between stores.
+// Values ends such a grant for good (endGrant).
+var errSourceMoved = errors.New("source moved")
 
 // Get reads one request by id. Its Approver is the approver column of its credential-request
 // record, the column PendingForApprover lists the record by, so the request names exactly the

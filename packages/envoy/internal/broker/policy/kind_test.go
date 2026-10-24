@@ -285,6 +285,36 @@ func TestAGitHubOwnersCommaIsRefused(t *testing.T) {
 	}
 }
 
+// TestAGitHubOwnerThatIsNoGitHubLoginIsRefused: each github-owners entry must be GitHub's login
+// form, 1 to 39 letters and digits with single hyphens between them, or the secret is refused
+// github-owners-malformed; the longest login and single inner hyphens are read.
+func TestAGitHubOwnerThatIsNoGitHubLoginIsRefused(t *testing.T) {
+	longest := strings.Repeat("a", 39)
+	for _, owners := range []string{"-ada", "ada-", "a--b", "ada_lovelace", "ada.org", "@ada", "ada/b", strings.Repeat("a", 40)} {
+		t.Run(owners, func(t *testing.T) {
+			logged := policytest.CaptureLog(t)
+			secret := kindSecret("APP_KEY", policy.KindGitHubApp, "value")
+			secret.Tags[policy.TagGitHubOwners] = "acme-org " + owners
+			set, err := policytest.Loader(secrets.NewLocal(secret)).Load(context.Background())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if _, ok := set.Secrets["APP_KEY"]; ok {
+				t.Fatalf("Load served a github-app secret whose github-owners names %q", owners)
+			}
+			if !strings.Contains(logged.String(), policy.ReasonGitHubOwnersMalformed) {
+				t.Fatalf("log %q does not name %q", logged.String(), policy.ReasonGitHubOwnersMalformed)
+			}
+			if _, err := policy.ParseGitHubOwners(owners); !errors.Is(err, policy.ErrGitHubOwnersLogin) {
+				t.Fatalf("ParseGitHubOwners(%q) = %v; want ErrGitHubOwnersLogin", owners, err)
+			}
+		})
+	}
+	if got, err := policy.ParseGitHubOwners("A-b-C9 " + longest + " x"); err != nil || got != "a-b-c9 "+longest+" x" {
+		t.Fatalf("ParseGitHubOwners of valid logins = %q, %v; want %q", got, err, "a-b-c9 "+longest+" x")
+	}
+}
+
 // legacyMintTargetPattern is the mint-service-account rule of the brokers before kinds, copied
 // from legion-envoy-v13.19.0 through 313fdc221's policy/load.go: a broker of that range refuses a
 // secret whose tag does not match it as mint-target-malformed, before anything else it decides.

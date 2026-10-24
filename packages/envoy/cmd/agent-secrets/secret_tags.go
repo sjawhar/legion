@@ -52,12 +52,24 @@ func checkMaxGrant(maxGrant string, orNone bool) error {
 }
 
 // checkGitHubOwners is --github-owners' rule, the broker's own (policy.ParseGitHubOwners): GitHub
-// account logins separated by spaces, which the shell quotes as one argument, or none where orNone
-// allows it; a comma is refused. It answers the list as the broker reads it, lowercased, sorted and
+// account logins separated by spaces, which the shell quotes as one argument; a comma is refused.
+// none is a sentinel, not a login: alone, and only where orNone allows it (retag), it removes the
+// tag; given on create, or beside a login, or in another case, it is refused, since it would
+// otherwise be written as a login or dropped as the removal (optionalTags), leaving a github-app
+// secret the broker refuses. It answers the list as the broker reads it, lowercased, sorted and
 // single-spaced, so the tag is written as it will be served.
 func checkGitHubOwners(owners string, orNone bool) (string, error) {
 	if owners == "" || (orNone && owners == tagNone) {
 		return owners, nil
+	}
+	for _, field := range strings.Fields(owners) {
+		if !strings.EqualFold(field, tagNone) {
+			continue
+		}
+		if orNone {
+			return "", usageErr{fmt.Errorf("--github-owners %q: none removes the tag and is given alone, as --github-owners none; a GitHub login list names no none", owners)}
+		}
+		return "", usageErr{fmt.Errorf("--github-owners %q: none names no GitHub account, and removes the tag only on retag; a github-app secret needs at least one login", owners)}
 	}
 	parsed, err := policy.ParseGitHubOwners(owners)
 	if err != nil {
@@ -68,10 +80,11 @@ func checkGitHubOwners(owners string, orNone bool) (string, error) {
 
 // checkGitHubOwnersFor applies the broker's github-owners rule (policy.GitHubOwnersFor) to the
 // kind and owners a secret will hold once a write lands, so create and retag refuse, before any
-// write, a github-app secret the broker would then refuse as github-owners-missing. named says the
-// command itself named --github-owners: owners named for a kind that does not read them are
-// refused too, since the broker would ignore them, while owners the secret already holds are left
-// alone whatever its kind becomes.
+// write, a github-app secret the broker would then refuse as github-owners-missing or
+// github-owners-malformed, each named as the broker names it. named says the command itself named
+// --github-owners: owners named for a kind that does not read them are refused too, since the
+// broker would ignore them, while owners the secret already holds are left alone whatever its kind
+// becomes.
 func checkGitHubOwnersFor(kind, owners string, named bool) error {
 	if !policy.KindNeedsGitHubOwners(kind) {
 		if named {
@@ -79,10 +92,15 @@ func checkGitHubOwnersFor(kind, owners string, named bool) error {
 		}
 		return nil
 	}
-	if _, err := policy.GitHubOwnersFor(kind, owners); err != nil {
+	_, err := policy.GitHubOwnersFor(kind, owners)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, policy.ErrGitHubOwnersMissing):
 		return usageErr{fmt.Errorf("a %s secret needs --github-owners naming at least one GitHub account, or the broker refuses it as %s", kind, policy.ReasonGitHubOwnersMissing)}
+	default:
+		return usageErr{fmt.Errorf("the secret's github-owners tag %q is malformed (%w), and the broker refuses it as %s: name the accounts with --github-owners", owners, err, policy.ReasonGitHubOwnersMalformed)}
 	}
-	return nil
 }
 
 // optionalTags is the kind, github-owners and max-grant tags the flags set: each flag's value

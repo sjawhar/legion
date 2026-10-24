@@ -156,6 +156,59 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 	}
 }
 
+// TestANoneBesideALoginIsRefusedOnCreateAndRetag: none removes github-owners only alone on retag,
+// so a list that names it beside a login, in any case, is refused before anything is read or
+// written, on create and on retag, rather than written as a login named none.
+func TestANoneBesideALoginIsRefusedOnCreateAndRetag(t *testing.T) {
+	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
+	startSecretBroker(t, servedBy(local))
+	writes := &countingTagWrites{Local: local}
+	useAWS(t, writes, testAccount, adaSignIn)
+	for _, owners := range []string{"none ada", "ada NONE", "None  acme-org"} {
+		useStdin(t, "stored-value")
+		_, stderr, code := runSecret("create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", owners)
+		if code != exitUsageError || !strings.Contains(stderr, "none names no GitHub account") {
+			t.Fatalf("create --github-owners %q: exit %d stderr %q; want a usage error naming none", owners, code, stderr)
+		}
+		_, stderr, code = runSecret("retag", "APP_KEY", "--github-owners", owners)
+		if code != exitUsageError || !strings.Contains(stderr, "given alone") {
+			t.Fatalf("retag --github-owners %q: exit %d stderr %q; want a usage error naming none alone", owners, code, stderr)
+		}
+	}
+	if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+		t.Fatal("a refused create made NEW_KEY")
+	}
+	if writes.tags != 0 || writes.untags != 0 || writes.describes != 0 {
+		t.Fatalf("refused commands made %d TagResource, %d UntagResource and %d DescribeSecret calls; want none", writes.tags, writes.untags, writes.describes)
+	}
+}
+
+// TestARetagOfASecretWhoseStoredOwnersAreMalformedNamesTheMalformedTag: a github-app secret whose
+// github-owners tag was written with a comma outside the CLI is refused by the broker as
+// github-owners-malformed, and a retag that leaves the tag as it is says so, not that owners are
+// missing, and writes nothing; naming the owners fixes it.
+func TestARetagOfASecretWhoseStoredOwnersAreMalformedNamesTheMalformedTag(t *testing.T) {
+	commas := kindTaggedSecret("APP_KEY")
+	commas.Tags[policy.TagGitHubOwners] = "acme-org,ada"
+	local := secrets.NewLocal(commas)
+	startSecretBroker(t, servedBy(local))
+	writes := &countingTagWrites{Local: local}
+	useAWS(t, writes, testAccount, adaSignIn)
+	_, stderr, code := runSecret("retag", "APP_KEY", "--tier", "human")
+	if code != exitUsageError || !strings.Contains(stderr, policy.ReasonGitHubOwnersMalformed) || strings.Contains(stderr, policy.ReasonGitHubOwnersMissing) {
+		t.Fatalf("retag --tier human: exit %d stderr %q; want a usage error naming %s, not %s", code, stderr, policy.ReasonGitHubOwnersMalformed, policy.ReasonGitHubOwnersMissing)
+	}
+	if writes.tags != 0 {
+		t.Fatalf("the refused retag made %d TagResource calls, want none", writes.tags)
+	}
+	if _, stderr, code := runSecret("retag", "APP_KEY", "--github-owners", "acme-org ada"); code != 0 {
+		t.Fatalf("retag naming the owners: exit %d stderr %q", code, stderr)
+	}
+	if tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags); tags[policy.TagGitHubOwners] != "acme-org ada" {
+		t.Fatalf("tags = %v, want github-owners %q", tags, "acme-org ada")
+	}
+}
+
 // TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing: the github-owners rule
 // (policy.GitHubOwnersFor) holds on retag as on create, against the kind and owners the secret
 // will hold once the write lands, on both stores, so a retag never writes a github-app secret the

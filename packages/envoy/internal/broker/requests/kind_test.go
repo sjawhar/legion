@@ -288,6 +288,104 @@ func TestAMaxGrantAddedLaterBoundsLiveGrantsAndPendingApprovals(t *testing.T) {
 	}
 }
 
+// endedForGood reads grantID's revocation and its grant.revoked audit rows naming GrantEndedActor.
+func endedForGood(t *testing.T, machine *Machine, grantID string) (revokedBy string, audits int) {
+	t.Helper()
+	var by *string
+	if err := machine.Store.Pool.QueryRow(t.Context(), `select revoked_by from grants where id=$1`, grantID).Scan(&by); err != nil {
+		t.Fatal(err)
+	}
+	if err := machine.Store.Pool.QueryRow(t.Context(), `select count(*) from audit where kind='grant.revoked' and grant_id=$1 and actor=$2`, grantID, GrantEndedActor).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if by != nil {
+		revokedBy = *by
+	}
+	return revokedBy, audits
+}
+
+// TestAKindChangedAwayAndBackLeavesTheGrantEnded: a kind retag after a grant ends that grant in
+// the store at its next release, so setting the kind back, which serves the same source the grant
+// froze, does not bring it back; the session asks again, and a new request makes a new grant.
+func TestAKindChangedAwayAndBackLeavesTheGrantEnded(t *testing.T) {
+	for name, away := range map[string]string{"removed": "", "changed": policy.KindGoogleLogin} {
+		t.Run(name, func(t *testing.T) {
+			machine, enrollmentID, key, _ := newFixture(t)
+			secret := requestKindSecret("BACK_KIND_KEY", policy.KindGitHubApp, policy.TierAgent, "")
+			retag(t, machine, secret)
+			machine.Minters = map[string]Minter{
+				policy.KindGitHubApp:   func(context.Context, secrets.MintRequest) (string, error) { return "minted-token", nil },
+				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
+			}
+			first, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read App key", "BACK_KIND_KEY"), "")
+			if err != nil || first.GrantID == nil {
+				t.Fatalf("Create = %+v, %v", first, err)
+			}
+			moved := secret
+			moved.Tags = maps.Clone(secret.Tags)
+			if away == "" {
+				delete(moved.Tags, policy.TagKind)
+			} else {
+				moved.Tags[policy.TagKind] = away
+			}
+			retag(t, machine, moved)
+			if _, _, err := machine.Values(t.Context(), *first.GrantID, enrollmentID); !errors.Is(err, ErrGrantNotLive) {
+				t.Fatalf("Values after the kind moved = %v; want ErrGrantNotLive", err)
+			}
+			retag(t, machine, secret)
+			if values, _, err := machine.Values(t.Context(), *first.GrantID, enrollmentID); !errors.Is(err, ErrGrantNotLive) || values != nil {
+				t.Fatalf("Values once the kind is back = %v, %v; want ErrGrantNotLive: the grant stays ended", values, err)
+			}
+			if by, audits := endedForGood(t, machine, *first.GrantID); by != GrantEndedActor || audits != 1 {
+				t.Fatalf("grant revoked_by = %q with %d grant.revoked rows by it; want %s and 1", by, audits, GrantEndedActor)
+			}
+			next, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read again", "BACK_KIND_KEY"), "")
+			if err != nil || next.ID == first.ID || next.GrantID == nil || *next.GrantID == *first.GrantID {
+				t.Fatalf("Create after the kind is back = %+v, %v; want a new request and grant", next, err)
+			}
+			if values, _, err := machine.Values(t.Context(), *next.GrantID, enrollmentID); err != nil || values["BACK_KIND_KEY"] != "minted-token" {
+				t.Fatalf("Values of the new grant = %v, %v; want the minted token", values, err)
+			}
+		})
+	}
+}
+
+// TestAMaxGrantLoweredBelowAGrantAndRaisedBackLeavesItEnded: a max-grant lowered below a live
+// grant's lifetime ends that grant in the store at its next release, so raising it back does not
+// bring the grant back, while a grant within the lowered bound keeps releasing.
+func TestAMaxGrantLoweredBelowAGrantAndRaisedBackLeavesItEnded(t *testing.T) {
+	machine, enrollmentID, key, _ := newFixture(t)
+	machine.Minters = map[string]Minter{
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
+	}
+	retag(t, machine, requestKindSecret("BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "1h"))
+	long, err := machine.Create(t.Context(), enrollmentID, signRequestFor(t, machine, key, 60*60, "BOUNDED_LOGIN"), "")
+	if err != nil || long.GrantID == nil {
+		t.Fatalf("Create(1h) = %+v, %v", long, err)
+	}
+	short, err := machine.Create(t.Context(), enrollmentID, signRequestFor(t, machine, key, 20*60, "BOUNDED_LOGIN"), "")
+	if err != nil || short.GrantID == nil {
+		t.Fatalf("Create(20m) = %+v, %v", short, err)
+	}
+	retag(t, machine, requestKindSecret("BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "30m"))
+	if _, _, err := machine.Values(t.Context(), *long.GrantID, enrollmentID); !errors.Is(err, ErrGrantNotLive) || !errors.Is(err, ErrGrantRequiresLifetime) {
+		t.Fatalf("Values(1h) under max-grant 30m = %v; want ErrGrantNotLive naming the max grant", err)
+	}
+	if values, _, err := machine.Values(t.Context(), *short.GrantID, enrollmentID); err != nil || values["BOUNDED_LOGIN"] != "access-token" {
+		t.Fatalf("Values(20m) under max-grant 30m = %v, %v; want the token", values, err)
+	}
+	retag(t, machine, requestKindSecret("BOUNDED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, "1h"))
+	if values, _, err := machine.Values(t.Context(), *long.GrantID, enrollmentID); !errors.Is(err, ErrGrantNotLive) || values != nil {
+		t.Fatalf("Values(1h) once max-grant is 1h again = %v, %v; want ErrGrantNotLive: the grant stays ended", values, err)
+	}
+	if by, audits := endedForGood(t, machine, *long.GrantID); by != GrantEndedActor || audits != 1 {
+		t.Fatalf("grant revoked_by = %q with %d grant.revoked rows by it; want %s and 1", by, audits, GrantEndedActor)
+	}
+	if by, _ := endedForGood(t, machine, *short.GrantID); by != "" {
+		t.Fatalf("the 20m grant was revoked by %q; want it live", by)
+	}
+}
+
 // TestAFailedMintIsNamedAndReleasesNothing: a minter's refusal, such as a Google login that needs
 // a new sign-in, reaches the session as ErrMintFailed with the minter's own words, never as the
 // stored value.

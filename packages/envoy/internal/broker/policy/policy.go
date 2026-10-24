@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -107,19 +108,34 @@ var ErrGitHubOwnersMissing = errors.New("github-owners names at least one GitHub
 // comma.
 var ErrGitHubOwnersComma = errors.New(`github-owners separates GitHub logins with spaces, not commas ("<login> <login>")`)
 
+// ErrGitHubOwnersLogin is a github-owners entry that is not a GitHub login: 1 to 39 letters and
+// digits, with single hyphens only between them.
+var ErrGitHubOwnersLogin = errors.New("github-owners names GitHub logins: 1 to 39 letters and digits, with single hyphens between them")
+
+// gitHubLogin is GitHub's login form, lowercased: letters and digits, with single hyphens between
+// them. A login is at most 39 characters (maxGitHubLogin), which the pattern does not check.
+var gitHubLogin = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+const maxGitHubLogin = 39
+
 // ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by white space,
-// compared without regard to case, refusing a comma anywhere (ErrGitHubOwnersComma) and a list
-// that names no account (ErrGitHubOwnersMissing). It answers them lowercased, sorted and joined by
-// single spaces, so a Secret holding them stays comparable, two spellings of one list are one
-// policy, and the value is one that both stores hold: an AWS tag value and a Secret Manager
-// annotation both take a space. A GitHub login or enterprise slug never holds one.
+// compared without regard to case. It refuses a comma anywhere (ErrGitHubOwnersComma), an entry that
+// is not a GitHub login (ErrGitHubOwnersLogin) and a list that names no account
+// (ErrGitHubOwnersMissing). It answers them lowercased, sorted and joined by single spaces, so a
+// Secret holding them stays comparable, two spellings of one list are one policy, and the value is
+// one that both stores hold: an AWS tag value and a Secret Manager annotation both take a space,
+// which a GitHub login never holds.
 func ParseGitHubOwners(raw string) (string, error) {
 	if strings.Contains(raw, ",") {
 		return "", ErrGitHubOwnersComma
 	}
 	var owners []string
 	for _, owner := range strings.Fields(raw) {
-		if owner = strings.ToLower(owner); !slices.Contains(owners, owner) {
+		owner = strings.ToLower(owner)
+		if len(owner) > maxGitHubLogin || !gitHubLogin.MatchString(owner) {
+			return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, owner)
+		}
+		if !slices.Contains(owners, owner) {
 			owners = append(owners, owner)
 		}
 	}
