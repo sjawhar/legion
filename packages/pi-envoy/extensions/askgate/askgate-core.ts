@@ -234,6 +234,11 @@ export interface GateEntry {
   revisesForKey: number;
   argsDigest: string;
   promptBytes?: number;
+  /**
+   * On every entry that asked the model: the call's arguments exactly as the model saw them (JSON,
+   * an upload's document text as `content`), cut at GATE_ARGS_MAX_BYTES as the request cut them.
+   */
+  reviewedText?: string;
   /** `provider/id` that answered (or, with no answer, the last one asked), on every entry that reached the model call. */
   model?: string;
   /** Each model of the chain that answered with an error before `model` was asked, with that error. */
@@ -1259,14 +1264,15 @@ export function renderTemplate(template: string, values: Record<string, string>)
 }
 
 /**
- * The gate's user message: the agent's system prompt and transcript as escaped data, then the call.
- * An upload of a markdown document carries askgate-upload.md, which limits the review to failure 10.
+ * The gate's user message: the agent's system prompt and transcript as escaped data, then the call,
+ * its arguments as `renderArgs` rendered them. An upload of a markdown document carries
+ * askgate-upload.md, which limits the review to failure 10.
  */
 function renderRequest(
   primarySystemPrompt: string,
   transcript: string,
   tool: string,
-  input: Input,
+  args: string,
   priorReasons: readonly string[],
   upload: boolean
 ): string {
@@ -1281,7 +1287,7 @@ function renderRequest(
     primarySystemPrompt: escapeXml(primarySystemPrompt),
     transcript,
     tool,
-    args: renderArgs(input),
+    args,
     uploadRule: upload ? `${uploadRule.trim()}\n` : "",
     priorReasons: prior,
   });
@@ -1565,7 +1571,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     /** What one model walk answered: the answer, and the fields every entry that reached the model records. */
     type Called = Pick<
       GateEntry,
-      "promptBytes" | "model" | "deadlineMs" | "failedModels" | "usage"
+      "promptBytes" | "model" | "deadlineMs" | "failedModels" | "usage" | "reviewedText"
     >;
     type Asked =
       | { kind: "no-model-role" }
@@ -1581,7 +1587,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     const askModel = async (
       ctx: GateCtx,
       call: { toolCallId: string; started: number },
-      prompt: { system: string; user: () => string }
+      prompt: { system: string; user: () => string; reviewedText: string }
     ): Promise<Asked> => {
       const resolved = resolveRole(ctx);
       if (resolved === undefined) return { kind: "no-model-role" };
@@ -1629,6 +1635,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         answer,
         called: {
           promptBytes,
+          reviewedText: prompt.reviewedText,
           model: `${asked.provider}/${asked.id}`,
           deadlineMs,
           ...(failedModels.length > 0 ? { failedModels } : {}),
@@ -1666,17 +1673,21 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
 
       if (closing) return givenUp(base.verdictMode, "shutdown");
+      // The arguments as the model sees them, cut at GATE_ARGS_MAX_BYTES, also go in the entry, so a
+      // later read of the review has the text the model judged, not the command or a mutable file.
+      const args = renderArgs(event.input);
       const reviewed = await askModel(
         ctx,
         { toolCallId: event.toolCallId, started },
         {
           system,
+          reviewedText: args,
           user: () =>
             renderRequest(
               ctx.getSystemPrompt().join("\n\n"),
               renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
               base.path,
-              event.input,
+              args,
               breaker.reasons(key),
               upload
             ),

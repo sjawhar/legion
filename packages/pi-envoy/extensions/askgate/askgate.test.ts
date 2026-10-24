@@ -412,6 +412,26 @@ describe("verdicts", () => {
     expect(g.entries[1].argsDigest).toBe(e.argsDigest);
     expect(g.entries[2].argsDigest).not.toBe(e.argsDigest);
   });
+  test("an entry that asked the model records reviewedText: the arguments the model saw, cut as they were", async () => {
+    const g = bind({ complete: async () => ({ text: REVISE }) });
+    await g.device("t1", "dispatch_comment", COMMENT);
+    const reviewed = JSON.stringify(COMMENT, null, 2);
+    expect(g.entries[0].reviewedText).toBe(reviewed);
+    expect(g.calls[0].user).toContain(reviewed);
+    // A body past 64 KiB is cut in the request and in the record alike.
+    const long = { issue: "X-1", body: "b".repeat(70 * 1024) };
+    await g.device("t2", "dispatch_comment", long);
+    const cut = g.entries[1].reviewedText ?? "";
+    expect(bytes(cut)).toBeLessThanOrEqual(64 * 1024);
+    expect(cut).toContain("[elided");
+    expect(g.calls[1].user).toContain(cut);
+  });
+  test("an entry that never asked the model records no reviewedText", async () => {
+    const g = bind({ roles: {} });
+    await g.device("t1", "dispatch_comment", COMMENT);
+    expect(g.entries[0].outcome).toBe("no-model-role");
+    expect(g.entries[0].reviewedText).toBeUndefined();
+  });
   test("no dump without OMP_ASKGATE_DUMP", async () => {
     const g = bind();
     await g.device("t1", "dispatch_comment", COMMENT);

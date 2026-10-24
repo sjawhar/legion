@@ -4,7 +4,10 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** One advisor-gate entry, with the write's text joined from its tool call. */
+/**
+ * One advisor-gate entry, with the write's text: the arguments the model reviewed (`reviewedText`),
+ * or, for an entry written before the gate recorded them, the text of its tool call.
+ */
 export interface GateRecord {
   session: string;
   timestamp: string;
@@ -17,6 +20,9 @@ export interface GateRecord {
   latencyMs: number | null;
   cost: number | null;
   text: string | null;
+  /** `reviewed`: the text the model judged. `command`: the tool call's own text, which for a
+   *  file-backed write names the file and not its content. */
+  textSource: "reviewed" | "command";
 }
 
 export interface ToolShare {
@@ -94,6 +100,7 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
     const data = isObject(entry.data) ? entry.data : {};
     const usage = isObject(data.usage) ? data.usage : {};
     const reason = data.deliveredReason ?? data.reason;
+    const reviewed = typeof data.reviewedText === "string" ? data.reviewedText : null;
     records.push({
       session,
       timestamp: str(entry.timestamp),
@@ -105,11 +112,13 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
       reason: typeof reason === "string" ? reason : null,
       latencyMs: num(data.latencyMs),
       cost: num(usage.cost),
-      text: null,
+      text: reviewed,
+      textSource: reviewed === null ? "command" : "reviewed",
     });
   }
   // The call comes before its entry, but the join waits for the whole file.
-  for (const record of records) record.text = calls.get(record.toolCallId) ?? null;
+  for (const record of records)
+    if (record.textSource === "command") record.text = calls.get(record.toolCallId) ?? null;
   return records;
 }
 
@@ -254,6 +263,7 @@ export function sampleLine(record: GateRecord): string {
     toolCallId: record.toolCallId,
     verdictMode: record.verdictMode,
     reason: record.reason,
+    textSource: record.textSource,
     text: record.text,
   });
 }

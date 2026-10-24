@@ -11,6 +11,7 @@ import {
   parseArgs,
   parseSessionText,
   readSessions,
+  sampleLine,
   sampleSentBack,
 } from "./askgate-report";
 
@@ -25,6 +26,7 @@ interface EntryInput {
   cost?: number | null;
   reason?: string;
   delivered?: string;
+  reviewed?: string;
 }
 
 function gate(e: EntryInput): string {
@@ -46,6 +48,7 @@ function gate(e: EntryInput): string {
   }
   if (e.reason !== undefined) data.reason = e.reason;
   if (e.delivered !== undefined) data.deliveredReason = e.delivered;
+  if (e.reviewed !== undefined) data.reviewedText = e.reviewed;
   return JSON.stringify({
     type: "custom",
     customType: "advisor-gate",
@@ -122,6 +125,24 @@ describe("parseSessionText", () => {
   test("a non-bash call's text is its arguments as JSON", () => {
     const b1 = parseSessionText(sessionB, "s").find((r) => r.toolCallId === "b1");
     expect(b1?.text).toBe(JSON.stringify({ issue: "ACME-3", body: "hello" }));
+  });
+
+  test("an entry's reviewedText is the sample's text; an older entry's falls back to the command, marked so", () => {
+    const reviewed = JSON.stringify({ issue: "ACME-1", content: "# The brief\n" }, null, 2);
+    const text = [
+      call("r1", "bash", { command: "dispatch artifact --issue ACME-1 --name b.md --path b.md" }),
+      gate({ id: "r1", decision: "revise", reviewed }),
+      call("r2", "bash", { command: "dispatch ask --issue ACME-2 --question q" }),
+      gate({ id: "r2", decision: "revise" }),
+    ].join("\n");
+    const [r1, r2] = parseSessionText(text, "s");
+    expect(r1).toMatchObject({ text: reviewed, textSource: "reviewed" });
+    expect(r2).toMatchObject({
+      text: "dispatch ask --issue ACME-2 --question q",
+      textSource: "command",
+    });
+    expect(JSON.parse(sampleLine(r1 as GateRecord)).textSource).toBe("reviewed");
+    expect(JSON.parse(sampleLine(r2 as GateRecord)).textSource).toBe("command");
   });
 });
 
@@ -250,7 +271,16 @@ describe("CLI", () => {
     expect(rows).toHaveLength(3);
     for (const row of rows) {
       expect(Object.keys(row).sort()).toEqual(
-        ["reason", "session", "text", "timestamp", "tool", "toolCallId", "verdictMode"].sort()
+        [
+          "reason",
+          "session",
+          "text",
+          "textSource",
+          "timestamp",
+          "tool",
+          "toolCallId",
+          "verdictMode",
+        ].sort()
       );
     }
     const a2 = rows.find((r) => r.toolCallId === "a2");
