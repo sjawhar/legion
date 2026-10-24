@@ -13,7 +13,7 @@ import (
 
 // legacyKinds are the kinds an agent-secrets-helper before legion-envoy 10 sends, each recorded as
 // "session": "host" for a session the helper enrolls for itself (Broker.Enroll), and "box" for a key
-// a launcher enrolled through its enroll-box op, which agentbox calls. Such a helper keeps running
+// a launcher enrolled through that helper's own enroll-box op. Such a helper keeps running
 // until no session is registered with it (dotfiles' installers/agent-secrets.sh restarts it only
 // then), so the broker must enroll its sessions through any client rollout. Each such enrollment
 // logs "an enrollment named a legacy kind"; this set goes once the production broker has logged
