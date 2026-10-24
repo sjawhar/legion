@@ -241,8 +241,8 @@ reviewing until you finish.
   - `fail`, for a defect: open a `dispatch ask` for it on the controller's report issue, as
     `skill://legion-worker/references/findings.md` says, publish its reference to the controller
     topic, and file no issue. It names this issue, the pull request, the merge commit, what you
-    drove and what failed. Name the ask (`dispatch://<KEY>/ask/<id>`) in the `Production:` line
-    and in the summary.
+    drove and what failed. Name the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the `Production:`
+    line and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look: the daemon suspends
   your claim with its session and the issue's volume kept, the pod goes, and the daemon wakes the
   check (the pod comes back and your session resumes with a new check task) on Dispatch's

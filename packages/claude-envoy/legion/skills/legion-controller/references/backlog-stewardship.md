@@ -26,8 +26,9 @@ Run this pass on the first turn of every UTC day and after every ruling from Sam
    `skill://dispatch/references/issues.md#board-rank-priority-and-assignee-on-a-read`.
 3. Reconcile the plan's one-owner map. For each listed owner, verify the named session is live.
    For unowned work, find a suitable live owner with `envoy_sessions` filtered by `title` or `dir`,
-   route the issue to that exact session, and tell it what it owns. Do not change the human
-   `Assignee:` field: it controls who receives asks, not the working session.
+   route the issue to that exact session, and tell it what it owns. Routing hands the work to that
+   session; it starts nothing on Legion and sets no label. Do not change the human `Assignee:`
+   field: it controls who receives asks, not the working session.
 4. Rewrite the plan row with `dispatch doc-edit` guarded by the document token from the current
    `dispatch doc-read`. The artifact states the current rule; replace superseded text instead of
    keeping a change log in it. A comment or message does not update the one-owner map.

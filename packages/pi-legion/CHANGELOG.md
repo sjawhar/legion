@@ -105,7 +105,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   that red until a later settlement or a reviewer read it.
 - The architect decides each `review_round_cap` notice in the turn it wakes, and posts the decision
   on the issue: narrow the next rounds to named acceptance lines, split the part that cannot settle
-  into an issue of its own blocked by this one, or let rounds that each found less than the one before run on. The daemon's cap
+  off (a sibling child under the same parent, or, on a root, a finding ask whether the rest needs
+  an issue), or let rounds that each found less than the one before run on. The daemon's cap
   still notifies only.
 
 - **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
