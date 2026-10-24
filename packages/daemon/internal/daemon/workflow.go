@@ -580,7 +580,7 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	case supervise.StateReady:
 		fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role, Launch: c.Generation}
 	case supervise.StateFailed:
-		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role}
+		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure}
 	default:
 		return fmt.Errorf("claim %s has non-terminal workflow state %s", c.Token, state)
 	}
