@@ -346,6 +346,150 @@ check "exits 1" "$(is "$status" 1)"
 check "does not credit a mention attached to nothing far above" \
   "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:6) does not name maxInputChars')"
 
+echo "case: a block comment several declarations higher, the line above being code with a trailing /* ... */"
+root=$(fixture trailing-block-on-code)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+/* History: maxInputChars was 8000 before dispatch://INFRA-42, and this block documents nothing
+   below it. */
+export const DISPATCH_TITLE_MAX = 200;
+export const DISPATCH_SLUG_MAX = 80; /* a trailing note */
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "never credits a block comment that documents something else, far above" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:5) does not name maxInputChars')"
+
+echo "case: executable code between the naming block comment and the declaration"
+root=$(fixture code-below-block)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+/* maxInputChars bounds it. */
+const secret = 1;
+const other = 2;
+function limits() { return 3; } /* side note */
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "never credits a line of code as the declaration's comment" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:5) does not name maxInputChars')"
+
+echo "case: a URL inside a string literal above the declaration"
+# The real dispatch-tools.ts is full of https:// and dispatch://KEY/... inside descriptions. A
+# `//` inside a string must never make its line comment text, or the line above the declaration
+# would be credited as a comment that names nothing.
+root=$(fixture url-in-string)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+  .describe("see https://example.com/maxInputChars docs"),
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "never reads a string literal's // as the declaration's comment" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:2) does not name maxInputChars')"
+
+echo "case: /* and */ inside a string literal on a line of code"
+# A quoted block-comment delimiter is text in a program, not a comment, and crediting it would
+# hand the declaration a mention no compiler ever reads.
+root=$(fixture block-delims-in-string)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+const s = "/* maxInputChars */";
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "never credits a quoted /* ... */ as a comment above the declaration" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:2) does not name maxInputChars')"
+
+echo "case: a /* inside a // comment line"
+# The `/*` is comment text, not an opening delimiter: nothing is left half-open and the line is
+# credited as the ordinary `//` comment it is.
+root=$(fixture block-open-inside-line-comment)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+// the deprecated spelling was a block: /* never past maxInputChars */
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "credits the // comment and leaves nothing half-open" \
+  "$(contains "$out" 'body limit 14500 (packages/contracts/src/dispatch-tools.ts:2) fits the embedder.s 19000')"
+
+echo "case: a // inside a /* ... */ block's body"
+# Inside a block, `//` is prose; the block is read whole and its mention of the other constant
+# counts.
+root=$(fixture line-comment-inside-block)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+/*
+  see // nothing, never past maxInputChars (embed.go)
+*/
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "reads the whole block, // and all" \
+  "$(contains "$out" 'body limit 14500 (packages/contracts/src/dispatch-tools.ts:4) fits the embedder.s 19000')"
+
+echo "case: apostrophes in the comment above the declaration"
+# Both of the real comments carry apostrophes. A classifier that tracked quote state would read
+# these as an unterminated string and refuse the real tree, so the pass is pinned here.
+root=$(fixture apostrophes-in-comment)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+/** Never past the embedder's maxInputChars, whose cap it mustn't exceed. */
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "an apostrophe never breaks the comment above the declaration" \
+  "$(contains "$out" 'body limit 14500 (packages/contracts/src/dispatch-tools.ts:2) fits the embedder.s 19000')"
+
+echo "case: the declaration's own trailing comment, naming the other constant"
+root=$(fixture trailing-names-xref)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+export const DISPATCH_BODY_MAX = 14500; // never past maxInputChars
+TS
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "credits the trailing comment with nothing above the declaration" \
+  "$(contains "$out" 'body limit 14500 (packages/contracts/src/dispatch-tools.ts:1) fits the embedder.s 19000')"
+
+echo "case: the declaration's own trailing comment, naming nothing about the embedder"
+root=$(fixture trailing-no-xref)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+export const DISPATCH_BODY_MAX = 14500; // UTF-16 units
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "refuses at the declaration's own line when its trailing comment names nothing" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:1) does not name maxInputChars')"
+
+echo "case: a template literal whose lines open with // or /*"
+# The classifier's deliberate conservative edge: a template-literal line opening with `//` or
+# `/*` is read as comment text, but the backtick line below it is code, which ends the run. So
+# nothing is credited to the declaration and the refusal names the declaration's own site.
+root=$(fixture template-literal-line-comment)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+const s = `
+// maxInputChars lives in embed.go
+`;
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "never credits a template literal's // line to the declaration below the backtick" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:4) does not name maxInputChars')"
+
+root=$(fixture template-literal-block-comment)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+const s = `
+/* maxInputChars */
+`;
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "never credits a template literal's /* ... */ line either" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:4) does not name maxInputChars')"
+
 echo "case: contracts/AGENTS.md names each constant on a different line"
 root=$(fixture contracts-agents)
 cat > "$root/packages/contracts/AGENTS.md" <<'MD'

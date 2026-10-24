@@ -117,45 +117,50 @@ def declaration(path: str, lines: list[str], const: str, pattern: str) -> Declar
     return Declaration(int(match.group(1)), number)
 
 
+def comment_flags(lines: list[str]) -> list[bool]:
+    """One flag per line, true where the line is itself comment text, decided by reading the file
+    downward - the direction a comment is written. A line is comment text when it opens with `//`
+    or `/*`, or when an unterminated `/*` above it is still open. A `/*` is only an opener when
+    the line starts with it: a line of code carrying a trailing `/* ... */` is code, and so is one
+    carrying an unterminated trailing `/*` - this check does not follow that block's continuation
+    lines, which are then credited to nothing (fail-closed: the cross-reference refuses and names
+    the site, as it does for any declaration whose comment says nothing)."""
+    inside = False
+    flags: list[bool] = []
+    for line in lines:
+        stripped = line.strip()
+        flags.append(inside or stripped.startswith(("//", "/*")))
+        if inside:
+            inside = "*/" not in stripped
+        elif stripped.startswith("/*"):
+            inside = "*/" not in stripped[2:]
+    return flags
+
+
 def attached_comment(lines: list[str], line_number: int) -> str:
     """Every comment the declaration carries: the trailing comment on its own line (the patterns
-    admit nothing but `//...` after the number), and the unbroken run of comment lines directly
-    above it - `//` lines, and a `/* ... */` block taken whole, however its inner lines are
-    written. A `//` line is a `//` line whatever its text ends with, so it is tested first: an
-    ordinary one trailing in `*/` is no block close. A `*/` whose opening `/*` is never found
-    above is a malformed tree, and nothing it passed is credited. A `const (` opener is
-    transparent, so a Go doc comment written on a one-member group reaches its member. Anything
-    else - a blank line, another declaration, code - ends the run."""
+    admit nothing but `//...` after the number), and the contiguous run of comment-text lines
+    directly above it, classified by `comment_flags`. The invariant is that a line is credited
+    only when it is itself comment text - never because some `/*` exists somewhere above it. A
+    `const (` opener is transparent, so a Go doc comment written on a one-member group reaches its
+    member. Anything else - a blank line, another declaration, code, a line of code carrying a
+    trailing block comment - ends the run."""
     block: list[str] = []
-    declaration = lines[line_number - 1]
-    trailing = declaration.find("//")
+    declaration_line = lines[line_number - 1]
+    trailing = declaration_line.find("//")
     if trailing >= 0:
-        block.append(declaration[trailing:])
+        block.append(declaration_line[trailing:])
+    flags = comment_flags(lines)
     index = line_number - 2
     while index >= 0:
         stripped = lines[index].strip()
         if stripped == "const (":
             index -= 1
             continue
-        if stripped.startswith("//"):
-            block.append(stripped)
-            index -= 1
-            continue
-        if stripped.endswith("*/"):
-            pending: list[str] = []
-            opened = False
-            while index >= 0:
-                stripped = lines[index].strip()
-                pending.append(stripped)
-                index -= 1
-                if stripped.startswith("/*"):
-                    opened = True
-                    break
-            if not opened:
-                break
-            block.extend(pending)
-            continue
-        break
+        if not flags[index]:
+            break
+        block.append(stripped)
+        index -= 1
     return "\n".join(block)
 
 
