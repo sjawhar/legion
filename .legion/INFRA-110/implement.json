@@ -2,83 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-110",
-  "completed": "2026-10-24T16:52:00Z",
-  "round": 2,
+  "completed": "2026-10-24T17:48:00Z",
+  "round": 3,
   "proof": [
     {
-      "criterion": "Review finding 1 (blocking): a leading-zero numeral is read as decimal by the check and as octal by Go, so a tree whose embedder cuts at 13,312 while the body cap is 32,000 — the silent tail loss acceptance criterion 1 names — was reported as a fit.",
-      "surface": "The check as CI runs it, against a scratch tree holding the real script symlinked in (the suite's own shape) and against the real repository's embed.go with the numeral rewritten.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-body-embed-limit.sh; echo \"exit=$?\"  (real tree, after writing `maxInputChars = 032000` into packages/envoy/internal/dispatch/embed/embed.go) — and the same on a scratch tree with DISPATCH_BODY_MAX = 14500 / maxInputChars = 017000",
-      "observed": "Reproduced first at the reviewed head: the scratch tree printed `body limit 14500 (…:3) fits the embedder's 17000 (…:6), and each names the other`, exit 0. After the fix, both trees exit 1 with `::error file=packages/envoy/internal/dispatch/embed/embed.go::… declares no maxInputChars this check can read: no line matches ^\\s*maxInputChars\\s*=\\s*(0|[1-9][0-9]*)\\s*(?://.*)?$. A renamed constant, a moved file, or the number written another way (digit separators, a leading zero, hexadecimal, an expression) is this failure …`. The real tree's edit was restored; `jj diff --stat` then reported 0 files changed.",
-      "headSha": "57cc85eeb0007d34217ca937e28e7bc88931ab65",
-      "negativeControl": "The plain decimal the repository actually carries still passes: the unmodified tree exits 0 with `body limit 32000 (packages/contracts/src/dispatch-tools.ts:213) fits the embedder's 32000 (packages/envoy/internal/dispatch/embed/embed.go:48), and each names the other`, so the tighter character class refuses the octal shape without refusing the real one."
+      "criterion": "The tester's failure: acceptance 2 is held by machine, so the check must refuse a tree whose declaration comment does not name the other constant. `attached_comment` tested `stripped.endswith(\"*/\")` before `stripped.startswith(\"//\")`, so an ordinary `//` line ending in `*/` was taken for a block close; the climb for an opening `/*` that the file never held then credited every line above the declaration, and a mention attached to nothing satisfied the cross-reference.",
+      "surface": "The check as CI runs it, against the tester's own reproduction built on the repository's four real files with the real script symlinked in: `maxInputChars`'s pairing sentence removed, `// Deprecated spelling of this comment was a block: /* bounds one text */` directly above the declaration, and `// Historical note: DISPATCH_BODY_MAX was raised in INFRA-45. Attached to nothing.` planted on line 1.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && <scratch root>/.github/scripts/check-body-embed-limit.sh; echo \"exit=$?\"  — run against this head's script and, for the control, against the previous one obtained with `jj file show -r @- .github/scripts/check-body-embed-limit.sh`",
+      "observed": "This head exits 1 with `::error file=packages/envoy/internal/dispatch/embed/embed.go,line=47::the comment above maxInputChars (…:47) does not name DISPATCH_BODY_MAX …` and `::error::1 problem(s)`. The fix is two rules in `attached_comment`: the `//` branch is tested first, so a `//` line is a `//` line whatever its text ends with, and a `*/` climb now collects into a pending list that is credited only when the opening `/*` is found — an unterminated block credits nothing and ends the walk.",
+      "headSha": "23f290e588a45844b829b443f487c11305a017b4",
+      "negativeControl": "The same tree against the previous script (commit 57cc85eeb000, read out with `jj file show -r @-`) printed `body limit 32000 (packages/contracts/src/dispatch-tools.ts:213) fits the embedder's 32000 (packages/envoy/internal/dispatch/embed/embed.go:47), and each names the other`, exit 0 — the false acceptance, reproduced before it was fixed rather than taken from the report."
     },
     {
-      "criterion": "Review finding 2 (blocking): the required lint job refused three trees that satisfy the cross-reference rule, each with an instruction the file already carried — an unprefixed /* … */ block, a Go doc comment on the const ( group, and a trailing same-line comment both declaration patterns deliberately accept.",
-      "surface": "The check as CI runs it, against one scratch tree per refused shape, the real script symlinked in.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && for each scratch tree: .github/scripts/check-body-embed-limit.sh; echo \"exit=$?\"",
-      "observed": "All three reproduced refused at the reviewed head (for example `::error file=packages/contracts/src/dispatch-tools.ts,line=5::the comment above DISPATCH_BODY_MAX (…:5) does not name maxInputChars … write maxInputChars into the comment above DISPATCH_BODY_MAX (…:5)` with that name inside the very block). After the fix each exits 0 with the pass line: the unprefixed block plus const-group doc comment tree, and the trailing-same-line-comment tree, both read. The real tree — a `/** … */` JSDoc on one side, `//` lines inside a `const (…)` group with earlier members on the other — still exits 0, and the earlier member's own comment is not swallowed into the walk.",
-      "headSha": "57cc85eeb0007d34217ca937e28e7bc88931ab65",
-      "negativeControl": "Breadth control, so the wider walk is not a weaker rule: a tree whose unprefixed `/* … */` block names nothing about the embedder still exits 1 against that site, and deleting `maxInputChars` from the real JSDoc still exits 1 naming `the comment above DISPATCH_BODY_MAX (…:210)` (restored, `jj diff --stat` 0 files changed)."
+      "criterion": "The tester's red test passes unmodified: `.github/scripts/check-body-embed-limit.test.sh`, case `a // comment line that ends with */ above the declaration` (the tester's commit 0c5d413f48e4).",
+      "surface": "The companion suite in the issue pod, the same file the `test` job runs.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-body-embed-limit.test.sh; echo \"exit=$?\"  — and `jj -R \"$LEGION_WORKSPACE\" diff --from 0c5d413f48e4 --to @ --git .github/scripts/check-body-embed-limit.test.sh`",
+      "observed": "`Results: 61 passed, 0 failed`, `PASS: check-body-embed-limit.sh`, exit 0, with the tester's two assertions (`exits 1`, `does not credit a mention attached to nothing far above`) green. The diff of the test file against the tester's own commit is empty: the case passes because the script changed, not the test. At the previous head the same file reported `Results: 59 passed, 0 failed` before the tester's commit and `59 passed, 2 failed` after it.",
+      "headSha": "23f290e588a45844b829b443f487c11305a017b4",
+      "negativeControl": "Running the unchanged suite against the previous script reproduces the tester's red exactly — `59 passed, 2 failed`, exit 1, both failures that case — so the case is load-bearing rather than tautological."
     },
     {
-      "criterion": "The error model the architect folded into this round: an unreadable input must fail naming the file rather than returning None into a flow that later dereferences it or ending in a Python traceback, and a reported line number must be the line a reader opens.",
-      "surface": "The check as CI runs it, against scratch trees holding a directory where embed.go belongs and a file carrying a form feed above the declaration.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-body-embed-limit.sh; echo \"exit=$?\"  on each tree, with `awk '/maxInputChars = /{print NR}'` as the reader's line number",
-      "observed": "Before: the directory tree ended `IsADirectoryError: [Errno 21] Is a directory: 'packages/envoy/internal/dispatch/embed/embed.go'` with a full traceback; the form-feed tree reported `embed.go:6` where awk counts line 5. After: the directory tree prints one `::error file=packages/envoy/internal/dispatch/embed/embed.go::packages/envoy/internal/dispatch/embed/embed.go cannot be read: [Errno 21] Is a directory: …`, exit 1, no traceback; the form-feed tree reports the line awk counts. `load()` and `declaration()` now end an unreadable tree with `fatal()` as every sibling in .github/scripts does, so the success print no longer dereferences a value its own type calls optional.",
-      "headSha": "57cc85eeb0007d34217ca937e28e7bc88931ab65",
-      "negativeControl": "Accumulation had to survive the refactor, and does: a tree missing both cross-references still prints both `::error file=…` lines and `::error::2 problem(s): the body limit and the embedder's input limit do not demonstrably agree`, and a tree missing both cross-references and one AGENTS.md line prints three. Only structural failures end at the first one."
-    },
-    {
-      "criterion": "Every behaviour of this check is pinned by its companion suite, run in the test job; the two fixed defects and the error model are pinned the same way.",
-      "surface": "The companion suite in the issue pod and in the test job of this pull request's run; 22 cases, each building a miniature repository with invented numbers and symlinking the real script in, the last running the real script against the real tree.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-body-embed-limit.test.sh; echo \"exit=$?\"",
-      "observed": "`Results: 59 passed, 0 failed`, `PASS: check-body-embed-limit.sh`, exit 0 — 39 assertions from round 1, unmodified, plus 20 this round. The round-1 non-vacuity proof still holds: the suite run against an out-of-tree copy whose comparison is disabled reports failures rather than passing.",
-      "headSha": "57cc85eeb0007d34217ca937e28e7bc88931ab65",
-      "negativeControl": "None of the round-1 assertions was weakened to accommodate the fixes; the only assertion text that changed is the `digit separators` case's literal, because the refusal's enumeration now names a leading zero too, and that case still requires exit 1."
+      "criterion": "The fix must not re-open review finding 2, which was the false refusal this walk's widening cured: the three conforming comment shapes must still pass while the breadth controls still fail.",
+      "surface": "The companion suite's own cases, and the real repository, in the issue pod.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-body-embed-limit.test.sh  (reading the named cases) && .github/scripts/check-body-embed-limit.sh; echo \"exit=$?\"",
+      "observed": "Green in both directions: `a /* … */ block whose body lines carry no leading *`, `a Go doc comment written on the const ( group, not on its one member` and `a trailing same-line comment on each declaration, with none above either` all exit 0; `a /* … */ block that does not name maxInputChars`, `the body limit's comment does not name maxInputChars`, `the embedder's comment does not name DISPATCH_BODY_MAX` and the tester's planted-mention tree all exit 1. The real tree — a `/** … */` JSDoc on one side, `//` lines inside a `const (…)` group with earlier members on the other — exits 0 with `body limit 32000 (packages/contracts/src/dispatch-tools.ts:213) fits the embedder's 32000 (packages/envoy/internal/dispatch/embed/embed.go:48), and each names the other`.",
+      "headSha": "23f290e588a45844b829b443f487c11305a017b4",
+      "negativeControl": "Deleting `maxInputChars` from the real JSDoc still exits 1 naming `the comment above DISPATCH_BODY_MAX (…:210)`, and raising `DISPATCH_BODY_MAX` to 32001 still exits 1 naming both numbers, both files and the remedy; both restored, `jj diff --stat` then `0 files changed`."
     }
   ],
-  "suiteCases": [
-    "the body limit fits the embedder's — the pass line names both numbers and both files.",
-    "the two are equal — the boundary the predicate allows passes.",
-    "the body limit is one past the embedder's — exit 1 naming both numbers, both sites, that the tail vanishes silently, and the remedy's two halves (lower DISPATCH_BODY_MAX; or raise maxInputChars deliberately), so the cheap wrong fix is never suggested.",
-    "comments naming other numbers, and 32,000 in the prose around them — the declaration-anchored matchers read the declaration, not the prose this very change adds to the scanned files.",
-    "the body constant renamed — exit 1 naming the file and the pattern it needs.",
-    "digit separators in place of a plain decimal — exit 1; the refusal enumerates the ways a number can be written.",
-    "NEW: a leading zero on maxInputChars, which Go reads as octal — exit 1 naming embed.go; the gate can no longer report a fit on a tree where Go cuts at 13,312 (review finding 1).",
-    "NEW: a leading zero on the body limit, which TypeScript rejects outright — exit 1 naming dispatch-tools.ts; the same refusal on the other side.",
-    "two maxInputChars declarations — exit 1, ambiguous, naming both lines.",
-    "embed.go missing — exit 1 naming the file, no traceback.",
-    "a file that is not valid UTF-8 — exit 1 naming the file, no traceback.",
-    "NEW: a directory where embed.go belongs — exit 1 with one ::error line naming the path and no traceback; the OSError the tester hit (architect's error-model item).",
-    "NEW: a form feed in the comment above a declaration — the reported line is the one a reader opens, pinning the split on \\n alone rather than str.splitlines().",
-    "the body limit's comment does not name maxInputChars — exit 1 naming that site and what to write.",
-    "the embedder's comment does not name DISPATCH_BODY_MAX — exit 1 naming that site.",
-    "NEW: a /* … */ block whose body lines carry no leading * — exit 0; the block is read whole (review finding 2).",
-    "NEW: a Go doc comment written on the const ( group, not on its one member — exit 0; the ordinary Go shape for a one-member block.",
-    "NEW: a trailing same-line comment on each declaration, with none above either — exit 0; the shape both declaration patterns already accept now counts for the cross-reference too.",
-    "NEW: a /* … */ block that does not name maxInputChars — exit 1; the widened walk is not a weaker rule.",
-    "contracts/AGENTS.md names each constant on a different line — exit 1; the rule is one line naming both.",
-    "envoy/AGENTS.md names each constant on a different line — exit 1, the same on the other guide.",
-    "the real repository passes — the real script, from the real root, exit 0 with the pass line."
-  ],
   "filesChanged": [
-    ".github/scripts/check-body-embed-limit.sh: both declaration patterns capture `(0|[1-9][0-9]*)` and the refusal enumerates a leading zero (commit 12050a4f0170); `comment_block_above` became `attached_comment`, crediting the declaration's own trailing comment, a `/* … */` block taken whole and a transparent `const (` opener (commit 5229534fb656); `fatal()` for an unreadable tree or an unreadable declaration, `OSError` caught, and lines split on `\\n` with a trailing `\\r` dropped (commit 57cc85eeb000).",
-    ".github/scripts/check-body-embed-limit.test.sh: 8 new cases over the three fixes, 59 assertions in all; the only changed assertion is the digit-separators case's literal, which follows the refusal's new enumeration."
+    ".github/scripts/check-body-embed-limit.sh (commit 23f290e588a4): in `attached_comment`, the `//` branch is tested before the `*/` branch, and a `*/` climb credits its lines only once the opening `/*` is found — an unterminated block ends the walk having credited nothing. The docstring states both rules. Nothing else in the function moved: the declaration's own trailing comment still counts, a well-formed block is still credited whole however its inner lines are written and the walk continues above it, a `const (` opener is still transparent, and a blank line, another declaration or code still ends the run."
   ],
   "trickyParts": [
-    "The leading-zero fix is a refusal, not a conversion: the check does not try to read `032000` as 13312, because a tree that writes it is one no reader can be sure of — Go reads octal, a TypeScript module rejects it, and the right answer is the existing 'declares no <const> this check can read' refusal, which tells the author to restore a plain decimal.",
-    "`attached_comment` enters a block comment from its closing line and consumes upward to the line that opens it, so a block is credited however its inner lines are written; it then keeps walking, so a `//` run above a block still counts. A `const (` opener is transparent, but a previous member of the group is not, which is what stops the walk from swallowing an earlier constant's comment in the real embed.go.",
-    "`fatal()` ends the run at the first structural failure, so a tree with two unreadable files names one. That is the sibling checks' convention (check-zod-version.sh, check-bun-workspace-manifests.sh, check-gh-version.sh) and deliberate: every finding after an unread file would be a guess. The findings a reader wants listed together — the comparison and the four cross-references — still accumulate and still end with the `::error::<N> problem(s)` summary.",
-    "Splitting on `\\n` rather than `str.splitlines()` keeps a CRLF file matching the declaration patterns only because each line's trailing `\\r` is dropped; without that the `$` anchor would fail on every Windows-checkout line."
+    "The two defects of this walk are mirrors, and the fix has to hold both: review finding 2 was a false refusal (a conforming comment not credited), the tester's finding was the false acceptance its cure traded for (a non-comment credited). Branch order fixes the first half — a `//` line can never be mistaken for a block close — and the pending-list rule fixes the second, because the only way the old code could walk past code was a climb that never found its opening.",
+    "An unterminated block credits nothing rather than failing with a message of its own: the declaration then simply has no attached comment naming the other constant, and the existing cross-reference refusal says so, naming the site and what to write. A malformed tree is thereby refused by the rule it breaks rather than by a new one.",
+    "The tester's red case is on the TypeScript side and my reproduction is on the Go side; both shapes exercise the same walk, and both are green now. The test file is byte-identical to the tester's commit."
   ],
-  "deviations": [
-    "The round's scope is wider than the reviewer's two findings: the architect ruled the error model (fatal shape, OSError, line numbers) into this round rather than a fast-follow, so it is the third commit and is pinned by two suite cases. No other scope moved; no spec edit, no new approval."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Round 1's `Fast-follow: none` still holds: the one follow-up the reviewer named (the error model) was taken in this round, so nothing is deferred.",
-    "`ce-simplify-code` ran once for this pull request, in round 1 at 7eed5a09, as the rule allows; a review round runs no second pass. The round-2 diff is three small, separately committed fixes inside one function family of one script.",
-    "The cross-model review the architect's standing note mentions was unavailable this round (the OpenAI API account exhausted its credit at about 16:20Z, dispatch://OSSV-142/ask/f46ae257-e92e-4355-86a5-d7ea4a162fd4); nothing of mine was mid-run on it, and no review subagent is due in a review round."
+    "This is round 3's only change: one function, 16 lines added and 7 removed, in one commit, as the architect asked. The same read of the walk turned up no other fail-open — the transparent `const (` opener is bounded by any previous member of the group, which is what keeps the real embed.go honest, and the tester recorded the same in its observations.",
+    "Round 2's head went red in the required `test` job by design, carrying the tester's red case; this head is what makes it green. The architect confirmed that red moves nothing on its own and that the fix-attempt count stands at 1."
   ]
 }
