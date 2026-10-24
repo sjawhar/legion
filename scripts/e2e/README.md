@@ -121,7 +121,7 @@ Every step is fatal and names its reason: no port to pick ([`lib/free-port.sh`](
 `ss` missing or failing, or no room below the ephemeral range), the refusal that does not name its
 host, a first tmux that is a script or mise itself while `mise which tmux` names no tmux
 (`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at once
-with its exit status),
+and names the daemon's exit status),
 a `/healthz` that never answers, a state document that is not boot 1 with cap 4 and no
 issues, a registry without exactly one entry for this run, a `firstBootAt` that moved across the
 restart, a daemon that ignored a stop (SIGKILLed on the way out, so nothing holds the port) or
@@ -2396,7 +2396,8 @@ SIGPIPE.
 
 The host-side helpers a stage proof sources for its rig: bounded waits, ports, the processes the
 run starts, and their teardown. Stage 1, Stage 3, Stage 4b, the 4b.13b acceptance and the
-controller, Dispatch user-turn and Claude Code backend proofs source it.
+controller, Dispatch user-turn and Claude Code backend proofs source it, as do the docs site's
+broker and operator-walkthrough recorders and pi-legion's skill-scenario rig.
 
 ```sh
 . "$root/scripts/e2e/lib/rig.sh"     # sourced, never run
@@ -2418,7 +2419,7 @@ only `real_bin_path`, so it sets `root` and `work` and defines `fail` alone.
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
 | `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
-| `real_bin_path DEST NAME…` | symlinks `DEST/NAME` to the real `NAME` binary `mise which NAME` resolves in the caller's own environment, for every `NAME`, and prints `DEST`: a devbox's own `jj` resolves through a shim chain that a pane's relocated `HOME` (`make_omp_home`) breaks, since mise has no pin for a directory whose global config a relocated `HOME` hides — `jj`'s own shim hands the call straight back to itself, exit 127. tmux also breaks for the daemon itself, which runs it with the pane environment's allow-list alone: from a checkout under the operator's real `HOME`, a shimmed tmux finds that `HOME`'s mise config as a parent directory's config, untrusted under the daemon's own `HOME`, and exits 1, which the daemon's boot reads as a failed scrub of its private server's environment, not as no server, so boot refuses. Every `NAME` must resolve through the caller's own mise configuration; it refuses naming the tool if `mise which` fails. Stage 3 prepends `real_bin_path "$work/realbin" gh jj tmux` to the daemon's own PATH (`start_daemon`), which every pane inherits (`paneEnvAllowList`); Stage 1 prepends `real_bin_path "$work/realbin" tmux` to its daemon's PATH when its first tmux is a script or mise itself, and keeps a real tmux binary, such as CI's apt tmux, otherwise; Stage 2, the 4b.13b acceptance and the Claude Code backend proof, which do not call it, put a link to `mise which tmux` on their daemons' PATH the same way |
+| `real_bin_path DEST NAME…` | symlinks `DEST/NAME` to the real `NAME` binary `mise which NAME` resolves in the caller's own environment, for every `NAME`, and prints `DEST`: a devbox's own `jj` resolves through a shim chain that a pane's relocated `HOME` (`make_omp_home`) breaks, since mise has no pin for a directory whose global config a relocated `HOME` hides — `jj`'s own shim hands the call straight back to itself, exit 127. tmux also breaks for the daemon itself, which runs it with the pane environment's allow-list alone: under the daemon's tmux environment, which moves the XDG directories under the state directory (a relocated `HOME` has the same effect), a shimmed tmux run from a directory under the operator's real `HOME` finds that `HOME`'s mise config as a parent directory's config with no trust record, and exits 1, which the daemon's boot reads as a failed scrub of its private server's environment, not as no server, so boot refuses. Every `NAME` must resolve through the caller's own mise configuration; it refuses naming the tool if `mise which` fails. Stage 3 prepends `real_bin_path "$work/realbin" gh jj tmux` to the daemon's own PATH (`start_daemon`), which every pane inherits (`paneEnvAllowList`); Stage 1 prepends `real_bin_path "$work/realbin" tmux` to its daemon's PATH when its first tmux is a script or mise itself, and keeps a real tmux binary, such as CI's apt tmux, otherwise; Stage 2, the 4b.13b acceptance and the Claude Code backend proof, which do not call it, put a link to `mise which tmux` on their daemons' PATH the same way |
 
 ## lib/omp-home.sh
 

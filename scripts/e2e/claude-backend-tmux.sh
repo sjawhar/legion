@@ -437,8 +437,8 @@ bun_bin=$(command -v bun)
 note "Claude Code: $claude_bin ($("$claude_bin" --version)); bun: $bun_bin"
 real_gh=$(mise which gh) || fail "mise has no gh"
 # The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
-# pane allow-list alone, where a shimmed tmux, from a checkout under the operator's real HOME,
-# finds that HOME's mise config untrusted and exits 1 (lib/rig.sh, real_bin_path).
+# pane allow-list alone, where a shimmed tmux, run from a directory under the operator's real
+# HOME, finds that HOME's mise config untrusted and exits 1 (lib/rig.sh, real_bin_path).
 real_tmux=$(mise which tmux) || fail "mise has no tmux"
 mkdir -p "$work/realtmux"
 ln -sfn "$real_tmux" "$work/realtmux/tmux"

@@ -69,7 +69,7 @@ fail() {
   exit 1
 }
 # wait_healthz [SUFFIX] polls the daemon ($pid) on $port for 10 s. A daemon that exits first stops
-# the run at once with its exit status, rather than after the full wait.
+# the run at once, naming the daemon's exit status, rather than after the full wait.
 wait_healthz() {
   local i status=0
   for i in $(seq 1 50); do
@@ -88,9 +88,11 @@ wait_healthz() {
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
 . "$root/scripts/e2e/lib/rig.sh"
 # A devbox's first tmux can be a wrapper script or a mise shim. mise runs it from the daemon's
-# working directory. From a checkout under the operator's real HOME it finds that HOME's global
-# config as a parent directory's config, which it does not trust under the daemon's own HOME
-# (pane_home, below), so it exits 1. The daemon's boot scrubs its private tmux server's environment
+# working directory, under the daemon's tmux environment, which moves the XDG directories under the
+# state directory; this run's own HOME (pane_home, below) has the same effect. From a working
+# directory under the operator's real HOME, mise then finds that HOME's config as a parent
+# directory's config with no trust record, so it exits 1. The daemon's boot scrubs its private tmux
+# server's environment
 # (`tmux show-environment`) and reads that exit as a failure, not as no server, so boot refuses.
 # So when the first tmux is a script or mise itself, the run's PATH, and so the daemon's, starts
 # with the real binary (lib/rig.sh, real_bin_path), which fails loudly when mise cannot name it.

@@ -165,6 +165,14 @@ install path (`mise which gh` or `asdf which gh` prints it). The check reads scr
 shim is compiled and passes, and where mise has no gh for the directory it runs the next `gh` on
 `PATH`, which in a pane is the pane's own `legion gh`, so a shims directory is no real gh either.
 
+The daemon runs tmux itself: the first `tmux` on its `PATH`, with the pane environment, whose XDG
+directories are under the state directory. A tmux wrapper script or a mise shim reads the operator's
+mise config there. Started from a directory under the operator's `HOME`, it finds that config as a
+parent directory's config with no trust record and exits 1, and boot refuses with `scrub the private
+tmux server's environment: … not trusted`. Put a real tmux binary first on the daemon's `PATH`
+(`mise which tmux` prints its install path), as the live proofs do with `real_bin_path`
+(`scripts/e2e/README.md`).
+
 ## Phase workers on Claude Code
 
 `worker_backends` in `legion.yaml` runs a role on another agent harness than Oh My Pi:
