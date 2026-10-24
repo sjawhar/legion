@@ -654,11 +654,12 @@ export function askgateSetting(filePath: string): AskgateSetting {
   }
   const parsed = z.object({ askgate: AskgateSectionSchema }).safeParse(parsedJson);
   if (!parsed.success) {
-    // An unknown key is named as the other sections name one; any other issue is the switch's type.
+    // An unknown key is named as the other sections name one, and then the one key the section
+    // takes; any other issue is the switch's type.
     const unknownKey = parsed.error.issues[0]?.code === "unrecognized_keys";
     return stayOn(
       unknownKey
-        ? describeSchemaIssue(filePath, parsed.error)
+        ? `${describeSchemaIssue(filePath, parsed.error)}; the one askgate key is askgate.enabled, true or false`
         : `${filePath}: askgate.enabled must be true or false`
     );
   }

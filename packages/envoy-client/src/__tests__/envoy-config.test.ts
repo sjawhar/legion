@@ -1549,7 +1549,7 @@ describe("askgateSetting", () => {
     writeFile(file, { askgate: { on: false } });
     expect(askgateSetting(file)).toEqual({
       enabled: true,
-      error: `${file}: unrecognized askgate key(s): askgate.on; AskGate stays on`,
+      error: `${file}: unrecognized askgate key(s): askgate.on; the one askgate key is askgate.enabled, true or false; AskGate stays on`,
     });
     for (const section of [false, null]) {
       writeFile(file, { askgate: section });
