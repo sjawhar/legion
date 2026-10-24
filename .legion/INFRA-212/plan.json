@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-212",
+  "completed": "2026-10-24T20:40:00Z",
+  "plan": "dispatch://INFRA-212/artifact/plan-md (version 2). One file changes, docs/kubernetes.md: 'Anatomy of a Sandbox pod' gains the environment a role's agent carries (the eleven names of the spec's comparison table, each with its value or the statement that the runtime sets it in no container), the existing gh and git prose is folded into it, each of the six retired TypeScript-daemon subsections and the five tables inside them gains one line naming it as retired and pointing at that section, and the two sentences scheduling the section's removal are corrected. No code, no new test.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: this is a Legion phase in a shared workspace — the commit, identity, push and handoff rules are its.",
+      "skill://legion-worker/references/pr-body.md: the pull-request body template and the definition of a proof, which the implementer's E2E line and proof array must meet (the live printenv read in a role container and the GitHub /markdown render of the edited section are the production-like surfaces here).",
+      "skill://legion-worker/references/default-branch-check.md: the App-identity check on its own commits before the push.",
+      "skill://dispatch: any write to the issue (a message, a comment, an ask) follows it; the plan document is already uploaded.",
+      "none for a code skill: ce-simplify-code is for settled, recently changed code and this change touches no code; the other loaded skills (dispatch-brainstorming, legion-architect, legion-controller, legion-oracle, legion-retro) belong to other roles or other phases."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase rules, workspace discipline and handoff.",
+      "skill://legion-worker/references/pr-body.md: 'the tester runs the application, not CI again' — here the application is a live role container (printenv of every documented name in its own container, whose generation and state home differ from the implementer's) and GitHub's own markdown renderer for the tables; everything static is read from CI."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase rules and handoff fields.",
+      "skill://legion-worker/references/review-threads.md: one disposition reply per thread, resolved one by one.",
+      "skill://legion-worker/references/merge-gate.md: the order of the round, the approval of a head by SHA, and what READY compares afterwards."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the acceptance criterion is false under the obvious command — a role container's own pod spec carries POD_UID alone (testdata/golden/worker.json), so `kubectl exec … printenv` exits 1 for all eleven names, including the four expected to.",
+        "answer": "Decision D2 of the plan: the section states that these are the variables the daemon's start command gives the role's launcher, which passes them to the shim and the agent, and that the container's own spec carries only POD_UID. AC2's command is the printenv loop run by the role's own agent, with the unset names as its negative control."
+      },
+      {
+        "finding": "F2: the eleven names come from three renderers, and LEGION_BOOT_TOKEN_FILE is appended in launcherCommand (launcher.go:414), not in mainEnvironment.",
+        "answer": "The plan's facts table cites the renderer per variable: podPath (manifest.go:1036), ghAgentEnv (podkind.go:211-213), mainEnvironment (manifest.go:906, 939-941), podkind.go:190 over workspace.Location, and launcherCommand (launcher.go:403, 414)."
+      },
+      {
+        "finding": "F3: the spec's 'all ten rows are stale' overstates it — row 7's workspace value is today's value; what is stale there is the name LEGION_ROOT_WORKSPACE.",
+        "answer": "No task changes: the plan copies no row of the retired table forward and writes every value from the code and from the live container instead. Reported to the architect as an inaccuracy in the spec's problem statement, which only the architect may correct."
+      },
+      {
+        "finding": "F4: DISPATCH_TOKEN_FILE and ENVOY_TOKEN_FILE are conditional on the daemon holding those credentials, and <generation> varies by role and by relaunch; the spec states them flat.",
+        "answer": "Decision D3: both are stated unconditionally because configuration load refuses a kubernetes daemon without them (config/kubernetes.go:1353,1355; config/stage3.go:98,558), and the text names that refusal. Decision D4: the text says <generation> is the role's own counter, which differs between role containers and rises on each relaunch."
+      },
+      {
+        "finding": "F5: 'the controller's container carries no LEGION_WORKSPACE' understates the difference, and the document already describes the controller's environment twice.",
+        "answer": "Task T4: the sentence stays inside the eleven names (no LEGION_WORKSPACE; GH_CONFIG_DIR is the project's default owner's directory) and points at 'Daemon-launched controller' for the rest, rather than writing a third list."
+      },
+      {
+        "finding": "F6: the single pointer target the spec gives the six opening lines is wrong for four of them, each of which has a live counterpart that is not pod anatomy.",
+        "answer": "Decision D6: each opening line keeps the spec's pointer at 'Anatomy of a Sandbox pod' and adds the subsection's live counterpart where that differs (#configuration, #contract-discipline, #rbac-the-go-daemon-needs, #operator-configuration). Recorded as a departure below."
+      },
+      {
+        "finding": "F7: '### Configuration' and '### Contract discipline' each appear twice, so a bare anchor resolves to the Go daemon's heading and the retired one needs a '-1' slug.",
+        "answer": "Decision D7: every link this change adds points at a live heading (#anatomy-of-a-sandbox-pod and the four counterparts), never at a retired subsection's own anchor, so no '-1' slug is written. AC6's throwaway slug check verifies every target in the file resolves."
+      },
+      {
+        "finding": "F8: the retired section's opening sentence would cover 'Operator configuration' and 'Network shares', 320 lines describing today's pods and the target of the seventeen pointers.",
+        "answer": "Decision D8 and task T3: the rewritten opening names those two subsections as the exception in the same sentence, so nothing moves and no heading changes. Recorded as a departure below."
+      },
+      {
+        "finding": "F9: 'stated once' is undefined against prose that states a value for another purpose, and two cross-references (lines 1441-1442 and 3939) depend on that prose.",
+        "answer": "Decision D9 and task T5: 'once' means one statement of the value inside the section; the prose keeps its behaviour and refers to the row. LEGION_GH_OWNERS_DIR, LEGION_GH_PATH, LEGION_GIT_PATH, LEGION_JJ_PATH and the GIT_CONFIG_* entries stay stated. AC3 reads each match rather than counting blind, and names /opt/legion/bin's expected two matches (the PATH row and the legion gh wrapper path)."
+      },
+      {
+        "finding": "F10: the document spells the same placeholders several ways, and a check needs one spelling.",
+        "answer": "Decision D5: the edited section uses <owner>, <repo>, <key-lower>, <generation> and <role>; line 2422's different spelling is out of scope and left alone."
+      },
+      {
+        "finding": "F11: the sentence at line 3622 ('The block below is the TypeScript daemon's.') would duplicate the new opening line three lines above it, and '### Configuration' opens with a 23-line paragraph rather than a line.",
+        "answer": "Task T2 names both: 3622's first sentence moves into the new opening line at the subsection's head, keeping its two pointers; and '### Configuration' gets the pointer appended to its existing opening sentence rather than a second line above it."
+      },
+      {
+        "finding": "F12: the Go doc guard test I had considered is outside the spec's scope and would need its assertions pinned.",
+        "answer": "Decision D1: dropped. The architect's instruction of 2026-10-24T20:20Z is that this repository commits no check that reads repository text; every structural check in the plan is a command a person runs at review time and quotes."
+      },
+      {
+        "finding": "F13: packages/pi-legion/src/skills-guard.test.ts fails on five phrasings anywhere in docs/kubernetes.md, and the envoy-and-contracts workflow runs that lane for this file.",
+        "answer": "Decision D11 names the five phrasings and the replacement wording ('the runtime sets it in no container'), and `cd packages/pi-legion && bun test src/skills-guard.test.ts` is in the plan's list of checks that must stay green."
+      },
+      {
+        "finding": "F14: the 2026-10-03 deletion date needed a source, and neither rewritten sentence may call the TypeScript daemon packages/daemon, which is now the Go module alone.",
+        "answer": "Decision D10: verified with `git show -s ed00df8b2` (Sat Oct 3 2026, 'refactor!: Legion runs on the Go daemon alone (LEGION-223 slice C)'); the rewrite names the deleted sources by that commit and no live path, and the words 'Stage 7' leave the file (AC5)."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The spec's comparison table and its acceptance speak of what 'a role container' carries, and check it with printenv inside a running role container.",
+      "plan": "The runbook text says these are the variables the daemon's start command hands the role's launcher, which passes them to the shim and so to the role's agent process, and that the container's own pod spec carries only POD_UID; the acceptance criterion is kept word for word and read as what a command the role's agent runs prints.",
+      "evidence": "packages/daemon/internal/runtime/sandbox/testdata/golden/worker.json gives each of the six role containers env of POD_UID alone; launchEnvironment (manifest.go:985) splits the rendered environment, and launcherCommand (launcher.go:401) carries the plain pairs in the start command. Written the spec's way the section would be false of kubectl exec, where printenv exits 1 on all eleven names.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "Each of the six retired subsections opens with a line naming it as the retired TypeScript daemon's and pointing at 'Anatomy of a Sandbox pod'.",
+      "plan": "Each opening line carries that pointer and, for the four subsections whose subject is not pod anatomy, a second pointer at the live counterpart: Configuration to #configuration (line 1169), Contract discipline to #contract-discipline (1081), RBAC the daemon needs to #rbac-the-go-daemon-needs (3077), The providers Secret to #operator-configuration (3294).",
+      "evidence": "Those four subsections describe configuration, contract discipline, RBAC and the providers Secret, and each already has a live counterpart in the file; a reader of them sent only to pod anatomy is sent to the wrong answer.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The retired section's opening says the TypeScript daemon's sources are already deleted and the section is kept for reference.",
+      "plan": "The same sentence also names 'Operator configuration' and its 'Network shares' subsection as the exception, since they describe the pods Legion runs today.",
+      "evidence": "docs/kubernetes.md:3294-3615 is 322 lines opening with 'The Go coordinator's.' and is the target of seventeen pointers in this repository; a blanket statement over the whole section would be untrue of them. No heading moves, so the spec's no-rename rule holds.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
