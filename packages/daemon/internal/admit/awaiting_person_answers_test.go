@@ -184,6 +184,40 @@ func handBackOnAClosedGate(t *testing.T, pool *pgxpool.Pool, admission *Admissio
 	}
 }
 
+// A registration whose read is older than the gate's newest version changes no gate state, but it
+// still queues the gate seed at the gate's version: that read of Dispatch is what catches a
+// review whose own event was lost.
+func TestAStaleRegistrationStillQueuesItsGateSeed(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 5})
+	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
+		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+	}, admission.engine, admission); err != nil {
+		t.Fatalf("register gate v4: %v", err)
+	}
+	var seeds []record.GateSeed
+	for _, effect := range effects(t, pool) {
+		if seed, ok := effect.payload.(record.GateSeed); ok && effect.issue == "LEGION-ROOT" {
+			seeds = append(seeds, seed)
+		}
+	}
+	if len(seeds) != 1 || seeds[0].Version != 5 || seeds[0].ArtifactID != "artifact-root" {
+		t.Fatalf("gate seeds = %#v, want one at the gate's version 5", seeds)
+	}
+	var gate *record.DesignGate
+	inTx(t, pool, func(tx pgx.Tx) {
+		var err error
+		if gate, err = record.NewStore().Gate(context.Background(), tx, "LEGION-ROOT"); err != nil {
+			t.Fatalf("read gate: %v", err)
+		}
+	})
+	if gate == nil || gate.LatestVersion != 5 {
+		t.Fatalf("gate after a stale registration = %#v, want it still at version 5", gate)
+	}
+}
+
 // Only a person's own act answers a wait. A registration whose approval request Dispatch shows
 // waiting on the agent carries no author, and a session's progress note hands an open ask to the
 // agent as a person's reply does, so that registration answers nothing: the root waits on, as it
@@ -304,6 +338,14 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 			order: []intake.Fact{
 				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path"},
 				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4},
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Seed: true}},
+			reasons: []string{"name the rollback path"}},
+		// The caller registers v4 while Dispatch already shows v5, whose changes request the live
+		// event told first: the gate is registered at v5, keeping the told record.
+		{name: "a caller's older version with Dispatch at the newer one", busy: true,
+			order: []intake.Fact{
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path"},
+				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 5},
 				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Seed: true}},
 			reasons: []string{"name the rollback path"}},
 		{name: "a second review at the same version", order: []intake.Fact{changes, second},

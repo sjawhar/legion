@@ -40,22 +40,26 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err != nil {
 		return intake.Result{}, err
 	}
-	// A registration of the same document whose read of Dispatch is older than the gate's newest
-	// observation (a later artifact event applied first) carries nothing new and would roll the
-	// gate, and the changes request it records as told, back to that older read. It changes nothing.
-	if stored != nil && stored.ArtifactID == fact.ArtifactID && stored.LatestVersion > max(fact.Version, fact.DispatchVersion) {
+	// The version the gate is registered at is the newest either side knows of: the caller's, or
+	// Dispatch's latest as register_gate's read found it (register_gate refuses a caller's version
+	// above Dispatch's). A same-document registration older than the gate's newest observation (a
+	// later artifact event applied first) changes nothing, so it neither rolls the gate back nor
+	// drops the changes request recorded as told; it still queues the gate seed, whose read of
+	// Dispatch catches a review whose own event was lost.
+	version := max(fact.Version, fact.DispatchVersion)
+	if stored != nil && stored.ArtifactID == fact.ArtifactID && stored.LatestVersion > version {
 		e.logOnCommit(ctx, "workflow: a registration whose read predates the gate's newest version changes nothing", "issue", issue.Key,
-			"artifact", fact.ArtifactID, "version", fact.Version, "gate_version", stored.LatestVersion)
-		return intake.Result{}, nil
+			"artifact", fact.ArtifactID, "version", version, "gate_version", stored.LatestVersion)
+		return intake.Result{}, e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: stored.LatestVersion, Generation: issue.Generation})
 	}
-	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
+	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: version}
 	changesRequested := false
 	switch {
 	case e.cfg.DesignGate == config.DesignGateOff:
-		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version)
-	case fact.ApprovedVersion >= fact.Version:
+		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, version)
+	case fact.ApprovedVersion >= version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion)
-	case fact.ChangesRequestedVersion >= fact.Version:
+	case fact.ChangesRequestedVersion >= version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateChangesRequested, fact.ChangesRequestedVersion)
 		changesRequested = true
 	}
@@ -79,8 +83,8 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, err
 	}
 	e.logOnCommit(ctx, "workflow: design gate registered", "issue", issue.Key, "artifact", fact.ArtifactID,
-		"version", fact.Version, "open", classify.DesignGateOpen(gate), "changes_requested", changesRequested, "policy", e.cfg.DesignGate)
-	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
+		"version", version, "open", classify.DesignGateOpen(gate), "changes_requested", changesRequested, "policy", e.cfg.DesignGate)
+	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err
 	}
 	switch {
