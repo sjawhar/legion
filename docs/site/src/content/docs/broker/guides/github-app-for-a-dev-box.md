@@ -86,12 +86,16 @@ key. To change a secret without a kind to `github-app`, do these steps in this s
    sees the old tags, do the retag again. Do not set the private key until a retag exits 0.
 3. Set the private key.
 
-Do this step on your own computer, not on the box. The agents on the box run as your user. They
-can read a file that you keep there, and they can use a Google sign-in that you leave there.
+You can do this step on your own computer or on the box. The procedure is the same. The agents on
+the box run as your user. They can read a file that you keep there, and they can use a Google
+sign-in that you leave there. Thus, on the box, delete the key files and delete your sign-in when
+you complete the step.
 
-On your own computer, sign in with `gcloud auth application-default login`, as
-[Before you start](/legion/broker/guides/manage-a-secret/#before-you-start) in "Manage a secret"
-tells you. Then build the file and set the secret.
+Sign in one time with `gcloud auth login`. This command does not change the credentials of the
+box. When the credentials of the box are not your own, `agent-secrets` writes the secret with your
+gcloud login. For more information, refer to
+[Before you start](/legion/broker/guides/manage-a-secret/#before-you-start) in "Manage a secret".
+Then build the file and set the secret.
 
 Build `app-key.json` from the App ID and the private key file that GitHub gave you. A PEM key
 spans several lines, which JSON must escape, so let `jq` write the file. Do not paste the key into
@@ -110,20 +114,13 @@ agent-secrets secret set GITHUB_APP_<PERSON> < app-key.json
 rm app-key.json '<private key file>.pem'
 ```
 
-If you must do this step on the box, do not run `gcloud auth application-default login` there. That
-command replaces the credentials of the box for all programs. Follow the box route in
-[Before you start](/legion/broker/guides/manage-a-secret/#before-you-start): it signs you in with
-`gcloud auth login --no-activate` and puts the path of your credentials file in the `me` shell
-variable. Then build `app-key.json` as above, and set the secret with your sign-in for this one
-command only. Do not export the variable.
+If you do this step on the box, delete your Google sign-in from the box after you set the secret:
 
 ```sh
-GOOGLE_APPLICATION_CREDENTIALS="$me" agent-secrets secret set GITHUB_APP_<PERSON> < app-key.json
-rm app-key.json '<private key file>.pem'
 gcloud auth revoke '<your email>'
 ```
 
-The last command deletes your Google sign-in from the box, so the agents on the box cannot use it.
+This command deletes your Google sign-in from the box, so the agents on the box cannot use it.
 
 The broker returns a JSON value with one entry for each active installation. The account name of
 each installation is the entry key.

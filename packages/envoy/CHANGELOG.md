@@ -8,7 +8,8 @@
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
   grant made while the secret was plain never returns the App key or refresh token stored once it
-  is a kind. Retag a stored secret to a kind, wait for `broker: serving`, then store its key.
+  is a kind. Retag a stored secret to a kind, and store its key only after the retag exits 0,
+  printing `broker: serving NAME (kind <kind>)`.
 - A mint error names an upstream's HTTP status by its number and a failed call by its class
   (cancelled, timed out, not resolved, not reached, a failed TLS handshake, an answer ended early,
   or no usable HTTP answer), never Go's transport text, the reason phrase or the body, any of which
