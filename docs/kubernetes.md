@@ -1944,8 +1944,43 @@ the default reservations every request equals its limit and the pod is `Guarante
 bounded on the node's disk, and Legion sets no affinity on the pod (GKE Autopilot adds its own,
 below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
+The variables below are the ones a role's agent process carries, not the ones its container's pod
+spec lists: a role container's own spec carries a single variable, `POD_UID` from the downward API
+(`packages/daemon/internal/runtime/sandbox/testdata/golden/worker.json` gives each of the six role
+containers an `env` of `POD_UID` alone). `launchEnvironment` (`manifest.go`) splits the rendered
+environment in two — the kubelet-resolved entries go on the container, and the plain `NAME=value`
+pairs travel in the daemon's start command to `legion launcher`, which hands them to
+`legion worker-shim` and so to the agent (`launcherCommand`, `launcher.go`). So a `printenv` run
+by `kubectl exec` into the container finds none of them, while one the role's own agent runs
+prints them. They are an issue pod's role container's; `<generation>` is the role's own generation
+counter, which differs between the role containers of one pod and rises on each relaunch of that
+role in it. `DISPATCH_TOKEN_FILE` and `ENVOY_TOKEN_FILE` are stated without condition because
+configuration load refuses a `runtime: kubernetes` daemon without a Dispatch token and an Envoy
+token (`packages/daemon/internal/config/kubernetes.go`), so every pod carries both.
+
+| variable | value | renderer |
+| :--- | :--- | :--- |
+| `PATH` | `/opt/legion/bin` first, then the image's own | `podPath`, `manifest.go` |
+| `GH_CONFIG_DIR` | `/var/run/legion/gh/<owner>`, the issue's repository's owner's directory in the role's gh bundle | `ghAgentEnv`, `podkind.go` |
+| `LEGION_GRANT_FILE` | the runtime sets it in no container: the `legion` tool mints the grants for its own daemon calls in-process | — |
+| `LEGION_STATE_DIR` | `/var/run/legion/state` | `StateDir`, `names.go`; `manifest.go` |
+| `LEGION_CREDENTIAL_HELPER` | the runtime sets it in no container | — |
+| `DISPATCH_TOKEN_FILE` | `/var/run/legion/private/g<generation>/DISPATCH_TOKEN` | `manifest.go`, over `generationDir`, `names.go` |
+| `LEGION_ROOT_WORKSPACE` | the runtime sets it in no container | — |
+| `LEGION_WORKSPACE` | `/legion/workspaces/<owner>/<repo>/<key-lower>` | `podkind.go`, over `workspace.Location`, `internal/workspace/provision.go` |
+| `LEGION_BOOT_TOKEN_FILE` | `/var/run/legion/private/g<generation>/LEGION_BOOT_TOKEN` | `launcherCommand`, `launcher.go` |
+| `LEGION_TERMINATION_GRACE_SECONDS` | the runtime sets it in no container; the pod's grace reaches the shim as its `--stop-grace` argument | `launcherCommand`, `launcher.go` |
+| `ENVOY_TOKEN_FILE` | `/var/run/legion/private/g<generation>/ENVOY_TOKEN` | `manifest.go` |
+
+`<owner>`, `<repo>`, `<key-lower>` and `<generation>` are the pod's own: the owner and repository
+of the issue's repository, the issue key in lower case, and the role's generation counter. The
+daemon-launched controller's container differs: of these eleven names its agent carries no
+`LEGION_WORKSPACE`, because it is told no tree, issue or checkout (`controllerPod.agentEnv`,
+`podkind.go`), and its `GH_CONFIG_DIR` is the project's default owner's directory;
+[Daemon-launched controller](#daemon-launched-controller) has the rest of it.
+
 Every role container is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root,
-`GH_CONFIG_DIR=/var/run/legion/gh/<owner>`, the issue's repository's owner's directory, and
+`GH_CONFIG_DIR` at the issue's repository's owner's directory under it (the table above), and
 `LEGION_GH_PATH=/usr/local/bin/gh`, the image's real gh. The `gh` first on its PATH is
 `/opt/legion/bin/gh`, which runs `legion gh`: it runs the real gh with `GH_CONFIG_DIR` at the
 directory of the owner the command targets, read as gh reads it from the real gh's own help (see
@@ -1968,11 +2003,10 @@ that repository; git in the shared clone asks the same helper it asked before, a
 host is left to the configuration files. The `legion` in the helper resolves on the PATH of
 whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and
 `GH_HOST` are set to the empty string, which gh ignores, so no value the image or an operator's rc
-file leaves in the environment outranks the files. No container is told `LEGION_GIT_PATH`,
-`LEGION_JJ_PATH`, `LEGION_CREDENTIAL_HELPER` or a grant file (the `legion` tool mints the grants for
-its own daemon calls in-process), and nothing is installed under the issue's volume for a pod to
-run: a pod's `git` and `jj` are the image's,
-resolved on its PATH, which puts only the `legion` directory first. The daemon renders the gh keys
+file leaves in the environment outranks the files. No container is told `LEGION_GIT_PATH` or
+`LEGION_JJ_PATH` (for the credential helper and the grant file, see the table above), and nothing
+is installed under the issue's volume for a pod to run: a pod's `git` and `jj` are the image's,
+resolved on its PATH. The daemon renders the gh keys
 when it writes the role Secret at the pod's start, logging `sandbox runtime: github credential
 written` with the sandbox, role, App, `expiresAt` and owners, and a refresher walks every live role
 each minute, re-rendering its bundle for the owner `github-default` names from the daemon's cached
