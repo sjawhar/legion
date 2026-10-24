@@ -44,6 +44,7 @@ import {
   AgentTexts,
   approval,
   checkouts,
+  SpecFixture,
   SpecVersions,
   State,
   seededIds,
@@ -214,10 +215,7 @@ export async function judgeRun(runDir: string, options: JudgeOptions = {}) {
   const entries = session(runDir);
   const own = sessionId(entries);
   if (own === undefined) throw new Error(`${runDir}: the transcript has no session header`);
-  const fixture = read(
-    path.join(runDir, "fixture.json"),
-    z.looseObject({ spec_artifact: z.string() })
-  );
+  const fixture = read(path.join(runDir, "fixture.json"), SpecFixture);
   const asks = read(path.join(runDir, "agent-asks.json"), AgentAsks)
     .filter((ask) => ask.kind !== "approval" && !seeded.has(ask.id))
     .map((ask, index) => ({ ask, index }))
@@ -236,7 +234,7 @@ export async function judgeRun(runDir: string, options: JudgeOptions = {}) {
           .map((name) => [`documents/${name}`, readFileSync(path.join(documents, name), "utf8")])
       )
     : {};
-  const { checks, writes } = specWork(entries, checkouts(work), fixture.spec_artifact);
+  const { checks, writes } = specWork(entries, checkouts(work), fixture);
   const findingsInputs = Object.fromEntries(
     checks.flatMap((check, index) => [
       [`check-${index + 1}/assignment.md`, `${check.assignment}\n`],

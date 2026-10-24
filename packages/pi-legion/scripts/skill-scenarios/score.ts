@@ -577,7 +577,9 @@ export const AgentTexts = z.array(
 const SourceAsks = z.array(
   z.looseObject({ answer: z.looseObject({ text: z.string().nullish() }).nullish() })
 );
-const SpecFixture = z.looseObject({ issue: z.string(), spec_artifact: z.string() });
+/** fixture.json of a spec run: the run's issue and its primary spec's artifact id. */
+export const SpecFixture = z.looseObject({ issue: z.string(), spec_artifact: z.string() });
+export type SpecFixture = z.infer<typeof SpecFixture>;
 
 /** The ids of the asks seed.ts seeded (seeded.json). Each is another agent's ask, which counts
  * neither against the run nor for it. */
@@ -752,24 +754,48 @@ function dispatchCalls(step: Step): DispatchCall[] {
     })
   );
 }
-/** Whether a call writes the primary spec: `dispatch issue` with a spec, `dispatch doc-edit` of the
- * issue's primary document (no artifact named, or the spec named), or `dispatch artifact` of the
- * spec's file. `specArtifact` is the spec's artifact id (fixture.json). */
-function writesSpec(call: DispatchCall, specArtifact: string): boolean {
-  const isSpec = (name: string) =>
-    ["spec", "spec.md", "spec-md", specArtifact.toLowerCase()].includes(name.toLowerCase());
+/** A reference to an issue or to one of its documents, as `--ref` takes it: `dispatch://<issue>`
+ * or a dashboard URL (`…/issues/<issue>`), then `/spec` or `/artifact/<id>` (`/artifacts/<id>` in
+ * a URL). It gives the issue, and the document: `spec`, or the artifact's id. */
+const ISSUE_REF =
+  /^(?:dispatch:\/\/|https?:\/\/[^/\s]+\/issues\/)([A-Z][A-Z0-9]{1,9}-[1-9]\d*)(?:\/(spec)|\/artifacts?\/([^/@?#\s]+)(?:@v\d+)?)?(?:[?#]\S*)?$/;
+/** Whether a call wrote the run's primary spec: what the call names, and the answer Dispatch gave
+ * in `text`, the result of the tool call that ran it. The answer, not the exit, says whether
+ * Dispatch made a version, so a call the CLI refused (`was not called`), an edit that changed
+ * nothing (`no new version`) and a failed call give none, and a shell that exits non-zero after
+ * the write does not take it back. A `--help` or `--dry-run` call writes nothing.
+ * - `dispatch issue` with a spec, answered with the run's issue made (`Created <issue>:`).
+ * - `dispatch doc-edit` of the run's issue (`--issue`, or the issue of a `--ref`) and of its spec
+ *   (`--artifact`, or the document of the `--ref`), answered `Applied <n> ops (version <v>)`.
+ * - `dispatch artifact` of the run's issue and of the spec's file, answered
+ *   `Uploaded <name> as version <v>`.
+ * A call of another issue, another document or a project's document writes no spec. */
+function writesSpec(call: DispatchCall, fixture: SpecFixture, text: string): boolean {
+  if (call.flag("help") !== undefined || call.flag("dry-run") !== undefined) return false;
+  const isSpec = (name: string | undefined) =>
+    name !== undefined &&
+    ["spec", "spec.md", "spec-md", fixture.spec_artifact.toLowerCase()].includes(
+      name.toLowerCase()
+    );
   if (call.command === "issue")
-    return call.flag("spec") !== undefined || call.flag("spec-file") !== undefined;
+    return (
+      (call.flag("spec") !== undefined || call.flag("spec-file") !== undefined) &&
+      new RegExp(`\\bCreated ${escaped(fixture.issue)}:`).test(text)
+    );
   if (call.command === "doc-edit") {
-    const ref = call.flag("ref");
-    if (call.flag("project") !== undefined && call.flag("issue") === undefined && ref === undefined)
-      return false;
-    const target =
-      call.flag("artifact") ??
-      (ref === undefined ? undefined : /\/artifact\/([^@/?#\s]+)/.exec(ref)?.[1]);
-    return target === undefined || isSpec(target);
+    const named = ISSUE_REF.exec(call.flag("ref") ?? "");
+    return (
+      (named?.[1] ?? call.flag("issue")) === fixture.issue &&
+      isSpec(call.flag("artifact") ?? named?.[2] ?? named?.[3]) &&
+      /\bApplied \d+ ops[^\n]*\(version \d+\)/.test(text)
+    );
   }
-  if (call.command === "artifact") return isSpec(call.flag("name") ?? "");
+  if (call.command === "artifact")
+    return (
+      call.flag("issue") === fixture.issue &&
+      isSpec(call.flag("name")) &&
+      /\bUploaded \S+ as version \d+/.test(text)
+    );
   return false;
 }
 /** The skill file a tool call reads, if any: a `read` of a skill:// target or of a file under a
@@ -853,10 +879,11 @@ function checkReport(
   }
   return { report: parts.length > 0 ? parts.join("\n\n") : text, reportAt };
 }
-/** The spec writes of a transcript and the spec-only checks before them. A check is a `task` call
- * whose assignment holds the seven outline headings as `##` lines and names no path under a
- * checkout in `reach`; a check counts for the first spec write after it. */
-export function specWork(entries: SessionEntry[], reach: string[], specArtifact: string): SpecWork {
+/** The spec writes of a transcript (writesSpec, against the run's fixture.json) and the spec-only
+ * checks before them. A check is a `task` call whose assignment holds the seven outline headings as
+ * `##` lines and names no path under a checkout in `reach`; a check counts for the first spec write
+ * after it. */
+export function specWork(entries: SessionEntry[], reach: string[], fixture: SpecFixture): SpecWork {
   const results = outcomes(entries);
   const writes: SpecWork["writes"] = [];
   const checks: SpecCheck[] = [];
@@ -872,8 +899,9 @@ export function specWork(entries: SessionEntry[], reach: string[], specArtifact:
       continue;
     }
     const outcome = results.get(step.id);
-    const calls = dispatchCalls(step).filter((call) => writesSpec(call, specArtifact));
-    if (outcome === undefined || outcome.failed || calls.length === 0) continue;
+    if (outcome === undefined) continue;
+    const calls = dispatchCalls(step).filter((call) => writesSpec(call, fixture, outcome.text));
+    if (calls.length === 0) continue;
     for (const check of pending)
       checks.push({
         assignment: check.assignment,
@@ -1033,20 +1061,26 @@ export interface SharedRun {
   text: string;
   input: string;
 }
+/** The `>` lines fetch-spec-sources.ts writes for an anchored comment's quote: the lines right
+ * after a comment entry's header, up to its first line that is not a `>` line. The quote is the old
+ * spec's text, not the person's. Every other `>` line of messages.md is the person's own: a block
+ * quote in a message, or one after a comment's quote and body. */
+const ANCHORED_QUOTE = /^(<!-- comment \S+ -->[ \t]*\n)((?:>[^\n]*(?:\n|$))+)/gm;
 /** The shared runs the `quoted` score finds. The run's texts are spec.md, each text of
  * agent-texts.json (seeded asks left out) and each file of documents/. The person's input is
- * source/messages.md without its `>` lines (they quote the old spec) and its entry headers, and the
- * text of each answer in source/asks.json. A shared run is a longest stretch of RUN_WORDS words or
- * more that a text and the input both hold, so a copied paragraph is one run: a stretch inside a
- * longer one, or a repeat of one, is not a run of its own. */
+ * source/messages.md less its entry headers and each comment's anchored quote (ANCHORED_QUOTE),
+ * and the text of each answer in source/asks.json. A shared run is a longest stretch of RUN_WORDS
+ * words or more that a text and the input both hold, so a copied paragraph is one run: a stretch
+ * inside a longer one, or a repeat of one, is not a run of its own. */
 export function sharedRuns(runDir: string): SharedRun[] {
   const seeded = seededIds(runDir);
   const messages = readFileSync(path.join(runDir, "source", "messages.md"), "utf8");
+  const quotesBlanked = messages.replace(
+    ANCHORED_QUOTE,
+    (_, header: string, quote: string) => header + quote.replace(/[^\n]/g, " ")
+  );
   const input = [
-    piece(
-      "messages.md",
-      blank(blank(messages, /^[ \t]*>.*$/gm), /^<!-- (?:message|comment) \S+ -->[ \t]*$/gm)
-    ),
+    piece("messages.md", blank(quotesBlanked, /^<!-- (?:message|comment) \S+ -->[ \t]*$/gm)),
     ...json(path.join(runDir, "source", "asks.json"), SourceAsks).flatMap((ask, index) =>
       ask.answer?.text ? [piece(`asks.json#${index}`, ask.answer.text)] : []
     ),
@@ -1133,8 +1167,9 @@ const indented = (text: string, depth = 6) =>
  * The row passes when its eight scores pass; `judged` gives the judges' counts, which pass or fail
  * nothing here (Task 2.6 holds each one to its own condition).
  *   - outline: outlineProblems finds nothing.
- *   - checked: the transcript holds at least one spec write, a spec-only check (specWork) came
- *     before every one, the first included, and findings.json has no `neither` row.
+ *   - checked: the transcript holds at least one spec write (writesSpec: a write Dispatch made of
+ *     the run's own primary spec), a spec-only check (specWork) came before every one, the first
+ *     included, and findings.json has no `neither` row.
  *   - refusals: each `dispatch` call that exited 1 or 2 (a `bash` result's `isError` and
  *     `details.exitCode`) is followed by a `dispatch` call that succeeded, with no skill file read
  *     between them (skillRead). Each failing pair is printed with its refusal text.
@@ -1169,7 +1204,7 @@ function specRow(
   const { approved, version, turns } = approval(runDir);
   const all = steps(entries);
   const results = outcomes(entries);
-  const work = specWork(entries, reach, fixture.spec_artifact);
+  const work = specWork(entries, reach, fixture);
   const firstWrite = work.writes[0]?.index ?? Number.POSITIVE_INFINITY;
   const reads = all.flatMap((step) => {
     const target = skillRead(step);

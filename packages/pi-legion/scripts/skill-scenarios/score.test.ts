@@ -241,12 +241,18 @@ function outlined({ problem = "The CLI prints no greeting.", design = "", summar
     "",
   ].join("\n");
 }
-// The person's input: messages.md without its `>` lines, and each answer's text in asks.json.
+// The person's input: messages.md less each entry's header and each comment's anchored quote (the
+// `>` lines right after a comment's header), and each answer's text in asks.json. Every other `>`
+// line is the person's own words: a block quote in a message, or one after a comment's quote.
 const askedFor =
   "Please make the widgets command line print a friendly greeting whenever somebody runs it with their name.";
 const quotedLine = "The command line prints nothing at all when a person runs it today.";
 const longMessage =
   "The greeting must stay on one line, use the name exactly as the person typed it, end with a full stop, and never print the name twice even when the person repeats it on the command line.";
+const voiceLine =
+  "I want the greeting to feel warm, so pick words a support agent would really say out loud.";
+const commentQuote =
+  "A colleague wrote that the old banner scrolled off the top of every small terminal window.";
 const personMessages = [
   "<!-- message 2026-10-20T10:00:00Z -->",
   askedFor,
@@ -256,8 +262,15 @@ const personMessages = [
   "",
   "Keep the output short so that scripts can still read each line.",
   "",
+  `> ${commentQuote}`,
+  "",
   "<!-- message 2026-10-21T09:00:00Z -->",
   longMessage,
+  "",
+  "<!-- message 2026-10-22T09:00:00Z -->",
+  `> ${voiceLine}`,
+  "",
+  "That is what I said on the call.",
   "",
 ].join("\n");
 const sourceAsks = [
@@ -309,8 +322,14 @@ const checkOf = (id: string, assignment = outlined()) => [
   }),
   result(id, "No gaps."),
 ];
-const specEdit = (id: string) =>
-  sh(id, "dispatch doc-edit --issue LWEVAL-7 --ops-json-file ops.json");
+/** A doc-edit of the run's spec, answered as Dispatch answers one that made a version. */
+const specEdit = (id: string, version = 2) =>
+  sh(
+    id,
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json",
+    0,
+    `Applied 1 ops (version ${version})\nDocument token: sha256:abc`
+  );
 const routedRead = readOf("r1", "skill://dispatch-writing-specs");
 const askStep = sh(
   "a1",
@@ -528,8 +547,159 @@ specRun("spec-writing-head-10", {
 specRun("spec-writing-head-11", {
   spec: outlined({ problem: "The CLI must print a friendly greeting whenever somebody runs." }),
 });
-// Keeps a `>` line of messages.md, which quotes the old spec, not the person.
+// Keeps a comment's anchored quote, which quotes the old spec, not the person.
 specRun("spec-writing-head-12", { spec: outlined({ problem: quotedLine }) });
+// Copies the `>` lines that start a message: the person's own words, as a block quote.
+specRun("spec-writing-head-19", {
+  spec: outlined({ problem: voiceLine }),
+  judges: copied("spec.md", folded(voiceLine), "copies"),
+});
+// Copies a `>` line after a comment's anchored quote and its body: the person's words too.
+specRun("spec-writing-head-20", {
+  spec: outlined({ problem: commentQuote }),
+  judges: copied("spec.md", folded(commentQuote), "copies"),
+});
+// Spec writes: only a write Dispatch made, of the run's own primary spec, counts. Each call below is
+// something else, and the run's two checked writes still stand. Each result is the one Dispatch
+// gives, so the calls that Dispatch did apply are left out for what they name, not for their result.
+const applied = "Applied 1 ops (version 2)\nDocument token: sha256:abc";
+const notWrites = [
+  // The help of doc-edit, piped as the agent did.
+  sh("n1", "dispatch doc-edit --help 2>&1 | head -40", 0, "Usage: dispatch doc-edit [flags]"),
+  // An edit of another issue's spec, and another issue made with a spec.
+  sh("n2", "dispatch doc-edit --issue WS-1 --artifact spec --ops-json '[]'", 0, applied),
+  sh(
+    "n3",
+    "dispatch issue --project WS --title 'Orchestration' --spec-file - <<'EOF'\nIt tracks one stream.\nEOF",
+    0,
+    "Created WS-1: Orchestration → http://127.0.0.1:1/issues/WS-1; unassigned"
+  ),
+  // An edit of the run's issue's other document.
+  sh("n4", "dispatch doc-edit --issue LWEVAL-7 --artifact plan.md --ops-json '[]'", 0, applied),
+  // A failed edit of the run's spec: the tool refused it.
+  sh(
+    "n5",
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json",
+    1,
+    "refused"
+  ),
+  // An edit the CLI refused before calling Dispatch: bash exits 0 through `2>&1`, and the result
+  // says `was not called`.
+  sh(
+    "n6",
+    'dispatch doc-edit --issue LWEVAL-7 --artifact spec --precondition-json \'{"document":"sha\' 2>&1',
+    0,
+    "dispatch doc-edit was not called: 1 problem\n- --precondition-json is not JSON"
+  ),
+  // A dry run, and an edit that changed nothing and so made no version.
+  sh("n7", "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json --dry-run"),
+  sh(
+    "n8",
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json",
+    0,
+    "Applied 1 ops; nothing changed (no new version)"
+  ),
+  // An edit by a ref to another issue's spec.
+  sh("n9", "dispatch doc-edit --ref dispatch://WS-1/spec --ops-json '[]'", 0, applied),
+  // The help and a dry run of the run's spec, each in one call with an edit Dispatch applied to
+  // another issue: that edit's answer is no write of the help or the dry run.
+  sh(
+    "n10",
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --help | head -5; dispatch doc-edit --issue WS-1 --artifact spec --ops-json '[]'",
+    0,
+    applied
+  ),
+  sh(
+    "n11",
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json --dry-run && dispatch doc-edit --issue WS-2 --artifact spec --ops-json '[]'",
+    0,
+    applied
+  ),
+  // Uploads that are no spec write: the run's plan, another issue's spec.md, and the run's spec.md
+  // that Dispatch refused.
+  sh(
+    "n12",
+    "dispatch artifact --issue LWEVAL-7 --name plan.md --content-file plan.md",
+    0,
+    "Uploaded plan.md as version 1 (artifact slug plan-md; dispatch://LWEVAL-7/artifact/plan-md)"
+  ),
+  sh(
+    "n13",
+    "dispatch artifact --issue WS-1 --name spec.md --content-file spec.md",
+    0,
+    "Uploaded spec.md as version 2 (artifact slug spec-md; dispatch://WS-1/artifact/spec-md)"
+  ),
+  sh(
+    "n14",
+    "dispatch artifact --issue LWEVAL-7 --name spec.md --content-file spec.md 2>&1",
+    0,
+    "dispatch artifact was not called: 1 problem\n- --content-file spec.md does not exist"
+  ),
+];
+specRun("spec-writing-head-21", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    ...notWrites,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// The spec writes of the run's issue that do count: `dispatch issue` that Dispatch answered with the
+// run's issue made, the spec by its artifact id, by a dispatch:// ref, as an uploaded spec.md, by a
+// dashboard URL, and in a shell whose last command failed after Dispatch made the version. Each has
+// its check before it.
+specRun("spec-writing-head-22", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c0"),
+    sh(
+      "w0",
+      "dispatch issue --project LWEVAL --title 'Greeting' --spec-file spec.md",
+      0,
+      "Created LWEVAL-7: Greeting → http://127.0.0.1:1/issues/LWEVAL-7; unassigned"
+    ),
+    checkOf("c1"),
+    sh(
+      "w1",
+      "dispatch doc-edit --issue LWEVAL-7 --artifact art-spec --ops-json-file ops.json",
+      0,
+      applied
+    ),
+    checkOf("c2"),
+    sh(
+      "w2",
+      "dispatch doc-edit --ref dispatch://LWEVAL-7/artifact/spec --ops-json-file ops.json",
+      0,
+      "Applied 2 ops (version 3)"
+    ),
+    checkOf("c3"),
+    sh(
+      "w3",
+      "dispatch artifact --issue LWEVAL-7 --name spec.md --content-file spec.md",
+      0,
+      "Uploaded spec.md as version 4 (artifact slug spec-md; dispatch://LWEVAL-7/artifact/spec-md)"
+    ),
+    checkOf("c4"),
+    sh(
+      "w4",
+      "dispatch doc-edit --ref http://127.0.0.1:1/issues/LWEVAL-7/spec --ops-json-file ops.json",
+      0,
+      "Applied 1 ops (version 5)"
+    ),
+    checkOf("c5"),
+    sh(
+      "w5",
+      "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json 2>&1; dispatch doc-read --issue LWEVAL-7 --artifact spec | grep -c TODO",
+      1,
+      "Applied 1 ops (version 6)\nDocument token: sha256:abc\n0"
+    ),
+    finish
+  ),
+});
 // Copies a 30-word passage: one run.
 const thirtyWords = folded(longMessage).split(" ").slice(0, 30).join(" ");
 specRun("spec-writing-head-13", {
@@ -786,11 +956,31 @@ test("quoted: a shared run of 8 words fails only when the judge marks it copies"
   expect(rowOf("spec-writing-head-10")).toContain(" shared=1 copies=0");
 });
 
-test("quoted: 7 shared words and a kept `>` line are no run", () => {
+test("quoted: 7 shared words and a comment's anchored quote are no run", () => {
   expect(scoresOf("spec-writing-head-11")).toEqual(allPass);
   expect(rowOf("spec-writing-head-11")).toContain(" shared=0 ");
   expect(scoresOf("spec-writing-head-12")).toEqual(allPass);
   expect(rowOf("spec-writing-head-12")).toContain(" shared=0 ");
+});
+
+test("quoted: the person's own `>` lines are input, in a message or after a comment's quote", () => {
+  expect(scoresOf("spec-writing-head-19")).toEqual({ ...allPass, quoted: "false" });
+  expect(rowOf("spec-writing-head-19")).toContain(
+    `shared run 1 in spec.md (${folded(voiceLine).split(" ").length} words, copies: The verdict.): ${folded(voiceLine)}`
+  );
+  expect(scoresOf("spec-writing-head-20")).toEqual({ ...allPass, quoted: "false" });
+  expect(rowOf("spec-writing-head-20")).toContain(`: ${folded(commentQuote)}`);
+});
+
+test("checked: only an accepted write of the run's own primary spec is a spec write", () => {
+  // --help, another issue or document, a failed call, a refused call, a dry run, an edit that
+  // changed nothing, and a ref to another issue's spec.
+  expect(scoresOf("spec-writing-head-21")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-21")).toContain(" writes=2 ");
+  // The run's issue made with its spec, its spec by artifact id, by a dispatch:// ref, as an
+  // uploaded spec.md, by a dashboard URL, and in a shell that failed after the write.
+  expect(scoresOf("spec-writing-head-22")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-22")).toContain(" writes=6 ");
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {

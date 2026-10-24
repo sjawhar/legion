@@ -120,9 +120,14 @@ const answered = (at: string, id: string, tool: string, text: string, details: o
     content: [{ type: "text", text }],
   },
 });
-const docEdit = (at: string, id: string) => [
-  call(at, id, "bash", { command: "dispatch doc-edit --issue LWEVAL-7 --ops-json-file ops.json" }),
-  answered(at, id, "bash", "Edited spec.md.", { exitCode: 0 }),
+/** A doc-edit of the run's spec, answered as Dispatch answers one that made a version. */
+const docEdit = (at: string, id: string, version: number) => [
+  call(at, id, "bash", {
+    command: "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json",
+  }),
+  answered(at, id, "bash", `Applied 1 ops (version ${version})\nDocument token: sha256:abc`, {
+    exitCode: 0,
+  }),
 ];
 const transcript = [
   { type: "session", id: sessionId, cwd: "/rig/cwd" },
@@ -144,7 +149,7 @@ const transcript = [
     "task",
     '<task-result id="SpecCheck1">R2 names no source.</task-result>'
   ),
-  ...docEdit("2026-10-24T10:02:00.000Z", "w1"),
+  ...docEdit("2026-10-24T10:02:00.000Z", "w1", 2),
   // A spec-only check that runs in the background: its report arrives as a message of its own.
   call("2026-10-24T10:04:00.000Z", "c2", "task", {
     context: `Read this spec alone.\n\n${v3}`,
@@ -163,7 +168,7 @@ const transcript = [
     content:
       '<system-notice>\nBackground job SpecCheck2 has completed.\n<task-result id="SpecCheck2" agent="task" status="completed">\nA1 tests no requirement alone.\n</task-result>\n</system-notice>',
   },
-  ...docEdit("2026-10-24T10:06:00.000Z", "w2"),
+  ...docEdit("2026-10-24T10:06:00.000Z", "w2", 3),
 ];
 
 /** A spec-writing run directory as rig.sh and seed.ts write one; `seeded-1` is a seeded ask that
@@ -506,4 +511,19 @@ test("answer refuses a label the ask does not offer, and writes an empty file wh
   await answerTurn(dir, 3, { runner: fakeRunner(none) });
   expect(none).toEqual([]);
   expect(readFileSync(path.join(dir, "answers-3.jsonl"), "utf8")).toBe("");
+});
+
+// fetch-spec-sources.ts writes `>` lines for a comment's anchored quote alone, at the start of the
+// comment's text. Any other `>` line, such as a block quote in a message, is the person's words.
+test("each prompt that reads messages.md says only a comment's leading `>` lines quote the spec", async () => {
+  const asked: Seen[] = [];
+  await answerTurn(runDir("spec-writing-head-5"), 1, { runner: fakeRunner(asked) });
+  const prompts = [...asked, only("questions"), only("preamble")].map((judge) => judge.prompt);
+  expect(prompts).toHaveLength(4);
+  for (const prompt of prompts) {
+    expect(prompt).toContain(
+      "The `>` lines directly after a `<!-- comment <time> -->` line quote the spec that the comment is about. They are not the person's words. Every other line is the person's words."
+    );
+    expect(prompt).not.toContain("A line that starts with `>` quotes the spec");
+  }
 });

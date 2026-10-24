@@ -69,7 +69,7 @@ function ending(dir: string, file: string, shape: string): string {
 }
 
 const MESSAGES =
-  "- `messages.md`: what the people wrote on the issue, oldest first. Each entry starts with a line `<!-- message <time> -->` or `<!-- comment <time> -->`. A line that starts with `>` quotes the spec that a comment is about. That line is not the person's words.";
+  "- `messages.md`: what the people wrote on the issue, oldest first. Each entry starts with a line `<!-- message <time> -->` or `<!-- comment <time> -->`. The `>` lines directly after a `<!-- comment <time> -->` line quote the spec that the comment is about. They are not the person's words. Every other line is the person's words.";
 const SOURCE_ASKS =
   "- `asks.json`: the questions that the people answered before the agent started. Each question holds its options and the person's answer (`answer.selected` and `answer.text`).";
 
