@@ -18,6 +18,7 @@ import {
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { insertExternalLink, resetDatabase } from "./seed";
 import { refusePosts } from "./sends";
+import { touchHold } from "./touch";
 import { asUser } from "./users";
 
 const session = {
@@ -390,6 +391,9 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
 // boxes with blank space around them in the middle of a line, so the hit box grows by vertical
 // padding, not an overlay: padding on an inline element grows the hit box without moving the
 // line, and without covering whatever happens to sit within 44px of the link.
+// The row places the turn itself and then waits for it to stop moving: the Conversation's jump
+// to its newest turn lands well after a link first has a box, and when it is missed the turn is
+// left under the fixed comment composer, where a hit test reads the composer and not the link.
 test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
   browser,
 }, testInfo) => {
@@ -468,6 +472,36 @@ test("an inline link keeps its line and grows its hit box without covering its n
 
     await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByRole("link", { name: "Lower line" }).first()).toBeVisible();
+    // The jump to the newest turn, and the unread "New" marks clearing after it, both move the
+    // turn after `toBeVisible()`: put the upper link in the middle of the viewport and hold
+    // there until its rect has not moved for 1.5 s, so the measurement is taken at a position
+    // this row chose.
+    await page.evaluate(async () => {
+      // The same link the measurement below takes: outside the ask cards, where a decision
+      // block renders the same body in its own card.
+      const upper = [...document.querySelectorAll("main a")]
+        .filter((link) => link.closest('[data-testid^="ask-"]') === null)
+        .find((link) => (link.textContent ?? "") === "Upper line");
+      if (upper === undefined) {
+        throw new Error("the conversation is missing its seeded upper link");
+      }
+      upper.scrollIntoView({ block: "center" });
+      // 30 samples 50 ms apart, the counter reset whenever the rect moves, bounded at 20 s.
+      let stable = 0;
+      let previous = upper.getBoundingClientRect().y;
+      for (let sample = 0; sample < 400; sample += 1) {
+        const tick = Promise.withResolvers<void>();
+        setTimeout(tick.resolve, 50);
+        await tick.promise;
+        const y = upper.getBoundingClientRect().y;
+        stable = y === previous ? stable + 1 : 0;
+        previous = y;
+        if (stable >= 30) {
+          return;
+        }
+      }
+      throw new Error("the seeded upper link never stopped moving");
+    });
     const line = await page.evaluate(() => {
       // Outside the ask cards: a decision block renders the same body in its own card.
       const links = [...document.querySelectorAll("main a")].filter(
@@ -481,18 +515,52 @@ test("an inline link keeps its line and grows its hit box without covering its n
       const range = document.createRange();
       range.selectNodeContents(upper);
       const upperText = range.getBoundingClientRect();
-      const node = document.elementFromPoint(
-        upperText.x + upperText.width / 2,
-        upperText.bottom - 1
-      );
+      const x = upperText.x + upperText.width / 2;
+      const hitAt = (y: number) => {
+        const node = document.elementFromPoint(x, y);
+        return node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link");
+      };
+      // One pixel below the link's own text - inside the padding, never derived from the
+      // anchor's padded box, which would move with the padding it is there to measure.
+      const probeY = upperText.bottom + 1;
+      // The composer is a fixed box over the foot of the page: a probe under it reads the
+      // composer whatever the link does, so the probe point has to clear it.
+      const composer = document.querySelector('[aria-label="Comment composer"]');
       return {
+        inPadding: hitAt(probeY),
         // How far the lower link's padding box starts below the upper link's own text.
         // Negative is padding sitting on letters a reader is trying to tap.
         lowerClearance: lower.getBoundingClientRect().y - upperText.bottom,
-        onUpperTextBottom:
-          node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link"),
+        onUpperTextBottom: hitAt(upperText.bottom - 1),
+        probeClear:
+          x >= 0 &&
+          x <= window.innerWidth &&
+          probeY >= 0 &&
+          probeY <= window.innerHeight &&
+          (composer === null || probeY < composer.getBoundingClientRect().top),
+        probeX: x,
+        probeY,
       };
     });
+
+    // A finger at the padded point, which no hit test can speak for: the click is recorded in
+    // the capture phase - before anything on the way can stop it - and not followed.
+    await page.evaluate(() => {
+      document.addEventListener(
+        "click",
+        (event) => {
+          const target = event.target;
+          document.documentElement.dataset.e2eTappedLink =
+            target instanceof Element ? (target.closest("a")?.textContent ?? "not-a-link") : "none";
+          event.preventDefault();
+        },
+        true
+      );
+    });
+    await touchHold(page, { x: line.probeX, y: line.probeY }, 0);
+    const tapped = await page.evaluate(
+      () => document.documentElement.dataset.e2eTappedLink ?? "no-click"
+    );
 
     await page.goto("/");
     const card = page.getByTestId(`ask-${bodyAsk.id}`);
@@ -543,9 +611,20 @@ test("an inline link keeps its line and grows its hit box without covering its n
     //    text, so a tap at the bottom of that text opens the upper link.
     expect(line.lowerClearance).toBeGreaterThanOrEqual(0);
     expect(line.onUpperTextBottom).toBe("Upper line");
-    // 4. A tap on the word before a wrapped link stays on the text.
+    // 4. Those probes were taken on screen: the point is inside the viewport and above the
+    //    composer's fixed box, so what they hit is the turn.
+    expect(
+      line.probeClear,
+      "the turn was left under the fixed comment composer, so the probe measured the composer"
+    ).toBe(true);
+    // 5. One pixel below the upper link's own text is still the upper link - this is the check
+    //    that goes red when the three pixels of `.prose a { padding-block }` are gone.
+    expect(line.inPadding).toBe("Upper line");
+    // 6. And a finger there reaches the link, which an `elementFromPoint` probe does not say.
+    expect(tapped).toBe("Upper line");
+    // 7. A tap on the word before a wrapped link stays on the text.
     expect(measured.onWord).toBe("not-a-link");
-    // 5. Two stacked links: the lower edge of the first is the first, and it never reaches the
+    // 8. Two stacked links: the lower edge of the first is the first, and it never reaches the
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
