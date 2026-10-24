@@ -255,11 +255,11 @@ func TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused(t *testing.T
 	if writes.tags != 0 {
 		t.Fatalf("the refused retag made %d TagResource calls, want none", writes.tags)
 	}
-	if _, stderr, code := runSecret("retag", "APP_KEY", "--github-owners", "Trajectory-Org  ada acme-org"); code != 0 {
+	if _, stderr, code := runSecret("retag", "APP_KEY", "--github-owners", "Widgets-Org  ada acme-org"); code != 0 {
 		t.Fatalf("retag to three owners: exit %d stderr %q", code, stderr)
 	}
-	if tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags); tags[policy.TagGitHubOwners] != "acme-org ada trajectory-org" {
-		t.Fatalf("tags = %v, want github-owners %q", tags, "acme-org ada trajectory-org")
+	if tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags); tags[policy.TagGitHubOwners] != "acme-org ada widgets-org" {
+		t.Fatalf("tags = %v, want github-owners %q", tags, "acme-org ada widgets-org")
 	}
 	useStdin(t, "stored-value")
 	if _, stderr, code := runSecret("create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "ada acme-org"); code != 0 {

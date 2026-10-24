@@ -74,8 +74,13 @@ tag lists. An installation on any other account gets no token.
 ## Store the App key
 
 The deployment creates an empty secret named `GITHUB_APP_<PERSON>`, with the `kind: github-app`
-and `github-owners` tags. Your access lets you set its value. Sign in to your Google Cloud
-Application Default Credentials before you set its value.
+and `github-owners` tags. Your access lets you set its value.
+
+Do not run `gcloud auth application-default login` on the box. That command replaces the
+credentials of the box for all programs. Use your own Google sign-in for this one write only.
+Follow [Before you start](/legion/broker/guides/manage-a-secret/#before-you-start) in "Manage a
+secret". It signs you in with `gcloud auth login --no-activate`, and it puts the path of your
+credentials file in the `me` shell variable.
 
 Build `app-key.json` from the App ID and the private key file that GitHub gave you. A PEM key
 spans several lines, which JSON must escape, so let `jq` write the file. Do not paste the key into
@@ -87,10 +92,10 @@ the file.
 ```
 
 Set the secret from standard input, then delete the file. Do not put the private key on a command
-line.
+line. Put `GOOGLE_APPLICATION_CREDENTIALS` before this command only. Do not export it.
 
 ```sh
-agent-secrets secret set GITHUB_APP_<PERSON> < app-key.json
+GOOGLE_APPLICATION_CREDENTIALS="$me" agent-secrets secret set GITHUB_APP_<PERSON> < app-key.json
 rm app-key.json
 ```
 
