@@ -590,7 +590,7 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
     state: stateAt("implementing"),
     answers: {
       handoffComplete: {
-        note: "no check is required on main, so READY was published without reading the head's checks",
+        note: "pull request #312 is already merged, so READY was published without reading its head's checks or handoffs",
       },
     },
   });
@@ -618,11 +618,11 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
     content: [
       {
         type: "text",
-        text: '{"note":"no check is required on main, so READY was published without reading the head\'s checks"}',
+        text: '{"note":"pull request #312 is already merged, so READY was published without reading its head\'s checks or handoffs"}',
       },
     ],
     details: {
-      note: "no check is required on main, so READY was published without reading the head's checks",
+      note: "pull request #312 is already merged, so READY was published without reading its head's checks or handoffs",
     },
   });
   expect(calls).toEqual([

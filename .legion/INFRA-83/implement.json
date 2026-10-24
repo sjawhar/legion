@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-83",
+  "completed": "2026-10-23T14:20:00Z",
+  "round": 7,
+  "proof": [
+    {
+      "criterion": "The pull request body's Threads ledger says what the forge says, and says how it was derived",
+      "surface": "The pull request's review threads as GitHub holds them, read with the paginated GraphQL this change itself writes, and the body's `## Verification` ledger that `skills/legion-worker/references/pr-body.md` makes the record a reviewer and a merger check against GitHub.",
+      "command": "`gh api graphql --paginate -f query='… reviewThreads(first:100, after:$endCursor){ totalCount pageInfo{hasNextPage endCursor} nodes{id isResolved path line} }' -F o=sjawhar -F r=legion -F n=2121`, counted from its answer rather than from the bullets already in the body.",
+      "observed": "`totalCount 11`, `unresolved 0`. The ledger read six: it had been extended by hand as bullets were added and never rebuilt from this read, so round three's three threads were never named in it. It now reads eleven with the eleven ids in the answer's own order, each with its file, its fixing commit and the head it was resolved at, and it names the query that produced the count so the next reader repeats it instead of trusting it.",
+      "headSha": "437320d4a209431775a906a012716fc17eeade84",
+      "negativeControl": "The query is the control: run it again and it answers `11`/`0`, which is what the line now claims; before this round the same query answered `9` against a line that said `6`, which is how the defect was found. A ledger extended by hand cannot be checked this way, which is the reason the derivation is now written beside the number."
+    },
+    {
+      "criterion": "The CI-line guard reads the root the defect lived in, and its comment describes what its regexes catch rather than a class they do not close",
+      "surface": "`packages/pi-legion/src/skills-guard.test.ts` over the staged `@sjawhar/pi-legion` partition and the daemon's prompts root, the two places a worker's text comes from.",
+      "command": "`cd packages/pi-legion && bun test src/skills-guard.test.ts`, then the control the widening exists for: the regressed paragraph planted in `packages/daemon/internal/prompts/roles/implementer.md`, the suite run, the file restored with `jj restore --from @-`, the suite run again.",
+      "observed": "The scan is `[staged, promptsRoot].flatMap(files)`, the shape the sibling `skip-checks` test already used, and a hit is named in the staged layout or from the repository root according to which root it came from. Planted in the prompts root, the test fails naming `packages/daemon/internal/prompts/roles/implementer.md:51`; before the widening that root was not read at all. Restored, 10 pass, 0 fail. The comment keeps its first paragraph, which records why the deletion needs a guard, and replaces the grammatical claim with an enumeration: the three shapes the regexes pin, then four they do not catch, each with its sentence - the copular, the nominalisation (`the sole definition of the CI line`, the sentence this branch deletes from `implementer.md:12`), a writing verb outside the list, and the anaphora - closing with the statement that it pins the shapes the regression took and closes no class.",
+      "headSha": "437320d4a209431775a906a012716fc17eeade84",
+      "negativeControl": "Both roots, both directions: the paragraph fires the guard in the staged skills (round six's control) and now in the prompts root too, and with it removed from both the suite is green. Round six's mention control stands unchanged - four sentences naming the line while saying it is gone, planted in a staged skill, all pass - and it is why no regex was widened this round."
+    },
+    {
+      "criterion": "The reviewer's 300-file compare caveat can be acted on with the command it follows",
+      "surface": "`skills/legion-worker/references/merge-gate.md` and `packages/daemon/internal/prompts/go/reviewer.md`, the two copies of the reviewer's four GitHub reads, and `gh` against this repository.",
+      "command": "`gh api repos/sjawhar/legion/compare/d940f4b9...d72ad240 --jq '{handoffsOnly: ([.files[].filename] | all(startswith(\".legion/\"))), files: (.files | length)}'`, run before the filter was written into either file.",
+      "observed": "`{\"files\":1,\"handoffsOnly\":true}`. Both copies now carry that filter, and the caveat is stated in terms of what the reader sees: `files` at 300 is a comparison GitHub cut at its cap, so `handoffsOnly` decides nothing - tell the architect and do not approve. The prompt copy gains that sentence, which it did not carry at all; before this round the command collapsed the list to one boolean and the count never reached the reviewer, so the rule as written could not be followed.",
+      "headSha": "437320d4a209431775a906a012716fc17eeade84",
+      "negativeControl": "The old filter is the control: `--jq '[.files[].filename] | all(startswith(\".legion/\"))'` prints `true` and nothing else, with no way for the reader to tell a 1-file comparison from a 300-file one, which is the state the caveat assumed away."
+    }
+  ],
+  "filesChanged": [
+    "packages/pi-legion/src/skills-guard.test.ts: the CI-line test scans `[staged, promptsRoot]`, names a hit by the root it came from, and its comment enumerates what the regexes catch and what they do not. No regular expression changed.",
+    "skills/legion-worker/references/merge-gate.md and packages/daemon/internal/prompts/go/reviewer.md: the compare emits `{handoffsOnly, files}` from one call and the 300-file caveat is stated in terms of `files`.",
+    "packages/claude-envoy/legion/skills/legion-worker/references/merge-gate.md: regenerated by `bun run build`, never hand-edited."
+  ],
+  "trickyParts": [
+    "The reviewer offered a flat ban on the phrase as a third option and it was declined, on the architect's own condition for the guard existing: a flat ban fires on a sentence that names the line while saying it is gone, which a skill may legitimately carry one day. Zero hits today is the state of the tree, not a property of the rule.",
+    "No regex was widened, although the reviewer named two shapes the comment claimed and the code missed. The architect bounded this round to the scan and the comment and said a third point ends the guard; widening the verb set is where a false positive on a mention would come from, and the comment naming the gaps is what the ruling asked for.",
+    "The ledger's defect was not a wrong count once: it was a record maintained by hand, so it could drift again the next time a bullet is added. The fix is the derivation written beside the number, which makes the line checkable in one command by anyone who doubts it."
+  ],
+  "deviations": [
+    "`packages/daemon/internal/prompts/go/reviewer.md` was fixed beside `merge-gate.md` although the review named only the skill: the prompt carries the same command with the same caveat and the same defect, and the reviewer reads the prompt, not the skill, as its own instruction.",
+    "The reviewer's new fast-follow (unexporting `classify.Judge`, which lost its last caller outside its package when this branch deleted `readyChecks`'s judging) and the four carried from earlier rounds are on the body's `Fast-follow` line, not fixed here."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The guard has now been the finding in two consecutive rounds and the architect has set its budget at this one. What it is worth is recorded here for whoever reads this next: it caught a real regression that no other check saw, and both rounds' findings were about what it claimed rather than what it did. The comment is now an enumeration, so the next reader can see its edges without running it.",
+    "No CI verdict exists for this head and none was waited for, per `skill://legion-worker/references/pr-body.md` *Never waiting on CI*. The last head whose base-required set was fully green is `7aaf2e9ac1a9b08e74df20552818fd3621080341` (`lint` 120428473579, `typecheck` 120428473536, `test` 120428473182, `pr-title` 120428472667, with `pi-legion` 120428562638 beside them).",
+    "No merge under the new code has been observed and none can be before this pull request merges. The live evidence is the production check after the close."
+  ]
+}

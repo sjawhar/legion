@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-83",
+  "completed": "2026-10-23T14:55:00Z",
+  "round": 7,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Three changes, each checked against what it claims rather than against its own test's green. The guard's comment now enumerates what it pins and what it does not, so I ran every sentence it names through the regexes themselves: the three shapes it says it catches fire (the reference as the subject of `names`, as the object of `writes`, and the `**CI:**` field line), the four it says it misses pass (the copular 'The body's CI line is the runs GitHub started', the nominalisation 'the sole definition of the CI line', a writing verb outside the list, and the anaphora 'the implementer writes it'), and the three it offers as sentences that name the line while saying it is gone pass too. Every claim the comment makes is true, which was not the case last round - the old comment asserted that no such sentence could reach the instruction slots, and one can. The widening to the daemon's prompts I drove rather than read: I appended 'The implementer writes the `CI` line at its completion.' to packages/daemon/internal/prompts/roles/implementer.md and the guard failed, naming packages/daemon/internal/prompts/roles/implementer.md:51 from the repository root as the comment says a prompt hit reads, then restored the file and it passed, 10 pass, 22 expect() calls. The compare caveat I ran verbatim from the text, in both of its states: on this pull request it prints {\"files\":1,\"handoffsOnly\":true}, and on a comparison GitHub cuts at its cap it prints {\"files\":300,\"handoffsOnly\":false} - which is the whole point of the change, since the old form printed a bare boolean with nothing to tell a cut comparison from a complete one. The skill and the prompt carry the same command, the skill is byte-identical to its bundled copy, and check-dist reports a fresh build. The one thing I could not finish is CI, recorded below and not as a pass: the head's `test` job has been hung on its `Install tmux` step for 55 minutes.",
+    "proofCitationCheck": "The implement handoff cites the code head 437320d4a209431775a906a012716fc17eeade84. At that head, read on GitHub: 26 success, 2 skipped, nothing red, and `test` still in_progress. I did not take its citation of a settled suite: see ciRead."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The guard says what it catches and what it does not, and it now covers the daemon's prompts as well as the staged skills",
+      "surface": "The guard's own regexes, run against every sentence its comment names, and the guard itself run against a planted instruction in a daemon prompt - the artifact the widening exists for.",
+      "command": "A throwaway script applying the three regexes verbatim to twelve sentences, nine of them quoted from the comment; then appending an instruction to packages/daemon/internal/prompts/roles/implementer.md and running cd packages/pi-legion && bun test src/skills-guard.test.ts, then restoring the file.",
+      "observed": "Every claim the comment makes holds. The three caught shapes fire; the four it declares uncaught pass, including the nominalisation it names as the sentence this branch deletes from the implementer prompt, which I confirmed is absent from the tree. The three negation examples pass. With the instruction planted in a prompt the guard fails, naming packages/daemon/internal/prompts/roles/implementer.md:51 - the repository-root spelling the comment says a prompt hit takes, against the staged spelling a skill hit takes - and with it restored the suite is 10 pass, 0 fail, 22 expect() calls.",
+      "headSha": "437320d4a209431775a906a012716fc17eeade84",
+      "negativeControl": "The widening is proven by the planted instruction rather than by the new code path being present: before the file was restored the test named the prompt and failed; after, it passed. The comment's honesty is itself the control for last round's finding - the universal claim that a sentence saying the line is gone cannot reach the instruction slots is gone, and what replaced it is a list of four shapes the rule misses, each of which I confirmed it does miss. The one false positive I reported last round survives ('nothing is cited from the `CI` line any more' fires, since its negator is a negative subject rather than never, no longer or not), and the comment no longer claims otherwise; it fails closed and stays a fast-follow."
+    },
+    {
+      "criterion": "The reviewer's compare read can be acted on when GitHub cuts the comparison at its 300-file cap",
+      "surface": "GitHub, through the command exactly as the skill and the daemon's reviewer prompt now write it.",
+      "command": "gh api repos/sjawhar/legion/compare/437320d4a209...f8f4aec0260e902c9e1124893e7aa34c17b5a23b --jq '{handoffsOnly: ([.files[].filename] | all(startswith(\".legion/\"))), files: (.files | length)}'; and the same read over a comparison long enough for GitHub to cut it.",
+      "observed": "On this pull request: {\"files\":1,\"handoffsOnly\":true}. On a comparison GitHub cuts: {\"files\":300,\"handoffsOnly\":false}. The second is the case the change exists for - at the cap, handoffsOnly is computed over a list GitHub truncated, and the new text tells the reviewer to read files at 300 as a cut comparison, tell the architect and not approve. The skill and packages/daemon/internal/prompts/go/reviewer.md carry the same command and the same caveat, and skills/legion-worker/references/merge-gate.md is byte-identical to its bundled copy with check-dist reporting a fresh build.",
+      "headSha": "437320d4a209431775a906a012716fc17eeade84",
+      "negativeControl": "The old form is the control, and the two runs show what it cost: `--jq '[.files[].filename] | all(startswith(\".legion/\"))'` prints a bare true or false, identical in shape whether GitHub listed every file or stopped at 300, so a reviewer reading `false` at the cap could not tell a real code push from a truncation. The 300 in the second run is that case, live."
+    },
+    {
+      "criterion": "Every earlier criterion, carried",
+      "surface": "The scope of this round, established from the diff before anything was re-run.",
+      "command": "jj -R $LEGION_WORKSPACE diff --from d940f4b9c1a8 --to f8f4aec0260e --stat; go -C packages/daemon test ./internal/prompts/... -count=1; the CI-line sweep over skills, the bundle and the prompts; the strong tree sweep.",
+      "observed": "This round touches skills/legion-worker/references/merge-gate.md and its bundled copy, packages/daemon/internal/prompts/go/reviewer.md, packages/pi-legion/src/skills-guard.test.ts and the two handoffs - no other Go, no docs/solutions, no other reference, no other prompt part. So round six's deletion-survival check over the whole branch, round five's reading of the skills split, round four's warn-gate and payload-clock drives, round three's docs/solutions judgement and round one's drive of readyChecks and the paged reads all stand at this head. ok github.com/sjawhar/legion/daemon/internal/prompts. The CI-line sweep over skills, the bundle and the prompts returns nothing at all, and the strong tree sweep's ten survivors are unchanged.",
+      "headSha": "437320d4a209431775a906a012716fc17eeade84",
+      "negativeControl": "The carry rests on the diff rather than on memory: a path outside the list above would have made this a re-drive, and the same command that establishes it would have shown it."
+    }
+  ],
+  "ciRead": {
+    "codeHead": "437320d4a209431775a906a012716fc17eeade84",
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "observed": "lint, typecheck and pr-title completed success, and pi-legion - the guard's own lane, which this round changes - completed success. 26 success, 2 skipped and nothing red. `test` has not settled: its job 120453447019 of run 39965291292 started at 13:55:50Z and has been in_progress on step 26 of 66, `Install tmux`, since 13:58:47Z - 55 minutes on an apt-get step that takes seconds, with every step before it green and the Go suites not yet begun. That is a hung runner step, not a verdict on this head: the step installs a tool, this round's diff is one test file, two markdown references and a prompt, and the same job completed success at the previous head 54 minutes after its start. I waited on it in three stretches and it did not move.",
+    "unsettled": "test (hung on Install tmux). The reviewer's own round reads the head's checks and its rule for a required check in_progress is to wait, so this does not pass the gate unread; and a red the daemon reads later at this head sends the issue back to implementing from wherever it stands, which is this change's own design. I am recording what I saw rather than citing a suite I did not watch settle - round four's lesson, applied to a lane that hung rather than one that failed.",
+    "rerun": "none: no CI lane was re-run as evidence in any round. I did not re-run or cancel this one either - `gh run rerun` acts on a completed run, and cancelling a hung one is not this phase's call."
+  },
+  "notesForTheArchitect": [
+    "The one thing this round leaves open is not the change: the head's `test` job is hung on `Install tmux` after 55 minutes, with every earlier step green and the Go suites not started. Nothing is red. Whoever may cancel and re-run that workflow should, since the reviewer's own rule is to wait on a required check in_progress and it will wait on this one; the daemon reads the head's settlement itself whenever it comes.",
+    "The false positive I reported last round survives and is now honestly uncovered rather than wrongly denied: 'nothing is cited from the `CI` line any more' fires, because its negator is a negative subject rather than never, no longer or not. It fails closed. Fast-follow, as agreed.",
+    "Fast-follow unchanged across seven rounds and still on the body's line: folding rememberWait's positional arm bool, and renaming readyChecks, which reads no check."
+  ]
+}
