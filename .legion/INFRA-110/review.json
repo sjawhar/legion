@@ -2,46 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-110",
-  "completed": "2026-10-24T18:55:00Z",
-  "round": 2,
-  "decision": "changes_requested",
+  "completed": "2026-10-24T18:05:00Z",
+  "round": 3,
+  "decision": "approved",
+  "approvedHead": "pushed with this handoff; named by SHA in the submitted review",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
+  "keyFindings": [],
+  "whatWasReviewed": "The architect's withdrawal of the machine-held declaration-comment assertion, after five rounds and four defects of that assertion, three of them fail-open. The check keeps the numeric gate and the two package-guide assertions; the declaration comments stay in both source files and are confirmed by a human at review.",
+  "removalAudit": {
+    "deadCode": "Clean, reviewer-run: `grep -rn 'comment_flags|attached_comment|cross_reference|comment_block_above' .github packages docs` returns nothing - the names survive only inside .legion/ round records. Every function left in the script has a live call site (one_line -> the three fatal messages, problem -> the two remaining call sites, fatal -> load and declaration, load -> the four file reads, declaration/Declaration -> the two declarations). Exactly two `problem()` call sites remain, the numeric comparison and the guide loop, so no path can raise a declaration-comment problem.",
+    "survivingClaims": "None, reviewer-run: `grep -rn 'names the other|cannot rot|each names'` over .github, packages/contracts, packages/envoy and docs returns no hit in any file this pull request touches. Read in full and each correct at this head: the script header (:12-18, 'confirmed by a human at review, not here', with the reason); the success line (:173-176, 'and a line of each package guide names both'); docs/solutions/envoy/...-INFRA-45.md:50-58 ('now half machine-held ... The other half is held by a human'); packages/contracts/AGENTS.md:34 and packages/envoy/AGENTS.md:1828, each ending with the same human-at-review sentence and the instruction to keep the row one line. The pull request body's Change bullets no longer claim the pairing cannot rot unnoticed.",
+    "shippingHalfDriven": "Reviewer-run at this head, both directions. Numeric gate: DISPATCH_BODY_MAX 99000 against maxInputChars 19000 exits 1 with both numbers, both files and the remedy's two halves; the fitting tree exits 0. Guide assertion: a contracts/AGENTS.md with no line naming both exits 1 naming that guide; restored, exit 0. Withdrawal working as designed: a tree whose declarations carry no comment at all now exits 0, which is the retreat, not a defect."
+  },
+  "notProven": [
     {
-      "severity": "important",
-      "file": ".github/scripts/check-body-embed-limit.sh:144-157",
-      "description": "False ACCEPT of acceptance criterion 2, reproduced by the reviewer at code head 23f290e5 and found independently by both thermonuclear agents. The `*/` branch of `attached_comment` climbs upward accumulating every line into `pending` until one *starts with* `/*`, so the invariant it enforces is 'some `/*` exists above', not 'the `/*` I found opens the `*/` I saw'. Round 2's fix (23f290e5, `if not opened: break`) closed only the sub-case where the file holds no opener at all. Tree 1, ordinary prettier-clean TypeScript: `/* History: maxInputChars was 8000 before INFRA-42, and this block documents nothing below it. */` / `export const DISPATCH_TITLE_MAX = 200;` / `export const DISPATCH_SLUG_MAX = 80; /* a trailing note */` / `export const DISPATCH_BODY_MAX = 14500;` exits 0 with `body limit 14500 (...:4) fits the embedder's 19000 (...), and each names the other`, while the declaration carries no comment at all - the credit comes from line 1, which documents nothing. Tree 2: `/* maxInputChars */` / `const secret = 1;` / `const other = 2;` / `function f() { return 3; } /* side note */` / declaration exits 0, crediting three lines of executable code as the declaration's comment. The numeric gate is unaffected: the same tree with `DISPATCH_BODY_MAX = 99000` exits 1 with both numbers and the remedy, so no silent truncation escapes - what is lost is the pairing half, and the PR body's claim that the pairing `cannot rot unnoticed` is false while this stands. Same class as the regression the tester pinned at 0c5d413f, in a second shape. Remedy: the walk must credit comment text only - the `/*` it stops at must be the opener of the `*/` it saw, and no non-comment line may enter the block. The simplest shape that does it is one downward classification pass (is each line inside a comment?) and then the contiguous run above the declaration; thermonuclear-code-quality ran exactly that against the committed 61-assertion suite unchanged (61 passed, 0 failed) and against both trees above (refused). Pin tree 1 and tree 2 as red cases."
-    }
-  ],
-  "roundOneFindingsVerified": [
-    {
-      "finding": "octal fail-open (round 1, blocking)",
-      "fixedIn": "12050a4f0170",
-      "verified": "`maxInputChars = 019000` against an otherwise green tree now exits 1 with `declares no maxInputChars this check can read: no line matches ^\\s*maxInputChars\\s*=\\s*(0|[1-9][0-9]*)\\s*(?://.*)?$`, and the refusal's enumeration now names `a leading zero`. Reviewer-run at the reviewed head."
+      "severity": "recorded, not blocking",
+      "file": ".github/scripts/check-body-embed-limit.sh:7-8",
+      "description": "The header's `this check fails iff DISPATCH_BODY_MAX > maxInputChars` is falsified by two compiling trees, found by thermonuclear-deep-review and reproduced by the reviewer. Tree A, dispatch-tools.ts: a `/* ... */` block holding a stale `export const DISPATCH_BODY_MAX = 10;` above a live `export const DISPATCH_BODY_MAX = 99_000;` - the check reads the commented copy and prints `body limit 10 (...:2) fits the embedder's 19000`, exit 0, while the live cap is 99000. Tree B, embed.go: a `/* ... */` block holding `maxInputChars = 99000` above a live `maxInputChars int = 8000` - exit 0 reporting the embedder at 99000 while it cuts at 8000. Both need two simultaneous faults, and each fault alone is fatal: a live declaration the patterns cannot read is refused (`declares no <const> this check can read`), and a readable stale copy beside a readable live one is refused (`declares <const> more than once`). A `//`-commented copy never matches at all. This is the same comment-versus-string blindness the architect withdrew the comment assertion over, in the declaration read, and no fix exists inside the agreed design without parsing the language. Recorded rather than fixed; the header sentence is the fast-follow."
     },
     {
-      "finding": "comment walk refusing three conforming shapes (round 1, blocking)",
-      "fixedIn": "5229534fb656",
-      "verified": "All three now pass, reviewer-run at the reviewed head: a trailing same-line comment (`export const DISPATCH_BODY_MAX = 14500; // never past maxInputChars (embed.go)`) exit 0; an unprefixed `/* ... */` block exit 0; a Go doc comment on the `const (` group exit 0. The widening is what opened the new finding above, so the fix is right in direction and too wide in reach."
-    },
-    {
-      "finding": "error model (round 1, folded in by the architect)",
-      "fixedIn": "57cc85eeb000",
-      "verified": "`load()` and `declaration()` return non-optional values and every unreadable-tree class ends in `fatal()` with one `::error file=...` line, matching check-zod-version.sh's convention; reviewer-run: a mode-000 file gives `packages/contracts/AGENTS.md cannot be read: [Errno 13] Permission denied` exit 1, and a directory in place of a file gives `[Errno 21] Is a directory` exit 1 - both tracebacks gone. `load()` now splits on `\\n` with a trailing `\\r` dropped, so U+2028 and friends no longer shift reported line numbers."
+      "severity": "pre-existing, out of scope",
+      "file": ".github/scripts/check-body-embed-limit.sh:49",
+      "description": "The check reads DISPATCH_BODY_MAX from the TypeScript source alone. The cap the server enforces is the generated copy contracts.DispatchBodyMax, held by `bun run check:go` in the `contracts` job, which main's ruleset does not require. Named in the script's header; outside this issue."
     }
   ],
   "verified": {
-    "ci": "Read on GitHub at the round's start. main's required set is lint, typecheck, test, pr-title (ruleset 12331919; no branch-protection set). The branch's newest pull_request run heads at code commit 23f290e588a45844b829b443f487c11305a017b4; compare 23f290e5...7d33262f is `ahead` by .legion/INFRA-110/implement.json and test.json alone. All four required check-runs are completed/success there (Tests run 40113173607, PR Title run 40113206579). Not required and not a gate: `envoy-go` reports failure at that commit with its `Unit test envoy Go package` step unfinished and its run (40113173766) still in progress, and `dispatch` is in_progress; the same job flaked in round 1 and went green on one re-run. Nothing required is red.",
-    "threads": "gh api graphql: two threads, both mine from round 1, both resolved by the implementer with a Fixed-in reply. I replied on each with my own disposition this round: PRRT_kwDORFy7ds6v5wkU accepted as fixed; PRRT_kwDORFy7ds6v5wkY fixed for the three shapes it named, with the new false accept opened as a thread of its own rather than reopening it. No bot thread exists, so there is none to adjudicate and none to name to the implementer.",
-    "e2e": "Both lines present in the live body and carrying this round's head: `E2E (implementer)` and `E2E (tester)`, each with surface, command, observation, head 23f290e588a45844b829b443f487c11305a017b4 and a negative control.",
-    "thermo": "Pair run once at the reviewed head. thermonuclear-deep-review: CHANGES, Medium, the same false accept, four trees. thermonuclear-code-quality: CHANGES, the same defect plus a verified rewrite passing the committed suite unchanged; it confirms the error model now matches the directory's fatal() convention. The reviewer reproduced the finding itself in two trees before grading."
+    "ci": "Read on GitHub by the reviewer, not cited from the tester. main's required set is lint, typecheck, test, pr-title (ruleset 12331919; no branch-protection set). The branch's newest pull_request run heads at code commit b8d1563e34174ecd32c3d8b1c575e037a7f5a78c, and all four required check-runs are completed/success there. compare b8d1563e...13a1c11d is `ahead` by .legion/INFRA-110/implement.json and test.json alone, so those runs stand for the code reviewed. The tester's E2E head 1d51e943 sits between the two and changes only .legion/INFRA-110/implement.json, so its proof is at this code.",
+    "threads": "gh api graphql: three threads, all mine, all resolved. PRRT_kwDORFy7ds6v5wkU (octal) and PRRT_kwDORFy7ds6v5wkY (the three false refusals) carry my round-2 dispositions; PRRT_kwDORFy7ds6v6Exm (the round-2 false accept) carries the implementer's fix reply and now my own: answered by withdrawal, the walk it was about no longer exists. No bot thread on this pull request, so none accepted and none named to the implementer.",
+    "e2e": "Both lines present in the live body: E2E (implementer) at the code head, E2E (tester) round 5 PASS at 1d51e943, which is this code plus one .legion/ commit.",
+    "thermo": "Pair run once at the reviewed head, both returning real reports rather than a promise (the dispatch://INFRA-200 empty-pass shape; neither needed a re-run). thermonuclear-deep-review: APPROVE, 0 blocking, with the two trees above as a Low. thermonuclear-code-quality: CHANGES, on suite residue - one dead case and three stale labels - plus the summary-line wording; the reviewer graded those as the architect pre-decided, as a fast-follow rather than a round."
   },
-  "gradedNotFindings": [
-    "A block comment whose closing line starts with `//` (`/*`, text, `// */`) is no longer credited: the `//` branch wins before the `*/` branch, the tree is refused naming the site and the remedy, and neither gofmt nor Biome writes such a closer. Fail-closed; the architect graded it and I agree. The downward-classification remedy above makes the case disappear rather than needing a rule.",
-    "The check binds the TypeScript literal, not the generated Go copies, which `bun run check:go` holds in a job main's ruleset does not require. Pre-existing, named in the script's header, and outside this issue.",
-    "The implementer's `discoveredComplexity` availability line about a cross-model read is an availability note, not a skipped step."
-  ],
-  "fastFollow": "The local name `declaration` at .github/scripts/check-body-embed-limit.sh:130 holds the declaration's own source line while the module-level `declaration()` returns a `Declaration`; rename the local to `declaration_line`. Naming only, no behaviour."
+  "fastFollow": "Three lines of prose that now claim or imply more than the check does, none changing a verdict: the header's `fails iff` sentence (:7-8), which the two trees above falsify; the accumulation summary (:165-169), which says `the body limit and the embedder's input limit do not demonstrably agree` even when the only problem is a package guide missing its line, sending the author to the constants rather than to AGENTS.md; and the suite's residue - the now-dead `a Go doc comment written on the const ( group` case and the labels at :253 and :267 that still speak the withdrawn walk's vocabulary."
 }
