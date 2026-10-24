@@ -1954,9 +1954,10 @@ pairs travel in the daemon's start command to `legion launcher`, which hands the
 by `kubectl exec` into the container finds none of them but `PATH`, which the worker image's own
 `ENV` sets (`packages/daemon/docker/worker.Dockerfile`) to the value the row below documents, so
 every process of the container carries it however it was started; one the role's own agent runs
-prints them all. They are an issue pod's role container's; `<generation>` is the role's own
-generation counter, which differs between the role containers of one pod and rises on each
-relaunch of that role in it. `DISPATCH_TOKEN_FILE` and `ENVOY_TOKEN_FILE` are stated without
+prints each of them the runtime sets, and exits 1 for the four it does not. They are an issue
+pod's role container's; `<generation>` is the role's own generation counter, which differs
+between the role containers of one pod and rises on each relaunch of that role in it.
+`DISPATCH_TOKEN_FILE` and `ENVOY_TOKEN_FILE` are stated without
 condition because configuration load refuses a `runtime: kubernetes` daemon that sets no
 `envoy_token_file` and one that sets no `dispatch_url`
 (`packages/daemon/internal/config/kubernetes.go`), and refuses a configured `dispatch_url` with no
@@ -1981,7 +1982,9 @@ so every pod carries both.
 of the issue's repository, the issue key in lower case, and the role's generation counter. The
 daemon-launched controller's container differs: of these eleven names its agent carries no
 `LEGION_WORKSPACE`, because it is told no tree, issue or checkout (`controllerPod.agentEnv`,
-`podkind.go`), and its `GH_CONFIG_DIR` is the project's default owner's directory;
+`podkind.go`), and its `GH_CONFIG_DIR` is its bundle's first owner's directory, because its launch
+names no repository and the default is then the project's owners sorted and the first taken
+(`appauth.GitHubCredential`, `credential.go`);
 [Daemon-launched controller](#daemon-launched-controller) has the rest of it.
 
 Every role container is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root,
