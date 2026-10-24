@@ -1826,12 +1826,15 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    `objects/info/packs` plus commit-graph files. An alternate object store is refused. A legacy
    shared clone that has already lost its feed is rebuilt instead of repaired in place: keep the
    issue status, suspend its Sandbox, save any unpushed workspace work, and move the clone and its
-   workspace aside together. The next provision creates both again; sessions remain in the SQL
-   store. Then run `legion claims retry` for a failed architect, and have the architect retry the
-   held role. Before this release any role could write the issue volume's `/legion/feed`, so a
-   volume carried over may hold a repository there that would run a hook or follow a setting in the
-   token-holding fetch: such a feed is removed, logged, and filled from the repository cache. Every
-   fetch from GitHub then
+   workspace aside together. The next provision creates both again. Sessions stay in their configured
+   store — the SQL store, or `/legion/sessions` on the volume — and this procedure does not touch
+   them. Set `LEGION_DAEMON_URL=<daemon url>` and run `legion claims retry --claim
+   legion-<project>-<issue>-architect --operator-token-file <0600 file>`. The architect then runs
+   `retry_or_escalate` with `retry` on the held role. A done issue with an open production check has
+   no command relaunch; its next check wake does (dispatch://LEGION-815). Before this release, any
+   role could write the issue volume's `/legion/feed`, so a carried-over volume may hold a repository
+   there that would run a hook or follow a setting in the token-holding fetch: such a feed is removed,
+   logged, and filled from the repository cache. Every fetch from GitHub then
    points the feed's `HEAD` at the branch GitHub names as the default now (`git
    ls-remote --symref`, under the same credential and bound), since a fetch never moves `HEAD` and
    prunes the branch a rename left behind; a move is logged (`the default branch of
