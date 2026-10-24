@@ -135,8 +135,9 @@ test.skipIf(omp === undefined && !onActions)(
       (request) => request.path === "/anthropic/v1/messages" && isRuleRequest(request)
     );
     expect(rules).toHaveLength(1);
+    // The request body is JSON, so the listed ask is looked for as JSON escapes it.
     expect(JSON.stringify(rules[0]?.body.messages)).toContain(
-      '<ask n="1" kind="ask">\\nShip the release today?\\n</ask>'
+      JSON.stringify('<ask n="1" kind="ask">\nShip the release today?\n</ask>').slice(1, -1)
     );
 
     const files = (await readdir(sessions, { recursive: true })).filter((file) =>
