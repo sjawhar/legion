@@ -176,7 +176,7 @@ extraction, however much room its disk has. The five priced options and their ve
 
 | option | the measurement | verdict |
 | :--- | :--- | :--- |
-| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-c6e0ee37272e` (revision `c6e0ee37272ead7d79630fa0bcf0f4e7582e15e7`), is 24 layers and 1026.9 MiB (1,076,762,438 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,284,674 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,282,712 bytes (327,156,512 → 335,439,224) and every other layer differs by at most 2 KB of compression noise | **chosen** |
+| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,286,296 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703) and every other layer is within 2 KB of compression noise | **chosen** |
 | a per-issue install onto the issue's disk | the issue's disk is 49 GiB with 2.5 GiB used, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client**: `apt` refuses above, and unpacking one by hand is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row |
 | a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
 | extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected**: it is the withheld `operator-setup` capability under any reading (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200), and it is fragile for exactly the client this change exists for |
@@ -253,13 +253,15 @@ Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `
 tree with the two npm language servers is 66 MiB. The five client tools
 ([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB of that
 total, measured like for like against this branch's own base: the head
-`ghcr.io/sjawhar/legion-worker:sha-c6e0ee37272e` (revision
-`c6e0ee37272ead7d79630fa0bcf0f4e7582e15e7`) is 24 layers and 1026.9 MiB (1,076,762,438 bytes)
+`ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision
+`afa29128061fc10dd6c6aa3755ba051b98b84e02`) is 24 layers and 1026.9 MiB (1,076,764,060 bytes)
 where the base it forks from, `:sha-92dbeea3d391` (revision
 `92dbeea3d3911b5fb08e279fb201634a84ffe72e`), is 24 layers and 1019.0 MiB (1,068,477,764 bytes) —
-8,284,674 bytes, of which the runtime stage's Debian layer is 8,282,712 bytes (327,156,512 →
-335,439,224) and every other layer differs by at most 2 KB. Each size is read from that image's
-own manifest in the registry and each revision from its config blob. On EKS, how long a node takes
+8,286,296 bytes, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 →
+335,441,703) and every other layer differs by at most 2 KB. Each size is read from that image's
+own manifest in the registry and each revision from its config blob; two builds of the same
+content differ by a kilobyte or two of compression noise, so read the figure as 7.9 MiB rather
+than as its last digits. On EKS, how long a node takes
 to pull that is not recorded here: the stage 4a launch below is where it is measured. The pull
 must fit the launch's wait for the role's launcher before any init container runs:
 `worker_boot_timeout_seconds` (`packages/daemon/internal/config/config.go`; 120 s by default),
