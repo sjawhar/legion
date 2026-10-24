@@ -242,6 +242,11 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
+	// suggestionTimeout replaces writeSuggestionTimeout for this server's suggestion step. Zero,
+	// which every server the deployment builds leaves it (register, below, sets no field), keeps
+	// the documented 300 ms; a test sets a tiny or a generous one so the step's outcome is its
+	// own choice rather than its machine's speed (INFRA-56).
+	suggestionTimeout time.Duration
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.
 	deliveryHub *deliveryHub

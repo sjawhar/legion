@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type testSuggestionOwner struct {
@@ -334,54 +335,105 @@ func TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked(t
 // TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails: an issue-owned ask whose write-advice
 // query itself fails must not drop the suggestions that were separately computed and persisted —
 // advice == nil means either "document owner" or "the advice query failed", and only the first
-// has no suggestions to offer.
+// has no suggestions to offer. Both cases file the same ask over the same corpus with the same
+// write-advice query failing and differ only in the allowance the suggestion step runs under
+// (server.suggestionAllowance), so each case's outcome is its own choice rather than its
+// machine's speed: an allowance no database can meet still answers with an envelope that says
+// what is missing, and a generous one carries the answered question and records it.
 func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
-	handler, database := newFailingAdviceHandler(t, "session_writes_since_human")
-	createAdviceProject(t, handler, "ADVFAIL")
-	decisionSpec := ""
-	decisionIssue := createAdviceIssue(t, handler, "ADVFAIL", "Choose a transport for the billing service", &decisionSpec)
-	decisionAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+decisionIssue.Key+"/asks", map[string]any{
-		"question": "Should the billing service public API use REST or GraphQL?",
-	}, "alice")
-	decisionAskID := decodeBody[testAskWithSuggestions](t, decisionAsk).ID
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+decisionAskID+"/answer", map[string]any{
-		"text": "REST.", "expected_edited_at": nil,
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("answer decision ask: status=%d body=%s", response.Code, response.Body.String())
+	// fileAsk seeds the corpus — an answered ask that settles the question, plus a separate
+	// target issue — and files the ask on the target through the real route with the
+	// write-advice query failing. Each call builds its own handler, and so its own database
+	// clone (storetest.Open), so the two cases are independent under -count=N and in any order.
+	fileAsk := func(t *testing.T, allowance time.Duration) (advice testAdvisedSuggestions, decisionAskID, createdAskID string, database *store.Store) {
+		t.Helper()
+		handler, database := newFailingAdviceHandler(t, "session_writes_since_human", allowance)
+		createAdviceProject(t, handler, "ADVFAIL")
+		decisionSpec := ""
+		decisionIssue := createAdviceIssue(t, handler, "ADVFAIL", "Choose a transport for the billing service", &decisionSpec)
+		decisionAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+decisionIssue.Key+"/asks", map[string]any{
+			"question": "Should the billing service public API use REST or GraphQL?",
+		}, "alice")
+		decisionAskID = decodeBody[testAskWithSuggestions](t, decisionAsk).ID
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+decisionAskID+"/answer", map[string]any{
+			"text": "REST.", "expected_edited_at": nil,
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("answer decision ask: status=%d body=%s", response.Code, response.Body.String())
+		}
+
+		targetSpec := ""
+		target := createAdviceIssue(t, handler, "ADVFAIL", "Pick a transport for the notifications service", &targetSpec)
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/asks", map[string]any{
+			"question": "Should the billing service public API use REST or GraphQL?",
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("open ask with failed write-advice: status=%d body=%s", response.Code, response.Body.String())
+		}
+		// Decoding into map[string]json.RawMessage first: a missing "advice" key and a null one
+		// both land as a nil envelope, and only the missing key is this test's failure.
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		adviceRaw, ok := body["advice"]
+		if !ok {
+			t.Fatalf("response has no advice at all, want suggestions-only advice despite the failed write-advice query: %s", response.Body.String())
+		}
+		if err := json.Unmarshal(adviceRaw, &advice); err != nil {
+			t.Fatalf("decode advice: %v", err)
+		}
+		createdAskID = decodeBody[testAskWithSuggestions](t, response).ID
+		return advice, decisionAskID, createdAskID, database
 	}
 
-	targetSpec := ""
-	target := createAdviceIssue(t, handler, "ADVFAIL", "Pick a transport for the notifications service", &targetSpec)
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/asks", map[string]any{
-		"question": "Should the billing service public API use REST or GraphQL?",
-	}, "alice")
-	if response.Code != http.StatusCreated {
-		t.Fatalf("open ask with failed write-advice: status=%d body=%s", response.Code, response.Body.String())
-	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	adviceRaw, ok := body["advice"]
-	if !ok {
-		t.Fatalf("response has no advice at all, want suggestions-only advice despite the failed write-advice query: %s", response.Body.String())
-	}
-	var advice testAdvisedSuggestions
-	if err := json.Unmarshal(adviceRaw, &advice); err != nil {
-		t.Fatalf("decode advice: %v", err)
-	}
-	if advice.Suggestions == nil || advice.Suggestions.Decision == nil || advice.Suggestions.Decision.ID != decisionAskID {
-		t.Fatalf("advice.suggestions = %+v, want the decision ask %s despite the failed write-advice query", advice.Suggestions, decisionAskID)
-	}
-	created := decodeBody[testAskWithSuggestions](t, response)
-	var persisted int
-	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*) from write_suggestions where source_ask_id = $1
-	`, created.ID).Scan(&persisted); err != nil {
-		t.Fatalf("count persisted suggestions: %v", err)
-	}
-	if persisted == 0 {
-		t.Fatalf("write_suggestions has no rows for the new ask despite computing a decision")
+	t.Run("an_allowance_no_database_can_meet_still_answers_with_an_envelope", func(t *testing.T) {
+		// decision being absent here is meaningful only because the generous case below finds it
+		// in an identically seeded corpus: trim this case's seeding and this assertion goes green
+		// because there was nothing to find, not because the allowance ran out.
+		advice, _, _, _ := fileAsk(t, time.Nanosecond)
+		if advice.Suggestions == nil {
+			t.Fatalf("advice.suggestions = null, want an envelope reporting what is missing: advice = %+v", advice)
+		}
+		// Only that missing is set is asserted, never its text: it interpolates the allowance and
+		// here reads "did not answer within 1ns".
+		if advice.Suggestions.Missing == "" {
+			t.Fatalf("advice.suggestions.missing = %q, want a reason the suggestions are absent: envelope = %+v", advice.Suggestions.Missing, advice.Suggestions)
+		}
+		if advice.Suggestions.Decision != nil {
+			t.Fatalf("advice.suggestions.decision = %+v, want none under an allowance no database can meet", advice.Suggestions.Decision)
+		}
+	})
+
+	t.Run("a_generous_allowance_finds_the_answered_question_and_records_it", func(t *testing.T) {
+		advice, decisionAskID, createdAskID, database := fileAsk(t, 30*time.Second)
+		if advice.Suggestions == nil {
+			t.Fatalf("advice.suggestions = null, want the decision ask %s despite the failed write-advice query: advice = %+v", decisionAskID, advice)
+		}
+		if advice.Suggestions.Decision == nil {
+			t.Fatalf("advice.suggestions.decision = null, want the answered ask %s: envelope = %+v", decisionAskID, advice.Suggestions)
+		}
+		if advice.Suggestions.Decision.ID != decisionAskID {
+			t.Fatalf("advice.suggestions.decision.id = %q, want the answered ask %q", advice.Suggestions.Decision.ID, decisionAskID)
+		}
+		var persisted int
+		if err := database.Pool.QueryRow(context.Background(), `
+			select count(*) from write_suggestions where source_ask_id = $1
+		`, createdAskID).Scan(&persisted); err != nil {
+			t.Fatalf("count persisted suggestions: %v", err)
+		}
+		if persisted == 0 {
+			t.Fatalf("write_suggestions has no rows for ask %s despite the response carrying decision %s", createdAskID, advice.Suggestions.Decision.ID)
+		}
+	})
+}
+
+// The deployment's own allowance is the documented one: register builds &server{deps: deps}
+// (server.go) and sets suggestionTimeout on no server, so the zero value is what production runs,
+// and cmd/dispatch/README.md and CHANGELOG.md promise a filed issue or ask waits at most 300 ms
+// on its suggestions. The literal, not the constant, is the pin.
+func TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound(t *testing.T) {
+	if got := (&server{}).suggestionAllowance(); got != 300*time.Millisecond {
+		t.Fatalf("a server the deployment builds allows %s for its suggestions, want 300ms as cmd/dispatch/README.md and CHANGELOG.md promise", got)
 	}
 }
 

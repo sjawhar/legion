@@ -20,6 +20,16 @@ import (
 // than ordinary, while bounding the worst case any single write waits.
 const writeSuggestionTimeout = 300 * time.Millisecond
 
+// suggestionAllowance is the deadline the suggestion step runs under: writeSuggestionTimeout on
+// every server the deployment builds, since register builds &server{deps: deps} and sets no
+// suggestionTimeout, and whatever a test set otherwise.
+func (s *server) suggestionAllowance() time.Duration {
+	if s.suggestionTimeout > 0 {
+		return s.suggestionTimeout
+	}
+	return writeSuggestionTimeout
+}
+
 // suggestionRelatedCount is "the three items most like what was just filed" (LEGION-550's spec).
 const suggestionRelatedCount = 3
 
@@ -116,14 +126,15 @@ func (s *server) computeAndPersistSuggestions(
 	if searchText == "" {
 		return nil
 	}
-	bounded, cancel := context.WithTimeout(ctx, writeSuggestionTimeout)
+	allowance := s.suggestionAllowance()
+	bounded, cancel := context.WithTimeout(ctx, allowance)
 	defer cancel()
 	if project == "" {
 		resolved, err := s.resolveSuggestionProject(bounded, source)
 		if err != nil {
 			reason := "the project behind it could not be resolved"
 			if bounded.Err() != nil {
-				reason = "the project lookup behind it did not answer within " + writeSuggestionTimeout.String()
+				reason = "the project lookup behind it did not answer within " + allowance.String()
 			}
 			slog.Warn("dispatch: write suggestions omitted", "error", err)
 			return &model.Suggestions{Related: []model.WriteSuggestion{}, Missing: reason}
@@ -167,7 +178,7 @@ func (s *server) computeSuggestions(
 	if err != nil {
 		reason := "the search behind it failed"
 		if ctx.Err() != nil {
-			reason = "the search behind it did not answer within " + writeSuggestionTimeout.String()
+			reason = "the search behind it did not answer within " + s.suggestionAllowance().String()
 		}
 		slog.Warn("dispatch: write suggestions omitted", "error", err)
 		return &model.Suggestions{Related: []model.WriteSuggestion{}, Missing: reason}
