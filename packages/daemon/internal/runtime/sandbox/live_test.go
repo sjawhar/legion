@@ -91,11 +91,11 @@ var liveChecks = []liveCheck{
 	{"secrets-self-enroll-negative", (*liveRig).checkSecretsSelfEnrollNegative, secretsBlocked},
 	{"secrets-approval-ask", (*liveRig).checkSecretsApprovalAsk, secretsBlocked},
 	{"suspend", (*liveRig).checkSuspend, nil},
-	{"role-container-isolation", (*liveRig).checkRoleContainerIsolation, nil},
+	{"role-isolation", (*liveRig).checkRoleIsolation, nil},
 	{"resume", (*liveRig).checkResume, nil},
 	{"stale-plugin-install", (*liveRig).checkStalePluginInstall, stalePluginBlocked},
 	{"same-agent-negative", (*liveRig).checkSameAgentNegative, nil},
-	{"kill-launcher", (*liveRig).checkKillLauncher, nil},
+	{"kill-role-init", (*liveRig).checkKillRoleInit, nil},
 	{"stale-incarnation", (*liveRig).checkStaleIncarnation, nil},
 	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
 	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
@@ -108,6 +108,7 @@ var liveChecks = []liveCheck{
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
 	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
 	{"displaced", (*liveRig).checkDisplaced, nil},
+	{"previous-layout", (*liveRig).checkPreviousLayout, previousLayoutBlocked},
 	{"postgres-resume", (*liveRig).checkPostgresResume, nil},
 }
 
@@ -281,6 +282,10 @@ type liveEnv struct {
 	// checkpoint with a clear message, never a refusal to start, so an older invocation of the
 	// script still runs every checkpoint it knows (stalePluginBlocked).
 	piLegionTarball, piEnvoyTarball, piLegionVersion, piEnvoyVersion string
+	// previous-layout's own inputs: the previous release's fixture harness the script built from
+	// the merge base (testdata/previouslayout), and that release's worker image by digest, which
+	// it runs on. Read with os.Getenv, as the plugin inputs are (previousLayoutBlocked).
+	previousHarness, previousImage string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -327,6 +332,8 @@ func readLiveEnv(t *testing.T) liveEnv {
 		piEnvoyTarball:        os.Getenv("LEGION_E2E_PI_ENVOY_TARBALL"),
 		piLegionVersion:       os.Getenv("LEGION_E2E_PI_LEGION_VERSION"),
 		piEnvoyVersion:        os.Getenv("LEGION_E2E_PI_ENVOY_VERSION"),
+		previousHarness:       os.Getenv("LEGION_E2E_PREVIOUS_HARNESS"),
+		previousImage:         os.Getenv("LEGION_E2E_PREVIOUS_IMAGE"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -1048,9 +1055,55 @@ func (r *liveRig) kubectl(args ...string) (string, error) {
 	return out, err
 }
 
-// exec runs a command in a claim's main container, through the admin context.
+// roleEnter is the shell that runs a command inside one running role of an issue pod's one
+// container (`legion launcher role-init`), from `kubectl exec -c roles`: $1 the role, the rest the
+// command. It finds the role's role-init by its argv (`… launcher role-init … --role <role> … --
+// <shim argv>`), refusing, exit 125, a role that runs none or two; enters that role-init's user,
+// mount, PID and IPC namespaces (uid 0 there, the container's runtime user outside, with
+// --preserve-credentials, since gVisor refuses the setgroups a plain nsenter makes), where /proc is
+// the role's own and role-init is its PID 1; and from there enters the user namespace of the role's
+// worker-shim (role-init's child, PPid 1), so the command runs as the role's own user with the
+// role's own mounts: its gh, private, state and agent-secrets directories at their fixed paths, its
+// home layer, its /tmp, and an empty roles directory. Pids it reads are the role's own, and so are
+// those it signals. With "pid" for the command it prints the role-init's pid in the container's PID
+// namespace instead, and runs nothing.
+const roleEnter = `role=$1; shift
+found=
+for d in /proc/[0-9]*; do
+  args=$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null) || continue
+  printf '%s\n' "$args" | sed '/^--$/q' | grep -qx role-init || continue
+  [ "$(printf '%s\n' "$args" | sed -n '/^--$/q; /^--role$/{n;p;q;}')" = "$role" ] || continue
+  [ -z "$found" ] || { echo "role $role runs two role-inits, pids $found and ${d#/proc/}" >&2; exit 125; }
+  found=${d#/proc/}
+done
+[ -n "$found" ] || { echo "role $role runs no role-init in this container" >&2; exit 125; }
+[ "$1" != pid ] || { echo "$found"; exit 0; }
+exec nsenter -t "$found" -U -m -p -i --preserve-credentials -- sh -c '
+shim=
+for d in /proc/[0-9]*; do
+  [ "$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)" = 1 ] || continue
+  tr "\0" "\n" <"$d/cmdline" 2>/dev/null | grep -qx worker-shim || continue
+  [ -z "$shim" ] || { echo "the role runs two worker-shims under its role-init" >&2; exit 125; }
+  shim=${d#/proc/}
+done
+[ -n "$shim" ] || { echo "the role runs no worker-shim under its role-init" >&2; exit 125; }
+exec nsenter -t "$shim" -U --preserve-credentials -- "$@"' role "$@"`
+
+// exec runs a command inside a claim's running role (roleEnter), through the admin context.
 func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
-	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", string(c.role), "--"}, command...)...)
+	return r.execPod(c, append([]string{"sh", "-c", roleEnter, "role-enter", string(c.role)}, command...)...)
+}
+
+// rolePid is the pid of c's role's role-init in the issue pod's container.
+func (r *liveRig) rolePid(c *liveClaim) (string, error) {
+	return r.execPod(c, "sh", "-c", roleEnter, "role-enter", string(c.role), "pid")
+}
+
+// execPod runs a command in the claim's issue pod's one container, in the container's own view:
+// what every role shares (the issue's volume at TreeRoot, the sessions directory at its
+// containerHomePath), whether or not the claim's role runs.
+func (r *liveRig) execPod(c *liveClaim, command ...string) (string, error) {
+	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", runtime.IssuePodContainer, "--"}, command...)...)
 	return strings.TrimSpace(out), err
 }
 
@@ -1074,9 +1127,10 @@ func (r *liveRig) issuePVCs(issue string) ([]string, error) {
 // before the stub agent has written to it does not exist yet, and a bare `cat`'s non-zero exit
 // would reach the caller as an error — a poll returns on the first error, never retrying — rather
 // than "not yet" (awaitRunning's own poll, the first launch of an issue: root at root-ready, root2
-// and child2 at independent-provision, an orphan's first launch).
+// and child2 at independent-provision, an orphan's first launch). It reads the container's view of
+// the sessions directory (containerHomePath), so a stopped role's marker reads too.
 func (r *liveRig) markerLines(c *liveClaim) ([]string, error) {
-	out, err := r.exec(c, "sh", "-c", `test ! -e "$1" || cat -- "$1"`, "sh", c.marker)
+	out, err := r.execPod(c, "sh", "-c", `test ! -e "$1" || cat -- "$1"`, "sh", containerHomePath(c.marker))
 	if err != nil {
 		return nil, err
 	}

@@ -81,9 +81,14 @@
 # bridge, forwarded through the same tunnel); LEGION_E2E_REPO_SECOND_OWNER (required) `<owner>/<name>`,
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
-# read-only tokens (nothing is pushed to it); STAGE4A_FROM a development entry point, which is
-# never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
-# fresh /tmp directory, kept and printed).
+# read-only tokens (nothing is pushed to it); LEGION_E2E_PREVIOUS_IMAGE (required) the worker image
+# by digest of the commit this checkout forked from main at (`git merge-base HEAD origin/main`, which
+# runs issue pods of six role containers): previous-layout builds that commit's Stage 4a harness with
+# testdata/previouslayout's fixture and runs it on that image, to leave a pod of the previous layout
+# running for this runtime to take over, and the script refuses an image whose
+# org.opencontainers.image.revision is not that commit; STAGE4A_FROM a development entry point,
+# which is never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go
+# (default a fresh /tmp directory, kept and printed).
 #
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
 # unconfigured: LEGION_E2E_AGENT_SECRETS_URL, LEGION_E2E_AGENT_SECRETS_OPERATOR (the email of the
@@ -109,6 +114,7 @@ namespace=legion
 port=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 repo=sjawhar/legion-smoke
 second_owner_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
+previous_image=${LEGION_E2E_PREVIOUS_IMAGE:-}
 app_id=3202636
 app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
 # The scratch session database's image: the pinned Postgres the repository's CI tests against.
@@ -239,6 +245,12 @@ esac
 [[ $second_owner_repo =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] || fail "LEGION_E2E_REPO_SECOND_OWNER must be <owner>/<name>, not '$second_owner_repo'"
 [ "$(tr '[:upper:]' '[:lower:]' <<<"${second_owner_repo%%/*}")" != "$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")" ] ||
   fail "LEGION_E2E_REPO_SECOND_OWNER $second_owner_repo is under ${repo%%/*}, $repo's owner: the check needs a repository of another owner"
+previous_base=$(git -C "$root" merge-base HEAD origin/main) || fail "git merge-base HEAD origin/main failed: previous-layout builds the previous release's harness from it"
+case "$previous_image" in *@sha256:*) ;; *) fail "LEGION_E2E_PREVIOUS_IMAGE must be the worker image of $previous_base pinned by digest (…@sha256:…), not '$previous_image'" ;; esac
+previous_revision=$(docker buildx imagetools inspect "$previous_image" --format '{{json .Image.Config.Labels}}' | jq -r '."org.opencontainers.image.revision" // empty') ||
+  fail "reading LEGION_E2E_PREVIOUS_IMAGE $previous_image's labels failed"
+[ "$previous_revision" = "$previous_base" ] ||
+  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from '$previous_revision', not this checkout's merge base with main $previous_base"
 for taken in "$port" "$session_db_port"; do
   if [ -n "$(ss -Hltn "sport = :$taken")" ]; then
     fail "port $taken is taken on the devbox: $(ss -Hltnp "sport = :$taken")"
@@ -415,6 +427,16 @@ begin build
 go -C "$root/packages/daemon" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout"
+# previous-layout's fixture: the merge base's own Stage 4a harness, with testdata/previouslayout's
+# one test added, built from an archive of that commit so no worktree or branch is made.
+mkdir "$work/previous"
+git -C "$root" archive "$previous_base" go.work go.work.sum packages/daemon packages/envoy | tar -x -C "$work/previous" ||
+  fail "archiving $previous_base for the previous release's harness failed"
+cp "$root/packages/daemon/internal/runtime/sandbox/testdata/previouslayout/fixture_test.go.txt" \
+  "$work/previous/packages/daemon/internal/runtime/sandbox/zz_previous_layout_fixture_test.go"
+go -C "$work/previous/packages/daemon" test -c -tags e2e -o "$work/previous.test" ./internal/runtime/sandbox ||
+  fail "building the previous release's ($previous_base) harness with the previous-layout fixture failed"
+note "built the previous release's ($previous_base) harness with the previous-layout fixture; its image $previous_image"
 
 harness_ok=
 # -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
@@ -455,6 +477,8 @@ env \
   LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \
   LEGION_E2E_PI_LEGION_VERSION="$pi_legion_version" \
   LEGION_E2E_PI_ENVOY_VERSION="$pi_envoy_version" \
+  LEGION_E2E_PREVIOUS_HARNESS="$work/previous.test" \
+  LEGION_E2E_PREVIOUS_IMAGE="$previous_image" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m &
 # Backgrounded and waited on, not run as env's own foreground child: a foreign command's shell
 # blocks delivering a trapped signal until that command itself exits, so a bare `if env ... cmd

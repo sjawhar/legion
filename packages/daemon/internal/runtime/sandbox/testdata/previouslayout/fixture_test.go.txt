@@ -1,0 +1,92 @@
+//go:build e2e
+
+// Stage 4a's previous-layout fixture. scripts/e2e/stage4a-sandbox-runtime.sh copies this file into
+// a checkout of the commit this branch forked from main at (the merge base, which runs issue pods of
+// six role containers), as zz_previous_layout_fixture_test.go of its internal/runtime/sandbox, and
+// builds that package's Stage 4a harness with it. The previous-layout check of this branch's harness
+// runs the result once, while its own runtime is stopped: the previous release's own runtime and rig
+// launch the issue S4A-9's architect and tester in one pod of that layout, on the previous release's
+// worker image, exactly as a deployment running it would, and leave both running. It writes each
+// claim's launch, its boot token among it, to LEGION_E2E_PREVIOUS_LAYOUT_OUT (owner-only) as one JSON
+// array, as the daemon's store would hold it across the upgrade; this branch's harness reads and
+// removes the file, and its runtime takes the claims over. Nothing else of the previous harness runs.
+
+package sandbox
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+)
+
+// previousLaunch is one claim the fixture launched: what the taking-over harness needs to hold it
+// as its own, the way a daemon's store would after the upgrade.
+type previousLaunch struct {
+	Name    string          `json:"name"`
+	Tree    string          `json:"tree"`
+	Issue   string          `json:"issue"`
+	Role    claim.Role      `json:"role"`
+	Token   claim.Token     `json:"token"`
+	Gen     uint64          `json:"generation"`
+	Boot    string          `json:"bootToken"`
+	Marker  string          `json:"marker"`
+	Locator runtime.Locator `json:"locator"`
+	Pod     string          `json:"pod"`
+	Names   []string        `json:"containers"`
+}
+
+func TestStage4aPreviousLayoutFixture(t *testing.T) {
+	out := os.Getenv("LEGION_E2E_PREVIOUS_LAYOUT_OUT")
+	if out == "" {
+		t.Fatal("LEGION_E2E_PREVIOUS_LAYOUT_OUT is unset")
+	}
+	env := readLiveEnv(t)
+	r := newLiveRig(t, env)
+	defer r.close()
+	r.mapRepository(r.env.repo)
+	var launched []previousLaunch
+	for _, c := range []struct {
+		name string
+		role claim.Role
+	}{{"prev-architect", claim.RoleArchitect}, {"prev-tester", claim.RoleTester}} {
+		token, err := claim.NewToken(env.claimProject, "S4A-9", c.role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lc := &liveClaim{token: token, tree: "S4A-9", issue: "S4A-9", role: c.role, name: c.name,
+			marker: ompSessionsDir + "/" + SandboxName(token) + ".marker"}
+		r.claims = append(r.claims, lc)
+		since := time.Now()
+		if _, err := r.spawn(lc, true); err != nil {
+			t.Fatalf("Spawn(%s) on the previous release: %v", c.name, err)
+		}
+		if _, err := r.awaitRunning(lc, since); err != nil {
+			t.Fatalf("%s running on the previous release: %v", c.name, err)
+		}
+		pod, err := r.getPod(SandboxName(token))
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(pod.Spec.Containers))
+		for _, container := range pod.Spec.Containers {
+			names = append(names, container.Name)
+		}
+		launched = append(launched, previousLaunch{
+			Name: c.name, Tree: lc.tree, Issue: lc.issue, Role: c.role, Token: token, Gen: lc.gen, Boot: lc.bootToken,
+			Marker: lc.marker, Locator: *lc.loc, Pod: string(pod.UID), Names: names,
+		})
+		fmt.Printf("   [previous] %s running at generation %d in pod %s (uid %s), containers %v\n", c.name, lc.gen, pod.Name, pod.UID, names)
+	}
+	raw, err := json.Marshal(launched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(out, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}

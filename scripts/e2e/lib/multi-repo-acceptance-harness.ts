@@ -73,12 +73,17 @@ export const bashPath = `${realDir("bash")}/bash`;
 // realKubectl forwards `exec [-i] <pod> -c <container> -- <rest...>` to a real local exec of
 // <rest>, with the caller's stdin: this is what lets the observer's own in-pod prober run
 // unmodified, scanning MULTIREPO_PROC_ROOT (a fake tree this suite builds) instead of a real pod's
-// `/proc`.
+// `/proc`. A <rest> that enters a role first (`sh -c <role_enter> role-enter <role> <command...>`,
+// multi-repo-acceptance.sh's role_enter, which needs a pod's role namespaces) runs its <command>
+// directly.
 export const realKubectl = `
 if [ "$1" = exec ]; then
   shift
   if [ "$1" = -i ]; then shift; fi
   shift; shift; shift; shift
+  if [ "$1" = sh ] && [ "$2" = -c ] && [ "$4" = role-enter ]; then
+    shift 5
+  fi
   exec "$@"
 fi
 echo "kubectl: unexpected call: $*" >&2
