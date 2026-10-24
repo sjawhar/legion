@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-227",
+  "completed": "2026-10-24T23:58:35Z",
+  "proof": [
+    {
+      "criterion": "Acceptance 1: the ten named lines read in role terms — the repository as GitHub stores it.",
+      "surface": "the committed tree of the issue branch, read with git's own index (the acceptance command of the spec, verbatim)",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && git grep -in sami -- skills packages/daemon/internal/prompts packages/claude-envoy/legion '*AGENTS.md'",
+      "observed": "exactly two lines, both dependency versions: packages/envoy/AGENTS.md:529 and packages/envoy/AGENTS.md:605, each 'sjawhar/ygo v1.51.3-sami.1'. The two line numbers the spec pins did not move.",
+      "headSha": "2563f7a54f28",
+      "negativeControl": "the same command at the base commit 3a3614e6c472 printed 12 lines: the four controller-skill lines, the same four under packages/claude-envoy/legion/, packages/daemon/internal/prompts/roles/controller-root.md:16, packages/envoy/AGENTS.md:280, and the two dependency-version lines."
+    },
+    {
+      "criterion": "Acceptance 1: as a pane actually loads it — the skills partition the @sjawhar/pi-legion npm package ships.",
+      "surface": "the staged plugin skills partition built by the repository's own prepack script, the artifact a worker pane reads at skill://legion-controller",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash scripts/pi-plugin-prepack.sh --stage-skills @sjawhar/pi-legion /tmp/stage-head && grep -rni sami /tmp/stage-head; grep -rc \"A direct Dispatch message to this controller from a person is a ruling\" /tmp/stage-head/legion-controller/SKILL.md",
+      "observed": "grep -rni sami printed nothing (exit 1, no match) over the whole staged partition, and the staged legion-controller/SKILL.md carries the new ruling definition exactly once.",
+      "headSha": "2563f7a54f28",
+      "negativeControl": "the same staging at the base commit (/tmp/stage-base) printed four lines: legion-controller/SKILL.md:62, :368 and references/backlog-stewardship.md:17, :36."
+    },
+    {
+      "criterion": "Acceptance 1: as the daemon ships it — the controller role prompt compiled into the legion binary.",
+      "surface": "a freshly built legion binary with its embedded prompts (packages/daemon/internal/prompts/roles/controller-root.md is embedded, not read from disk at runtime)",
+      "command": "cd packages/daemon && go build -o /tmp/legion-head ./cmd/legion && grep -aci sami /tmp/legion-head; grep -ac \"a person's rulings\" /tmp/legion-head",
+      "observed": "0 occurrences of the name in the binary, and 1 occurrence of \"a person's rulings\" — the rewritten sentence is the one the daemon hands a controller pane.",
+      "headSha": "2563f7a54f28",
+      "negativeControl": "/tmp/legion-base, built the same way at the base commit, gave 1 and 0: the name was in the shipped binary and the role wording was not."
+    },
+    {
+      "criterion": "Acceptance 2: the controller behaves as it does today — a ruling is still a direct Dispatch message that sets off the full reconciliation pass.",
+      "surface": "the two skill files a controller pane loads and both regenerated Claude Code copies",
+      "command": "grep -n 'ruling' skills/legion-controller/SKILL.md skills/legion-controller/references/backlog-stewardship.md; grep -c \"A direct Dispatch message to this controller from a person is a ruling\" skills/legion-controller/SKILL.md packages/claude-envoy/legion/skills/legion-controller/SKILL.md; grep -c \"A ruling from a person is a direct Dispatch message to this controller\" skills/legion-controller/references/backlog-stewardship.md packages/claude-envoy/legion/skills/legion-controller/references/backlog-stewardship.md; grep -n 'triggers the full reconciliation pass' skills/legion-controller/references/backlog-stewardship.md",
+      "observed": "a definition in each file, count 1 in the skill and 1 in its Claude copy, count 1 in the reference and 1 in its Claude copy; 'A ruling triggers the full reconciliation pass even when it appears to affect only one issue.' is unchanged at line 40 (39 before, moved by the paragraph's fourth line). The pass trigger at reference line 17 now reads 'after every ruling from a person'.",
+      "headSha": "2563f7a54f28",
+      "negativeControl": "the same four counts over the base commit's files match the old wording ('A direct Dispatch message from <name> is a ruling'), so the greps distinguish the two texts rather than matching anything with the word 'ruling'."
+    },
+    {
+      "criterion": "Acceptance 3: the guards pass over the rewritten text and the controller skill has not grown.",
+      "surface": "the two plugin test suites, which read the real skills tree and the daemon's prompt directory (the same files a pane loads), with the Oh My Pi-gated rules enabled",
+      "command": "cd packages/pi-legion && bun run test; cd packages/pi-envoy && bun run test; LEGION_TEST_OMP=/opt/omp/bin/omp bun test src/skills-guard.test.ts in each package; wc -l skills/legion-controller/SKILL.md",
+      "observed": "pi-legion 492 pass / 8 skip / 0 fail (first run had one unrelated timing flake, 'cleanDetail > stays linear … 64 KiB in under 1 s' at 1080 ms against its 1 s budget, green on re-run and untouched by this change); pi-envoy 899 pass / 3 skip / 0 fail; with LEGION_TEST_OMP set, pi-legion's skills guard 10 pass / 0 fail and pi-envoy's 9 pass / 0 fail, so no rule skipped; SKILL.md is 488 lines, at or under the 488 the acceptance names and well under the guard's 500.",
+      "headSha": "2563f7a54f28",
+      "negativeControl": "with the sentence 'Legion never merges a pull request.' appended to skills/legion-controller/SKILL.md, pi-legion's skills guard failed on 'no skill or prompt says Legion never merges' (9 pass / 1 fail) — the guard reads the file this change rewrites. The line was reverted with jj restore and the workspace left clean."
+    },
+    {
+      "criterion": "Acceptance 4: packages/claude-envoy/legion/ is regenerated on Bun 1.3.14 and committed.",
+      "surface": "the committed Claude Code plugin tree, the artifact a claude-backend pane loads",
+      "command": "cd packages/claude-envoy && bun run build && bun run check-dist && bun test tests/legion-plugin-fresh.test.ts",
+      "observed": "build on Bun 1.3.14 regenerated the tree; check-dist prints 'dist/ and legion/ match a fresh build'; legion-plugin-fresh 4 pass / 0 fail. jj diff --stat shows the only generated files that moved are legion/skills/legion-controller/SKILL.md and .../references/backlog-stewardship.md — dist/ and THIRD_PARTY_NOTICES are byte-identical.",
+      "headSha": "2563f7a54f28",
+      "negativeControl": "run after the skill edit and before the build, check-dist failed: 'generated files are stale (legion/skills/legion-controller/SKILL.md, legion/skills/legion-controller/references/backlog-stewardship.md); run `bun run build` on Bun 1.3.14 and commit the result'."
+    },
+    {
+      "criterion": "Acceptance 5: the rule is written down in the root AGENTS.md and the pi-legion changelog.",
+      "surface": "the root AGENTS.md every session in this repository loads, and the package changelog that ships the controller skill",
+      "command": "grep -n 'name no person' AGENTS.md; sed -n '/^## \\[Unreleased\\]/,/^## \\[/p' packages/pi-legion/CHANGELOG.md | grep -n 'name no person\\|names no person'; bash .github/scripts/check-private-names.sh",
+      "observed": "AGENTS.md line 148 carries the new Conventions bullet (the section runs to 148; ## Issue Lifecycle starts at 150), and the Unreleased section of packages/pi-legion/CHANGELOG.md carries the entry under ### Changed. check-private-names.sh passes over the whole tree (4869 files), so the new text names nothing private, and the bullet itself carries no example spelling the removed name, which is why acceptance 1's '*AGENTS.md' sweep stays at two lines.",
+      "headSha": "2563f7a54f28",
+      "negativeControl": "both commands at the base commit return nothing — no bullet and no changelog entry."
+    }
+  ],
+  "filesChanged": [
+    "AGENTS.md — one new Conventions bullet: a skill, a role prompt and an AGENTS.md name no person, with the identifier carve-out and the scope the spec settled.",
+    "skills/legion-controller/SKILL.md — line 62's duty list and the turn-discipline bullet at 368-370; still 488 lines.",
+    "skills/legion-controller/references/backlog-stewardship.md — the pass trigger at line 17 and the ruling definition at 36-39; 63 to 64 lines.",
+    "packages/daemon/internal/prompts/roles/controller-root.md — the controller's own prompt sentence, lines 16-18.",
+    "packages/envoy/AGENTS.md — lines 280-281: the LEGION-496 decision becomes the operator's; the file's line count is unchanged.",
+    "packages/claude-envoy/legion/skills/legion-controller/SKILL.md and .../references/backlog-stewardship.md — regenerated by bun scripts/build.ts, never hand-edited.",
+    "packages/pi-legion/CHANGELOG.md — one entry under the existing ### Changed heading in Unreleased."
+  ],
+  "trickyParts": [
+    "The new root AGENTS.md bullet is itself inside acceptance 1's '*AGENTS.md' pathspec, so it states the identifier carve-out abstractly and spells no example name; any later edit that adds a worked example there would break the headline acceptance command.",
+    "The reference's ruling paragraph had to grow from three lines to four: the sentence holds 302 characters after the substitution, which does not fit three lines at the repository's 100-column hand wrap. That moves 'A ruling triggers the full reconciliation pass …' from line 39 to 40; the spec's acceptance only requires the grep to find it.",
+    "packages/envoy/AGENTS.md's replacement was kept to two lines on purpose, so the spec's pinned dependency-version lines stay at 529 and 605.",
+    "bun scripts/build.ts deletes and rewrites packages/claude-envoy/dist/ as well as legion/; the diff was checked to confirm dist/ and THIRD_PARTY_NOTICES are untouched, which they are on this Bun 1.3.14 install."
+  ],
+  "deviations": [
+    "One departure from the spec's wording, recorded by the planner and carried out as planned: the root AGENTS.md bullet states the Dispatch carve-out as skills/dispatch/SKILL.md line 55 actually reads — a decision carries the name of the person who made it when the agent was given one, and 'the person' when it was not — rather than the spec's unconditional phrasing. The spec's Summary, Acceptance and scope are unaffected.",
+    "No check script ships, by the human's answered decision on the spec ('Drop the check', 2026-10-24). A reviewer catches the next slip."
+  ],
+  "openQuestions": [
+    "packages/envoy/AGENTS.md:280 now reads 'the operator's decision, LEGION-496' because the approved spec says so in as many words; if the architect reads that decision as the human's rather than the operator's, it is a one-word change.",
+    "This change does not reach the running controller: pods load the released @sjawhar/pi-legion (10.19.8 today) and a role prompt compiled into the deployed daemon binary, so the production check after the merge re-reads /opt/legion/pi-legion/dist/skills/legion-controller/SKILL.md in a pod and reports pending until a plugin released after the merge is installed."
+  ],
+  "discoveredComplexity": [
+    "No simplify pass: the diff is documentation and prompt text only, so skill://ce-simplify-code and the thermonuclear pair do not apply and the PR body omits the Thermo line.",
+    "The name remains, by design and by the spec's scope, in docs/, deploy/, the Go and TypeScript sources, the scripts, .claude-plugin/marketplace.json, .omp-pin and the package changelogs (packages/envoy/CHANGELOG.md keeps the LEGION-496 attribution that packages/envoy/AGENTS.md drops). A reviewer should not flag them."
+  ]
+}
