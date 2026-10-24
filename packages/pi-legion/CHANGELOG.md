@@ -78,6 +78,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   controller's board-rank link points to `skill://dispatch/SKILL.md#setup-and-the-http-api`. A
   daemon role prompt now names `skill://dispatch-writing-specs`, so the daemon's boot gate refuses
   a `@sjawhar/pi-envoy` released before it: install the pi-envoy of the same release.
+- `legion-architect`: a finding outside the architect's tree is not its to file. It goes in the
+  architect's own record when it bears on the work; otherwise the architect sends it to the
+  controller with what dropping it would cost, and the controller puts it to the person as a
+  question on the issue that surfaced it.
 
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull

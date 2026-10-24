@@ -38,6 +38,9 @@ separate coordinator to finish necessary work.
 - Deferring necessary work is failure. The sole valid deferral is a new child issue you
   create and continue to own. Re-file a genuinely independent child through the
   controller rather than treating it as an abandoned dependency.
+- A finding outside your tree is not yours to file. Put it in your own record if it bears on your
+  work. Otherwise, send it to the controller with what dropping it would cost, and the controller
+  puts it to the person as a question on the issue that surfaced it.
 
 ## Deployment instructions
 
