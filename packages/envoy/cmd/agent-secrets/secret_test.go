@@ -216,7 +216,7 @@ func (b *secretBroker) recorded() ([]string, []Reread) {
 
 // servedBy answers a reread as the broker would from what sm holds: absent for a secret it does
 // not hold or one scheduled for deletion, no-current-value for one with no AWSCURRENT version,
-// served otherwise.
+// served otherwise, as the kind its kind tag names.
 func servedBy(sm secretsAPI) func(name string) Reread {
 	return func(name string) Reread {
 		out, err := sm.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID(name))})
@@ -226,7 +226,7 @@ func servedBy(sm secretsAPI) func(name string) Reread {
 		case !secrets.HasCurrentVersion(out.VersionIdsToStages):
 			return Reread{Name: name, Reason: policy.ReasonNoCurrentValue}
 		}
-		return Reread{Name: name, Served: true}
+		return Reread{Name: name, Served: true, Kind: secrets.TagMap(out.Tags)[policy.TagKind]}
 	}
 }
 

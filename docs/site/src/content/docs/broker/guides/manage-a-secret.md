@@ -296,11 +296,13 @@ retagged DEMO_LOGIN (removed max-grant)
 broker: serving DEMO_LOGIN
 ```
 
-To make a stored secret a kind, retag it first, wait for `broker: serving` in the retag's output
-(the broker has reread it), and only then store the App key or the Google login with `secret
-set`. Until the broker serves the kind, a grant of the stored secret releases its stored value,
-and a release that finds the secret retagged while it reads the store releases nothing and ends
-that grant.
+To make a stored secret a kind, retag it first, and only once the retag exits 0, showing
+`broker: serving NAME (kind <kind>)`, store the App key or the Google login with `secret set`. A
+reread can read the tags stale (Secret Manager's metadata can lag a write by hours), and while the
+broker still serves the secret as stored, a grant of it releases its stored value raw. So a retag
+whose reread answers another kind than the one it wrote exits 1: the broker still sees the old
+tags; run the retag again, and store no value until it exits 0. A release that finds the secret
+retagged while it reads the store releases nothing and ends that grant.
 
 A retag checks the tags it read. On GCP it writes against that read, so a retag another person
 wrote in between refuses it, with `another write changed the secret after this retag read it`,
@@ -379,7 +381,8 @@ and prints its answer on a line of its own:
 
 | Line | What it means |
 | --- | --- |
-| `broker: serving NAME` | The broker serves the secret as just written. |
+| `broker: serving NAME` | The broker serves the secret as just written, as a stored secret. |
+| `broker: serving NAME (kind <kind>)` | The broker serves the secret as that kind: it mints from the stored value and never returns it. |
 | `broker: NAME is deleted (restorable until <date>)` | After a delete: the broker no longer serves it. |
 | `broker: refusing NAME (reason=<reason>)` | The broker leaves the secret out: `absent` (it found no such secret, or one scheduled for deletion), or one of the refusals [Operating the broker](/legion/broker/operate/#health-and-logs) lists, such as `no-current-value`. |
 

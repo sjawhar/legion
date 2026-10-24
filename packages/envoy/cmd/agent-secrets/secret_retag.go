@@ -137,7 +137,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
-		return rereadAfter(s, stdout, stderr, form, name, true, nil)
+		return rereadRetag(s, stdout, stderr, form, name, after[policy.TagKind])
 	}
 	owner, tier := after[policy.TagOwner], after[policy.TagTier]
 	if owner == "" || tier == "" {
@@ -157,7 +157,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
-	return rereadAfter(s, stdout, stderr, form, name, true, nil)
+	return rereadRetag(s, stdout, stderr, form, name, after[policy.TagKind])
 }
 
 // rereadIfRestored asks the broker to reread name after a tag write the store wrote and then put
@@ -168,4 +168,29 @@ func rereadIfRestored(s *secretSession, stdout, stderr io.Writer, form, name str
 	if errors.Is(err, errTagsRestored) {
 		rereadAfter(s, stdout, stderr, form, name, true, nil)
 	}
+}
+
+// rereadRetag is rereadAfter for a retag, which also exits 1 when the broker serves the secret as
+// another kind than kind, the one the retag left it (after's): a reread can read the secret's
+// metadata stale (Secret Manager's is eventually consistent for up to hours), and a secret the
+// broker still serves as stored releases its stored value raw, so a key stored in it then reaches
+// every grant of it. Only this exit, not `broker: serving`, says the broker reads the new tags.
+func rereadRetag(s *secretSession, stdout, stderr io.Writer, form, name, kind string) int {
+	r, ok := reread(s, stdout, stderr, form, name, true, nil)
+	if !ok {
+		return 1
+	}
+	if r.Kind != kind {
+		fmt.Fprintf(stderr, "agent-secrets %s: the retag stands, but the broker serves %s as %s, not %s: it still sees the old tags. Run this retag again to ask it to reread them, and store no value in %s until a retag exits 0\n", form, name, kindName(r.Kind), kindName(kind), name)
+		return 1
+	}
+	return 0
+}
+
+// kindName is kind as rereadRetag names it: itself, or "a stored secret" for none.
+func kindName(kind string) string {
+	if kind == "" {
+		return "a stored secret"
+	}
+	return kind
 }

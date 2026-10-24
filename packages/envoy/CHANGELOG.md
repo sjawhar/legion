@@ -21,6 +21,11 @@
   no condition, it reads the tags back after its write, and when another writer left a `github-app`
   secret without owners it restores the tags it read and exits 1 naming the race: retag on AWS one
   writer at a time.
+- `POST /v1/secrets/{name}/reread` answers `kind`, the kind the broker serves the secret as (absent
+  for a stored secret), and `agent-secrets secret retag` exits 1 when that is not the kind it wrote:
+  `the broker still sees the old tags`, since a stale metadata read serves the secret as it was, and
+  a secret served as stored releases its stored value. Store an App key or a login in a secret only
+  after its retag to that kind exits 0, printing `broker: serving NAME (kind <kind>)`.
 - A person's machine login is an OAuth 2.0 device authorization grant (RFC 8628) on the secrets
   broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
   itself. `agent-secrets machine login` prints the same code, which the person the login names

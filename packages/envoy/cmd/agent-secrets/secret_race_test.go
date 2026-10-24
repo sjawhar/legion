@@ -119,3 +119,42 @@ func TestAConcurrentRetagNeverLeavesAGitHubAppSecretWithoutOwners(t *testing.T) 
 		}
 	})
 }
+
+// TestARetagExitsOneWhileTheBrokerServesTheOldKind: `broker: serving` alone does not say the
+// broker reads the tags a retag wrote, since a reread can read them stale. A retag to a kind whose
+// reread answers the secret served as stored (or as another kind) exits 1, saying the broker still
+// sees the old tags, to run the retag again, and to store no value yet; the reread answering the
+// kind the retag wrote exits 0. A retag that removes the kind is held to the same rule.
+func TestARetagExitsOneWhileTheBrokerServesTheOldKind(t *testing.T) {
+	for _, row := range []struct {
+		name, served string
+		args         []string
+		code         int
+	}{
+		{"stale: still stored", "", []string{"--kind", policy.KindGoogleLogin}, 1},
+		{"stale: the other kind", policy.KindGitHubApp, []string{"--kind", policy.KindGoogleLogin}, 1},
+		{"read", policy.KindGoogleLogin, []string{"--kind", policy.KindGoogleLogin}, 0},
+		{"removal stale", policy.KindGoogleLogin, []string{"--kind", "none"}, 1},
+		{"removal read", "", []string{"--kind", "none"}, 0},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			local := secrets.NewLocal(policytest.Secret("LOGIN_KEY", "ada@example.com", policy.TierAgent, "v1"))
+			if row.args[1] == "none" {
+				local = secrets.NewLocal(policytest.KindSecret("LOGIN_KEY", "ada@example.com", policy.TierAgent, policy.KindGoogleLogin, "v1"))
+			}
+			startSecretBroker(t, func(name string) Reread { return Reread{Name: name, Served: true, Kind: row.served} })
+			useAWS(t, local, testAccount, adaSignIn)
+			stdout, stderr, code := runSecret(append([]string{"retag", "LOGIN_KEY"}, row.args...)...)
+			if code != row.code {
+				t.Fatalf("retag %v with the broker serving kind %q: exit %d, stdout %q, stderr %q; want %d", row.args, row.served, code, stdout, stderr, row.code)
+			}
+			stale := strings.Contains(stderr, "it still sees the old tags") && strings.Contains(stderr, "Run this retag again") && strings.Contains(stderr, "store no value in LOGIN_KEY")
+			if stale != (row.code == 1) {
+				t.Fatalf("stderr %q; want the stale-tags message exactly when the kind is stale", stderr)
+			}
+			if row.served != "" && !strings.Contains(stdout, "broker: serving LOGIN_KEY (kind "+row.served+")") {
+				t.Fatalf("stdout %q does not name the served kind", stdout)
+			}
+		})
+	}
+}

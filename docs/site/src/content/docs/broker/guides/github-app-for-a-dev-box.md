@@ -80,9 +80,10 @@ Set the private key only in a secret that has the `kind: github-app` tag. If the
 `kind` tag, a session that has a grant for it gets the stored value. That value is your private
 key. To change a secret without a kind to `github-app`, do these steps in this sequence:
 
-1. Change the tags with `agent-secrets secret retag`.
-2. Make sure that the output of the retag shows `broker: serving`. This output tells you that the
-   broker uses the new tags.
+1. Change the tags with `agent-secrets secret retag NAME --kind github-app --github-owners "<owners>"`.
+2. Make sure that the retag exits 0 and shows `broker: serving NAME (kind github-app)`. This tells
+   you that the broker uses the new tags. If the retag exits 1 and tells you that the broker still
+   sees the old tags, do the retag again. Do not set the private key until a retag exits 0.
 3. Set the private key.
 
 Do this step on your own computer, not on the box. The agents on the box run as your user. They

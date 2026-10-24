@@ -2439,7 +2439,10 @@ refuses - is `policy.ErrNameInvalid` before any store call,
 before the writer lock and before a miss-path reread token (`Loader.secretName`, which
 `Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
 `POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
-`RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
+`RefreshOne` over HTTP, answering `{name, served, reason, kind}` (`kind`: the kind the broker serves
+the secret as, `Secret.Kind`, absent for a stored secret; nothing else of the tags, since the route
+is public), which `agent-secrets secret retag` compares with the kind it wrote and exits 1 on a
+mismatch (`rereadRetag`: a stale metadata read still serves the old kind), `400 SECRET_NAME_INVALID` for such a
 name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
 request ended first; the public `GET /v1/settings`
 answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefix and, per store,

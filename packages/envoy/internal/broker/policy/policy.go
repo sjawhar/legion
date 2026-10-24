@@ -240,6 +240,16 @@ type Secret struct {
 	ownership    ownerKind
 }
 
+// Kind is the kind the secret is served as, read back from its Source (KindSource), or "" for a
+// stored secret.
+func (secret Secret) Kind() string {
+	kind, _, minted, err := ParseKindSource(secret.Source)
+	if !minted || err != nil {
+		return ""
+	}
+	return kind
+}
+
 // GitHubOwnerLogins is GitHubOwners as a list of lowercase logins, nil when it is "".
 func (secret Secret) GitHubOwnerLogins() []string {
 	if secret.GitHubOwners == "" {

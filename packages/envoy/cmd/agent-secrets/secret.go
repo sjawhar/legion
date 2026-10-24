@@ -526,12 +526,23 @@ func displayName(prefix, id string) string {
 // 1 when its answer contradicts the write or it could not be asked. restorable is when a deleted
 // secret stops being restorable, which only delete names.
 func rereadAfter(s *secretSession, stdout, stderr io.Writer, form, name string, wantServed bool, restorable *time.Time) int {
+	if _, ok := reread(s, stdout, stderr, form, name, wantServed, restorable); !ok {
+		return 1
+	}
+	return 0
+}
+
+// reread is rereadAfter's reread: it asks the broker, prints its answer, and answers it, with ok
+// false when the answer contradicts the write or the broker could not be asked, which it printed.
+func reread(s *secretSession, stdout, stderr io.Writer, form, name string, wantServed bool, restorable *time.Time) (Reread, bool) {
 	r, err := s.broker.RereadSecret(s.ctx, name)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: the write to the secret store stands, but the broker could not be asked to reread %s, so it serves the change only from its next reload: %v\n", form, name, err)
-		return 1
+		return r, false
 	}
 	switch {
+	case r.Served && r.Kind != "":
+		fmt.Fprintf(stdout, "broker: serving %s (kind %s)\n", name, r.Kind)
 	case r.Served:
 		fmt.Fprintf(stdout, "broker: serving %s\n", name)
 	case !wantServed && r.Reason == policy.ReasonAbsent:
@@ -542,12 +553,12 @@ func rereadAfter(s *secretSession, stdout, stderr io.Writer, form, name string, 
 	switch {
 	case wantServed && !r.Served:
 		fmt.Fprintf(stderr, "agent-secrets %s: the broker refuses %s after the write (reason=%s)\n", form, name, r.Reason)
-		return 1
+		return r, false
 	case !wantServed && r.Served:
 		fmt.Fprintf(stderr, "agent-secrets %s: the broker still serves %s after its delete\n", form, name)
-		return 1
+		return r, false
 	}
-	return 0
+	return r, true
 }
 
 // secretView is what list and show print of one secret: never its value.
