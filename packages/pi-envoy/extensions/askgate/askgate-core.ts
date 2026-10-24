@@ -8,7 +8,8 @@
 //   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`: the
 //     head rules of the plugin that ships the CLI, copied, with the program taken by a literal
 //     path to `dispatch` as well as by name, plus AskGate's two harmless wrappers, one leading
-//     `cd <path> &&` with a path the shell does not expand and one trailing `2>&1`)
+//     `cd <path> &&` with a path the shell does not expand and one `2>&1` at the end of its first
+//     line, before or after a here-document opener)
 //     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
 //     `artifact` with a `--name` that ends in `.md`. The gate learns
@@ -349,8 +350,9 @@ export function scopedDevice(toolName: string, input: Input): boolean {
 
 /** The one here-document a command's first line may end with, opened with a quoted delimiter so
  * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
- * which bash strips leading tabs from the delimiter line. */
-const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'[ \t]*$/;
+ * which bash strips leading tabs from the delimiter line. The fourth is a `2>&1` after the opener,
+ * which bash applies to the command as it would before it. */
+const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'([ \t]+2>&1)?[ \t]*$/d;
 
 /** A line of nothing but blanks, which bash runs as no command. */
 const BLANK_LINE = /^[ \t]*$/;
@@ -366,8 +368,11 @@ const REFUSED_DOUBLE_QUOTED = "$`\\";
 
 /** A command's first line, without its here-document opener and its blanks, and where that text
  * starts in the command, when the command is that one line, optionally fed one quoted
- * here-document on stdin; undefined for any other command. */
-function headLine(command: string): { text: string; at: number } | undefined {
+ * here-document on stdin; undefined for any other command. `stderr` is where a `2>&1` after the
+ * opener starts and ends in the command. */
+function headLine(
+  command: string
+): { text: string; at: number; stderr?: [number, number] } | undefined {
   if (hasControlCharacter(command)) return undefined;
   // Blank lines before the head and after the command's last line run as no command, so they are
   // dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
@@ -378,7 +383,9 @@ function headLine(command: string): { text: string; at: number } | undefined {
   if (first === -1) return undefined;
   const last = all.findLastIndex((line) => !BLANK_LINE.test(line));
   const lines = all.slice(first, last + 1);
+  const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
   let head = lines[0] ?? "";
+  let stderr: [number, number] | undefined;
   if (lines.length > 1) {
     const opening = HEREDOC_OPENING.exec(head);
     if (opening === null) return undefined;
@@ -391,10 +398,15 @@ function headLine(command: string): { text: string; at: number } | undefined {
     // the last line: anything after it would run as a command.
     if (end !== lines.length - 1) return undefined;
     head = opening[1] ?? "";
+    const redirect = opening.indices?.[4];
+    if (redirect) stderr = [lineAt + redirect[0], lineAt + redirect[1]];
   }
-  const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
   const leading = /^[ \t]*/.exec(head)?.[0].length ?? 0;
-  return { text: head.replace(/^[ \t]+|[ \t]+$/g, ""), at: lineAt + leading };
+  return {
+    text: head.replace(/^[ \t]+|[ \t]+$/g, ""),
+    at: lineAt + leading,
+    ...(stderr ? { stderr } : {}),
+  };
 }
 
 // AskGate's own additions to those rules: the program may be a literal path to `dispatch` as well
@@ -453,17 +465,19 @@ function cdPathEnd(text: string, from: number): number | undefined {
     : undefined;
 }
 
-/** A trailing `2>&1` after the `dispatch` command, with the blanks before it. */
+/** A `2>&1` after the `dispatch` command's words, with the blanks before it. */
 const STDERR_TO_STDOUT = /[ \t]+2>&1$/;
 
 /** A `dispatch` command in a `bash` command, bare or in the two wrappers above: its head, where the
- * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run) and where the
- * trailing `2>&1` ends (to leave it out of the dry-run, whose stdout must be the CLI's JSON). */
+ * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run), where the head's
+ * line ends, past a trailing `2>&1`, and where a `2>&1` after a here-document opener lies (both
+ * `2>&1` forms are left out of the dry-run, whose stdout must be the CLI's JSON). */
 interface DispatchHead {
   head: string;
   at: number;
   cdEnd?: number;
   end: number;
+  stderr?: [number, number];
 }
 
 function dispatchCommandHead(command: string): DispatchHead | undefined {
@@ -494,7 +508,13 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   )
     return undefined;
   const at = line.at + offset;
-  return { head, at, ...(cdEnd === undefined ? {} : { cdEnd }), end: at + text.length };
+  return {
+    head,
+    at,
+    ...(cdEnd === undefined ? {} : { cdEnd }),
+    end: at + text.length,
+    ...(line.stderr ? { stderr: line.stderr } : {}),
+  };
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter
@@ -571,13 +591,16 @@ function headWords(head: string): Word[] {
 }
 
 /** A scoped `dispatch` command: the tool it calls, the text to run (an override flag removed),
- * the same text with `--dry-run` after the command name, and the override's line. */
+ * the same text with `--dry-run` after the command name, the override's line, and whether a flag
+ * names a file the gate reads (a `--<field>-file` other than `-`, the here-document, or an
+ * upload's `--path`). */
 export interface ScopedCommand {
   tool: string;
   label: string;
   command: string;
   dryRunScript: string;
   rebuttal?: string;
+  readsFile: boolean;
   /** A `dispatch artifact` upload of a markdown document, reviewed against failure 10 alone. */
   upload?: true;
   /**
@@ -592,7 +615,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
-  const { head, at, cdEnd, end } = found;
+  const { head, at, cdEnd, end, stderr } = found;
   const [program, name, ...flags] = headWords(head);
   if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
   // An override is `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a value that starts
@@ -617,19 +640,34 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   }
   // The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
   // silenced (bash prints the directory when CDPATH found it), so it runs where the command will;
-  // it drops the `2>&1`, so the CLI's JSON is all its stdout holds.
+  // it drops the `2>&1`, before or after a here-document opener, so the CLI's JSON is all its
+  // stdout holds.
   const before =
     cdEnd === undefined
       ? command.slice(0, at)
       : `${command.slice(0, cdEnd)} >/dev/null${command.slice(cdEnd, at)}`;
+  const after =
+    stderr === undefined
+      ? command.slice(end)
+      : `${command.slice(end, stderr[0])}${command.slice(stderr[1])}`;
   const rest = kept.map((word) => word.raw);
+  const upload = name.value === UPLOAD_COMMAND;
+  const readsFile = kept.some(({ value }, index) => {
+    const eq = value.indexOf("=");
+    const flag = eq === -1 ? value : value.slice(0, eq);
+    const file = eq === -1 ? kept[index + 1]?.value : value.slice(eq + 1);
+    const named =
+      (flag.startsWith("--") && flag.endsWith("-file")) || (upload && flag === "--path");
+    return named && file !== undefined && file !== "-";
+  });
   return {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
     command: `${command.slice(0, at)}${[program.raw, name.raw, ...rest].join(" ")}${command.slice(at + head.length)}`,
-    dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...rest].join(" ")}${command.slice(end)}`,
+    dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...rest].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
-    ...(name.value === UPLOAD_COMMAND ? { upload: true as const } : {}),
+    readsFile,
+    ...(upload ? { upload: true as const } : {}),
     ...(cdEnd === undefined ? {} : { cdScript: `${command.slice(0, cdEnd)} >/dev/null && pwd` }),
   };
 }
@@ -1212,7 +1250,7 @@ const agentFacing = (text: string) =>
 const SECOND_REVISE =
   "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
 /** How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the command. */
-type Override = { name: string; how: string; what: string };
+type Override = { name: string; how: string; what: string; note?: string };
 const DEVICE_OVERRIDE: Override = {
   name: REBUTTAL_KEY,
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
@@ -1223,8 +1261,14 @@ const COMMAND_OVERRIDE: Override = {
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
   what: "flag",
 };
+/** Oh My Pi runs the tool_call hooks of a whole batch before any call of it, so the dry run reads a
+ * named file before a sibling call of the same batch changes it. */
+const FILE_OVERRIDE: Override = {
+  ...COMMAND_OVERRIDE,
+  note: "AskGate read the file this command names before any other call in the same batch ran, so a change made to it in that batch was not reviewed. Change a file in one step, then send the command in the next.",
+};
 const renderRevise = (reason: string, second: boolean, override: Override) =>
-  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
+  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
   abandoned:
@@ -1257,7 +1301,7 @@ function renderUnreadable({ label, program }: UnreadableCommand): string {
       : program.namesDispatch
         ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
         : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`;
-  return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too) and before one trailing \`2>&1\`.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+  return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too) and with one \`2>&1\` at the end of its first line, before or after a here-document opener.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
 }
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
@@ -1780,7 +1824,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 base,
                 key,
                 scoped.rebuttal,
-                COMMAND_OVERRIDE,
+                scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
                 scoped.upload === true
               );
             }
