@@ -112,9 +112,10 @@
   token as a current value, which the broker never returns, and a mint GitHub or Google refuses
   is `502 MINT_FAILED` with their reason, logged at ERROR as `broker: mint failed` with the
   secret's name, kind and the failure's class. `max-grant` limits a request's `--ttl`; a missing or
-  longer lifetime is `400 GRANT_REQUIRES_LIFETIME`, and a `max-grant` set or lowered later ends a
-  longer live grant for good at its next release (`GRANT_NOT_LIVE`), as a kind retag ends a grant of
-  that secret, and refuses approval of a longer pending request
+  longer lifetime is `400 GRANT_REQUIRES_LIFETIME`. A grant ends for good when a release finds its
+  secret's kind changed or its lifetime over the current `max-grant` (`GRANT_NOT_LIVE`); a change
+  reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it. A
+  `max-grant` set or lowered later also refuses approval of a longer pending request
   (`NOT_APPROVER`). `BROKER_MINT_TARGETS` is removed and the broker refuses it when it is set.
   `agent-secrets secret create` takes `--kind`, `--github-owners` and `--max-grant`, and `secret
   retag` takes `--kind`, `--github-owners LOGINS|none` and `--max-grant DURATION|none`. A retag

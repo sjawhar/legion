@@ -2383,8 +2383,10 @@ the alarm, and a failed reload keeps the last set; a reload cut short because `N
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
 SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub owners, is
 recorded on every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read
-back by `policy.ParseKindSource`), so a kind change ends a live grant for good at its next release
-(`Machine.endGrant`). `policy.Kinds`, `ValidKind`,
+back by `policy.ParseKindSource`). A grant ends for good when a release finds its secret's kind
+changed (a moved source) or its lifetime over the current max-grant (`Machine.endGrant`); a change
+reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it.
+`policy.Kinds`, `ValidKind`,
 `ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant
 is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES`
 separates its entries, a form an AWS tag value and a Secret Manager annotation both hold; a comma
