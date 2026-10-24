@@ -327,11 +327,16 @@ an excluded session does not pay up to `OPEN_ASKS_TIMEOUT_MS` for an answer noth
 period runs one **silent self-check**: one side turn — the host's one-shot, tool-free model call
 over a snapshot of the conversation, the same channel a targeted Dispatch BTW uses. The check uses
 the open-asks snapshot it reads to name the session's own open asks in the prompt: the first line of
-at most five questions, each truncated to about 120 characters, followed by `+N more`; with no asks
-it says so. Every Unicode line separator ends that displayed first line, and other C0/C1 controls
-become spaces, so a listed ask cannot add prompt lines. The one prompt asks whether the agent is
-waiting on a human for anything those asks do not cover, answered with exactly WAITING or
-PROCEEDING. An open ask or `opened_since` never suppresses this check.
+at most five questions, each truncated to about 120 characters, followed by `+N more`; with none
+it says the session has none, not that Dispatch has none, since another session's open ask can
+cover the wait. Every Unicode line separator ends that displayed first line, and other C0/C1
+controls become spaces, so a listed ask cannot add prompt lines. The one prompt asks whether the
+agent is waiting on a human for anything those asks do not cover, answered with exactly WAITING or
+PROCEEDING. Its PROCEEDING definition covers a wait any open ask covers, another session's
+included, and a reply a human already said they will send and that is on its way (a go-ahead
+message the user promised): such a reply is an event, not an open question. Something the human
+put off for later, or promised and then did not send, stays WAITING, and so does any decision
+nobody has said they will make. An open ask or `opened_since` never suppresses this check.
 
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with

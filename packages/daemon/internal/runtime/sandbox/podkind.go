@@ -202,14 +202,13 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 // launcher token and gh files read-only, and none at those fixed paths; the role homes volume
 // (roleHomesVolume) at RoleHomesDir holds each role's home overlay and temporary directories. The
 // pod's shared mounts are mounted once: the issue's volume, its sessions directory, the config
-// home, the feed read-only (the issue's clone keeps its objects there, objects/info/alternates,
-// and no agent writes what workspace-fetch, the token's holder, reads), the providers, the
-// broker's token, and the operator's. Every one of them that belongs at or under the image's home
-// — the sessions directory, the config home, an operator's mount there — is mounted under
-// launcher.HomeMountsDir at the same relative path instead (homeMountsView), so the home carries
-// no mount: each role's namespace overlays the home, which Linux refuses over a lower layer with
-// mounts under it, and then binds each of them back at its own path. The values the kubelet
-// resolves are the same for every role (the downward API's POD_UID), so they are set once.
+// home, the feed read-only (so no agent writes what workspace-fetch, the token's holder, reads),
+// the providers, the broker's token, and the operator's. Every one of them that belongs at or under
+// the image's home — the sessions directory, the config home, an operator's mount there — is
+// mounted under launcher.HomeMountsDir at the same relative path instead (homeMountsView), so the
+// home carries no mount: each role's namespace overlays the home, which Linux refuses over a lower
+// layer with mounts under it, and then binds each of them back at its own path. The values the
+// kubelet resolves are the same for every role (the downward API's POD_UID), so they are set once.
 func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount) corev1.Container {
 	command := []string{r.tools.Legion, "launcher", connectFlag, r.streamURL, "--sandbox", l.name, "--roles-dir", RolesDir}
 	mounts := []corev1.VolumeMount{

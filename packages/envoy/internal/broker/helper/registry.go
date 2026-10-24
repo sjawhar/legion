@@ -178,6 +178,8 @@ type Record struct {
 type Registry struct {
 	mu     sync.Mutex
 	saveMu sync.Mutex // serializes Save so the last rename is always the newest snapshot
+	// closed, set by Close under saveMu, makes every later Save write nothing.
+	closed bool
 	path   string
 	byPID  map[int]*Session
 	// parent reads a process's parent for the ancestry walks: procParent, or a test's fake.
@@ -304,10 +306,13 @@ func (r *Registry) Draining() bool {
 	return r.draining
 }
 
-// Save writes every session's record, atomically, 0600.
+// Save writes every session's record, atomically, 0600. After Close it writes nothing.
 func (r *Registry) Save() error {
 	r.saveMu.Lock()
 	defer r.saveMu.Unlock()
+	if r.closed {
+		return nil
+	}
 	recs := make([]Record, 0)
 	for _, s := range r.List() {
 		recs = append(recs, Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.recordedEnrollmentID()})
@@ -321,6 +326,17 @@ func (r *Registry) Save() error {
 		return err
 	}
 	return os.Rename(tmp, r.path)
+}
+
+// Close waits for a Save in progress, then makes every later Save write nothing, so a caller can
+// remove the directory the records live in while a registration, a retire or an enrollment is
+// still finishing: Serve returning does not wait for those, and each saves the records after the
+// registry has changed. A test's cleanup calls it; the helper never does, since a session retired
+// while the helper stops must still be recorded.
+func (r *Registry) Close() {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
+	r.closed = true
 }
 
 // LoadRecords reads what Save wrote; no file means no sessions.

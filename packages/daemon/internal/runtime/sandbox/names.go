@@ -15,18 +15,16 @@ import (
 )
 
 // The pod's own paths. The issue's volume is mounted whole at TreeRoot in workspace-init and each
-// role launcher, and sessions stay on it. The pod's feed, where workspace-fetch fills the bare
-// repository the issue's clone keeps its objects in, is the volume's feedSubPath directory, mounted
-// at FeedDir: read-write in workspace-fetch, which mounts nothing else of the volume, and read-only
-// over the whole volume's mount in every other container, so the path the clone's
-// objects/info/alternates names is the same in each and no agent writes what the token-holding
-// container reads. On a volume carried over from an earlier release, whose agents could write the
-// whole volume, feedSubPath may be a link to another directory of it, which the kubelet mounts in
-// its place; agents may still change what the next fetch reads there, through that directory's own
-// path or the link itself, which is no mount point in their containers. There the fetch's own check
-// of the feed (workspace.Fetch takes a feed only in the shape it writes), run before any git and in
-// an init container no agent runs beside, keeps the token-holding container from running what they
-// wrote.
+// role launcher, and sessions stay on it. The pod's feed is the volume's feedSubPath directory,
+// mounted at FeedDir: read-write in workspace-fetch, which mounts nothing else of the volume, and
+// read-only over the whole volume's mount in every other container. The clone owns its object-store
+// entries, and no agent writes what the token-holding container reads. On a volume carried over from
+// an earlier release, whose agents could write the whole volume, feedSubPath may be a link to another
+// directory of it, which the kubelet mounts in its place; agents may still change what the next fetch
+// reads there, through that directory's own path or the link itself, which is no mount point in their
+// containers. There the fetch's own check of the feed (workspace.Fetch takes a feed only in the shape
+// it writes), run before any git and in an init container no agent runs beside, keeps the
+// token-holding container from running what they wrote.
 // LauncherDir, LauncherPrivateDir, StateDir, GHConfigDir and AgentSecretsKeyDir are where a
 // launcher role's process finds its own launcher token projection, memory-backed private directory
 // (where its launcher writes each generation's boot token and launch credentials), state directory,

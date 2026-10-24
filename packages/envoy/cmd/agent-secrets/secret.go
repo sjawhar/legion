@@ -161,8 +161,8 @@ func secretFail(stderr io.Writer, form string, err error) int {
 var secretFlagValues = map[string]bool{"owner": true, "tier": true, "profile": true}
 
 // secretFlags is form's flag set with --profile, which every secret form takes but only the AWS
-// backend uses (GCP uses your Application Default Credentials instead; a non-empty --profile
-// there is a usage error, openSecretBackend).
+// backend uses (GCP uses your Google sign-in instead, gcpBackend; a non-empty --profile there is a
+// usage error, openSecretBackend).
 func secretFlags(form string, stderr io.Writer) (*flag.FlagSet, *string) {
 	flags := newFlagSet(form, stderr)
 	return flags, flags.String("profile", "", "the AWS profile to sign in with (AWS only; default: AWS_PROFILE, else the AWS SDK's default credential chain)")
@@ -399,14 +399,16 @@ type secretBackend interface {
 	// secrets: a read there would list another account's secrets as if they were the agent
 	// secrets. AWS only: GCP needs no equivalent (gcpBackend.requireAccount says why).
 	requireAccount(ctx context.Context) error
-	// requireWriteSignIn refuses, before any write, a sign-in that must not write - AWS a
-	// machine's own role, GCP any but a person's own Google Account sign-in - and answers the
-	// signed-in person's lowercased email for --owner me.
+	// requireWriteSignIn makes sure a write runs under a person's own sign-in, before anything
+	// is written - AWS refuses a machine's own role; GCP signs in with the person's gcloud login
+	// in place of a machine's Application Default Credentials, and refuses where it cannot - and
+	// answers the signed-in person's lowercased email for --owner me.
 	requireWriteSignIn(ctx context.Context) (email string, err error)
-	// signInPrefix is the shell assignment a command line the form prints for running again
-	// (pipeCommand) needs to sign in as this one did when the sign-in came from a variable set
-	// for this command alone: GCP's GOOGLE_APPLICATION_CREDENTIALS when set, else "". It ends in
-	// a space when it is not empty.
+	// signInPrefix is the shell assignments a command line the form prints for running again
+	// (pipeCommand) needs to sign in as this one did when the sign-in came from a variable that
+	// may have been set for this command alone: GCP's GOOGLE_APPLICATION_CREDENTIALS when set, and
+	// CLOUDSDK_CORE_ACCOUNT when it chose the gcloud login; else "". It ends in a space when it is
+	// not empty.
 	signInPrefix() string
 
 	list(ctx context.Context) ([]secretView, error)
@@ -484,7 +486,7 @@ func openSecretBackend(ctx context.Context, profile string, settings Settings) (
 		return &awsBackend{settings: settings, sm: sm, st: st}, nil
 	case secrets.StoreGCP:
 		if profile != "" {
-			return nil, usageErr{fmt.Errorf("--profile names an AWS profile; this broker's store is %s, which uses your Application Default Credentials, not --profile (set GOOGLE_APPLICATION_CREDENTIALS to use another credentials file for one command)", settings.Store)}
+			return nil, usageErr{fmt.Errorf("--profile names an AWS profile; this broker's store is %s, which signs in with your Google sign-in (your Application Default Credentials, or your gcloud login), not --profile", settings.Store)}
 		}
 		if err := checkSettingsKMSKeyName(settings); err != nil {
 			return nil, err
@@ -510,8 +512,8 @@ func connectReader(ctx context.Context, profile string) (*secretSession, error) 
 	return s, nil
 }
 
-// connectWriter is openSession for a write: it refuses any sign-in that must not write
-// (backend.requireWriteSignIn) before anything is written, and answers their email.
+// connectWriter is openSession for a write: it makes sure the write runs under a person's own
+// sign-in (backend.requireWriteSignIn) before anything is written, and answers their email.
 func connectWriter(ctx context.Context, profile string) (*secretSession, string, error) {
 	s, err := openSession(ctx, profile)
 	if err != nil {

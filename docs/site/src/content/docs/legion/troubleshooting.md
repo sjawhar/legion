@@ -507,7 +507,7 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 
 - **`Issue reached review_round_cap=3.`** The implementer's round count reached three
   ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
-  architect decides in the same turn whether to narrow the next rounds, split work into an issue of its own, or
+  architect decides in the same turn whether to narrow the next rounds, split work off (a sibling child, or, on a root, an ask whether the rest needs an issue), or
   let rounds that are converging run, and posts that decision on the issue; it asks you only for a
   decision that needs your authority.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires

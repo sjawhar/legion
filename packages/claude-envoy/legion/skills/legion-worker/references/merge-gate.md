@@ -23,9 +23,10 @@ it, and any other change to the head voids it.
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
   and records the verdict. The `CI` fact is the checks that stand for the code under review:
   those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/` (a push that changes only
-  `.legion/` carries `skip-checks: true`, so GitHub runs no workflow for it). With `<o>/<r>`,
-  `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  every commit above that push's head changes only `.legion/` (GitHub starts no workflow run for a
+  head whose commit message carries `skip-checks: true`, which every handoff-only push before
+  retro does; retro's push carries no such line, so its head does get GitHub's workflow runs of
+  its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
@@ -238,10 +239,11 @@ reviewing until you finish.
     previous release, a daemon still running the previous commit, a deploy nobody has run): the
     summary names what is missing, and the `Production:` line stays at
     `pending deploy of <merge sha>`.
-  - `fail`, for a defect: file it as an issue of its own in the issue's project with
-    `dispatch issue` (`--external <owner>/<repo>#<n>` links the pull request; its spec names the
-    closed issue as `dispatch://<KEY>`), never as a child of the closed issue, and name the new
-    issue in the `Production:` line and in the summary.
+  - `fail`, for a defect: open a `dispatch ask` for it on the controller's report issue, as
+    `skill://legion-worker/references/findings.md` says, publish its reference to the controller
+    topic, and file no issue. It names this issue, the pull request, the merge commit, what you
+    drove and what failed. Name the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the `Production:`
+    line and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look: the daemon suspends
   your claim with its session and the issue's volume kept, the pod goes, and the daemon wakes the
   check (the pod comes back and your session resumes with a new check task) on Dispatch's
@@ -262,9 +264,9 @@ reviewing until you finish.
   closes the check as any look's would; a `pending` closes it as not run, and before reporting it
   you write on the pull request, in the `Production:` line and a comment, that the check did not
   run because production did not carry the merge within the bound.
-- **The record lives on the pull request alone.** Dispatch refuses a message or a comment on a
-  closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
-  issue" is the pull request for a closed issue, and a defect reaches Dispatch as the new issue.
+- **The record lives on the pull request alone.** Dispatch refuses a message, a comment or an ask
+  on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
+  issue" is the pull request for a closed issue, and a defect reaches Dispatch as the ask above.
   The architect accepted the issue before the merge and is asked nothing after it. `pass` or
   `fail` closes the check: your claim is retired and, for a child, the issue's Sandbox and volume
   are released.

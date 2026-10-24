@@ -233,6 +233,21 @@ func TestAMachineFileOthersCanReadIsRefused(t *testing.T) {
 	}
 }
 
+// TestASaveAfterTheBrokerClosesWritesNothing: once Close returns, no save of the machine login
+// writes into its directory, so the caller that closed the broker can remove that directory
+// while a refresh or an approved login is still finishing.
+func TestASaveAfterTheBrokerClosesWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	b := &Broker{MachineFile: filepath.Join(dir, "machine.json")}
+	b.Close()
+	if err := b.saveFile(testMachineFile(t, "cred-1", "refresh-1")); err != nil {
+		t.Fatalf("a save after Close: %v; want nil, since it writes nothing", err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("a save after Close wrote into the directory: %v %v", entries, err)
+	}
+}
+
 // TestRemoveLeftoverMachineTempsRemovesOnlyTheSavesTemps: the temporary files an interrupted save
 // leaves beside the machine file (.machine-*.json.tmp, holding a key and a refresh token) are
 // removed; the machine file and anything else in the directory are left alone.

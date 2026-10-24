@@ -243,15 +243,23 @@ function askPromptQuestionHead(question: string): string {
 }
 /**
  * What the hidden self-check asks the agent, over a snapshot of its own conversation. It names
- * the asks Dispatch already knows about, then asks whether the agent is waiting on a human for
- * something those asks do not cover. One word comes back; only WAITING buys the visible turn.
+ * the session's own open asks, then asks whether the agent is waiting on a human for something
+ * those asks do not cover. With none it says the session has none, not that Dispatch has none:
+ * another session's open ask can cover the wait, and a line denying that ask exists drew WAITING.
+ * One word comes back; only WAITING buys the visible turn.
+ * A reply a human already said they will send and that is on its way, such as a go-ahead message
+ * the user promised, is an event, so PROCEEDING: WAITING would buy a steer to ask for it.
+ * Something a human put off for later ("I'll take a look later") or promised and then did not
+ * send is not on its way, so it stays WAITING: an agent waits on a human only through an open
+ * ask. WAITING excludes a wait the listed asks cover, and PROCEEDING counts a wait any open ask
+ * covers, another session's included.
  */
 const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): string => {
   const askLimit = 5;
   const questionLimit = 120;
   const promptAsks =
     asks.length === 0
-      ? "There are no open asks in Dispatch."
+      ? "You have no open asks in Dispatch."
       : [
           "Your open asks in Dispatch:",
           ...asks.slice(0, askLimit).map((ask) => {
@@ -270,9 +278,13 @@ const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): stri
     `${promptAsks}\n\n` +
     "Are you right now waiting on a human for anything none of those asks covers? " +
     "Answer with exactly one word and nothing else: WAITING or PROCEEDING. " +
-    "WAITING — you stopped because you need a decision, an approval, or information from a human. " +
-    "PROCEEDING — you finished, you will carry on by yourself, or you are waiting only on tools, " +
-    "subagents, or events."
+    "WAITING — you stopped because you need a decision, an approval, or information from a human " +
+    "that none of those asks covers and that is not already on its way; something they put off " +
+    "for later, or promised and then did not send, is not on its way. " +
+    "PROCEEDING — you finished, you will carry on by yourself, or you are waiting only on open " +
+    "asks, tools, subagents, or events, including a message, an answer, or an event a human " +
+    "already said they will send and that is on its way: a reply on its way is an event, not an " +
+    "open question."
   );
 };
 

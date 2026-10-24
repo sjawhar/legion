@@ -16,11 +16,11 @@ Documentation: <https://sjawhar.github.io/legion/>
 ### Legion
 
 The coordinator: a Go daemon and the `legion` CLI. The daemon works the Dispatch issues labelled
-`legion`. A controller session the operator starts labels and admits the highest-priority `todo`
-issue whenever a slot frees; you can also label an issue yourself. Each admitted issue gets an
-architect, which writes the spec, splits the work and asks you what only you can answer. Once you
-approve the spec, the daemon runs the phase workers in turn: planner, implementer, tester, reviewer
-and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session, in a tmux
+`legion`: you label an issue yourself, or ask the controller session the operator starts to label
+it for you, and an agent that finds a problem outside its issue asks you before anything is filed.
+Each admitted issue gets an architect, which writes the spec, splits the work and asks you what
+only you can answer. Once you approve the spec, the daemon runs the phase workers in turn: planner,
+implementer, tester, reviewer and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session, in a tmux
 pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
 pod on Kubernetes, and each phase commits a handoff under `.legion/` on the issue branch for a
 restarted agent to recover from. The daemon writes the issue's status back to Dispatch as it moves
