@@ -104,9 +104,10 @@ func startContractHelper(t *testing.T, broker *brokertest.Rig, machineFile strin
 				sess.peer.Close()
 			}
 		}
-		cr.srv.Registry.saveMu.Lock()
+		cr.srv.Registry.Close()
 		cancel()
 		<-served
+		cr.srv.Broker.Close()
 	})
 	if err := cr.srv.Broker.Start(ctx); err != nil {
 		t.Fatal(err)

@@ -95,11 +95,15 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 		actual.Argv[3] = r.remote
 	}
 	if commandWith(actual.Argv, "git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets") {
-		actual.Argv[4] = r.remote
+		for i, arg := range actual.Argv {
+			if arg == "https://github.com/acme/widgets" {
+				actual.Argv[i] = r.remote
+			}
+		}
 	}
 	// The fetch into a feed that already holds the repository, and its read of GitHub's HEAD, name
 	// GitHub in their argv, too.
-	if len(actual.Argv) > 2 && actual.Argv[0] == "git" && (actual.Argv[2] == "fetch" || actual.Argv[2] == "ls-remote") {
+	if len(actual.Argv) > 2 && actual.Argv[0] == "git" && (slices.Contains(actual.Argv, "fetch") || slices.Contains(actual.Argv, "ls-remote")) {
 		for i, arg := range actual.Argv {
 			if arg == "https://github.com/acme/widgets" {
 				actual.Argv[i] = r.remote
@@ -448,6 +452,11 @@ func commandEnv(command Command, key string) string {
 }
 
 func commandWith(argv []string, prefix ...string) bool {
+	if len(prefix) > 0 && prefix[0] == "git" && len(argv) > 0 && argv[0] == "git" {
+		for len(argv) > 2 && argv[1] == "-c" {
+			argv = slices.Concat(argv[:1], argv[3:])
+		}
+	}
 	if len(argv) < len(prefix) {
 		return false
 	}
@@ -678,7 +687,7 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 		t.Errorf("the feed's main is %s, not the remote's", main)
 	}
 	clone := findCall(t, run.Calls(), "git", "clone")
-	if want := []string{"git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets"}; !slices.Equal(clone.Argv[:len(want)], want) || len(clone.Argv) != len(want)+1 || !strings.HasPrefix(clone.Argv[len(want)], feed+".clone-") {
+	if want := []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "--bare", "--quiet", "https://github.com/acme/widgets"}; !slices.Equal(clone.Argv[:len(want)], want) || len(clone.Argv) != len(want)+1 || !strings.HasPrefix(clone.Argv[len(want)], feed+".clone-") {
 		t.Errorf("Fetch ran %q, want %q into a temporary sibling of %s", clone.Argv, want, feed)
 	}
 	assertCredentialedEnvironmentBounded(t, clone, FetchTimeout)
@@ -688,12 +697,11 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 }
 
 // A pod's second init container provisions from the feed Fetch filled, which is read-only there,
-// and holds no credential: the shared clone is a `git clone --shared` of the feed, so its objects
-// stay in the feed (objects/info/alternates) and nothing of the history is copied into it, its
-// origin names https://github.com/<repo>, and the fetch that follows reaches that remote at the
-// feed. No command is handed a token file, an askpass, or a credential helper. The workspace starts
-// at the default branch, which the clone tracks. The next pod's fetch brings what the remote gained
-// since.
+// and holds no credential. Its local-path clone owns its object-store entries, so removing the feed
+// cannot remove history that the clone's refs need. Its origin names https://github.com/<repo>, and
+// the fetch that follows reaches that remote at the feed. No command is handed a token file, an
+// askpass, or a credential helper. The workspace starts at the default branch, which the clone
+// tracks. The next pod's fetch brings what the remote gained since.
 func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	run := newLocalRunner(t)
 	pushRemoteBranch(t, run.remote, "main", "history.txt")
@@ -725,18 +733,16 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 			}
 		}
 		if commandWith(call.Argv, "jj", "git", "clone") {
-			t.Errorf("the shared clone was cloned whole: %q", call.Argv)
+			t.Errorf("the clone used a credentialed Jujutsu clone: %q", call.Argv)
 		}
 	}
-	if clone := findCall(t, calls, "git", "clone", "--shared"); len(clone.Argv) != 6 || clone.Argv[4] != feed {
-		t.Errorf("the shared clone was cloned with %q, want a shared clone of the feed %s", clone.Argv, feed)
+	if clone := findCall(t, calls, "git", "clone", "--quiet"); len(clone.Argv) != 5 || clone.Argv[3] != feed {
+		t.Errorf("the clone was made with %q, want a local clone of the feed %s", clone.Argv, feed)
 	}
 	cloneDir := filepath.Join(state, "repos", "github.com", "acme", "widgets")
-	alternates, err := os.ReadFile(filepath.Join(cloneDir, ".git", "objects", "info", "alternates"))
-	if err != nil || strings.TrimSpace(string(alternates)) != filepath.Join(feed, "objects") {
-		t.Errorf("the shared clone's alternates = %q (%v), want the feed's objects %s", alternates, err, filepath.Join(feed, "objects"))
+	if _, err := os.Stat(filepath.Join(cloneDir, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the clone's alternates = %v, want no borrowed history", err)
 	}
-	assertHistoryOnlyInFeed(t, filepath.Join(cloneDir, ".git"), feed)
 	if origin := strings.TrimSpace(runSetup(t, cloneDir, "git", "--git-dir="+filepath.Join(cloneDir, ".git"), "remote", "get-url", "origin")); origin != "https://github.com/acme/widgets" {
 		t.Errorf("the shared clone's origin is %s, want GitHub's", origin)
 	}
@@ -757,10 +763,10 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	}
 }
 
-// The shared clone's clone from a pod's feed runs each step whose duration follows the
-// repository's size under what remains of one shared CloneTimeout — the `git clone --shared`,
-// which checks out the working tree, then jj's import of every commit, with less — and every
-// other provisioning command keeps the runner's slow-command budget.
+// The clone from a pod's feed runs each step whose duration follows the repository's size under
+// what remains of one shared CloneTimeout — the local `git clone`, which checks out the working
+// tree, then jj's import of every commit, with less — and every other provisioning command keeps
+// the runner's slow-command budget.
 func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 	run := newLocalRunner(t)
 	req := feedRequest(t, run, provisionRequest(t))
@@ -771,7 +777,7 @@ func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 	var steps []string
 	var given []time.Duration
 	for _, call := range run.Calls()[before:] {
-		if commandWith(call.Argv, "git", "clone", "--shared") || commandWith(call.Argv, "jj", "git", "init", "--colocate") {
+		if commandWith(call.Argv, "git", "clone") || commandWith(call.Argv, "jj", "git", "init", "--colocate") {
 			steps = append(steps, strings.Join(call.Argv[:3], " "))
 			given = append(given, call.Timeout)
 			if call.Timeout > CloneTimeout || call.Timeout < CloneTimeout-time.Minute {
@@ -786,15 +792,15 @@ func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 	if len(given) == 2 && given[1] >= given[0] {
 		t.Errorf("jj's import was given %s, no less than the shared clone's %s: want what remained after it", given[1], given[0])
 	}
-	if !slices.Equal(steps, []string{"git clone --shared", "jj git init"}) {
-		t.Errorf("provisioning ran the shared clone's steps %q, want the shared clone and jj's import once each", steps)
+	if !slices.Equal(steps, []string{"git clone --quiet", "jj git init"}) {
+		t.Errorf("provisioning ran the clone's steps %q, want the local clone and jj's import once each", steps)
 	}
 }
 
-// The shared clone's two size-following steps share one CloneTimeout, counted from the first's
-// start, as ProvisionBound budgets one: the `git clone --shared` gets the whole bound and jj's
-// import what remains of it. Two steps that fit together clone; a clone that leaves the import too
-// little fails at the shared deadline, the import killed there, and no clone is left in place.
+// The clone's two size-following steps share one CloneTimeout, counted from the first's start, as
+// ProvisionBound budgets one: the local `git clone` gets the whole bound and jj's import what
+// remains of it. Two steps that fit together clone; a clone that leaves the import too little fails
+// at the shared deadline, the import killed there, and no clone is left in place.
 func TestTheSharedClonesStepsShareOneCloneTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -872,10 +878,9 @@ func (r *slowSteps) Run(ctx context.Context, command Command) (Result, error) {
 	return r.recordingRunner.Run(ctx, command)
 }
 
-// sharedCloneStep names the shared clone's size-following steps, `git clone --shared` and then
-// `jj git init`.
+// sharedCloneStep names the clone's size-following steps, `git clone` and then `jj git init`.
 func sharedCloneStep(argv []string) string {
-	if commandWith(argv, "git", "clone", "--shared") || commandWith(argv, "jj", "git", "init") {
+	if commandWith(argv, "git", "clone") || commandWith(argv, "jj", "git", "init") {
 		return strings.Join(argv[:2], " ")
 	}
 	return ""

@@ -76,7 +76,8 @@ type Service struct {
 	OAuth *oauth.Provider
 
 	// Replay records a request object's jti (the proof_jtis table), answering false when it was
-	// already seen. Wired to enroll.Service.Replay in production, exactly like
+	// already seen, in the transaction ctx carries (oauthstore.TxFrom) and on the pool when it
+	// carries none. Wired to enroll.Service.Replay in production, exactly like
 	// requests.Machine.Replay: without it a captured signed machine-login request object could be
 	// resubmitted repeatedly within its freshness window, each call minting a fresh pending record
 	// and confirmation code — a confirmation-fatigue/notification-spam vector against the named
@@ -193,8 +194,11 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // and the user code the provider minted. form's request is the signed request object Login takes,
 // verified the same way with the same refusals (its jti recorded, so a replay is refused), and its
 // dpop_jkt must be that object's key thumbprint, so the tokens the login is issued are bound to the
-// key its credential is (record.ErrRequestInvalid otherwise). The record is Login's, its code the
-// user code, and there is no poll row: the machine polls with its device code.
+// key its credential is (record.ErrRequestInvalid otherwise). The jti, like the record, is written
+// in that transaction (Replay reads it from ctx), so a login holds the one pooled connection its
+// transaction took and never waits for another, and a refused login leaves no jti behind. The
+// record is Login's, its code the user code, and there is no poll row: the machine polls with its
+// device code.
 func (s *Service) LoginDevice(ctx context.Context, form url.Values, userCode string) error {
 	tx, ok := oauthstore.TxFrom(ctx)
 	if !ok {

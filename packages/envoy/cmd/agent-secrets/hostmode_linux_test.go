@@ -93,8 +93,10 @@ func realHelper(t *testing.T) string {
 
 // serveRealHelper serves a real helper.Server against the broker at brokerURL, with an operator
 // file naming operator (an email, as Dispatch names the person who approves) so a test can log it
-// in (Broker.Login). It waits for every session to be retired, and the server to stop, before the
-// test's temporary directories go.
+// in (Broker.Login). It waits for every session to be retired and the server to stop, then closes
+// the registry, which lets a save still finishing a registration, a retire or an enrollment
+// complete and makes any later one write nothing, and the broker, which does the same for its
+// machine file, before the test's temporary directories go.
 func serveRealHelper(t *testing.T, brokerURL, operator string) (*helper.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -125,6 +127,8 @@ func serveRealHelper(t *testing.T, brokerURL, operator string) (*helper.Server, 
 		}
 		cancel()
 		<-served
+		srv.Registry.Close()
+		srv.Broker.Close()
 	})
 	return srv, sock
 }

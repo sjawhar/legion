@@ -33,14 +33,13 @@ const CommandTimeout = 5 * time.Minute
 // transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
-// CloneTimeout is the one bound the shared clone's own clone (ensureRepoClone) gives the steps
-// whose duration follows the repository's size, all together, as the fetch's share FetchTimeout:
-// from GitHub, a `jj git clone` that copies and imports every object; from a pod's feed, a `git
-// clone --shared` that copies no object but checks out the working tree, then jj's import of every
-// commit, each given what remains. A 3.4 GB repository (816k objects, 421 refs) cloned from a local
-// feed by `jj git clone` in 253 s with four cores and 281 s with two on a 64-core devbox, using no
-// more than about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once
-// a sandbox slows it at all.
+// CloneTimeout is the one bound ensureRepoClone gives its size-following steps, together, as the
+// fetch's share FetchTimeout: from GitHub, a `jj git clone` that copies and imports every object;
+// from a pod's feed, a local `git clone` that hard-links objects where possible, then jj's import
+// of every commit. A 3.4 GB repository (816k objects, 421 refs) cloned from a local feed by `jj git
+// clone` in 253 s with four cores and 281 s with two on a 64-core devbox, using no more than about
+// two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once a sandbox slows
+// it at all.
 const CloneTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
@@ -588,7 +587,9 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	}
 	// The fetch takes no snapshot of the clone's working copy: a snapshot runs the working-copy
 	// filter, fsmonitor, and signing programs jj's configuration names, which a tree agent can set,
-	// and on the tmux runtime this fetch holds the one-shot credential.
+	// and on the tmux runtime this fetch holds the one-shot credential. A failed fetch is diagnosed
+	// against the old alternate-clone failure before its own error is returned; a successful fetch
+	// pays no connectivity scan.
 	fetch := []string{"git", "fetch"}
 	for _, branch := range source.branches {
 		fetch = append(fetch, "--branch", exactName(branch))
@@ -597,8 +598,18 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	if err != nil {
 		return err
 	}
-	_, err = RunChecked(ctx, run, argv, source.env, "")
-	return err
+	result, runErr := runCommand(ctx, run, argv, source.env, "")
+	_, fetchErr := checkedResult(argv, result, runErr)
+	if fetchErr == nil {
+		return nil
+	}
+	if err := ensureCloneConnectivity(ctx, run, cloneDir); err != nil {
+		return err
+	}
+	if err := ensureJujutsuConnectivity(ctx, run, cloneDir); err != nil {
+		return err
+	}
+	return fetchErr
 }
 
 // GitHubCredentialHelper is the `credential.helper` every shared clone gets: `legion
