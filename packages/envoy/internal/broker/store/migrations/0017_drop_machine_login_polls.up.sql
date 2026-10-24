@@ -12,6 +12,9 @@
 -- left pending is still decided by its code through Dispatch; it has no device code, so its
 -- machine learns nothing of the decision and logs in again through the device grant.
 --
--- The drop takes an ACCESS EXCLUSIVE lock on machine_login_polls alone, which only those two
--- routes touch, so no request of either release waits behind it.
+-- The drop takes ACCESS EXCLUSIVE on machine_login_polls and, to drop its foreign key, on
+-- credential_requests, which every request, decision and machine login reads. Both hold for the
+-- catalog change alone, no row is read or written, and the runner's lock timeout bounds the wait
+-- for a transaction already holding credential_requests, so requests queue behind it for at most
+-- that long at the broker's boot.
 drop table machine_login_polls;
