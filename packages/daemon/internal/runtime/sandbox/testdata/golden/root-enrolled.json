@@ -713,6 +713,11 @@
                 "mountPath": "/legion/feed",
                 "name": "issue",
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/legion/feed-quarantine",
+                "name": "issue",
+                "subPath": "feed-quarantine"
               }
             ],
             "workingDir": "/legion/feed"

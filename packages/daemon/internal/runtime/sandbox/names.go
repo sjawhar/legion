@@ -48,6 +48,7 @@ const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"
 	FeedDir            = TreeRoot + "/" + feedSubPath
+	FeedQuarantineDir  = TreeRoot + "/" + feedQuarantineSubPath
 	CacheRoot          = "/legion/cache"
 	LauncherDir        = "/var/run/legion/launcher"
 	LauncherPrivateDir = "/var/run/legion/private"
@@ -58,10 +59,12 @@ const (
 	ProvidersDir       = "/var/run/legion/providers"
 )
 
-// feedSubPath is the issue volume's directory that holds the pod's feed (FeedDir). The kubelet
-// makes it on first use, so a volume provisioned before the feed moved onto it is relaunched as it
-// is: nothing of its tree moves.
-const feedSubPath = "feed"
+// feedSubPath and feedQuarantineSubPath are issue-volume siblings. Fetch owns both until it exits;
+// provision sees the trusted feed read-only and the untrusted quarantine through its whole-volume mount.
+const (
+	feedSubPath           = "feed"
+	feedQuarantineSubPath = "feed-quarantine"
+)
 
 // AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id
 // live in, and AgentSecretsTokenDir where its projected token for the broker's audience is

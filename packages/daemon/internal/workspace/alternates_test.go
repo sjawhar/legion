@@ -127,7 +127,7 @@ func TestProvisionDissociatesAnOldSharedCloneAfterFeedQuarantine(t *testing.T) {
 		t.Fatalf("clone alternates after dissociation = %v, want absent", err)
 	}
 	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
-	if _, err := os.Stat(first.Feed + ".legacy"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(testQuarantine(first.Feed)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("quarantined feed after provision = %v, want removed", err)
 	}
 }
@@ -166,7 +166,7 @@ func TestProvisionRetriesAnInterruptedLegacyCloneDissociation(t *testing.T) {
 	if _, err := Provision(context.Background(), interrupted, request); err == nil {
 		t.Fatal("Provision succeeded while the legacy repack failed")
 	}
-	quarantine := first.Feed + ".legacy"
+	quarantine := testQuarantine(first.Feed)
 	if got, err := os.ReadFile(filepath.Join(workspace.Clone, ".git", "objects", "info", "alternates")); err != nil || strings.TrimSpace(string(got)) != filepath.Join(quarantine, "objects") {
 		t.Fatalf("alternate after failed repack = %q, %v; want the quarantined feed", got, err)
 	}
@@ -227,7 +227,7 @@ func TestProvisionDissociatesAnOldSharedCloneAfterSymlinkedFeedOwnerQuarantine(t
 		t.Fatalf("clone alternates after dissociation = %v, want absent", err)
 	}
 	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
-	if _, err := os.Lstat(owner + ".legacy"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Dir(testQuarantine(first.Feed))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("quarantined owner after provision = %v, want removed", err)
 	}
 }
@@ -345,6 +345,11 @@ func replaceAlternate(t *testing.T, clone, remote string) {
 	if err := os.WriteFile(filepath.Join(clone, ".git", "objects", "info", "alternates"), []byte(filepath.Join(fresh, "objects")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func testQuarantine(feed string) string {
+	root := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(feed))), "feed-quarantine")
+	return feedQuarantines(feed, root)[0].feed
 }
 
 func commitOnlyInFeed(t *testing.T, feed string) string {

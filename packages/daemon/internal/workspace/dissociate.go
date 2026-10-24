@@ -16,22 +16,26 @@ type feedQuarantine struct {
 	remove string
 }
 
-// feedQuarantines are the two possible quarantines ownFeedRepository creates: a bare feed moved
-// aside, or a symlinked owner moved aside without following its target.
-func feedQuarantines(feed string) [2]feedQuarantine {
+// feedQuarantines are the two possible quarantines ownFeedRepository creates under root: a bare
+// feed moved aside, or a symlinked owner moved aside without following its target.
+func feedQuarantines(feed, root string) [2]feedQuarantine {
 	return [2]feedQuarantine{
-		{feed: feed + ".legacy", remove: feed + ".legacy"},
-		{feed: filepath.Join(filepath.Dir(feed)+".legacy", filepath.Base(feed)), remove: filepath.Dir(feed) + ".legacy"},
+		{feed: filepath.Join(root, filepath.Base(filepath.Dir(feed)), filepath.Base(feed)), remove: filepath.Join(root, filepath.Base(filepath.Dir(feed)), filepath.Base(feed))},
+		{feed: filepath.Join(root, filepath.Base(filepath.Dir(feed)), filepath.Base(feed)), remove: filepath.Join(root, filepath.Base(filepath.Dir(feed)))},
 	}
 }
 
 // dissociateLegacyClone repacks a legacy alternate clone after workspace-fetch quarantines a
 // foreign feed and before provisioning reads the clone. This process holds no provisioning token.
-func dissociateLegacyClone(ctx context.Context, run Runner, cloneDir, feed string, log func(string)) error {
+func dissociateLegacyClone(ctx context.Context, run Runner, cloneDir, feed, quarantineRoot string, log func(string)) error {
 	if feed == "" {
 		return nil
 	}
-	for _, quarantine := range feedQuarantines(feed) {
+	quarantines := feedQuarantines(feed, quarantineRoot)
+	if info, err := os.Lstat(filepath.Dir(quarantines[0].feed)); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		quarantines[0], quarantines[1] = quarantines[1], quarantines[0]
+	}
+	for _, quarantine := range quarantines {
 		if _, err := os.Lstat(quarantine.feed); errors.Is(err, fs.ErrNotExist) {
 			continue
 		} else if err != nil {

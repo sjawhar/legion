@@ -131,6 +131,7 @@ func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 			{Name: provisionVolume, MountPath: ProvisionDir, ReadOnly: true},
 			{Name: tempVolume, MountPath: initTempDir},
 			{Name: issueVolume, MountPath: FeedDir, SubPath: feedSubPath},
+			{Name: issueVolume, MountPath: FeedQuarantineDir, SubPath: feedQuarantineSubPath},
 		},
 		Resources:       resources,
 		SecurityContext: restrictedContainer(),

@@ -3,12 +3,14 @@ package workspace
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -17,18 +19,21 @@ import (
 // ownFeedRepository makes the feed repository gitDir one Fetch may take as its own, before it runs
 // any git there. A foreign feed is quarantined outside the new feed path, so the uncredentialed
 // provisioner can preserve a legacy clone that borrowed its objects before the quarantine is removed.
-func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log func(string)) (bool, error) {
-	quarantines := feedQuarantines(gitDir)
+func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log func(string), quarantineRoot string) (bool, error) {
+	quarantines := feedQuarantines(gitDir, quarantineRoot)
 	owner := filepath.Dir(gitDir)
 	if info, err := os.Lstat(owner); err == nil && info.Mode()&fs.ModeSymlink != 0 {
 		quarantine := quarantines[1]
+		if err := os.MkdirAll(filepath.Dir(quarantine.remove), 0o700); err != nil {
+			return false, fmt.Errorf("create feed quarantine parent: %w", err)
+		}
 		if _, err := os.Lstat(quarantine.remove); !errors.Is(err, fs.ErrNotExist) {
 			if err == nil {
 				return false, fmt.Errorf("the feed's legacy owner %s already exists", quarantine.remove)
 			}
 			return false, err
 		}
-		if err := os.Rename(owner, quarantine.remove); err != nil {
+		if err := moveFeed(owner, quarantine.remove); err != nil {
 			return false, fmt.Errorf("quarantine the symlink at the feed's %s: %w", owner, err)
 		}
 		log(fmt.Sprintf("the feed's %s is not one this fetch wrote (it is a symlink): quarantined; the feed is filled afresh", owner))
@@ -52,17 +57,63 @@ func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log
 		return true, nil
 	}
 	quarantine := quarantines[0]
+	if err := os.MkdirAll(filepath.Dir(quarantine.feed), 0o700); err != nil {
+		return false, fmt.Errorf("create feed quarantine parent: %w", err)
+	}
 	if _, err := os.Lstat(quarantine.feed); !errors.Is(err, fs.ErrNotExist) {
 		if err == nil {
 			return false, fmt.Errorf("the feed's legacy repository %s already exists", quarantine.feed)
 		}
 		return false, err
 	}
-	if err := os.Rename(gitDir, quarantine.feed); err != nil {
+	if err := moveFeed(gitDir, quarantine.feed); err != nil {
 		return false, fmt.Errorf("quarantine the feed's %s, which %s: %w", gitDir, why, err)
 	}
 	log(fmt.Sprintf("the feed's %s is not one this fetch wrote (%s): quarantined; the feed is filled afresh", repo, why))
 	return false, nil
+}
+
+// moveFeed preserves the untrusted feed without crossing a bind-mount boundary. A quarantine is a
+// sibling subpath in Kubernetes, so rename may report EXDEV; then copy only regular files and
+// directories and delete the source after the copy is complete.
+func moveFeed(source, destination string) error {
+	if err := os.Rename(source, destination); !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	if err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("quarantine refuses %s, which is not a regular file", path)
+		}
+		input, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer input.Close()
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(output, input)
+		closeErr := output.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	}); err != nil {
+		return err
+	}
+	return os.RemoveAll(source)
 }
 
 // foreignFeed is why the bare repository gitDir is not one Fetch wrote, or "" when it is in the shape
