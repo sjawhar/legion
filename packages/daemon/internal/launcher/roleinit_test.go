@@ -41,7 +41,8 @@ type stagePlan struct {
 
 // agentPlan is what the agent reports on: the paths its role should and should not reach, the
 // process the stage started outside its namespaces, and the detached, SIGTERM-ignoring process it
-// leaves behind for the stage to look for once the namespaces are gone.
+// leaves behind for the stage to look for once the namespaces are gone. Label is what its lines
+// carry, so the stage's two generations read apart.
 type agentPlan struct {
 	Home       string
 	RolesDir   string
@@ -49,6 +50,8 @@ type agentPlan struct {
 	Role       string
 	Sibling    string
 	Owner      string
+	Label      string
+	Generation uint64
 	OutsidePID int
 	Detached   string
 }
@@ -113,15 +116,32 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		{"agent uid", "1000", "the role's agent runs as the image's unprivileged user"},
 		{"agent outside-process", "absent", "the role sees only its own processes"},
 		{"agent signal-outside", "refused", "the role cannot signal a process outside it"},
+		{"agent init-mem", "refused", "the role cannot read the memory of its own role-init, which holds the cover's namespace"},
+		{"agent init-environ", "refused", "the role cannot read the environment its own role-init was started with"},
+		{"agent init-status-fd", "refused", "the role cannot reach the launcher's status pipe through its own role-init"},
+		{"agent own-agent-secrets", "present", "the role reads its own agent-secrets key at the fixed path"},
+		{"agent own-agent-secrets-key", "key-a", "the key it reads there is its own"},
 		{"agent home-mount", "mounted-a", "a mount the home carried is bound back over the role's overlay"},
 		{"agent tmp-mount", "mounted-a", "a mount /tmp carried is bound back over the role's own /tmp"},
+		{"agent home-carryover", "absent", "the role's first generation starts on a home layer with nothing of its own"},
 		{"stage upper-home", "present", "what the role wrote under its home landed on its own layer"},
 		{"stage upper-tmp", "present", "what the role wrote in /tmp landed in its own temporary directory"},
 		{"stage upper-var-tmp", "present", "what the role wrote in /var/tmp landed in its own temporary directory"},
 		{"stage container-home", "absent", "what the role wrote under its home is invisible to the container"},
 		{"stage container-tmp", "absent", "what the role wrote in /tmp is invisible to the container"},
+		{"stage container-shm", "absent", "what the role wrote in /dev/shm is invisible to the container"},
 		{"stage detached", "gone", "a detached process of the role that ignores SIGTERM is gone once the role's init exits"},
 		{"stage status", "0", "role-init reports the shim's own wait status"},
+		// The role's relaunch: a second generation of the same role, over the same role-homes
+		// volume, with no agent-secrets directory, as a pod not enrolled with the broker has it.
+		{"agent2 own-gh", "gh-a", "the relaunched role reads its own gh bundle again"},
+		{"agent2 own-agent-secrets", "absent", "a role whose pod is not enrolled starts with no agent-secrets directory"},
+		{"agent2 sibling", "absent", "the relaunched role reaches no sibling"},
+		{"agent2 init-mem", "refused", "the relaunched role cannot read its role-init either"},
+		{"agent2 home-carryover", "present", "the relaunched role keeps its own home layer across generations"},
+		{"agent2 tmp-mount", "mounted-a", "the relaunch keeps the mount /tmp carries"},
+		{"stage2 status", "0", "the relaunch reports its own shim's wait status"},
+		{"stage2 detached", "gone", "the relaunch leaves nothing behind either"},
 	} {
 		if got, ok := report[want.key]; !ok || got != want.value {
 			t.Errorf("%s = %q, want %q: %s\n%s", want.key, got, want.value, want.why, output)
@@ -144,7 +164,7 @@ func stageMountPoint(t *testing.T) string {
 			return dir
 		}
 	}
-	t.Skip("no directory to mount the role's layout on (/mnt, /media, /srv)")
+	skipOutsideCI(t, "no directory to mount the role's layout on (/mnt, /media, /srv)")
 	return ""
 }
 
@@ -153,7 +173,7 @@ func reported(output string) map[string]string {
 	lines := map[string]string{}
 	for _, line := range strings.Split(output, "\n") {
 		who, rest, ok := strings.Cut(strings.TrimSpace(line), " ")
-		if !ok || (who != "agent" && who != "stage") {
+		if !ok || (!strings.HasPrefix(who, "agent") && !strings.HasPrefix(who, "stage")) {
 			continue
 		}
 		if key, value, ok := strings.Cut(rest, "="); ok {
@@ -191,6 +211,13 @@ func runStage(plan stagePlan) error {
 	if err := mountTmpfs(plan.Mount, "size=64m"); err != nil {
 		return err
 	}
+	// The stage's own /tmp and /dev/shm, so what the role plants if its privacy broke lands here
+	// and never on the machine, and the stage can see that it did not.
+	for _, dir := range []string{"/tmp", "/dev/shm"} {
+		if err := mountTmpfs(dir, "size=16m"); err != nil {
+			return err
+		}
+	}
 	rolesDir := filepath.Join(plan.Mount, "roles")
 	fixedRoot := filepath.Join(plan.Mount, "fixed")
 	home := filepath.Join(plan.Mount, "home")
@@ -210,6 +237,7 @@ func runStage(plan stagePlan) error {
 			filepath.Join(rolesDir, role, roleLauncherDir, launcherTokenFile):        "launcher-token-" + role,
 			filepath.Join(rolesDir, role, roleGHDir, plan.Owner, "hosts.yml"):        "gh-" + role,
 			filepath.Join(rolesDir, role, rolePrivateDir, "g1", "LEGION_BOOT_TOKEN"): "boot-" + role,
+			filepath.Join(rolesDir, role, roleAgentSecretsDir, "key.pem"):            "key-" + role,
 		} {
 			if err := os.WriteFile(path, []byte(content), 0o400); err != nil {
 				return err
@@ -223,16 +251,12 @@ func runStage(plan stagePlan) error {
 	}
 	// A mount the home carries, as an issue pod's sessions and shared configuration do, and one
 	// /tmp carries, as an operator's volume may: the role's own filesystems there must not hide
-	// them. The stage's /tmp is a memory filesystem of its own first, so the machine's is never
-	// touched.
+	// them.
 	carried := filepath.Join(plan.Mount, "carried")
 	if err := os.MkdirAll(carried, 0o755); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(carried, "marker"), []byte("mounted-"+plan.Role), 0o644); err != nil {
-		return err
-	}
-	if err := mountTmpfs("/tmp", "size=16m"); err != nil {
 		return err
 	}
 	for _, at := range []string{filepath.Join(home, "mounted"), "/tmp/mounted"} {
@@ -249,18 +273,49 @@ func runStage(plan stagePlan) error {
 		return err
 	}
 	defer func() { _ = outside.Process.Kill(); _, _ = outside.Process.Wait() }()
-
-	agent, err := json.Marshal(agentPlan{
+	roleInitLaunch = roleInitHelperLaunch(plan.Self)
+	layout := agentPlan{
 		Home: home, RolesDir: rolesDir, FixedRoot: fixedRoot, Role: plan.Role, Sibling: plan.Sibling,
 		Owner: plan.Owner, OutsidePID: outside.Process.Pid, Detached: plan.Detached,
-	})
+	}
+
+	if err := runGeneration(plan, layout, 1, "agent"); err != nil {
+		return err
+	}
+	homes := filepath.Join(rolesDir, roleHomesDir, plan.Role)
+	fmt.Printf("stage upper-home=%s\n", presence(filepath.Join(homes, "upper", "planted")))
+	fmt.Printf("stage upper-tmp=%s\n", presence(filepath.Join(homes, "tmp", "planted")))
+	fmt.Printf("stage upper-var-tmp=%s\n", presence(filepath.Join(homes, "var-tmp", "planted")))
+	fmt.Printf("stage container-home=%s\n", presence(filepath.Join(home, "planted")))
+	fmt.Printf("stage container-tmp=%s\n", presence(filepath.Join("/tmp", "planted")))
+	fmt.Printf("stage container-shm=%s\n", presence(filepath.Join("/dev/shm", "planted")))
+	fmt.Printf("stage detached=%s\n", detachedProcess(plan.Detached))
+
+	// The role's relaunch: a second generation over the same role-homes volume, with the
+	// agent-secrets directory gone, as a pod that is not enrolled with the secrets broker has it.
+	if err := os.RemoveAll(filepath.Join(rolesDir, plan.Role, roleAgentSecretsDir)); err != nil {
+		return err
+	}
+	layout.Detached = plan.Detached + "2"
+	if err := runGeneration(plan, layout, 2, "agent2"); err != nil {
+		return err
+	}
+	fmt.Printf("stage2 detached=%s\n", detachedProcess(layout.Detached))
+	return nil
+}
+
+// runGeneration runs one generation of the role over the stage's layout and reports the wait
+// status role-init gave back for it.
+func runGeneration(plan stagePlan, layout agentPlan, generation uint64, label string) error {
+	layout.Label = label
+	layout.Generation = generation
+	agent, err := json.Marshal(layout)
 	if err != nil {
 		return err
 	}
-	roleInitLaunch = roleInitHelperLaunch(plan.Self)
 	process, err := newRoleProcess(RoleInitConfig{
-		RolesDir: rolesDir, Role: plan.Role, Home: home, FixedRoot: fixedRoot,
-		Argv: []string{plan.Self, "-test.run=^TestRoleInitAgentHelper$"},
+		RolesDir: layout.RolesDir, Role: plan.Role, Generation: generation, Home: layout.Home,
+		FixedRoot: layout.FixedRoot, Argv: []string{plan.Self, "-test.run=^TestRoleInitAgentHelper$"},
 	}, append(os.Environ(), roleInitAgentEnv+"="+string(agent)), os.Stdout, os.Stderr)
 	if err != nil {
 		return err
@@ -271,21 +326,17 @@ func runStage(plan stagePlan) error {
 	status, _ := io.ReadAll(process.status)
 	_ = process.status.Close()
 	if err := process.cmd.Wait(); err != nil {
-		return fmt.Errorf("role-init: %w", err)
+		return fmt.Errorf("role-init generation %d: %w", generation, err)
+	}
+	who := "stage"
+	if generation > 1 {
+		who = "stage2"
 	}
 	if reported := parseStatus(status); reported == nil {
-		fmt.Println("stage status=none")
+		fmt.Printf("%s status=none\n", who)
 	} else {
-		fmt.Printf("stage status=%d\n", reported.ExitStatus())
+		fmt.Printf("%s status=%d\n", who, reported.ExitStatus())
 	}
-
-	homes := filepath.Join(rolesDir, roleHomesDir, plan.Role)
-	fmt.Printf("stage upper-home=%s\n", presence(filepath.Join(homes, "upper", "planted")))
-	fmt.Printf("stage upper-tmp=%s\n", presence(filepath.Join(homes, "tmp", "planted")))
-	fmt.Printf("stage upper-var-tmp=%s\n", presence(filepath.Join(homes, "var-tmp", "planted")))
-	fmt.Printf("stage container-home=%s\n", presence(filepath.Join(home, "planted")))
-	fmt.Printf("stage container-tmp=%s\n", presence(filepath.Join("/tmp", "planted")))
-	fmt.Printf("stage detached=%s\n", detachedProcess(plan.Detached))
 	return nil
 }
 
@@ -321,6 +372,7 @@ func detachedProcess(marker string) string {
 
 // TestRoleInitAgentHelper is the worker shim's stand-in: the process role-init starts inside the
 // role's namespaces, which reports what the role can reach and leaves a detached process behind.
+// Every line it prints carries its generation's label, so the stage's two runs read apart.
 func TestRoleInitAgentHelper(t *testing.T) {
 	encoded := os.Getenv(roleInitAgentEnv)
 	if encoded == "" {
@@ -331,36 +383,73 @@ func TestRoleInitAgentHelper(t *testing.T) {
 		fmt.Println("agent error:", err)
 		os.Exit(2)
 	}
-	fmt.Printf("agent uid=%d\n", os.Getuid())
-	fmt.Printf("agent own-gh=%s\n", content(filepath.Join(plan.FixedRoot, roleGHDir, plan.Owner, "hosts.yml")))
-	fmt.Printf("agent own-boot-token=%s\n", content(filepath.Join(plan.FixedRoot, rolePrivateDir, "g1", "LEGION_BOOT_TOKEN")))
-	fmt.Printf("agent own-state=%s\n", writable(filepath.Join(plan.FixedRoot, roleStateDir)))
-	fmt.Printf("agent sibling=%s\n", presence(filepath.Join(plan.RolesDir, plan.Sibling)))
-	fmt.Printf("agent own-launcher-token=%s\n", presence(filepath.Join(plan.RolesDir, plan.Role, roleLauncherDir, launcherTokenFile)))
-	entries, err := os.ReadDir(plan.RolesDir)
-	if err != nil {
-		fmt.Printf("agent roles-entries=unreadable: %v\n", err)
+	say := func(key, value string) { fmt.Printf("%s %s=%s\n", plan.Label, key, value) }
+	say("uid", strconv.Itoa(os.Getuid()))
+	say("own-gh", content(filepath.Join(plan.FixedRoot, roleGHDir, plan.Owner, "hosts.yml")))
+	say("own-boot-token", content(filepath.Join(plan.FixedRoot, rolePrivateDir, "g1", "LEGION_BOOT_TOKEN")))
+	say("own-state", writable(filepath.Join(plan.FixedRoot, roleStateDir)))
+	// The agent-secrets directory is bound only when the pod is enrolled with the broker: its
+	// key is the role's own in the first generation, and the second runs with none.
+	say("own-agent-secrets", presence(filepath.Join(plan.FixedRoot, roleAgentSecretsDir, "key.pem")))
+	say("own-agent-secrets-key", content(filepath.Join(plan.FixedRoot, roleAgentSecretsDir, "key.pem")))
+	say("sibling", presence(filepath.Join(plan.RolesDir, plan.Sibling)))
+	say("own-launcher-token", presence(filepath.Join(plan.RolesDir, plan.Role, roleLauncherDir, launcherTokenFile)))
+	if entries, err := os.ReadDir(plan.RolesDir); err != nil {
+		say("roles-entries", "unreadable: "+err.Error())
 	} else {
-		fmt.Printf("agent roles-entries=%d\n", len(entries))
+		say("roles-entries", strconv.Itoa(len(entries)))
 	}
-	fmt.Printf("agent uncover=%s\n", uncover(plan))
-	fmt.Printf("agent pids=%d\n", processes())
-	fmt.Printf("agent outside-process=%s\n", presence(filepath.Join("/proc", strconv.Itoa(plan.OutsidePID))))
-	fmt.Printf("agent signal-outside=%s\n", signalOutside(plan.OutsidePID))
-	fmt.Printf("agent home-mount=%s\n", content(filepath.Join(plan.Home, "mounted", "marker")))
-	fmt.Printf("agent tmp-mount=%s\n", content(filepath.Join("/tmp", "mounted", "marker")))
-	for _, dir := range []string{plan.Home, "/tmp", "/var/tmp"} {
+	say("uncover", uncover(plan))
+	say("pids", strconv.Itoa(processes()))
+	say("outside-process", presence(filepath.Join("/proc", strconv.Itoa(plan.OutsidePID))))
+	say("signal-outside", signalOutside(plan.OutsidePID))
+	// Its own role-init, PID 1 of this namespace, holds CAP_SYS_ADMIN over the mount namespace
+	// that carries the cover and the launcher's status pipe. The role runs in a user namespace
+	// of its own, so the kernel refuses it every read of that process: its memory, the
+	// environment its generation was started with, and the descriptors it holds.
+	say("init-mem", readable("/proc/1/mem"))
+	say("init-environ", readable("/proc/1/environ"))
+	say("init-status-fd", readable("/proc/1/fd/"+strconv.Itoa(roleStatusFD)))
+	say("home-mount", content(filepath.Join(plan.Home, "mounted", "marker")))
+	say("tmp-mount", content(filepath.Join("/tmp", "mounted", "marker")))
+	// What an earlier generation of this role wrote under its home is still the role's own: the
+	// writable layer is the role's across its generations, as a role container's filesystem was.
+	say("home-carryover", presence(filepath.Join(plan.Home, "planted")))
+	for _, dir := range []string{plan.Home, "/tmp", "/var/tmp", "/dev/shm"} {
 		if err := os.WriteFile(filepath.Join(dir, "planted"), []byte("planted"), 0o600); err != nil {
-			fmt.Printf("agent write-%s=%v\n", dir, err)
+			say("write-"+dir, err.Error())
 		}
 	}
 	detached := exec.Command("/bin/sh", "-c", "trap '' TERM; /bin/sleep "+plan.Detached)
 	detached.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := detached.Start(); err != nil {
-		fmt.Println("agent detached-start=", err)
+		say("detached-start", err.Error())
 	}
-	fmt.Println("agent done=yes")
+	say("done", "yes")
 	os.Exit(0)
+}
+
+// readable is what the role gets when it tries to read path: `refused` where the kernel denies
+// it, which is what every probe of its own role-init must answer, and `readable` wherever it
+// could open and reach the file at all. It never blocks: a descriptor of role-init's that is a
+// pipe would otherwise hold the role here until its own init let go of the other end.
+func readable(path string) string {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err == nil {
+		var one [1]byte
+		_, err = syscall.Read(fd, one[:])
+		_ = syscall.Close(fd)
+	}
+	switch {
+	case err == nil, errors.Is(err, syscall.EAGAIN), errors.Is(err, syscall.EIO):
+		return "readable"
+	case errors.Is(err, fs.ErrPermission):
+		return "refused"
+	case errors.Is(err, fs.ErrNotExist):
+		return "absent"
+	default:
+		return "unreadable: " + err.Error()
+	}
 }
 
 // uncover is what a further namespace of the role's own can do to the cover over the roles

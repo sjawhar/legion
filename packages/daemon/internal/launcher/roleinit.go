@@ -46,16 +46,17 @@ func RoleHome() string { return roleHome }
 func RoleFixedRoot() string { return roleFixedRoot }
 
 // RoleInitConfig is `legion launcher role-init`'s resolved flags: the role whose namespaces this
-// process is the init of, where every role's directories are, the home its overlay covers, the
-// root its own directories are bound back under, the pipe it writes the shim's own wait status
-// to, and the shim argv it runs as its child.
+// process is the init of and the generation it runs, where every role's directories are, the home
+// its overlay covers, the root its own directories are bound back under, the pipe it writes the
+// shim's own wait status to, and the shim argv it runs as its child.
 type RoleInitConfig struct {
-	RolesDir  string   `json:"rolesDir"`
-	Role      string   `json:"role"`
-	Home      string   `json:"home"`
-	FixedRoot string   `json:"fixedRoot"`
-	StatusFD  int      `json:"statusFd"`
-	Argv      []string `json:"argv"`
+	RolesDir   string   `json:"rolesDir"`
+	Role       string   `json:"role"`
+	Generation uint64   `json:"generation"`
+	Home       string   `json:"home"`
+	FixedRoot  string   `json:"fixedRoot"`
+	StatusFD   int      `json:"statusFd"`
+	Argv       []string `json:"argv"`
 	// Stdout and Stderr are the launcher's own, which the shim inherits, so one container's log
 	// carries every role's output behind its own prefix.
 	Stdout io.Writer `json:"-"`
@@ -72,6 +73,8 @@ func (c RoleInitConfig) validate() error {
 		return fmt.Errorf("role-init: roles directory %q is not absolute", c.RolesDir)
 	case c.Role == "":
 		return errors.New("role-init: no role")
+	case c.Generation == 0:
+		return errors.New("role-init: no generation")
 	case !filepath.IsAbs(c.Home):
 		return fmt.Errorf("role-init: home %q is not absolute", c.Home)
 	case !filepath.IsAbs(c.FixedRoot):
@@ -107,8 +110,8 @@ var roleInitLaunch = func(cfg RoleInitConfig) (argv, env []string, err error) {
 	}
 	argv = []string{
 		self, "launcher", RoleInitSubcommand,
-		"--roles-dir", cfg.RolesDir, "--role", cfg.Role, "--home", cfg.Home,
-		"--fixed-root", cfg.FixedRoot, "--status-fd", strconv.Itoa(cfg.StatusFD), "--",
+		"--roles-dir", cfg.RolesDir, "--role", cfg.Role, "--generation", strconv.FormatUint(cfg.Generation, 10),
+		"--home", cfg.Home, "--fixed-root", cfg.FixedRoot, "--status-fd", strconv.Itoa(cfg.StatusFD), "--",
 	}
 	return append(argv, cfg.Argv...), nil, nil
 }
@@ -157,12 +160,6 @@ func (p *roleProcess) start() error {
 		_ = p.status.Close()
 	}
 	return err
-}
-
-// close drops a generation's pipe when it never started.
-func (p *roleProcess) close() {
-	_ = p.write.Close()
-	_ = p.status.Close()
 }
 
 // parseStatus reads the wait status role-init wrote to its status pipe: the shim's own, so the

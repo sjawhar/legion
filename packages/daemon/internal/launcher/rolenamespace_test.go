@@ -43,10 +43,18 @@ func requireRoleNamespaces(t *testing.T) {
 	if err == nil {
 		return
 	}
+	skipOutsideCI(t, "a role's namespaces: %v: %s", err, output)
+}
+
+// skipOutsideCI skips a role-namespace test this machine cannot run, and fails it under
+// GITHUB_ACTIONS: the job that must run these tests is set up to run them, so anything that would
+// make it skip is a broken runner, never a green job with the proof gone from it.
+func skipOutsideCI(t *testing.T, format string, args ...any) {
+	t.Helper()
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		t.Fatalf("a role's namespaces: %v: %s", err, output)
+		t.Fatalf(format, args...)
 	}
-	t.Skipf("a role's namespaces: %v: %s", err, output)
+	t.Skipf(format, args...)
 }
 
 // namespaceScratch is a directory for a test whose role mounts its own /tmp over the container's:
@@ -59,7 +67,7 @@ func namespaceScratch(t *testing.T) string {
 	}
 	home := os.Getenv("HOME")
 	if home == "" {
-		t.Skip("no directory outside /tmp for the role's layout: TMPDIR is under /tmp and HOME is unset")
+		skipOutsideCI(t, "no directory outside /tmp for the role's layout: TMPDIR is under /tmp and HOME is unset")
 	}
 	dir, err := os.MkdirTemp(home, "legion-launcher-")
 	if err != nil {

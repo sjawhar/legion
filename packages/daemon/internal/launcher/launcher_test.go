@@ -259,15 +259,33 @@ func published(t *testing.T, marker string) (int, string) {
 	return 0, ""
 }
 
+// gone says whether a process has ended. A process whose parent never reaps it stays a zombie,
+// which still takes a signal, so the state its /proc entry reports decides: in a container whose
+// PID 1 is the test's own stand-in rather than a reaping init — the probe pod runs `sleep` —
+// every ended descendant the launcher killed is a zombie until the container exits.
 func gone(pid int) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
 			return true
 		}
+		if zombie(pid) {
+			return true
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+// zombie says whether pid has ended and is only waiting to be reaped: the third field of
+// /proc/<pid>/stat, after the command in parentheses, which may itself hold spaces.
+func zombie(pid int) bool {
+	body, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	_, after, ok := strings.Cut(string(body), ") ")
+	return ok && strings.HasPrefix(after, "Z")
 }
 
 // A started generation's credentials are written owner-only into its own fresh directory, its

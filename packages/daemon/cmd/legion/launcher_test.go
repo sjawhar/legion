@@ -129,7 +129,8 @@ func TestTheLauncherCommandRefusesAMixOfItsTwoForms(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"a roles directory and a token file", []string{"--roles-dir", t.TempDir(), "--role", "tester", "--token-file", token}, "no --token-file"},
+		{"a roles directory and a token file", []string{"--roles-dir", t.TempDir(), "--role", "tester", "--token-file", token}, "no --token-file or --private-dir"},
+		{"a roles directory and a private directory", []string{"--roles-dir", t.TempDir(), "--role", "tester", "--private-dir", t.TempDir()}, "no --token-file or --private-dir"},
 		{"two roles without a roles directory", []string{"--token-file", token, "--role", "tester", "--role", "reviewer", "--private-dir", t.TempDir()}, "several roles need --roles-dir"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,8 +160,8 @@ func TestRoleInitIsHiddenAndRefusesToRunOutsideARolesNamespaces(t *testing.T) {
 		t.Fatalf("role-init with no shim argv: exit %d, %q; want its usage", code, stderr.String())
 	}
 	stderr.Reset()
-	code := run(context.Background(), []string{"legion", "launcher", "role-init", "--roles-dir", t.TempDir(), "--role", "a", "--status-fd", "3", "--", "/bin/true"}, &stdout, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "role-init: ") {
+	code := run(context.Background(), []string{"legion", "launcher", "role-init", "--roles-dir", t.TempDir(), "--role", "a", "--generation", "1", "--status-fd", "3", "--", "/bin/true"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "role-init: not the init of a PID namespace of its own") {
 		t.Fatalf("role-init outside a role's namespaces: exit %d, %q; want a refusal", code, stderr.String())
 	}
 }

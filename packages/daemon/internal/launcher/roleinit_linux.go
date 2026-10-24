@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"golang.org/x/sys/unix"
 )
 
@@ -67,6 +68,8 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 	role := filepath.Join(cfg.RolesDir, cfg.Role)
 	homes := filepath.Join(cfg.RolesDir, roleHomesDir, cfg.Role)
 	stage := filepath.Join(homes, "stage")
+	works := filepath.Join(homes, "work")
+	work := filepath.Join(works, shimwire.GenerationDir(cfg.Generation))
 	if err := privateMounts(); err != nil {
 		return fmt.Errorf("hold this role's mounts to itself: %w", err)
 	}
@@ -75,9 +78,26 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 	if err := os.RemoveAll(stage); err != nil {
 		return fmt.Errorf("clear the role's stage: %w", err)
 	}
-	for _, name := range []string{"upper", "work", "tmp", "var-tmp", "stage"} {
-		if err := os.MkdirAll(filepath.Join(homes, name), 0o755); err != nil {
-			return fmt.Errorf("make the role's own %s directory: %w", name, err)
+	for _, dir := range []string{filepath.Join(homes, "upper"), work, filepath.Join(homes, "tmp"), filepath.Join(homes, "var-tmp"), stage} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("make the role's own %s directory: %w", filepath.Base(dir), err)
+		}
+	}
+	// Each generation's overlay works in a directory of its own, so its mount never waits on the
+	// previous generation's namespace letting go of one, which the kernel may finish after that
+	// generation's init is reaped. The upper layer is the role's across generations, as a role
+	// container's own filesystem was. What earlier generations' overlays left is cleared; a
+	// leftover only costs disk, so one that cannot be cleared is logged and the role starts.
+	entries, err := os.ReadDir(works)
+	if err != nil {
+		return fmt.Errorf("read the role's overlay work directories: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(work) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(works, entry.Name())); err != nil {
+			roleLogf(cfg, "role-init: clear an earlier generation's overlay work directory: %v", err)
 		}
 	}
 	// The role's own directories at the fixed paths every role is told, so neither the shim nor
@@ -105,7 +125,7 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 	}
 	// The role's own layer over the image's home.
 	if err := carryOver(cfg.Home, stage, func() error {
-		options := "lowerdir=" + cfg.Home + ",upperdir=" + filepath.Join(homes, "upper") + ",workdir=" + filepath.Join(homes, "work")
+		options := "lowerdir=" + cfg.Home + ",upperdir=" + filepath.Join(homes, "upper") + ",workdir=" + work
 		return unix.Mount("overlay", cfg.Home, "overlay", 0, options)
 	}); err != nil {
 		return fmt.Errorf("give the role its own layer over %s: %w", cfg.Home, err)
@@ -121,11 +141,18 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 	}
 	// The role's own small memory filesystems where the image has one for the whole container:
 	// the lock directories and POSIX shared memory. A path the image does not have is skipped,
-	// and a path that is another's link (the image's /var/lock) is covered once.
+	// and a path that is another's link (the image's /var/lock) is covered once; any other
+	// failure to read the path is a refusal, since the role would otherwise share the
+	// container's with its siblings.
 	covered := map[string]bool{}
 	for _, path := range []string{"/run/lock", "/var/lock", "/dev/shm"} {
 		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil || covered[resolved] {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			return fmt.Errorf("give the role its own %s: %w", path, err)
+		case covered[resolved]:
 			continue
 		}
 		covered[resolved] = true
@@ -312,7 +339,8 @@ func unescapeMount(field string) string {
 }
 
 // makeLike makes target a mount point of source's kind — a directory for a directory, an empty
-// file for anything else — so a bind of source has somewhere to land.
+// file for anything else — so a bind of source has somewhere to land. A file already there is
+// the mount point itself, and is left as it is: it is never opened for writing.
 func makeLike(source, target string) error {
 	info, err := os.Stat(source)
 	if err != nil {
@@ -324,7 +352,7 @@ func makeLike(source, target string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, fs.ErrExist) {
 		return nil
 	}

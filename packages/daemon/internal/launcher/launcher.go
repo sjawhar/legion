@@ -423,7 +423,8 @@ func (m *manager) remember(id string, body []byte, result shimwire.Frame) {
 func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProcess, error) {
 	if m.namespaced {
 		return newRoleProcess(RoleInitConfig{
-			RolesDir: m.cfg.RolesDir, Role: m.role, Home: roleHome, FixedRoot: roleFixedRoot, Argv: start.Argv,
+			RolesDir: m.cfg.RolesDir, Role: m.role, Generation: start.Generation, Home: roleHome,
+			FixedRoot: roleFixedRoot, Argv: start.Argv,
 		}, env, m.stdout, m.stderr)
 	}
 	cmd := exec.Command(start.Argv[0], start.Argv[1:]...)
@@ -443,11 +444,13 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 		_ = active.status.Close()
 		reported = parseStatus(raw)
 	}
-	err := cmd.Wait()
+	if err := cmd.Wait(); err != nil && cmd.ProcessState == nil {
+		m.logf("launcher: wait for generation %d: %v", active.generation, err)
+	}
 	if !m.namespaced {
 		m.cleanExitedGeneration()
 	}
-	exit := exitOf(err, active.generation)
+	exit := exitOf(cmd.ProcessState, active.generation)
 	if reported != nil {
 		exit = exitOfStatus(*reported, active.generation)
 	}
@@ -568,8 +571,8 @@ type roleLog struct {
 	stdout, stderr io.Writer
 }
 
-// writers are role's own stdout and stderr: nil where the launcher was given none, so a child
-// inherits the launcher's own descriptor rather than an empty pipe.
+// writers are role's own stdout and stderr: nil where the launcher was given none, which exec.Cmd
+// turns into the null device for the child.
 func (l *roleLog) writers(role string) (stdout, stderr io.Writer) {
 	if l.stdout != nil {
 		stdout = &prefixWriter{log: l, out: l.stdout, prefix: role + ": "}
@@ -580,30 +583,52 @@ func (l *roleLog) writers(role string) (stdout, stderr io.Writer) {
 	return stdout, stderr
 }
 
+// maxLogLine bounds how much of one unfinished line a role can make PID 1 hold: a longer line is
+// written out as a line of its own at that length, and the rest follows behind the prefix again.
+const maxLogLine = 64 * 1024
+
 // prefixWriter holds back a partial line until its newline arrives, so a prefix only ever
-// precedes the start of a line.
+// precedes the start of a line. It never fails its caller: a line the container's log refuses is
+// dropped, since it has nowhere else to go, and a role whose output could not be copied would
+// block on a full pipe or lose its output for good.
 type prefixWriter struct {
 	log     *roleLog
 	out     io.Writer
 	prefix  string
 	partial []byte
+	// line is the buffer each prefixed line is built in, reused from one line to the next.
+	line []byte
 }
 
 func (w *prefixWriter) Write(p []byte) (int, error) {
 	w.log.mu.Lock()
 	defer w.log.mu.Unlock()
 	w.partial = append(w.partial, p...)
+	start := 0
 	for {
-		end := bytes.IndexByte(w.partial, '\n')
-		if end < 0 {
+		rest := w.partial[start:]
+		end := bytes.IndexByte(rest, '\n')
+		switch {
+		case end >= 0:
+			w.emit(rest[:end+1], false)
+			start += end + 1
+		case len(rest) >= maxLogLine:
+			w.emit(rest[:maxLogLine], true)
+			start += maxLogLine
+		default:
+			w.partial = w.partial[:copy(w.partial, rest)]
 			return len(p), nil
 		}
-		line := append([]byte(w.prefix), w.partial[:end+1]...)
-		w.partial = w.partial[end+1:]
-		if _, err := w.out.Write(line); err != nil {
-			return 0, err
-		}
 	}
+}
+
+// emit writes one line behind the role's prefix, ending a line cut at maxLogLine itself.
+func (w *prefixWriter) emit(line []byte, cut bool) {
+	w.line = append(append(w.line[:0], w.prefix...), line...)
+	if cut {
+		w.line = append(w.line, '\n')
+	}
+	_, _ = w.out.Write(w.line)
 }
 
 // resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
@@ -733,18 +758,15 @@ func mergeEnv(base, updates []string) []string {
 	return out
 }
 
-func exitOf(err error, generation uint64) shimwire.LauncherExit {
-	exit := shimwire.LauncherExit{Generation: generation}
-	var process *exec.ExitError
-	if errors.As(err, &process) {
-		if status, ok := process.Sys().(syscall.WaitStatus); ok {
-			exit.Code = status.ExitStatus()
-			if status.Signaled() {
-				exit.Signal = status.Signal().String()
-			}
+// exitOf is the exit a process's own wait status reports. A wait that produced no status reports
+// code -1, which no process exits with: the exit is unknown, never a clean 0.
+func exitOf(state *os.ProcessState, generation uint64) shimwire.LauncherExit {
+	if state != nil {
+		if status, ok := state.Sys().(syscall.WaitStatus); ok {
+			return exitOfStatus(status, generation)
 		}
 	}
-	return exit
+	return shimwire.LauncherExit{Generation: generation, Code: -1}
 }
 
 func randomID() string {

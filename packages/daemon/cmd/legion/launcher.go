@@ -55,8 +55,8 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	}
 	if *rolesDir != "" {
 		cfg.RolesDir, cfg.Roles = *rolesDir, roles
-		if *tokenFile != "" {
-			fmt.Fprintln(stderr, "launcher: --roles-dir holds every role's own launcher token: no --token-file")
+		if *tokenFile != "" || *privateDir != "" {
+			fmt.Fprintln(stderr, "launcher: --roles-dir holds every role's own launcher token and private directory: no --token-file or --private-dir")
 			return 2
 		}
 	} else {
@@ -81,7 +81,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	return 0
 }
 
-const roleInitUsage = "usage: legion launcher role-init --roles-dir <dir> --role <role> [--home <dir>] [--fixed-root <dir>] --status-fd <n> -- <shim argv…>"
+const roleInitUsage = "usage: legion launcher role-init --roles-dir <dir> --role <role> --generation <n> [--home <dir>] [--fixed-root <dir>] --status-fd <n> -- <shim argv…>"
 
 // runRoleInit is `legion launcher role-init`, the launcher's own hidden subcommand: the init of
 // one role generation's user, mount, PID and IPC namespaces, which the launcher clones into them
@@ -92,6 +92,7 @@ func runRoleInit(args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("launcher role-init", roleInitUsage, stderr)
 	rolesDir := flags.String("roles-dir", "", "the container-level per-role root")
 	role := flags.String("role", "", "the role whose namespaces this process is the init of")
+	generation := flags.Uint64("generation", 0, "the generation this role-init runs, which names its own overlay work directory")
 	home := flags.String("home", launcher.RoleHome(), "the home directory the role's own layer covers")
 	fixedRoot := flags.String("fixed-root", launcher.RoleFixedRoot(), "the root the role's own directories are bound back under")
 	statusFD := flags.Int("status-fd", 0, "the descriptor to report the shim's own wait status on")
@@ -103,7 +104,7 @@ func runRoleInit(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err := launcher.RoleInit(launcher.RoleInitConfig{
-		RolesDir: *rolesDir, Role: *role, Home: *home, FixedRoot: *fixedRoot, StatusFD: *statusFD,
+		RolesDir: *rolesDir, Role: *role, Generation: *generation, Home: *home, FixedRoot: *fixedRoot, StatusFD: *statusFD,
 		Argv: flags.Args(), Stdout: stdout, Stderr: stderr,
 	}); err != nil {
 		fmt.Fprintln(stderr, err)
