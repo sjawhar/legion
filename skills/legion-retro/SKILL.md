@@ -167,10 +167,10 @@ what failed.
 
 Then push both commits with one push, so one CI run covers them (`<KEY>` is your `LEGION_ISSUE`):
 `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>`.
-It carries `docs/solutions/` and the removal of `.legion/<KEY>/`, so it is not a handoff-only
-push: its head's message never ends with `skip-checks: true` and carries none of GitHub's
-`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*). When
-the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
+Its head's message never ends with `skip-checks: true` and carries none of GitHub's
+`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*).
+Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
+When the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
 moved; never force), write `<dir>/before.md` back the same way before you report the refusal to
 the architect with its output, so the body matches the head GitHub has. After the push, post one
 Dispatch message on
