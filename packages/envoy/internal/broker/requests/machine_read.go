@@ -36,8 +36,11 @@ const MintFailedMessage = "broker: mint failed"
 // granted name under the login that decided it (stillAllowed), and that no granted name's
 // max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
 // stored secret releases its frozen source. A kind secret reads that same stored source and
-// passes its value to the kind's minter. It holds no pooled connection across a Secrets Manager
-// read: the grant's names are read into memory before the first value is fetched.
+// passes its value to the kind's minter. Once every value is read, each stored one is checked
+// against the policy as it stands then (recheckStoredSources), so a retag that lands during the
+// reads never releases what the secret stores once it is a kind. It holds no pooled connection
+// across a Secrets Manager read: the grant's names are read into memory before the first value is
+// fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
 	var expires *time.Time
@@ -107,11 +110,51 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		values[g.name] = value
 		released = append(released, g.name)
 	}
+	if err := m.recheckStoredSources(ctx, grantID, granted); err != nil {
+		return nil, nil, err
+	}
 	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
 		enrollmentID, requestID, grantID, "session:"+enrollmentID, auditDetail{"names": released}); err != nil {
 		return nil, nil, err
 	}
 	return values, expires, nil
+}
+
+// recheckStoredSources checks every name of grantID that releases its stored value (a source no
+// kind froze) against the policy as it stands after Values read the store, since the policy Values
+// checked before its reads can be replaced while they run: a retag to a kind, reread as a read
+// starts, makes the read return what the secret stores as that kind (a GitHub App key, or a Google
+// refresh token stored once the reread served the kind). A name now served from another source,
+// a kind's included, ends the grant for good (endGrant), as it does before the reads; a name the
+// policy no longer serves pauses it, as before the reads. Either way Values releases none of the
+// values it read. A minted name needs no such check: its minter returns only a token.
+func (m *Machine) recheckStoredSources(ctx context.Context, grantID string, granted []requestedSecret) error {
+	now := m.Policy.Get()
+	for _, g := range granted {
+		if _, _, minted, _ := policy.ParseKindSource(g.source); minted {
+			continue
+		}
+		current, served := now.Secrets[g.name]
+		if !served {
+			return noLongerServed(g.name)
+		}
+		if current.Source != g.source {
+			return m.endGrant(ctx, grantID, sourceMoved(g.name))
+		}
+	}
+	return nil
+}
+
+// noLongerServed is the refusal of a granted name the current policy does not serve: a pause,
+// since a value stored later serves it again.
+func noLongerServed(name string) error {
+	return fmt.Errorf("%w: %s is no longer an agent secret", ErrGrantNotLive, name)
+}
+
+// sourceMoved is the refusal of a granted name the current policy serves from another source than
+// its grant froze, which ends the grant for good (errSourceMoved).
+func sourceMoved(name string) error {
+	return fmt.Errorf("%w: %w: %s is now served from another source than this grant's", ErrGrantNotLive, errSourceMoved, name)
 }
 
 // GrantEndedActor is what a grant the broker itself ended at release records as having ended it,
@@ -227,13 +270,13 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
-		return fmt.Errorf("%w: %s is no longer an agent secret", ErrGrantNotLive, name)
+		return noLongerServed(name)
 	}
 	if err != nil {
 		return err
 	}
 	if set.Secrets[name].Source != frozenSource {
-		return fmt.Errorf("%w: %w: %s is now served from another source than this grant's", ErrGrantNotLive, errSourceMoved, name)
+		return sourceMoved(name)
 	}
 	switch {
 	case d.Outcome == policy.Deny:
