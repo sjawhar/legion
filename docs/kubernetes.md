@@ -1949,6 +1949,10 @@ each owner's two keys as `<owner>/hosts.yml` and `<owner>/config.yml`),
 volume at `/legion`, the sessions `subPath`, the config home, the feed read-only, the providers
 Secret's configured keys when there are any (with its `NATS_NKEY_SEED` key when the daemon has a
 NATS nkey seed), the broker's token when the pod enrolls, and the operator's volumes and mounts.
+Every one of them that belongs at or under `/home/legion` (the sessions `subPath` at
+`.omp/profiles/legion/agent/sessions`, the config home at `.config`, an operator's mount there) is
+mounted under `/var/run/legion/home` at the same relative path instead, so `/home/legion` itself
+carries no mount in the `roles` container; each role's namespace binds it back at its own path.
 A pod's gh projection names the owners of its creation, so an owner added to the project reaches
 the issue's next pod. The issue's `-boot` Secret holds the provisioning token, projected into
 `workspace-fetch` alone.
@@ -1960,8 +1964,12 @@ state and agent-secrets directories are bound back at the fixed paths `/var/run/
 `/var/run/legion/private`, `/var/run/legion/state` and `/var/run/legion/agent-secrets`; its
 launcher token is bound nowhere, so no role's process reads it, and no role sees a sibling's
 directories. `/home/legion` is an overlay whose lower is the image's and whose upper and work
-directories are the role's on `role-homes`, with every mount that was under `/home/legion` (the
-sessions `subPath`, the config home, an operator's mount) bound back on top; `/tmp` and
+directories are the role's on `role-homes` (a work directory of each generation's own), with
+every mount the container holds under `/var/run/legion/home` bound back on top at its own path
+under `/home/legion`, and `/var/run/legion/home` itself then covered. The lower layer has no
+mount under it because Linux refuses an overlay over one with mounts locked under it from a more
+privileged namespace, which every container mount is inside a role's user namespace; gVisor
+allows it today, and the layout does not lean on that. `/tmp` and
 `/var/tmp` are binds of the role's own directories on `role-homes`; `/run/lock`, `/var/lock` and
 `/dev/shm` are private small memory filesystems; `/proc` is the role's own. role-init then starts
 the shim's argv unchanged as its child, cloned into a nested user namespace that maps uid and gid
@@ -1975,9 +1983,10 @@ or `/dev/shm`, or at or above the image's other spellings of them (`/var/run/loc
 `/var/run/shm`), is refused: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> is at or above
 <dir>, which every role's namespace in an issue pod covers with its own: mount under it instead`.
 A mount under `/tmp` and the like is allowed, and role-init carries it back. A mount at, under or
-above `/var/run/legion/roles` is refused as any other path Legion mounts is:
-`runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
-Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`.
+above `/var/run/legion/roles` or `/var/run/legion/home` is refused as any other path Legion mounts
+is: `runtime.kubernetes.pod.volume_mounts[i].mount_path <p> overlaps /var/run/legion/roles, which
+Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's`. A mount
+under `/home/legion` is allowed, and reaches the role at its own path.
 
 What a role writes without being told where is not on the node's disk: the issue's temporary
 directory, its cache and data homes and bun's install cache are one set on the issue's volume,

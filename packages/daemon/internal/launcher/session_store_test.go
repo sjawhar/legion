@@ -148,14 +148,14 @@ func TestAResumeUnderSQLStorageWaitsOutAnUnreachableSessionDatabase(t *testing.T
 		time.Sleep(300 * time.Millisecond)
 		writeURL(dsn)
 	}()
-	if _, err := sessionWritten(env, sessionFile); err != nil {
+	if _, err := sessionWritten(env, sessionFile, sessionFile); err != nil {
 		t.Fatalf("a lookup whose database came back during the backoff = %v, want the session found", err)
 	}
 	<-back
 
 	writeURL(unreachable)
 	started := time.Now()
-	_, err = sessionWritten(env, sessionFile)
+	_, err = sessionWritten(env, sessionFile, sessionFile)
 	if err == nil || !strings.Contains(err.Error(), "resume session "+sessionFile) || !strings.Contains(err.Error(), "attempts in "+resumeLookupTimeout.String()) {
 		t.Fatalf("a lookup whose database never came back = %v, want the refusal naming the session and the attempts", err)
 	}

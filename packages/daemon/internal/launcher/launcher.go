@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -371,8 +372,14 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	env := mergeEnv(os.Environ(), command.Env)
 	recreated := false
 	if command.ResumeFile != "" {
+		// An issue pod's role names its session under its own home, which the container holds
+		// under the home mounts; the controller's pod mounts its home's volumes in place.
+		onDisk := command.ResumeFile
+		if m.namespaced {
+			onDisk = containerPath(onDisk)
+		}
 		var err error
-		if recreated, err = resumable(env, command.ResumeFile, m.stderr); err != nil {
+		if recreated, err = resumable(env, command.ResumeFile, onDisk, m.stderr); err != nil {
 			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 			m.remember(command.ID, body, result)
 			return result
@@ -424,7 +431,7 @@ func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProc
 	if m.namespaced {
 		return newRoleProcess(RoleInitConfig{
 			RolesDir: m.cfg.RolesDir, Role: m.role, Generation: start.Generation, Home: roleHome,
-			FixedRoot: roleFixedRoot, Argv: start.Argv,
+			HomeMounts: roleHomeMounts, FixedRoot: roleFixedRoot, Argv: start.Argv,
 		}, env, m.stdout, m.stderr)
 	}
 	cmd := exec.Command(start.Argv[0], start.Argv[1:]...)
@@ -653,8 +660,8 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // only what was pushed. A workspace with no record, or a child with no workspace (the controller),
 // was not. A record that cannot be read, which an init container killed mid-write can leave, only
 // decides that notice: it is written to log and taken as no record, and the resume goes ahead.
-func resumable(env []string, file string, log io.Writer) (recreated bool, err error) {
-	written, err := sessionWritten(env, file)
+func resumable(env []string, file, onDisk string, log io.Writer) (recreated bool, err error) {
+	written, err := sessionWritten(env, file, onDisk)
 	if err != nil {
 		return false, err
 	}
@@ -673,14 +680,22 @@ func resumable(env []string, file string, log io.Writer) (recreated bool, err er
 }
 
 // sessionWritten is when the session a resume names was last written, from where the child's Oh My
-// Pi keeps it (resumable), refusing a session nothing holds. A session table it cannot reach is
-// asked again after each of resumeLookupBackoff's waits until resumeLookupTimeout, the URL file read
-// afresh each time, as a database that is briefly unreachable must not fail the launch; a session
-// the table answers it does not hold, or a URL file that is missing or empty, is refused at once.
-func sessionWritten(env []string, file string) (time.Time, error) {
+// Pi keeps it (resumable), refusing a session nothing holds. A session file is read at onDisk, where
+// this process finds the path the child names (file): in an issue pod the role's home is its own
+// overlay, and the volume holding its sessions is mounted under the home mounts outside it
+// (containerPath). A session table it cannot reach is asked again after each of
+// resumeLookupBackoff's waits until resumeLookupTimeout, the URL file read afresh each time, as a
+// database that is briefly unreachable must not fail the launch; a session the table answers it does
+// not hold, or a URL file that is missing or empty, is refused at once.
+func sessionWritten(env []string, file, onDisk string) (time.Time, error) {
 	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
-		info, err := os.Stat(file)
+		info, err := os.Stat(onDisk)
 		if err != nil {
+			// The refusal names the file as the role knows it, whichever path held it here.
+			var path *fs.PathError
+			if errors.As(err, &path) {
+				path.Path = file
+			}
 			return time.Time{}, fmt.Errorf("resume session file %s: %v", file, err)
 		}
 		return info.ModTime(), nil

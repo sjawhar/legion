@@ -592,17 +592,19 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 			}
 		}
 	}
-	volumeAt := func(c corev1.Container) string {
+	// The issue pod's roles container holds the config home under HomeMountsDir, where every
+	// role's namespace binds it back at XDG_CONFIG_HOME (homeMountsView).
+	volumeAt := func(c corev1.Container, path string) string {
 		for _, mount := range c.VolumeMounts {
-			if mount.MountPath == configHome {
+			if mount.MountPath == path {
 				return mount.Name
 			}
 		}
 		return ""
 	}
-	shared := volumeAt(init)
-	if shared == "" || shared != volumeAt(main) {
-		t.Fatalf("XDG_CONFIG_HOME %s is mounted from %q in the init container and %q in the main one", configHome, shared, volumeAt(main))
+	shared := volumeAt(init, configHome)
+	if shared == "" || shared != volumeAt(main, containerHomePath(configHome)) {
+		t.Fatalf("XDG_CONFIG_HOME %s is mounted from %q in the init container and %q in the main one", configHome, shared, volumeAt(main, containerHomePath(configHome)))
 	}
 	for _, volume := range pod.Volumes {
 		if volume.Name == shared && (volume.EmptyDir == nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory) {
@@ -1481,6 +1483,11 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 			}
 			agent := tc.agent
 			for _, want := range opts.Pod.VolumeMounts {
+				// An issue pod's roles container holds what belongs under the home under
+				// HomeMountsDir (homeMountsView); every other pod mounts it as configured.
+				if tc.name == "root" || tc.name == "worker" {
+					want = homeMountsView([]corev1.VolumeMount{want})[0]
+				}
 				if !slices.ContainsFunc(agent.VolumeMounts, func(m corev1.VolumeMount) bool { return reflect.DeepEqual(m, want) }) {
 					t.Errorf("%s mounts %+v, want %+v among them", agent.Name, agent.VolumeMounts, want)
 				}
@@ -1659,10 +1666,16 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 			volumes[volume.Name] = true
 		}
 		for _, mount := range agent.VolumeMounts {
-			// Every role's own mounts lie under RolesDir, which is reserved whole.
-			if path := mount.MountPath; path == RolesDir || strings.HasPrefix(path, RolesDir+"/") {
+			// Every role's own mounts lie under RolesDir, which is reserved whole; an issue
+			// pod's roles container holds what belongs under the home under HomeMountsDir, which
+			// is reserved whole too, at the path each is bound back at.
+			switch path := mount.MountPath; {
+			case path == RolesDir || strings.HasPrefix(path, RolesDir+"/"):
 				mounts[RolesDir] = true
-			} else {
+			case strings.HasPrefix(path, HomeMountsDir+"/"):
+				mounts[HomeMountsDir] = true
+				mounts[podHome+strings.TrimPrefix(path, HomeMountsDir)] = true
+			default:
 				mounts[path] = true
 			}
 		}

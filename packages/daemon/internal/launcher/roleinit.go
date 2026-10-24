@@ -14,29 +14,35 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// roleHome is the home directory a role's overlay covers, and roleFixedRoot the root its own
-// directories are bound back under: the worker image's (Home, FixedRoot). A test points both at
-// directories of its own, since a machine running the tests has neither.
+// roleHome is the home directory a role's overlay covers, roleHomeMounts where the container
+// mounts what belongs under it, and roleFixedRoot the root a role's own directories are bound back
+// under: the worker image's (Home, HomeMountsDir, FixedRoot). A test points them at directories of
+// its own, since a machine running the tests has none of them.
 var (
-	roleHome      = Home
-	roleFixedRoot = FixedRoot
+	roleHome       = Home
+	roleHomeMounts = HomeMountsDir
+	roleFixedRoot  = FixedRoot
 )
 
-// RoleHome and RoleFixedRoot are those defaults, which `legion launcher role-init`'s flags carry
-// so the command line says what the launcher gave it.
+// RoleHome, RoleHomeMounts and RoleFixedRoot are those defaults, which `legion launcher
+// role-init`'s flags carry so the command line says what the launcher gave it.
 func RoleHome() string { return roleHome }
+
+func RoleHomeMounts() string { return roleHomeMounts }
 
 func RoleFixedRoot() string { return roleFixedRoot }
 
 // RoleInitConfig is `legion launcher role-init`'s resolved flags: the role whose namespaces this
 // process is the init of and the generation it runs, where every role's directories are, the home
-// its overlay covers, the root its own directories are bound back under, the pipe it writes the
-// shim's own wait status to, and the shim argv it runs as its child.
+// its overlay covers and the directory the container mounts the home's volumes under, the root its
+// own directories are bound back under, the pipe it writes the shim's own wait status to, and the
+// shim argv it runs as its child.
 type RoleInitConfig struct {
 	RolesDir   string   `json:"rolesDir"`
 	Role       string   `json:"role"`
 	Generation uint64   `json:"generation"`
 	Home       string   `json:"home"`
+	HomeMounts string   `json:"homeMounts"`
 	FixedRoot  string   `json:"fixedRoot"`
 	StatusFD   int      `json:"statusFd"`
 	Argv       []string `json:"argv"`
@@ -60,6 +66,8 @@ func (c RoleInitConfig) validate() error {
 		return errors.New("role-init: no generation")
 	case !filepath.IsAbs(c.Home):
 		return fmt.Errorf("role-init: home %q is not absolute", c.Home)
+	case !filepath.IsAbs(c.HomeMounts) || overlaps(c.HomeMounts, c.Home):
+		return fmt.Errorf("role-init: home mounts %q is not an absolute directory apart from the home %q", c.HomeMounts, c.Home)
 	case !filepath.IsAbs(c.FixedRoot):
 		return fmt.Errorf("role-init: fixed root %q is not absolute", c.FixedRoot)
 	case c.StatusFD < roleStatusFD:
@@ -94,9 +102,27 @@ var roleInitLaunch = func(cfg RoleInitConfig) (argv, env []string, err error) {
 	argv = []string{
 		self, "launcher", RoleInitSubcommand,
 		"--roles-dir", cfg.RolesDir, "--role", cfg.Role, "--generation", strconv.FormatUint(cfg.Generation, 10),
-		"--home", cfg.Home, "--fixed-root", cfg.FixedRoot, "--status-fd", strconv.Itoa(cfg.StatusFD), "--",
+		"--home", cfg.Home, "--home-mounts", cfg.HomeMounts, "--fixed-root", cfg.FixedRoot,
+		"--status-fd", strconv.Itoa(cfg.StatusFD), "--",
 	}
 	return append(argv, cfg.Argv...), nil, nil
+}
+
+// overlaps reports whether one of two clean absolute paths is the other or lies under it.
+func overlaps(a, b string) bool {
+	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
+	return a == b || under(a, b) || under(b, a)
+}
+
+// containerPath is where the launcher, outside every role's namespaces, finds a file a role names
+// under its home: a path under the home is under the home mounts in the container, where the
+// volume holding it is mounted, and any other path is the same in both views.
+func containerPath(path string) string {
+	rest, ok := strings.CutPrefix(path, roleHome+"/")
+	if !ok {
+		return path
+	}
+	return filepath.Join(roleHomeMounts, rest)
 }
 
 // RoleInitSubcommand is `legion launcher`'s hidden subcommand, the one the launcher runs itself.

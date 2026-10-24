@@ -69,6 +69,13 @@ probes were throwaway shell scripts run in a pod (`nstest*.sh`) and server-side 
 - **The home overlay's upper needs a disk `emptyDir`.** An upper on the root filesystem does not
   work, and a tmpfs upper would charge a role's home writes to the pod's memory. So the pod has one
   disk `emptyDir`, `role-homes`.
+- **The home overlay's lower may have no mount under it.** Linux's overlayfs clones its lower
+  layer with `clone_private_mount`, which refuses (`EINVAL`, dmesg `overlayfs: failed to clone
+  lowerpath`) a path with mounts under it that a more privileged namespace locked, and every mount
+  the container carries is locked inside a role's user namespace. gVisor allows it, so a gVisor
+  pod alone never shows it; a real kernel (GitHub's runner) does. So the `roles` container mounts
+  everything that belongs under `/home/legion` under `/var/run/legion/home` at the same relative
+  path, and role-init binds each back over the overlay, then covers `/var/run/legion/home`.
 - **A role's gh bundle follows token rotation.** The bind of the projected Secret's directory sees
   the kubelet's update, so no relaunch is needed when a role's App token is refreshed.
 - **GKE Autopilot's 10Gi is per pod's main containers and per init container.** One `roles`

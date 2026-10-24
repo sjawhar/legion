@@ -93,12 +93,12 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "mountPath": "/var/run/legion/home/.omp/profiles/legion/agent/sessions",
                 "name": "issue",
                 "subPath": "sessions"
               },
               {
-                "mountPath": "/home/legion/.config",
+                "mountPath": "/var/run/legion/home/.config",
                 "name": "config"
               },
               {

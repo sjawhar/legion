@@ -139,12 +139,14 @@ func legionVolumeNames() []string {
 // one: an operator's mount may be neither at, under, nor above one. AgentSecretsKeyDir and
 // AgentSecretsTokenDir are reserved whether or not this deployment enrolls, GHConfigDir whether or
 // not the pod is an issue's, FeedDir, which TreeRoot already covers, is named for the read-only
-// mount every issue pod's container carries there, and RolesDir is where an issue pod mounts every
-// role's own volumes, which each role's namespace covers whole.
+// mount every issue pod's container carries there, RolesDir is where an issue pod mounts every
+// role's own volumes, which each role's namespace covers whole, and HomeMountsDir is where an
+// issue pod's roles container mounts what belongs under the home (homeMountsView), which each
+// role's namespace covers too once it has bound each back.
 func legionMountPaths() []string {
 	paths := []string{
 		TreeRoot, FeedDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
-		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir, HomeMountsDir,
 	}
 	slices.Sort(paths)
 	return paths

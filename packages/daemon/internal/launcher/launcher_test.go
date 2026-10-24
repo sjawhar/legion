@@ -612,8 +612,10 @@ func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(f.home, 0o755); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{f.home, filepath.Join(scratch, "home-mounts")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, role := range roles {
 		for _, name := range []string{RoleLauncherDir, RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
@@ -625,7 +627,7 @@ func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
 			t.Fatal(err)
 		}
 	}
-	useRoleLayout(t, f.home, f.fixed)
+	useRoleLayout(t, f.home, filepath.Join(scratch, "home-mounts"), f.fixed)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -817,5 +819,31 @@ while :; do /bin/sleep 600 & wait; done
 	}
 	if elapsed > 2500*time.Millisecond {
 		t.Fatalf("the container's stop took %s for two roles whose handlers take 1.5s each: the roles are stopped one after another, not together", elapsed)
+	}
+}
+
+// An issue pod's role names its session under its own home, which the container holds under the
+// home mounts directory (layout.go's HomeMountsDir): the launcher, outside every role's namespaces,
+// reads the session there. A file at the role's own path in the container's view is not the
+// session — the home carries no mount there — so a resume that only it would satisfy is refused,
+// naming the session as the role knows it.
+func TestARolesResumeIsReadWhereTheContainerHoldsItsHome(t *testing.T) {
+	f := newFleet(t, 2*time.Second, "tester")
+	session := filepath.Join(f.home, "sessions", "s.jsonl")
+	if err := os.MkdirAll(filepath.Dir(session), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := f.role("tester").start(shimwire.LauncherStart{
+		ID: "start-1", Generation: 1, Argv: []string{"/bin/true"}, ResumeFile: session,
+	})
+	held := containerPath(session)
+	if held == session || !strings.HasPrefix(held, roleHomeMounts+"/") {
+		t.Fatalf("the container holds %s at %s, want it under the home mounts %s", session, held, roleHomeMounts)
+	}
+	if got.OK || !strings.Contains(got.Error, "resume session file "+session+": stat "+session) {
+		t.Fatalf("start = %#v, want a refusal naming %s: the session is read under the home mounts, at %s, where nothing is", got, session, held)
 	}
 }

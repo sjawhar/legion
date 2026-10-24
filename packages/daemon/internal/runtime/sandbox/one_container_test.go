@@ -84,12 +84,22 @@ func TestAnIssuePodRunsEveryRoleInOneContainer(t *testing.T) {
 			}
 		}
 	}
+	// The volumes that belong under the home are mounted under HomeMountsDir at the same relative
+	// path, so the home carries no mount: each role's namespace overlays it, which Linux refuses
+	// over a lower layer with mounts under it, and binds each back at its own path (role-init).
 	for path, volume := range map[string]string{
-		"/var/run/legion/roles/.homes": "role-homes", TreeRoot: issueVolume, ompSessionsDir: issueVolume, xdgConfigHome: configVolume,
-		FeedDir: issueVolume, AgentSecretsTokenDir: agentSecretsTokenVolume,
+		"/var/run/legion/roles/.homes": "role-homes", TreeRoot: issueVolume,
+		"/var/run/legion/home/.omp/profiles/legion/agent/sessions": issueVolume,
+		"/var/run/legion/home/.config":                             configVolume,
+		FeedDir:                                                    issueVolume, AgentSecretsTokenDir: agentSecretsTokenVolume,
 	} {
 		if got, ok := byPath[path]; !ok || got.Name != volume {
 			t.Errorf("the roles container mounts %+v at %s, want volume %s", got, path, volume)
+		}
+	}
+	for _, m := range c.VolumeMounts {
+		if m.MountPath == podHome || strings.HasPrefix(m.MountPath, podHome+"/") {
+			t.Errorf("the roles container mounts %s at %s, under the home every role's namespace overlays: it belongs under %s", m.Name, m.MountPath, HomeMountsDir)
 		}
 	}
 	for _, inNamespace := range []string{LauncherDir, LauncherPrivateDir, StateDir, GHConfigDir, AgentSecretsKeyDir} {

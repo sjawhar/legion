@@ -81,7 +81,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	return 0
 }
 
-const roleInitUsage = "usage: legion launcher role-init --roles-dir <dir> --role <role> --generation <n> [--home <dir>] [--fixed-root <dir>] --status-fd <n> -- <shim argv…>"
+const roleInitUsage = "usage: legion launcher role-init --roles-dir <dir> --role <role> --generation <n> [--home <dir>] [--home-mounts <dir>] [--fixed-root <dir>] --status-fd <n> -- <shim argv…>"
 
 // runRoleInit is `legion launcher role-init`, the launcher's own hidden subcommand: the init of
 // one role generation's user, mount, PID and IPC namespaces, which the launcher clones into them
@@ -94,6 +94,7 @@ func runRoleInit(args []string, stdout, stderr io.Writer) int {
 	role := flags.String("role", "", "the role whose namespaces this process is the init of")
 	generation := flags.Uint64("generation", 0, "the generation this role-init runs, which names its own overlay work directory")
 	home := flags.String("home", launcher.RoleHome(), "the home directory the role's own layer covers")
+	homeMounts := flags.String("home-mounts", launcher.RoleHomeMounts(), "where the container mounts every volume that belongs under the home, at the same relative path")
 	fixedRoot := flags.String("fixed-root", launcher.RoleFixedRoot(), "the root the role's own directories are bound back under")
 	statusFD := flags.Int("status-fd", 0, "the descriptor to report the shim's own wait status on")
 	if code, ok := parseFlags(flags, args); !ok {
@@ -104,7 +105,7 @@ func runRoleInit(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err := launcher.RoleInit(launcher.RoleInitConfig{
-		RolesDir: *rolesDir, Role: *role, Generation: *generation, Home: *home, FixedRoot: *fixedRoot, StatusFD: *statusFD,
+		RolesDir: *rolesDir, Role: *role, Generation: *generation, Home: *home, HomeMounts: *homeMounts, FixedRoot: *fixedRoot, StatusFD: *statusFD,
 		Argv: flags.Args(), Stdout: stdout, Stderr: stderr,
 	}); err != nil {
 		fmt.Fprintln(stderr, err)

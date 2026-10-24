@@ -45,6 +45,7 @@ type stagePlan struct {
 // carry, so the stage's two generations read apart.
 type agentPlan struct {
 	Home       string
+	HomeMounts string
 	RolesDir   string
 	FixedRoot  string
 	Role       string
@@ -121,7 +122,11 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		{"agent init-status-fd", "refused", "the role cannot reach the launcher's status pipe through its own role-init"},
 		{"agent own-agent-secrets", "present", "the role reads its own agent-secrets key at the fixed path"},
 		{"agent own-agent-secrets-key", "key-a", "the key it reads there is its own"},
-		{"agent home-mount", "mounted-a", "a mount the home carried is bound back over the role's overlay"},
+		{"agent home-mount", "mounted-a", "a volume the home carries is bound back at its own path over the role's overlay"},
+		{"agent home-mount-nested", "nested-a", "a mount inside a volume the home carries comes back with it"},
+		{"agent home-mount-deep", "mounted-a", "a volume deep under the home lands at its path, made in the role's layer"},
+		{"agent home-mount-writes", "volume", "what the role writes into a volume under its home reaches the volume"},
+		{"agent home-mounts-view", "0", "the container's view of the home's volumes is covered: the role sees each at its own path alone"},
 		{"agent tmp-mount", "mounted-a", "a mount /tmp carried is bound back over the role's own /tmp"},
 		{"agent home-carryover", "absent", "the role's first generation starts on a home layer with nothing of its own"},
 		{"stage upper-home", "present", "what the role wrote under its home landed on its own layer"},
@@ -140,6 +145,9 @@ func TestARoleRunsInNamespacesOfItsOwn(t *testing.T) {
 		{"agent2 init-mem", "refused", "the relaunched role cannot read its role-init either"},
 		{"agent2 home-carryover", "present", "the relaunched role keeps its own home layer across generations"},
 		{"agent2 tmp-mount", "mounted-a", "the relaunch keeps the mount /tmp carries"},
+		{"agent2 home-mount", "mounted-a", "the relaunch binds the home's volumes back again"},
+		{"agent2 home-mount-deep", "mounted-a", "the relaunch finds the deep volume's place already made in its layer"},
+		{"agent2 home-mounts-view", "0", "the relaunch covers the container's view of the home's volumes too"},
 		{"stage2 status", "0", "the relaunch reports its own shim's wait status"},
 		{"stage2 detached", "gone", "the relaunch leaves nothing behind either"},
 	} {
@@ -208,9 +216,17 @@ func runStage(plan stagePlan) error {
 	if err := privateMounts(); err != nil {
 		return err
 	}
-	if err := mountTmpfs(plan.Mount, "size=64m"); err != nil {
+	if err := mountTmpfs(plan.Mount, "size=96m"); err != nil {
 		return err
 	}
+	// The test binary runs from wherever `go test` built it, under /tmp when TMPDIR is unset, as
+	// on GitHub's runners; the stage covers /tmp next, so every process it starts runs a copy of
+	// it kept on the stage's own filesystem.
+	self := filepath.Join(plan.Mount, "launcher.test")
+	if err := copyExecutable(plan.Self, self); err != nil {
+		return err
+	}
+	plan.Self = self
 	// The stage's own /tmp and /dev/shm, so what the role plants if its privacy broke lands here
 	// and never on the machine, and the stage can see that it did not.
 	for _, dir := range []string{"/tmp", "/dev/shm"} {
@@ -221,6 +237,7 @@ func runStage(plan stagePlan) error {
 	rolesDir := filepath.Join(plan.Mount, "roles")
 	fixedRoot := filepath.Join(plan.Mount, "fixed")
 	home := filepath.Join(plan.Mount, "home")
+	homeMounts := filepath.Join(plan.Mount, "home-mounts")
 	for _, role := range []string{plan.Role, plan.Sibling} {
 		for _, name := range []string{RoleLauncherDir, RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
 			if err := os.MkdirAll(filepath.Join(rolesDir, role, name), 0o755); err != nil {
@@ -249,21 +266,37 @@ func runStage(plan stagePlan) error {
 			return err
 		}
 	}
-	// A mount the home carries, as an issue pod's sessions and shared configuration do, and one
-	// /tmp carries, as an operator's volume may: the role's own filesystems there must not hide
-	// them.
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	// The volumes the home carries, as an issue pod's sessions, shared config home and operator
+	// mounts do: mounted under the home mounts at their path relative to the home, as the pod
+	// builder renders them, so the home itself carries none. One sits shallow and holds a mount of
+	// its own; one sits deep, under directories the home does not have. A mount /tmp carries, as an
+	// operator's volume may, is carried over the role's own /tmp.
 	carried := filepath.Join(plan.Mount, "carried")
-	if err := os.MkdirAll(carried, 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(carried, "marker"), []byte("mounted-"+plan.Role), 0o644); err != nil {
-		return err
-	}
-	for _, at := range []string{filepath.Join(home, "mounted"), "/tmp/mounted"} {
-		if err := os.MkdirAll(at, 0o755); err != nil {
+	nested := filepath.Join(plan.Mount, "nested")
+	for dir, marker := range map[string]string{carried: "mounted-" + plan.Role, nested: "nested-" + plan.Role} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		if err := bindMount(carried, at); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "marker"), []byte(marker), 0o644); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(carried, "nested"), 0o755); err != nil {
+		return err
+	}
+	for _, bind := range [][2]string{
+		{carried, filepath.Join(homeMounts, "mounted")},
+		{nested, filepath.Join(homeMounts, "mounted", "nested")},
+		{carried, filepath.Join(homeMounts, "deep", "sessions")},
+		{carried, "/tmp/mounted"},
+	} {
+		if err := os.MkdirAll(bind[1], 0o755); err != nil {
+			return err
+		}
+		if err := bindMount(bind[0], bind[1]); err != nil {
 			return err
 		}
 	}
@@ -275,8 +308,8 @@ func runStage(plan stagePlan) error {
 	defer func() { _ = outside.Process.Kill(); _, _ = outside.Process.Wait() }()
 	roleInitLaunch = roleInitHelperLaunch(plan.Self)
 	layout := agentPlan{
-		Home: home, RolesDir: rolesDir, FixedRoot: fixedRoot, Role: plan.Role, Sibling: plan.Sibling,
-		Owner: plan.Owner, OutsidePID: outside.Process.Pid, Detached: plan.Detached,
+		Home: home, HomeMounts: homeMounts, RolesDir: rolesDir, FixedRoot: fixedRoot, Role: plan.Role,
+		Sibling: plan.Sibling, Owner: plan.Owner, OutsidePID: outside.Process.Pid, Detached: plan.Detached,
 	}
 
 	if err := runGeneration(plan, layout, 1, "agent"); err != nil {
@@ -304,6 +337,16 @@ func runStage(plan stagePlan) error {
 	return nil
 }
 
+// copyExecutable copies the executable at source to target, which the stage then runs in its
+// place.
+func copyExecutable(source, target string) error {
+	body, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(target, body, 0o755)
+}
+
 // runGeneration runs one generation of the role over the stage's layout and reports the wait
 // status role-init gave back for it.
 func runGeneration(plan stagePlan, layout agentPlan, generation uint64, label string) error {
@@ -315,7 +358,8 @@ func runGeneration(plan stagePlan, layout agentPlan, generation uint64, label st
 	}
 	process, err := newRoleProcess(RoleInitConfig{
 		RolesDir: layout.RolesDir, Role: plan.Role, Generation: generation, Home: layout.Home,
-		FixedRoot: layout.FixedRoot, Argv: []string{plan.Self, "-test.run=^TestRoleInitAgentHelper$"},
+		HomeMounts: layout.HomeMounts, FixedRoot: layout.FixedRoot,
+		Argv: []string{plan.Self, "-test.run=^TestRoleInitAgentHelper$"},
 	}, append(os.Environ(), roleInitAgentEnv+"="+string(agent)), os.Stdout, os.Stderr)
 	if err != nil {
 		return err
@@ -411,6 +455,18 @@ func TestRoleInitAgentHelper(t *testing.T) {
 	say("init-environ", readable("/proc/1/environ"))
 	say("init-status-fd", readable("/proc/1/fd/"+strconv.Itoa(roleStatusFD)))
 	say("home-mount", content(filepath.Join(plan.Home, "mounted", "marker")))
+	say("home-mount-nested", content(filepath.Join(plan.Home, "mounted", "nested", "marker")))
+	say("home-mount-deep", content(filepath.Join(plan.Home, "deep", "sessions", "marker")))
+	if err := os.WriteFile(filepath.Join(plan.Home, "mounted", "written-"+plan.Label), []byte("volume"), 0o600); err != nil {
+		say("home-mount-writes", err.Error())
+	} else {
+		say("home-mount-writes", content(filepath.Join(plan.Home, "deep", "sessions", "written-"+plan.Label)))
+	}
+	if entries, err := os.ReadDir(plan.HomeMounts); err != nil {
+		say("home-mounts-view", "unreadable: "+err.Error())
+	} else {
+		say("home-mounts-view", strconv.Itoa(len(entries)))
+	}
 	say("tmp-mount", content(filepath.Join("/tmp", "mounted", "marker")))
 	// What an earlier generation of this role wrote under its home is still the role's own: the
 	// writable layer is the role's across its generations, as a role container's filesystem was.

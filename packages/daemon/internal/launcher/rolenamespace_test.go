@@ -78,18 +78,20 @@ func namespaceScratch(t *testing.T) string {
 }
 
 // useRoleLayout runs the package's role generations the way a test can: role-init is this test
-// binary re-entered as TestRoleInitHelper, since the binary is not `legion`, and the home and
-// fixed root are the test's own directories, since a machine running the tests has neither the
-// image's /home/legion nor its /var/run/legion mount points, and could not create them.
-func useRoleLayout(t *testing.T, home, fixed string) {
+// binary re-entered as TestRoleInitHelper, since the binary is not `legion`, and the home, the home
+// mounts and the fixed root are the test's own directories, since a machine running the tests has
+// neither the image's /home/legion nor its /var/run/legion mount points, and could not create them.
+func useRoleLayout(t *testing.T, home, homeMounts, fixed string) {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousHome, previousFixed, previousLaunch := roleHome, roleFixedRoot, roleInitLaunch
-	roleHome, roleFixedRoot, roleInitLaunch = home, fixed, roleInitHelperLaunch(self)
-	t.Cleanup(func() { roleHome, roleFixedRoot, roleInitLaunch = previousHome, previousFixed, previousLaunch })
+	previousHome, previousMounts, previousFixed, previousLaunch := roleHome, roleHomeMounts, roleFixedRoot, roleInitLaunch
+	roleHome, roleHomeMounts, roleFixedRoot, roleInitLaunch = home, homeMounts, fixed, roleInitHelperLaunch(self)
+	t.Cleanup(func() {
+		roleHome, roleHomeMounts, roleFixedRoot, roleInitLaunch = previousHome, previousMounts, previousFixed, previousLaunch
+	})
 }
 
 // roleInitHelperLaunch is roleInitLaunch for a test binary: it re-enters self as role-init, with

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -123,12 +124,8 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 			return fmt.Errorf("bind %s at %s: %w", bind.source, bind.target, err)
 		}
 	}
-	// The role's own layer over the image's home.
-	if err := carryOver(cfg.Home, stage, func() error {
-		options := "lowerdir=" + cfg.Home + ",upperdir=" + filepath.Join(homes, "upper") + ",workdir=" + work
-		return unix.Mount("overlay", cfg.Home, "overlay", 0, options)
-	}); err != nil {
-		return fmt.Errorf("give the role its own layer over %s: %w", cfg.Home, err)
+	if err := privateHome(cfg, homes, work); err != nil {
+		return err
 	}
 	// The role's own temporary directories, on the pod's disk as a container filesystem is.
 	for _, bind := range [][2]string{
@@ -163,10 +160,13 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 	if err := os.RemoveAll(stage); err != nil {
 		return fmt.Errorf("clear the role's stage: %w", err)
 	}
-	// The cover, last of the roles directory's own mounts: every role's directories go behind an
-	// empty filesystem, this role's launcher token with them.
-	if err := mountTmpfs(cfg.RolesDir, "size=1m,mode=0755"); err != nil {
-		return fmt.Errorf("cover %s: %w", cfg.RolesDir, err)
+	// The covers, last of the mounts made from under them: every role's directories go behind an
+	// empty filesystem, this role's launcher token with them, and so does the container's view of
+	// the home's volumes, which the role now sees at their own paths alone.
+	for _, dir := range []string{cfg.RolesDir, cfg.HomeMounts} {
+		if err := mountTmpfs(dir, "size=1m,mode=0755"); err != nil {
+			return fmt.Errorf("cover %s: %w", dir, err)
+		}
 	}
 	if err := unix.Mount("proc", "/proc", "proc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
 		return fmt.Errorf("mount the role's own /proc: %w", err)
@@ -174,12 +174,60 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 	return nil
 }
 
+// privateHome gives the role a writable layer of its own over the image's home, then puts every
+// volume the home carries — an issue pod's sessions and shared config home, an operator's mount —
+// back at its own path on top. The container mounts those volumes under the home mounts
+// directory rather than under the home itself, so the overlay's lower layer, the home, has no
+// mount under it: Linux refuses an overlay whose lower layer has mounts under it that a more
+// privileged namespace locked (clone_private_mount), and every mount the container carries is
+// locked in the role's namespaces. A home that carries a mount anyway is refused, naming it, rather
+// than overlaid on one kernel and hidden on another. What the role writes anywhere else under its
+// home is its own: no sibling role and nothing in the container sees it.
+func privateHome(cfg RoleInitConfig, homes, work string) error {
+	if carried, err := mountsUnder(cfg.Home); err != nil {
+		return err
+	} else if len(carried) > 0 {
+		return fmt.Errorf("the home %s carries mounts (%s): the container mounts what belongs under the home under %s instead",
+			cfg.Home, strings.Join(carried, ", "), cfg.HomeMounts)
+	}
+	options := "lowerdir=" + cfg.Home + ",upperdir=" + filepath.Join(homes, "upper") + ",workdir=" + work
+	if err := unix.Mount("overlay", cfg.Home, "overlay", 0, options); err != nil {
+		return fmt.Errorf("give the role its own layer over %s: %w", cfg.Home, err)
+	}
+	mounts, err := mountsUnder(cfg.HomeMounts)
+	if err != nil {
+		return err
+	}
+	// A mount under another is carried by that one's recursive bind, so only the outermost of
+	// each nest is bound; mountinfo lists a mount after the one it sits on.
+	var bound []string
+	for _, mount := range mounts {
+		if slices.ContainsFunc(bound, func(outer string) bool { return strings.HasPrefix(mount, outer+"/") }) {
+			continue
+		}
+		rel, err := filepath.Rel(cfg.HomeMounts, mount)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(cfg.Home, rel)
+		if err := makeLike(mount, target); err != nil {
+			return fmt.Errorf("make %s's place in the role's home: %w", target, err)
+		}
+		if err := bindMount(mount, target); err != nil {
+			return fmt.Errorf("bind %s at %s: %w", mount, target, err)
+		}
+		bound = append(bound, mount)
+	}
+	return nil
+}
+
 // carryOver puts the role's own filesystem at dir (place) while keeping every mount strictly
-// under dir — an issue pod's sessions and shared configuration under the home, an operator's
-// volume under /tmp — visible on top of it: each is held aside on the role's stage first and
-// bound back at its own path after, since the new filesystem would otherwise hide it and what
-// the role writes there would never reach the volume. What the role writes anywhere else under
-// dir is its own: no sibling role and nothing in the container sees it.
+// under dir — an operator's volume under /tmp, say — visible on top of it: each is held aside on
+// the role's stage first and bound back at its own path after, since the new filesystem would
+// otherwise hide it and what the role writes there would never reach the volume. What the role
+// writes anywhere else under dir is its own: no sibling role and nothing in the container sees it.
+// The home is not carried this way (privateHome): an overlay's lower layer may have no mount under
+// it at all.
 func carryOver(dir, stage string, place func() error) error {
 	carried, err := mountsUnder(dir)
 	if err != nil {

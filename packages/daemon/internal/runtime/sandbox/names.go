@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // The pod's own paths. The issue's volume is mounted whole at TreeRoot in workspace-init and each
@@ -77,6 +78,10 @@ const (
 const (
 	RolesDir     = launcher.FixedRoot + "/roles"
 	RoleHomesDir = RolesDir + "/" + launcher.RoleHomesDir
+	// HomeMountsDir is where an issue pod's roles container mounts every volume that belongs at
+	// or under the image's home (homeMountsView), and where `legion launcher role-init` finds
+	// each to bind it back at its own path under the role's home overlay.
+	HomeMountsDir = launcher.HomeMountsDir
 )
 
 // roleDir is role's own directory of an issue pod's one container, under RolesDir: its launcher
@@ -84,6 +89,31 @@ const (
 // agent-secrets key directories, the last only in a pod enrolled with the secrets broker, each one
 // volume's mount at that name of launcher's layout.
 func roleDir(role claim.Role) string { return RolesDir + "/" + string(role) }
+
+// homeMountsView is mounts as an issue pod's roles container carries them: every mount at or
+// under the image's home (podHome) at the same path relative to HomeMountsDir instead
+// (containerHomePath), so the home itself carries no mount, and every other mount as it is.
+// `legion launcher role-init` binds each back at its own path under the role's home overlay.
+func homeMountsView(mounts []corev1.VolumeMount) []corev1.VolumeMount {
+	out := slices.Clone(mounts)
+	for i := range out {
+		out[i].MountPath = containerHomePath(out[i].MountPath)
+	}
+	return out
+}
+
+// containerHomePath is where an issue pod's roles container, outside every role's namespaces,
+// holds what a role sees at path: a path at or under the image's home is under HomeMountsDir,
+// and any other path is the same in both views.
+func containerHomePath(path string) string {
+	if path == podHome {
+		return HomeMountsDir
+	}
+	if rest, ok := strings.CutPrefix(path, podHome+"/"); ok {
+		return HomeMountsDir + "/" + rest
+	}
+	return path
+}
 
 // feedSubPath is the issue volume's directory that holds the pod's feed (FeedDir). The kubelet
 // makes it on first use, so a volume provisioned before the feed moved onto it is relaunched as it
