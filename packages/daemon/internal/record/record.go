@@ -431,14 +431,16 @@ const (
 )
 
 // DesignGate records the current document version, the version a human approved, if any, and the
-// version a human last requested changes on, if any: the last says what the architect has already
-// been told, so a later registration reading the same request from Dispatch does not tell it twice.
+// changes request the architect has been told of, if any: its document version and the reviewer's
+// reason. A re-read of that same request, by a later registration or by the gate seed, tells the
+// architect nothing new; a review with another reason, or at another version, does.
 type DesignGate struct {
-	Issue                   string
-	ArtifactID              string
-	LatestVersion           int
-	ApprovedVersion         *int
-	ChangesRequestedVersion *int
+	Issue              string
+	ArtifactID         string
+	LatestVersion      int
+	ApprovedVersion    *int
+	ToldChangesVersion *int
+	ToldChangesReason  string
 }
 
 // Slot is an active admission slot.

@@ -351,30 +351,37 @@ const (
 
 // ApplyDesignGateEvent updates a registered gate from one artifact observation. Approval opens
 // only when it names the latest known version; a newer document version and changes request close
-// it. A changes request is recorded by its version, and an approval or a newer version clears that
-// record, so the gate says which request the architect has already been told of.
+// it. An approval and a newer version also clear the changes request the architect was told of,
+// which RecordChangesTold writes when it is told: neither leaves that request standing.
 func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
-		gate.ChangesRequestedVersion = nil
+		gate.ToldChangesVersion, gate.ToldChangesReason = nil, ""
 	}
 	switch kind {
 	case DesignGateApproved:
 		approved := version
 		gate.ApprovedVersion = &approved
-		gate.ChangesRequestedVersion = nil
+		gate.ToldChangesVersion, gate.ToldChangesReason = nil, ""
 	case DesignGateChangesRequested:
 		gate.ApprovedVersion = nil
-		requested := version
-		gate.ChangesRequestedVersion = &requested
 	}
 	return gate
 }
 
-// DesignGateChangesTold reports whether the gate already records a human's changes request at
-// version, which the architect was told of when it was recorded.
-func DesignGateChangesTold(gate record.DesignGate, version int) bool {
-	return gate.ChangesRequestedVersion != nil && *gate.ChangesRequestedVersion == version
+// DesignGateChangesTold reports whether the gate already records this changes request as one the
+// architect was told of: the same document version and the same reason. A second review at that
+// version with another reason is a new act of a person, and is not this one.
+func DesignGateChangesTold(gate record.DesignGate, version int, reason string) bool {
+	return gate.ToldChangesVersion != nil && *gate.ToldChangesVersion == version && gate.ToldChangesReason == reason
+}
+
+// RecordChangesTold records on the gate the changes request the architect is being told of, so a
+// later read of the same request (a registration's, the gate seed's) tells it nothing again.
+func RecordChangesTold(gate record.DesignGate, version int, reason string) record.DesignGate {
+	told := version
+	gate.ToldChangesVersion, gate.ToldChangesReason = &told, reason
+	return gate
 }
 
 // DesignGateOpen reports whether a human approved the gate's current document version.
