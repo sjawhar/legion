@@ -8,8 +8,10 @@ anything. Every path it cites is in sjawhar/legion.
 
 Check this list first: each of these is on your `PATH` now, and needs no runner.
 
-- `psql` — the Dispatch browser suite (`bun run e2e`) refuses to start without it, so a role whose
-  change owes that suite can run it.
+- `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
+  `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
+  dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without it on
+  `PATH` — so a role whose change owes that suite can run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a
   megabyte, because a second image roll costs more than a megabyte.
 - `sqlite3` — Oh My Pi's own session files are SQLite databases, and a role reading its own session
@@ -19,7 +21,7 @@ Check this list first: each of these is on your `PATH` now, and needs no runner.
 - `dig` — how a role whose connection to a service name fails tells "the name does not resolve"
   from "the packets are dropped".
 
-## Why you cannot install a sixth
+## Why a sixth is an image change, not an install
 
 Your container is an unprivileged user with no writable system prefix: `/usr/local/bin`, `/opt` and
 `/home` are read-only, and `apt-get` cannot take dpkg's lock even to download.
@@ -29,9 +31,16 @@ $ apt-get install -d -y postgresql-client
 E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)
 ```
 
-So a compiled client is not something you can fetch for yourself, however much room the issue's
-disk has. For everything the five do not cover, the one documented step is a pinned run through one
-of the three package runners the image already carries.
+Unpacking files under `$HOME` or the issue's disk is a different question, and the answer is not a
+flat no: `redis-cli`, `sqlite3` and `dig` did run from an extraction prefix with `LD_LIBRARY_PATH`
+set, and `psql` did not — Debian's `/usr/bin/psql` is a Perl wrapper that loads `PgCommon.pm`
+through Perl's own search path, which no extraction prefix is on. Legion rules the attempt out
+whichever way it would have gone: installing a tool for yourself is the withheld `operator-setup`
+capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200).
+So the answer for a role is never an extraction, however much room the issue's disk has: for
+everything the five do not cover, the one documented step is a pinned run through one of the three
+package runners the image already carries, and a tool no runner reaches is an image change
+("When no runner reaches it", below).
 
 ## The three pinned runner forms
 
@@ -50,22 +59,51 @@ of the three package runners the image already carries.
   github.com/nats-io/natscli/nats@v99.99.99 --version` fails closed, exit 1, with
   `go: github.com/nats-io/natscli/nats@v99.99.99: invalid version: unknown revision nats/v99.99.99`.
 
-## Always write the exact version
+## Always write the exact coordinate and the exact version
 
-The name is written with its version every time, never bare: unpinned, the command can run a
-different package altogether.
+A pin has two halves, and a runner resolves what you asked for only when both are right:
+
+1. **The coordinate** — the registry name the project itself publishes, scope and all:
+   `@biomejs/biome`, not `biome`. The binary's name is no evidence of the package's. Check it once,
+   before the tool's first use, instead of assuming it: `npm view <name> version description
+   repository.url homepage`. The real package's answer names the project's own repository and site;
+   the squatter's names neither.
+2. **The version** on that coordinate.
+
+```text
+$ npm view biome version description repository.url homepage
+version = '0.3.3'
+description = 'A simple way to manage environment variables on a per-project basis'
+$ npm view @biomejs/biome version description repository.url homepage
+version = '2.6.3'
+description = 'Biome is a toolchain for the web: formatter, linter and more'
+repository.url = 'git+https://github.com/biomejs/biome.git'
+homepage = 'https://biomejs.dev'
+```
+
+Pinning the version alone does not save you: it pins the squatter at a version, and obeys "write
+the version" to the letter while doing it.
 
 ```text
 $ bunx biome --version
+0.3.3
+$ bunx biome@0.3.3 --version
 0.3.3
 $ bunx --package @biomejs/biome@2.6.3 biome --version
 Version: 2.6.3
 ```
 
-The npm package `biome` is "A simple way to manage environment variables on a per-project basis",
-with one maintainer; the formatter is `@biomejs/biome`. Nothing refuses the unpinned command: no
-guard, no lint and no check stops you typing a bare `bunx biome`. What you are given is a correct
-form and a tool that is already there, not a gate — so the pin is yours to type.
+Only the third runs the formatter, and what separates it from the second is the *name*, not the
+version. Each runner's syntax makes a different half easy to get wrong. `bunx`'s `--package
+<name>@<version> <binary>` form exists because the coordinate and the binary name differ, so a
+bare `bunx <binary>@<version>` is a coordinate you never checked — the half to watch.
+`uvx <name>@<version>` and `go run <module>@<version>` take the coordinate directly, and a Go
+module path is a URL, so its identity is the path itself; there the version is the half left to
+you.
+
+Nothing refuses an unpinned command: no guard, no lint and no check stops you typing a bare `bunx
+biome`. What you are given is a correct form and a tool that is already there, not a gate — so both
+halves are yours to type.
 
 ## When no runner reaches it
 
