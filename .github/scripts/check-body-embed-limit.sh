@@ -121,8 +121,11 @@ def attached_comment(lines: list[str], line_number: int) -> str:
     """Every comment the declaration carries: the trailing comment on its own line (the patterns
     admit nothing but `//...` after the number), and the unbroken run of comment lines directly
     above it - `//` lines, and a `/* ... */` block taken whole, however its inner lines are
-    written. A `const (` opener is transparent, so a Go doc comment written on a one-member group
-    reaches its member. Anything else - a blank line, another declaration, code - ends the run."""
+    written. A `//` line is a `//` line whatever its text ends with, so it is tested first: an
+    ordinary one trailing in `*/` is no block close. A `*/` whose opening `/*` is never found
+    above is a malformed tree, and nothing it passed is credited. A `const (` opener is
+    transparent, so a Go doc comment written on a one-member group reaches its member. Anything
+    else - a blank line, another declaration, code - ends the run."""
     block: list[str] = []
     declaration = lines[line_number - 1]
     trailing = declaration.find("//")
@@ -134,17 +137,23 @@ def attached_comment(lines: list[str], line_number: int) -> str:
         if stripped == "const (":
             index -= 1
             continue
-        if stripped.endswith("*/"):
-            while index >= 0:
-                stripped = lines[index].strip()
-                block.append(stripped)
-                index -= 1
-                if stripped.startswith("/*"):
-                    break
-            continue
         if stripped.startswith("//"):
             block.append(stripped)
             index -= 1
+            continue
+        if stripped.endswith("*/"):
+            pending: list[str] = []
+            opened = False
+            while index >= 0:
+                stripped = lines[index].strip()
+                pending.append(stripped)
+                index -= 1
+                if stripped.startswith("/*"):
+                    opened = True
+                    break
+            if not opened:
+                break
+            block.extend(pending)
             continue
         break
     return "\n".join(block)
