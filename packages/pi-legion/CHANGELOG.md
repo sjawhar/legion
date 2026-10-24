@@ -11,7 +11,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   do, who decides which steps, check-ins, and a new rule that a lead proves its facts about its
   own stream with a command and its output, not a reading. It is the dotfiles skill of the same
   name, copied with that rule added; the rule's cause was a lead that reported five of its six
-  agents as not live, from a session list that was cut in the middle.
+  agents as not live, from a session list that was cut in the middle. A claim that nothing exists
+  also names its search and a positive control on the same path as the things claimed absent,
+  after a census that searched for `kind: Service` found none of the Services built in code.
 
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
