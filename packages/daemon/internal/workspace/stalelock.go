@@ -21,7 +21,7 @@ import (
 //
 // A lock some process still holds must never be removed: two writers would then replace one file.
 // So the caller is one that knows no process can hold any: a Kubernetes issue pod's
-// `workspace-init provision`, which runs before any role container of the pod starts, on the
+// `workspace-init provision`, which runs before the pod's launcher container starts, on the
 // issue's own volume, which no other pod mounts. The tmux runtime's provisioning never calls it,
 // since every pane of the repository shares the clone there. jj's own locks need nothing: they are
 // flock(2) locks the kernel releases with their holder, so a lock file one leaves blocks no jj.

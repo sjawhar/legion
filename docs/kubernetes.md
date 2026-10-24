@@ -1085,7 +1085,7 @@ every issue pod is relaunched onto the new image.
 release at contract 36 builds an issue pod with one container, `roles`, whose launcher runs every
 role in multi-role mode, which only an image of that release's `legion` has: pin the worker image
 with the daemon release, since the image probe refuses an image whose `pi-legion` declares another
-contract. At boot, store migration 0050 rewrites every stored claim locator naming a per-role
+contract. At boot, store migration 0051 rewrites every stored claim locator naming a per-role
 container to `roles`, and the boot census passes a pod of either layout and refuses everything
 else as before. A running issue pod whose containers are exactly the six role names is reported
 moved for every role recorded in it, with the detail `the pod's containers architect, planner,

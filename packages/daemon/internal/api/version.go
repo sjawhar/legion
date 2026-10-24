@@ -305,11 +305,12 @@ package api
 // `/var/run/legion/roles/.homes`. An image whose `legion launcher` lacks multi-role mode cannot run
 // that pod, and the image probe refuses an image whose pi-legion declares another contract, so the
 // bump keeps a daemon from building such pods for an older image. A sandbox locator of an issue
-// pod's role names container `roles`, and store migration 0050 rewrites every stored one at boot;
+// pod's role names container `roles`, and store migration 0051 rewrites every stored one at boot;
 // a running pod of the layout before it is StaleAddress for every role and replaced once by the
 // next launch of any of them, uncharged. `settings.runtime.kubernetes.resources` is now
 // `{issue, controller}`, the two pods' reservations, rather than one entry per role; the
-// resource-limits capability row names those pods. (sjawhar/legion#2131 also declares 36 on its
-// branch: whichever of the two merges second takes the next contract number and renumbers its
-// store migration past the other's, as the collision note says.)
+// resource-limits capability row names those pods. (Main holds store migration 0050, so this takes
+// 0051. sjawhar/legion#2131 also declares 36 and migration 0051 on its branch: whichever of the two
+// merges second takes the next contract number and renumbers its store migration past the other's,
+// as the collision note says.)
 const DaemonAPIVersion = 36

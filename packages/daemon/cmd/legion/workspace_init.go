@@ -175,7 +175,7 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 // mounts, holds a resume to the same agent, removes the git locks an interrupted git or jj left,
 // and provisions from the feed, an issue with no branch at defaultBranch. No lock guards the
 // clone: it is the issue's own, on the issue's own volume, and no other pod mounts it. For the same
-// reason, and because no role container of the pod has started, no process holds a git lock on the
+// reason, and because the pod's launcher container has not started, no process holds a git lock on the
 // volume while this runs, so every one there is stale and would fail each later write of what it
 // locks (LEGION-731).
 func workspaceInit(ctx context.Context, issue, repo, defaultBranch, root, credentialHelper, feed string, stdout io.Writer) error {

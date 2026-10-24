@@ -7,12 +7,12 @@ import (
 
 // An issue pod runs every role in one container, `roles`, so a claim stored by a daemon of the
 // layout before it, whose sandbox locator names a container per role, is rewritten to `roles` by
-// 0050 in both tables that keep a locator, and then loads (Validate refuses the old value). The
+// 0051 in both tables that keep a locator, and then loads (Validate refuses the old value). The
 // controller's locator, a tmux locator and a claim with no locator are left as they are.
-func TestIssuePodLocatorsStoredBefore0050NameTheRolesContainer(t *testing.T) {
+func TestIssuePodLocatorsStoredBefore0051NameTheRolesContainer(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 49)
+	migrateThrough(t, store, 50)
 	issue := `{"runtime":"sandbox","claim":"legion-LEGION-209-implementer","incarnation":"pod-uid-3/3","sandbox":{"namespace":"legion","name":"legion-legion-209","podUid":"pod-uid-3","container":"implementer","generation":3}}`
 	controller := `{"runtime":"sandbox","claim":"legion-legion-controller","incarnation":"pod-uid-9/1","sandbox":{"namespace":"legion","name":"legion-legion-controller","podUid":"pod-uid-9","container":"controller","generation":1}}`
 	tmux := `{"runtime":"tmux","claim":"legion-LEGION-210-tester","incarnation":"4242:1","tmux":{"window":"@1","pane":"%1"}}`
@@ -51,12 +51,12 @@ func TestIssuePodLocatorsStoredBefore0050NameTheRolesContainer(t *testing.T) {
 	}
 	claims, err := store.Claims(ctx)
 	if err != nil {
-		t.Fatalf("Claims after 0050: %v", err)
+		t.Fatalf("Claims after 0051: %v", err)
 	}
 	if len(claims) != 4 {
-		t.Fatalf("Claims after 0050 = %d claims, want 4", len(claims))
+		t.Fatalf("Claims after 0051 = %d claims, want 4", len(claims))
 	}
 	if _, err := store.CapabilityReports(ctx); err != nil {
-		t.Fatalf("CapabilityReports after 0050: %v", err)
+		t.Fatalf("CapabilityReports after 0051: %v", err)
 	}
 }

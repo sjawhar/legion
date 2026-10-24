@@ -72,7 +72,8 @@ func (m *manager) reapOrphans(ctx context.Context, signals <-chan os.Signal) {
 
 // Cleanup finishes before the exit is reported, credentials are removed or a new generation is
 // admitted. A namespace whose processes cannot be observed is not safe to reuse: fail the launcher
-// loudly so Kubernetes replaces this role container rather than reporting a false completed stop.
+// loudly so Kubernetes replaces this container rather than reporting a false completed stop. Only
+// the single-role form runs it; an issue pod's roles end with their own namespace's init.
 func (m *manager) cleanExitedGeneration() {
 	if os.Getpid() != 1 {
 		return

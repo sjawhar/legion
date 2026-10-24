@@ -43,7 +43,7 @@ import (
 // pod mounts its own volume. The
 // issue's scratch is `/legion/scratch` (scratchRoot) on its volume, and the roles of the issue
 // share it: one temporary directory, one cache home, one data home and one bun install cache,
-// `/legion/scratch/{tmp,cache,data,bun/install/cache}`, every role container told the same four
+// `/legion/scratch/{tmp,cache,data,bun/install/cache}`, every role told the same four
 // (roleEnvironment). The one directory of it that is a role's own is its state home,
 // `/legion/scratch/state/<role>` (roleStateHome), which keeps one role's browser broker lock from
 // blocking its siblings'. The go command's two caches are the issue's too, one pair every role of

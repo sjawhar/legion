@@ -176,7 +176,7 @@ func EnsureStateHome(environ []string) error {
 }
 
 // ScratchVariables are the variables EnsureScratch makes the directory of, in the order it makes
-// them: what sandbox.roleEnvironment tells a role container to write in without being told where,
+// them: what sandbox.roleEnvironment tells a role to write in without being told where,
 // wherever on the issue's volume the runtime puts them — the issue's scratch for the temporary
 // directory, the cache and data homes and bun's install cache, the pair beside it for the two Go
 // caches, every one of them the same for every role of the pod — less XDG_STATE_HOME, which is
@@ -199,7 +199,7 @@ var ScratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GO
 //
 // `go` and `bun` make their own cache directories, so GOCACHE, GOMODCACHE and BUN_INSTALL_CACHE_DIR
 // would come up by themselves; TMPDIR has no creator at all — mktemp and every library equivalent
-// fail where the directory the variable names does not exist, and the pod's role containers are
+// fail where the directory the variable names does not exist, and the pod's roles are
 // told no other temporary directory. The list is the whole told set rather than that one name, so
 // the shim makes what the runtime said it would use whatever the tool reading it does.
 //
@@ -207,7 +207,7 @@ var ScratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GO
 // kubelet create each one, but it would also contradict the rule that these paths sit on the issue
 // volume's own mount (sandbox.TestTheIssuesRolesShareOneScratchAndOneGoCachePair), ask the
 // kubelet for twelve directories — the four the issue's roles share, the two Go caches beside
-// them and a state home in each of the issue pod's six role containers — and rest on an unproven
+// them and a state home for each of the issue pod's six roles — and rest on an unproven
 // ownership behaviour: what mode a kubelet gives a nested sub-path directory it creates on a
 // fresh volume. The shim runs as the pod's own user, which can write the volume, and makes
 // exactly the directories the runtime told it to use, read from the same environment the agent

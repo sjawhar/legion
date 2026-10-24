@@ -58,8 +58,9 @@ type Kubernetes struct {
 	// fits to the node's allocatable ephemeral storage (its root volume).
 	Resources PodResources
 	// controllerNamed is whether the file named runtime.kubernetes.resources.controller, an entry
-	// setting no field included; only the file's own block (fileConfig.Kubernetes) holds it, which
-	// resolveControllerLaunch reads to refuse the key under `controller: operator`.
+	// setting no field included. readKubernetes sets it on the file's block, and the settled block
+	// (resolveKubernetes copies the file's) carries it unchanged; resolveControllerLaunch reads the
+	// file's to refuse the key under `controller: operator`.
 	controllerNamed bool
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
@@ -81,7 +82,7 @@ type Kubernetes struct {
 	// PluginsFromBinary is whether Plugins was filled from the binary's linked pair rather than
 	// read from the file; false while Plugins holds the file's own setting or is nil.
 	PluginsFromBinary bool
-	// Setup is `runtime.kubernetes.setup`: the argv every role's container runs before each start
+	// Setup is `runtime.kubernetes.setup`: the argv every role runs before each start
 	// of its Oh My Pi, after a stale-plugin relaunch's install and with the environment and working
 	// directory Oh My Pi gets; Oh My Pi starts only once it exits 0. Nil when the file sets none.
 	Setup []string

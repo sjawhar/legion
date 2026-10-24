@@ -84,7 +84,7 @@ var commands = map[string]commandEntry{
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
 	"claude-bridge":  {runClaudeBridge, "run Claude Code in Oh My Pi's place under worker-shim, for a role worker_backends puts on claude"},
 	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
-	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
+	"launcher":       {runLauncher, "PID 1 of an issue pod's roles container or the controller's pod: starts and stops each role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},

@@ -245,7 +245,7 @@ func pluginEnabled(lock, name string) (string, bool) {
 // whose own toolchain download or GOTOOLCHAIN setting can make a present binary fail to run. flock
 // is on the list because the install Legion renders for an installing launch serialises on the
 // issue's shared bun install cache with it (installBlock,
-// packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
+// packages/daemon/internal/runtime/sandbox/plugins.go), so a role whose image lacks it
 // fails every installing launch.
 func toolchain(ctx context.Context, img Image) (string, bool) {
 	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "flock")

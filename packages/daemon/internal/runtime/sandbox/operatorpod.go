@@ -90,7 +90,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // TreeRoot — and the image makes nothing there either, but Legion names it to the issue pod's
 // workspace-init (xdgEnvironment), so an operator's mount over it is refused here, at
 // `--check-config`, rather than left to surprise someone in a pod. (An operator's
-// pod.VolumeMounts reaches the role containers and the image probe's and no init container, so
+// pod.VolumeMounts reaches the launcher containers and the image probe's and no init container, so
 // this row speaks for the name rather than for workspace-init.) A provider key must name a
 // variable nothing else in the pod sets, since the shim refuses one its own environment names
 // and would replace one Oh My

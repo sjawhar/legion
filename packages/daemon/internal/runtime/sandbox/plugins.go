@@ -81,7 +81,7 @@ if (got !== want) {
 `
 
 // startName is the start wrapper's $0 (startArgv): what the shell names itself in its own
-// messages, and what a role container's process list shows for the wrapper before its exec.
+// messages, and what a role's process list shows for the wrapper before its exec.
 const startName = "legion-start"
 
 // installLockWait is how long installBlock's flock waits for the shared bun install cache before
@@ -198,7 +198,7 @@ func installLockWait(boot time.Duration, intervals int) int {
 //     person removes it. Hence the mkdir inside, and the rm of a non-directory before it, which
 //     clears exactly that file and nothing a cache can legitimately be. The cache
 //     directory is $BUN_INSTALL_CACHE_DIR itself, with no default behind it: the runtime sets that
-//     variable for every role container (roleEnvironment, manifest.go; runtimeOwned refuses anyone
+//     variable for every role (roleEnvironment, manifest.go; runtimeOwned refuses anyone
 //     else setting it, and TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes pins that the
 //     runtime names it), and a default would silence, for the one variable this script is about,
 //     the `set -u` abort that is how a broken invariant should announce itself. flock is named by

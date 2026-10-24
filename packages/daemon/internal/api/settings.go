@@ -98,7 +98,7 @@ type KubernetesSettings struct {
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
 	// Plugins is the settled pair, whatever its source, absent while the daemon knows none.
 	Plugins *PluginsSettings `json:"plugins,omitempty"`
-	// Setup is the argv every role container runs before each start of its Oh My Pi, `[]` while the
+	// Setup is the argv every role runs before each start of its Oh My Pi, `[]` while the
 	// file sets none: every pod runs it, so every pod knows it, as with `omp_launch_prefix`.
 	Setup           []string                `json:"setup"`
 	RepositoryCache RepositoryCacheSettings `json:"repository_cache"`

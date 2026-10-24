@@ -1,6 +1,6 @@
-// Package launcher runs one role container's long-lived process supervisor. It connects to the
-// daemon independently from the child worker shim, reports actual child state after every
-// reconnect, and owns exactly one worker-shim process group at a time.
+// Package launcher runs a launcher container's long-lived process supervisor: one per role it
+// serves, each of which connects to the daemon independently from its child worker shim, reports
+// actual child state after every reconnect, and owns exactly one generation at a time.
 package launcher
 
 import (

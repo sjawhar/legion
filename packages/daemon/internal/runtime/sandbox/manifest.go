@@ -673,10 +673,10 @@ const (
 
 // xdgEnvironment is the four XDG base directories on the image's HOME: what the issue pod's
 // workspace-init is told (initEnvironment), the one container of a pod told any of them besides
-// the role containers — workspace-fetch is told none (fetchEnvironment), and neither is the
-// controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role container is
-// told none of them but the config home; its cache and data homes are the issue's scratch's and
-// its state home its own directory there (roleEnvironment).
+// what each role is told — workspace-fetch is told none (fetchEnvironment), and neither is the
+// controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role is told none
+// of them but the config home; its cache and data homes are the issue's scratch's and its state
+// home its own directory there (roleEnvironment).
 func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -686,12 +686,12 @@ func xdgEnvironment() []corev1.EnvVar {
 	}
 }
 
-// scratchRoot is the issue's scratch, on the issue's volume, which every role launcher mounts
-// whole at TreeRoot: the four directories every role container of the pod is told the same one of
+// scratchRoot is the issue's scratch, on the issue's volume, which every launcher container
+// mounts whole at TreeRoot: the four directories every role of the pod is told the same one of
 // (roleEnvironment) and `state`, which holds one state home per role (roleStateHome).
 const scratchRoot = TreeRoot + "/scratch"
 
-// roleEnvironment is where a role container's agent puts what it writes without being told where:
+// roleEnvironment is where a role's agent puts what it writes without being told where:
 // its temporary directory, the three XDG homes a tool caches under, and the three tool caches that
 // resolve to a path of their own (Go's build and module caches, bun's install cache). Every one of
 // them is on the issue's volume, where neither the gigabyte of ephemeral storage the container is
@@ -731,12 +731,13 @@ func roleEnvironment(role claim.Role) []corev1.EnvVar {
 
 // roleStateHome is the XDG_STATE_HOME a role's agent is told, `/legion/scratch/state/<role>`: the
 // one directory of the issue's scratch that is the role's own rather than the issue's, in a pod
-// whose role containers share the network namespace, the workspace path and the rest of that
+// whose roles share the network namespace, the workspace path and the rest of that
 // scratch. Oh My Pi keeps its browser broker's lock under its state root (`run/daemons/<hash of
 // the workspace's real path>/broker.pid`), taken as an abstract unix socket named from the lock
-// path, and an abstract socket name is one name across every container of the pod; with one state
-// root the first role's lock would block every other role's broker, and their `browser.open` would
-// fail while `broker.sock` sits on the first container's own filesystem. The per-role homes hang
+// path, and an abstract socket name is one name across every role of the pod, whose namespaces
+// share the pod's network namespace; with one state root the first role's lock would block every
+// other role's broker, and their `browser.open` would fail while `broker.sock` sits in the first
+// role's own view of the filesystem. The per-role homes hang
 // under one `state` directory so that the shared and the per-role halves of the scratch stay
 // visibly apart and no role's name can collide with a shared directory's. The shim makes Oh My
 // Pi's profile directory under it before Oh My Pi starts (podsafety.EnsureStateHome), since Oh My
@@ -774,10 +775,10 @@ func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
 
-// The go command's two caches in the role containers, which roleEnvironment hands every role of
-// the issue the same pair of.
+// The go command's two caches, which roleEnvironment hands every role of the issue the same pair
+// of.
 const (
-	// goBuildCache is the GOCACHE every role container of an issue is told and goModCache its
+	// goBuildCache is the GOCACHE every role of an issue is told and goModCache its
 	// GOMODCACHE, both on the issue's volume beside the workspaces and uv's cache, and both shared
 	// by the issue's roles rather than split per role. Each holds content addressed by its hash,
 	// and the roles of one issue may fill them at once: of the build cache `go help cache` says
@@ -971,8 +972,9 @@ func gitCredentialEnv() []corev1.EnvVar {
 }
 
 // launchEnvironment is mainEnvironment split into its two carriers: the variables the kubelet
-// resolves (the downward API, the operator's Secret references), set on every role container, and
-// the plain NAME=value pairs the launcher's start command carries to each generation's child.
+// resolves (the downward API, the operator's Secret references), set once on the launcher's
+// container, and the plain NAME=value pairs the launcher's start command carries to each
+// generation's child.
 func (r *Runtime) launchEnvironment(l launch) ([]corev1.EnvVar, []string) {
 	var resolved []corev1.EnvVar
 	var plain []string
