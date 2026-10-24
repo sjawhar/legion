@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,16 +36,17 @@ type googleTokenError struct {
 }
 
 // Mint returns the bare Google access token. It never puts a stored credential or returned token
-// in an error.
+// in an error, and every error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
 func (m GoogleLogin) Mint(ctx context.Context, value string) (string, error) {
+	const what = "refresh Google login"
 	var secret googleLoginSecret
 	// encoding/json's syntax errors quote the offending byte, so neither decode wraps its error:
 	// the stored credential and Google's answer both hold secrets.
 	if json.Unmarshal([]byte(value), &secret) != nil {
-		return "", errors.New("decode Google login secret: not a JSON object of its fields")
+		return "", fmt.Errorf("%w: decode Google login secret: not a JSON object of its fields", ErrMintStoredValue)
 	}
 	if secret.Type != "authorized_user" || secret.ClientID == "" || secret.ClientSecret == "" || secret.RefreshToken == "" {
-		return "", errors.New("Google login secret must be an authorized_user credential")
+		return "", fmt.Errorf("%w: Google login secret must be an authorized_user credential", ErrMintStoredValue)
 	}
 	endpoint := m.TokenURL
 	if endpoint == "" {
@@ -60,38 +60,28 @@ func (m GoogleLogin) Mint(ctx context.Context, value string) (string, error) {
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", fmt.Errorf("create Google token request: %w", err)
+		return "", fmt.Errorf("%w: create Google token request: %w", ErrMintUpstream, err)
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	client := m.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return "", fmt.Errorf("refresh Google login: %w", err)
-	}
-	payload, readErr := io.ReadAll(response.Body)
-	response.Body.Close()
-	if readErr != nil {
-		return "", fmt.Errorf("read Google token response: %w", readErr)
-	}
-	if response.StatusCode != http.StatusOK {
+	payload, err := mintCall(m.HTTP, request, what, "Google", http.StatusOK)
+	if status := (*mintStatusError)(nil); errors.As(err, &status) {
 		var tokenError googleTokenError
 		if json.Unmarshal(payload, &tokenError) == nil && tokenError.Code == "invalid_grant" {
 			if tokenError.Subtype != "" {
-				return "", fmt.Errorf("Google login needs a new sign-in: invalid_grant (%s)", tokenError.Subtype)
+				return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (%s)", ErrMintRefused, tokenError.Subtype)
 			}
-			return "", errors.New("Google login needs a new sign-in: invalid_grant")
+			return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant", ErrMintRefused)
 		}
-		return "", fmt.Errorf("refresh Google login: Google returned %s", response.Status)
+	}
+	if err != nil {
+		return "", err
 	}
 	var token googleTokenResponse
 	if json.Unmarshal(payload, &token) != nil {
-		return "", errors.New("decode Google token response: not a JSON object of its fields")
+		return "", fmt.Errorf("%w: decode Google token response: not a JSON object of its fields", ErrMintUpstream)
 	}
 	if token.AccessToken == "" {
-		return "", errors.New("Google returned no access token")
+		return "", fmt.Errorf("%w: Google returned no access token", ErrMintUpstream)
 	}
 	return token.AccessToken, nil
 }

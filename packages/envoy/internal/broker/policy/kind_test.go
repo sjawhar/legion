@@ -2,6 +2,7 @@ package policy_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +15,7 @@ import (
 const kindOwner = "ada@example.com"
 
 func kindSecret(name, kind, value string) secrets.LocalSecret {
-	s := policytest.Secret(name, kindOwner, policy.TierAgent, value)
-	s.Tags[policy.TagKind] = kind
-	return s
+	return policytest.KindSecret(name, kindOwner, policy.TierAgent, kind, value)
 }
 
 func TestKindSecretsAreServed(t *testing.T) {
@@ -39,15 +38,43 @@ func TestKindSecretsAreServed(t *testing.T) {
 			t.Errorf("Load did not serve %s", name)
 			continue
 		}
-		if secret.Kind != kind {
-			t.Errorf("%s Kind = %q, want %q", name, secret.Kind, kind)
-		}
-		if want := policy.KindSourcePrefix + kind + ":" + secrets.LocalARN(policytest.ID(name)); secret.Source != want {
+		store := secrets.LocalARN(policytest.ID(name))
+		if want := policy.KindSource(kind, store); secret.Source != want {
 			t.Errorf("%s Source = %q, want %q", name, secret.Source, want)
 		}
+		if gotKind, gotStore, minted, err := policy.ParseKindSource(secret.Source); err != nil || !minted || gotKind != kind || gotStore != store {
+			t.Errorf("ParseKindSource(%q) = %q, %q, %t, %v; want %q, %q, true", secret.Source, gotKind, gotStore, minted, err, kind, store)
+		}
 	}
-	if got := set.Secrets["GOOGLE_LOGIN_KEY"].MaxGrant; got == nil || *got != time.Hour {
+	if got := set.Secrets["GOOGLE_LOGIN_KEY"].MaxGrant; got != time.Hour {
 		t.Fatalf("GOOGLE_LOGIN_KEY MaxGrant = %v, want 1h", got)
+	}
+	if got := set.Secrets["GITHUB_APP_KEY"].MaxGrant; got != 0 {
+		t.Fatalf("GITHUB_APP_KEY MaxGrant = %v, want 0 (unset)", got)
+	}
+}
+
+func TestParseKindSourceRefusesAMalformedMintedSource(t *testing.T) {
+	for _, source := range []string{"mint:", "mint:github-app", "mint:github-app:", "mint::arn:aws:x"} {
+		if _, _, minted, err := policy.ParseKindSource(source); !minted || !errors.Is(err, policy.ErrKindSourceMalformed) {
+			t.Errorf("ParseKindSource(%q) = minted %t, %v; want minted and ErrKindSourceMalformed", source, minted, err)
+		}
+	}
+	if kind, store, minted, err := policy.ParseKindSource("arn:aws:secretsmanager:x"); minted || err != nil || kind != "" || store != "arn:aws:secretsmanager:x" {
+		t.Errorf("ParseKindSource(stored) = %q, %q, %t, %v; want the source whole and not minted", kind, store, minted, err)
+	}
+}
+
+func TestParseMaxGrant(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"1h": time.Hour, "1s": time.Second, "90m": 90 * time.Minute} {
+		if got, err := policy.ParseMaxGrant(raw); err != nil || got != want {
+			t.Errorf("ParseMaxGrant(%q) = %v, %v; want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"", "soon", "0s", "500ms", "-1h"} {
+		if _, err := policy.ParseMaxGrant(raw); !errors.Is(err, policy.ErrMaxGrantMalformed) {
+			t.Errorf("ParseMaxGrant(%q) = %v; want ErrMaxGrantMalformed", raw, err)
+		}
 	}
 }
 
@@ -166,7 +193,7 @@ func TestEmptyKindIsAPlainSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := set.Secrets["EMPTY_KIND"]; got.Kind != "" || got.Source != secrets.LocalARN(policytest.ID("EMPTY_KIND")) {
+	if got := set.Secrets["EMPTY_KIND"]; got.Source != secrets.LocalARN(policytest.ID("EMPTY_KIND")) {
 		t.Fatalf("EMPTY_KIND = %+v, want plain stored source", got)
 	}
 }

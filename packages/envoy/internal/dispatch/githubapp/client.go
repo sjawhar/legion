@@ -1,22 +1,16 @@
 // Package githubapp mints GitHub App installation tokens and proves the App
 // can read a repository before Dispatch stores it as an architecture source.
 //
-// The RS256 App JWT is hand-rolled on the standard library (crypto/rsa,
-// crypto/sha256, encoding/base64) — no JWT dependency for one fixed
-// header/claims shape.
+// The RS256 App JWT is signed by internal/githubappjwt, which the secrets
+// broker's github-app minter shares.
 package githubapp
 
 import (
 	"bytes"
 	"context"
-	"crypto"
-	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +24,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/githubappjwt"
 )
 
 // Typed access-check failures. Handlers surface these verbatim to the human
@@ -226,7 +221,7 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 	if app == nil || app.PEM == "" {
 		return nil, nil
 	}
-	key, err := parsePrivateKey(app.PEM)
+	key, err := githubappjwt.ParseKey(app.PEM)
 	if err != nil {
 		return nil, fmt.Errorf("parse GitHub App private key: %w", err)
 	}
@@ -250,47 +245,11 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 	return c, nil
 }
 
-func parsePrivateKey(pemText string) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(pemText))
-	if block == nil {
-		return nil, errors.New("no PEM block found")
-	}
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return key, nil
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	key, ok := parsed.(*rsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("unsupported key type %T (need RSA)", parsed)
-	}
-	return key, nil
-}
-
 // appJWT signs the App-authentication JWT. GitHub accepts the App's client ID
 // as iss (it is the one identifier LoadAppFromEnv requires; the numeric App ID
-// is optional and zero in e2e) and caps exp at ten minutes; iat is backdated
-// a minute against clock skew.
+// is optional and zero in e2e).
 func (c *Client) appJWT() (string, error) {
-	now := c.now()
-	claims, err := json.Marshal(map[string]any{
-		"iat": now.Add(-time.Minute).Unix(),
-		"exp": now.Add(9 * time.Minute).Unix(),
-		"iss": c.app.ClientID,
-	})
-	if err != nil {
-		return "", fmt.Errorf("encode JWT claims: %w", err)
-	}
-	signing := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`)) +
-		"." + base64.RawURLEncoding.EncodeToString(claims)
-	digest := sha256.Sum256([]byte(signing))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, c.key, crypto.SHA256, digest[:])
-	if err != nil {
-		return "", fmt.Errorf("sign app JWT: %w", err)
-	}
-	return signing + "." + base64.RawURLEncoding.EncodeToString(signature), nil
+	return githubappjwt.Sign(c.app.ClientID, c.key, c.now())
 }
 
 // Installation resolves the App installation covering owner/repo and checks

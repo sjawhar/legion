@@ -463,13 +463,19 @@ func TestGoldenDigest(t *testing.T) {
 	}
 }
 
+// TestGoldenDigestWithKindAndMaxGrant pins a kind secret's line: its kind is in its Source
+// (KindSource), and its max-grant a fifth field in time.Duration's own form. The expected value is
+// the SHA-256 of the four lines printed by hand, so it holds the bytes, not just their stability:
+// printf 'A_B\tada@example.com\thuman\t<arn>/a-b\nA0\t…\tagent\t<arn>/a0\n
+// DEEL_API_KEY\tshared\thuman\t<arn>/deel-api-key\n
+// GOLDEN_KIND\tada@example.com\tagent\tmint:google-login:<arn>/golden-kind\t1h0m0s\n' | sha256sum,
+// with <arn> arn:aws:secretsmanager:local:000000000000:secret:example/agent-secrets.
 func TestGoldenDigestWithKindAndMaxGrant(t *testing.T) {
 	store := goldenFixture()
-	kind := policytest.Secret("GOLDEN_KIND", "ada@example.com", policy.TierAgent, "v1")
-	kind.Tags[policy.TagKind] = policy.KindGoogleLogin
+	kind := policytest.KindSecret("GOLDEN_KIND", "ada@example.com", policy.TierAgent, policy.KindGoogleLogin, "v1")
 	kind.Tags[policy.TagMaxGrant] = "1h"
 	store.Put(kind)
-	const want = "83eec292c0488a1506eb8644e77103865c469f1e25d0b8e247824174a53e9c47"
+	const want = "13a6552e06b84f4c5bae6e34d7c1f0aa408c14fbb7129dd27609b55a963b7ed7"
 	set, err := policytest.Loader(store).Load(context.Background())
 	if err != nil {
 		t.Fatal(err)

@@ -84,8 +84,13 @@ func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
 	if want := map[string]string{"example-service": "system:serviceaccount:example:example-sa"}; !maps.Equal(m.ServiceAccounts, want) {
 		t.Fatalf("request Machine's ServiceAccounts = %v, want %v", m.ServiceAccounts, want)
 	}
-	if m.Minters[policy.KindGitHubApp] == nil || m.Minters[policy.KindGoogleLogin] == nil {
-		t.Fatalf("request Machine Minters = %v, want both kind minters", m.Minters)
+	for _, kind := range policy.Kinds {
+		if m.Minters[kind] == nil {
+			t.Errorf("request Machine has no minter for kind %q, which the policy serves", kind)
+		}
+	}
+	if len(m.Minters) != len(policy.Kinds) {
+		t.Errorf("request Machine has %d minters for %d kinds: %v", len(m.Minters), len(policy.Kinds), m.Minters)
 	}
 }
 

@@ -275,14 +275,8 @@ func (b *gcpBackend) show(ctx context.Context, slug string) (secretView, error) 
 	return view, nil
 }
 
-func (b *gcpBackend) create(ctx context.Context, slug, owner, tier, kind, maxGrant, value string) error {
-	annotations := map[string]string{policy.TagOwner: owner, policy.TagTier: tier}
-	if kind != "" {
-		annotations[policy.TagKind] = kind
-	}
-	if maxGrant != "" {
-		annotations[policy.TagMaxGrant] = maxGrant
-	}
+func (b *gcpBackend) create(ctx context.Context, slug string, tags map[string]string, value string) error {
+	annotations := maps.Clone(tags)
 	secret, err := b.client.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
 		Parent:   b.parent(),
 		SecretId: b.secretID(slug),
@@ -325,33 +319,37 @@ func (b *gcpBackend) currentTags(ctx context.Context, slug string) (owner, tier 
 	return secret.GetAnnotations()[policy.TagOwner], secret.GetAnnotations()[policy.TagTier], nil
 }
 
-// retag applies one retagChange in one UpdateSecret: owner, tier and the tags it sets, or the tags
-// it removes, and every annotation it does not change stays as it is. An UpdateSecret whose mask
-// names "annotations" replaces the whole map, so this method reads and merges the current
-// annotations. It sends the Etag, so a concurrent annotation change fails instead of being
+// setTags writes tags into the secret's annotations, and removeTags deletes keys from them, each in
+// one UpdateSecret that keeps every annotation it does not name. An UpdateSecret whose mask names
+// "annotations" replaces the whole map, so updateAnnotations reads and merges the current
+// annotations, and sends the read's Etag, so a concurrent annotation change fails instead of being
 // silently overwritten.
-func (b *gcpBackend) retag(ctx context.Context, slug string, change retagChange) error {
+func (b *gcpBackend) setTags(ctx context.Context, slug string, tags map[string]string) error {
+	return b.updateAnnotations(ctx, slug, func(annotations map[string]string) { maps.Copy(annotations, tags) })
+}
+
+func (b *gcpBackend) removeTags(ctx context.Context, slug string, keys []string) error {
+	return b.updateAnnotations(ctx, slug, func(annotations map[string]string) {
+		for _, key := range keys {
+			delete(annotations, key)
+		}
+	})
+}
+
+func (b *gcpBackend) updateAnnotations(ctx context.Context, slug string, change func(map[string]string)) error {
 	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
 	if err != nil {
 		return err
 	}
-	merged := maps.Clone(secret.GetAnnotations())
-	if merged == nil {
-		merged = map[string]string{}
+	annotations := maps.Clone(secret.GetAnnotations())
+	if annotations == nil {
+		annotations = map[string]string{}
 	}
-	if len(change.remove) > 0 {
-		for _, key := range change.remove {
-			delete(merged, key)
-		}
-	} else {
-		merged[policy.TagOwner] = change.owner
-		merged[policy.TagTier] = change.tier
-		maps.Copy(merged, change.set)
-	}
+	change(annotations)
 	_, err = b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
 		Secret: &secretmanagerpb.Secret{
 			Name:        b.id(slug),
-			Annotations: merged,
+			Annotations: annotations,
 			Etag:        secret.GetEtag(),
 		},
 		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"annotations"}},

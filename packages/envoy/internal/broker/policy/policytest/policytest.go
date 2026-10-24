@@ -37,6 +37,13 @@ func Secret(name, owner, tier, value string) secrets.LocalSecret {
 	}
 }
 
+// KindSecret is Secret with a kind tag: a secret whose release the broker mints from value.
+func KindSecret(name, owner, tier, kind, value string) secrets.LocalSecret {
+	secret := Secret(name, owner, tier, value)
+	secret.Tags[policy.TagKind] = kind
+	return secret
+}
+
 // ID is the Secrets Manager name of the secret a session asks for as name.
 func ID(name string) string {
 	return Prefix + mustSlug(name)

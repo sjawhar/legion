@@ -196,36 +196,39 @@ func checkOwnerTier(owner, tier string) error {
 	return nil
 }
 
-const kindNone = "none"
+// tagNone is the value of --kind and --max-grant that removes the tag.
+const tagNone = "none"
 
+// checkKind is --kind's rule: a kind the broker mints (policy.ValidKind), or none.
 func checkKind(kind string) error {
-	switch kind {
-	case "", kindNone, policy.KindGitHubApp, policy.KindGoogleLogin:
+	if kind == "" || kind == tagNone || policy.ValidKind(kind) {
 		return nil
-	default:
-		return usageErr{fmt.Errorf("--kind is %s, %s or %s, not %q", policy.KindGitHubApp, policy.KindGoogleLogin, kindNone, kind)}
 	}
+	return usageErr{fmt.Errorf("--kind is %s or %s, not %q", strings.Join(policy.Kinds, ", "), tagNone, kind)}
 }
 
-func checkMaxGrant(maxGrant string) error {
-	if maxGrant == "" {
+// checkMaxGrant is --max-grant's rule, the broker's own (policy.ParseMaxGrant), or none where
+// orNone allows it.
+func checkMaxGrant(maxGrant string, orNone bool) error {
+	if maxGrant == "" || (orNone && maxGrant == tagNone) {
 		return nil
 	}
-	duration, err := time.ParseDuration(maxGrant)
-	if err != nil || duration < time.Second {
-		return usageErr{errors.New("--max-grant is a duration of at least 1s")}
+	if _, err := policy.ParseMaxGrant(maxGrant); err != nil {
+		return usageErr{fmt.Errorf("--max-grant: %w", err)}
 	}
 	return nil
 }
 
-// retagChange is one retag's write: owner and tier, the kind and max-grant tags the command sets
-// (set), and the tags it clears with none (remove). A retag either removes tags or sets them,
-// never both (cmdSecretRetag refuses the mix), so each backend makes the whole change in one call
-// and a refused call leaves the secret as it was.
-type retagChange struct {
-	owner, tier string
-	set         map[string]string
-	remove      []string
+// optionalTags is the kind and max-grant tags the flags set: each flag's value when it names one,
+// and nothing for one left unset or set to none.
+func optionalTags(kind, maxGrant string) map[string]string {
+	tags := map[string]string{}
+	for key, value := range map[string]string{policy.TagKind: kind, policy.TagMaxGrant: maxGrant} {
+		if value != "" && value != tagNone {
+			tags[key] = value
+		}
+	}
+	return tags
 }
 
 // ownerTag is the owner tag --owner names: the signed-in person's email for me, shared for shared.
@@ -437,12 +440,16 @@ type secretBackend interface {
 
 	list(ctx context.Context) ([]secretView, error)
 	show(ctx context.Context, slug string) (secretView, error)
-	create(ctx context.Context, slug, owner, tier, kind, maxGrant, value string) error
+	// create makes the secret holding value with tags, which always hold owner and tier.
+	create(ctx context.Context, slug string, tags map[string]string, value string) error
 	set(ctx context.Context, slug, value string) error
 	// currentTags answers the secret's current owner and tier, for retag to fill in a tag it did
 	// not receive.
 	currentTags(ctx context.Context, slug string) (owner, tier string, err error)
-	retag(ctx context.Context, slug string, change retagChange) error
+	// setTags writes tags onto the secret in one call and leaves every other tag as it is.
+	setTags(ctx context.Context, slug string, tags map[string]string) error
+	// removeTags removes keys from the secret in one call and leaves every other tag as it is.
+	removeTags(ctx context.Context, slug string, keys []string) error
 	// delete schedules the secret's deletion and answers the moment it happens (AWS:
 	// DeleteSecret's own recovery window end; GCP: the expire_time it sets), nil only on error.
 	delete(ctx context.Context, slug string) (deletion *time.Time, err error)
@@ -764,7 +771,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 		err = checkKind(*kind)
 	}
 	if err == nil {
-		err = checkMaxGrant(*maxGrant)
+		err = checkMaxGrant(*maxGrant, false)
 	}
 	if err != nil {
 		return secretFail(stderr, form, err)
@@ -789,10 +796,9 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	if *kind == kindNone {
-		*kind = ""
-	}
-	if err := s.backend.create(s.ctx, slug, ownerValue, *tier, *kind, *maxGrant, value); err != nil {
+	tags := optionalTags(*kind, *maxGrant)
+	tags[policy.TagOwner], tags[policy.TagTier] = ownerValue, *tier
+	if err := s.backend.create(s.ctx, slug, tags, value); err != nil {
 		return secretFail(stderr, form, err)
 	}
 	fmt.Fprintf(stdout, "created %s (owner=%s, tier=%s)\n", name, ownerValue, *tier)
@@ -834,16 +840,19 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 // retag
 // ---------------------------------------------------------------------------
 
-// cmdSecretRetag changes a secret's owner, tier, kind or max grant. A retag that sets tags always
-// sends owner and tier, re-sending the one not named as the secret holds it: on AWS, the
-// deployment repository's IAM policy that lets a person tag their own secret conditions on both
-// request tags, so a request carrying one fails. GCP has no equivalent condition (annotations are
-// not IAM-conditionable the way AWS tags are): anyone with secretmanager.secrets.update on the
-// namespace can retag any secret under it, shared ones included; sending both tags there is for
-// API symmetry with AWS, not an enforced shared-secret protection. A retag that removes tags
-// (--kind none, --max-grant none) changes nothing else: AWS removes tags only with UntagResource,
-// so a retag that both set and removed tags would be two calls, and a refused second call would
-// leave it half applied. The command refuses that mix before any write.
+// cmdSecretRetag changes a secret's owner, tier, kind or max grant, in one cloud write. A retag
+// that names none (--kind none, --max-grant none) removes those tags and does nothing else; any
+// other retag sets tags. A retag that does both is refused before anything is read or written: AWS
+// removes tags only with UntagResource, so it would be two calls, and a refused second call would
+// leave it half applied.
+//
+// A retag that sets tags always sends owner and tier, re-sending the one not named as the secret
+// holds it: on AWS, the deployment repository's IAM policy that lets a person tag their own secret
+// conditions on both request tags, so a request carrying one fails. GCP has no equivalent
+// condition (annotations are not IAM-conditionable the way AWS tags are): anyone with
+// secretmanager.secrets.update on the namespace can retag any secret under it, shared ones
+// included; sending both tags there is for API symmetry with AWS, not an enforced shared-secret
+// protection.
 func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	const form = "secret retag"
 	flagArgs, positional := splitArgs(args, secretFlagValues)
@@ -865,21 +874,18 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		err = checkKind(*newKind)
 	}
-	if err == nil && *newMaxGrant != kindNone {
-		err = checkMaxGrant(*newMaxGrant)
+	if err == nil {
+		err = checkMaxGrant(*newMaxGrant, true)
 	}
-	change := retagChange{set: map[string]string{}}
-	for key, value := range map[string]string{policy.TagKind: *newKind, policy.TagMaxGrant: *newMaxGrant} {
-		switch value {
-		case "":
-		case kindNone:
-			change.remove = append(change.remove, key)
-		default:
-			change.set[key] = value
-		}
+	var remove []string
+	if *newKind == tagNone {
+		remove = append(remove, policy.TagKind)
 	}
-	slices.Sort(change.remove)
-	if err == nil && len(change.remove) > 0 && (*newOwner != "" || *newTier != "" || len(change.set) > 0) {
+	if *newMaxGrant == tagNone {
+		remove = append(remove, policy.TagMaxGrant)
+	}
+	set := optionalTags(*newKind, *newMaxGrant)
+	if err == nil && len(remove) > 0 && (*newOwner != "" || *newTier != "" || len(set) > 0) {
 		err = usageErr{errors.New("none removes a tag in a retag of its own: run the removal and the other changes as two retags")}
 	}
 	if err != nil {
@@ -890,39 +896,42 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		return secretFail(stderr, form, err)
 	}
 	defer s.Close()
+	if len(remove) > 0 {
+		if err := s.backend.removeTags(s.ctx, slug, remove); err != nil {
+			return secretFail(stderr, form, err)
+		}
+		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
+		return rereadAfter(s, stdout, stderr, form, name, true, nil)
+	}
 	curOwner, curTier, err := s.backend.currentTags(s.ctx, slug)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	change.owner, change.tier = curOwner, curTier
+	owner, tier := curOwner, curTier
 	if *newOwner != "" {
-		change.owner, err = ownerTag(*newOwner, email)
-		if err != nil {
+		if owner, err = ownerTag(*newOwner, email); err != nil {
 			return secretFail(stderr, form, err)
 		}
 	}
 	if *newTier != "" {
-		change.tier = *newTier
+		tier = *newTier
 	}
-	if len(change.remove) == 0 && (change.owner == "" || change.tier == "") {
+	if owner == "" || tier == "" {
 		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
 	}
-	if err := s.backend.retag(s.ctx, slug, change); err != nil {
+	set[policy.TagOwner], set[policy.TagTier] = owner, tier
+	if err := s.backend.setTags(s.ctx, slug, set); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
 		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
 		// so a deployment instead grants that permission at all only to administrators for the
-		// secrets it protects this way. A removal sends no owner or tier, so the hint is not about it.
-		if len(change.remove) == 0 && s.backend.isAccessDenied(err) && (curOwner == policy.OwnerShared || change.owner == policy.OwnerShared) {
+		// secrets it protects this way.
+		if s.backend.isAccessDenied(err) && (curOwner == policy.OwnerShared || owner == policy.OwnerShared) {
 			fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, sharedRetagRefused)
 		}
 		return 1
 	}
-	if len(change.remove) > 0 {
-		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(change.remove, ", "))
-	} else {
-		fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, change.owner, change.tier)
-	}
+	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
 }
 

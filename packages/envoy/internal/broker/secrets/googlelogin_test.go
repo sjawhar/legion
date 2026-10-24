@@ -41,12 +41,29 @@ func TestGoogleLoginMintNamesInvalidRaptWithoutLeakingCredentials(t *testing.T) 
 	value := `{"type":"authorized_user","client_id":"client-id","client_secret":"client-secret","refresh_token":"refresh-token"}`
 
 	_, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), value)
-	if err == nil || !strings.Contains(err.Error(), "invalid_rapt") {
-		t.Fatalf("Mint error = %v, want invalid_rapt", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid_rapt") || secrets.MintErrorClass(err) != "refused" {
+		t.Fatalf("Mint error = %v (class %s), want invalid_rapt, refused", err, secrets.MintErrorClass(err))
 	}
 	for _, credential := range []string{value, "client-secret", "refresh-token", "access-token"} {
 		if strings.Contains(err.Error(), credential) {
 			t.Fatalf("Mint error leaked %q: %q", credential, err)
 		}
+	}
+}
+
+// TestGoogleLoginMintNamesAGoogleOutageAsUpstream: a 5xx from Google is the upstream's failure,
+// not a login that needs a new sign-in, so the broker's log points its operator at Google.
+func TestGoogleLoginMintNamesAGoogleOutageAsUpstream(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	value := `{"type":"authorized_user","client_id":"client-id","client_secret":"client-secret","refresh_token":"refresh-token"}`
+	_, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), value)
+	if secrets.MintErrorClass(err) != "upstream" || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("Mint against a Google 503 = %v (class %s), want upstream naming 503", err, secrets.MintErrorClass(err))
+	}
+	if _, err := (secrets.GoogleLogin{}).Mint(t.Context(), `{"type":"service_account"}`); secrets.MintErrorClass(err) != "stored-value" {
+		t.Fatalf("Mint of a service-account value = %v, want stored-value", err)
 	}
 }

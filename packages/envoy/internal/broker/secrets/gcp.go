@@ -285,26 +285,22 @@ func (g GCP) onKey(keyVersion string) bool {
 	return gcpKeyVersionSuffix.ReplaceAllString(keyVersion, "") == g.KeyName
 }
 
-// Read answers the secret's current value with AccessSecretVersion on versions/latest. It holds
-// the metadata result for gcpHeldFor so ordinary grants share one metadata read per source.
+// Read answers the secret's current value with AccessSecretVersion on versions/latest, after a
+// GetSecret that refuses one scheduled for deletion: Secret Manager reads a secret until its
+// expire_time, so without that check a grant made before `agent-secrets secret delete` would keep
+// reading it until the policy drops it, where Secrets Manager refuses a secret in its recovery
+// window at once. That GetSecret counts against the project's shared metadata read quota, so its
+// verdict (readable, or absent or scheduled for deletion) is trusted for gcpHeldFor (30 s), with
+// one check at a time per secret: a busy fleet's releases, including repeated releases of a
+// deleted secret through a grant the policy has not dropped yet, cost a read per distinct secret
+// per 30 s, and a delete is refused at most 30 s after Secret Manager's metadata shows it.
+// ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND), when the
+// secret has an expire_time, or when the latest version is disabled or destroyed
+// (FAILED_PRECONDITION), all the same answer to the caller: the secret is not readable. The value
+// must be non-empty UTF-8, since the broker injects it into an environment; an error names the
+// secret and never the bytes.
 func (g GCP) Read(ctx context.Context, source string) (string, error) {
-	return g.read(ctx, source, false)
-}
-
-// ReadFresh answers the current value after a new metadata read. A kind release uses it so a
-// deletion does not keep releasing a stored key or refresh token from the metadata cache.
-func (g GCP) ReadFresh(ctx context.Context, source string) (string, error) {
-	return g.read(ctx, source, true)
-}
-
-func (g GCP) read(ctx context.Context, source string, fresh bool) (string, error) {
-	verdict := func(key string, look func() error) error {
-		if fresh {
-			return look()
-		}
-		return g.held.verdict(key, look)
-	}
-	if err := verdict(source, func() error {
+	if err := g.held.verdict(source, func() error {
 		secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: source})
 		switch status.Code(err) {
 		case codes.OK:
@@ -327,8 +323,15 @@ func (g GCP) read(ctx context.Context, source string, fresh bool) (string, error
 	case codes.NotFound:
 		return "", ErrNotFound
 	case codes.FailedPrecondition:
+		// A disabled or destroyed latest version answers FAILED_PRECONDITION, and that is the
+		// secret having no value. Google does not document it as the code's only meaning (an
+		// unusable CMEK key may answer it too), so the version's own state decides: anything but
+		// DISABLED or DESTROYED stays an error the broker logs.
+		// That check is a metadata read too, so its "no value" verdict is cached under the same
+		// 30 s as Read's other check, keyed on the version: it is consulted only after a fresh
+		// FAILED_PRECONDITION, so a re-enabled or new version is served at once.
 		accessErr := err
-		if err := verdict(latest, func() error {
+		if err := g.held.verdict(latest, func() error {
 			version, err := g.Client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
 			if err == nil && (version.GetState() == secretmanagerpb.SecretVersion_DISABLED || version.GetState() == secretmanagerpb.SecretVersion_DESTROYED) {
 				return ErrNotFound

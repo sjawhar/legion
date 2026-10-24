@@ -475,26 +475,6 @@ func TestGCPReadChecksDeletionOncePerWindow(t *testing.T) {
 	}
 }
 
-func TestGCPReadFreshChecksDeletionImmediately(t *testing.T) {
-	f := &fakeSecretManager{secrets: map[string]*fakeSecret{fakePrefix + "a": servedSecret("v")}}
-	store := NewGCP(startFake(t, f), fakeKey)
-	ctx := context.Background()
-	if _, err := store.Read(ctx, fakePrefix+"a"); err != nil {
-		t.Fatal(err)
-	}
-	before := f.reads()
-	f.mu.Lock()
-	f.secrets[fakePrefix+"a"].expires = time.Now().Add(30 * 24 * time.Hour)
-	f.mu.Unlock()
-
-	if _, err := store.ReadFresh(ctx, fakePrefix+"a"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("ReadFresh after a delete = %v, want ErrNotFound", err)
-	}
-	if got := f.reads() - before; got != 1 {
-		t.Fatalf("ReadFresh after a delete cost %d metadata reads, want 1", got)
-	}
-}
-
 // TestGCPReadCachesARefusalAndCoalescesConcurrentChecks pins the rest of Read's bound: repeated
 // releases of a secret scheduled for deletion cost one metadata read per window, as readable ones
 // do, and concurrent releases of a cold secret wait for one check.

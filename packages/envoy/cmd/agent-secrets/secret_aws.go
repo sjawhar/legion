@@ -9,7 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -118,13 +120,13 @@ func checkSettingsKeyARN(settings Settings) error {
 	return nil
 }
 
-// ownerTierTags is the owner and tier tags, which create and retag always send together
-// (cmdSecretRetag says why).
-func ownerTierTags(owner, tier string) []smtypes.Tag {
-	return []smtypes.Tag{
-		{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
-		{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
+// awsTags is tags as Secrets Manager's tag list, in key order: the inverse of secrets.TagMap.
+func awsTags(tags map[string]string) []smtypes.Tag {
+	list := make([]smtypes.Tag, 0, len(tags))
+	for _, key := range slices.Sorted(maps.Keys(tags)) {
+		list = append(list, smtypes.Tag{Key: aws.String(key), Value: aws.String(tags[key])})
 	}
+	return list
 }
 
 // isAccessDenied reports whether err is AWS's AccessDeniedException, which the SDK answers as a
@@ -202,19 +204,12 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	}, nil
 }
 
-func (b *awsBackend) create(ctx context.Context, slug, owner, tier, kind, maxGrant, value string) error {
-	tags := ownerTierTags(owner, tier)
-	if kind != "" {
-		tags = append(tags, smtypes.Tag{Key: aws.String(policy.TagKind), Value: aws.String(kind)})
-	}
-	if maxGrant != "" {
-		tags = append(tags, smtypes.Tag{Key: aws.String(policy.TagMaxGrant), Value: aws.String(maxGrant)})
-	}
+func (b *awsBackend) create(ctx context.Context, slug string, tags map[string]string, value string) error {
 	_, err := b.sm.CreateSecret(ctx, &secretsmanager.CreateSecretInput{
 		Name:         aws.String(b.id(slug)),
 		KmsKeyId:     aws.String(b.settings.KMSKeyARN),
 		SecretString: aws.String(value),
-		Tags:         tags,
+		Tags:         awsTags(tags),
 	})
 	return err
 }
@@ -235,27 +230,20 @@ func (b *awsBackend) currentTags(ctx context.Context, slug string) (owner, tier 
 	return tags[policy.TagOwner], tags[policy.TagTier], nil
 }
 
-// retag writes the owner and tier tags and the kind and max-grant tags the command sets in one
-// TagResource, or removes the tags the command clears in one UntagResource. cmdSecretRetag never
-// asks for both in one command, so a denied call changes nothing: a retag is never left half
-// applied.
-func (b *awsBackend) retag(ctx context.Context, slug string, change retagChange) error {
-	if len(change.remove) > 0 {
-		_, err := b.sm.UntagResource(ctx, &secretsmanager.UntagResourceInput{
-			SecretId: aws.String(b.id(slug)),
-			TagKeys:  change.remove,
-		})
-		return err
-	}
-	tags := ownerTierTags(change.owner, change.tier)
-	for _, key := range []string{policy.TagKind, policy.TagMaxGrant} {
-		if value, ok := change.set[key]; ok {
-			tags = append(tags, smtypes.Tag{Key: aws.String(key), Value: aws.String(value)})
-		}
-	}
+// setTags writes tags in one TagResource, which keeps every tag it does not name.
+func (b *awsBackend) setTags(ctx context.Context, slug string, tags map[string]string) error {
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(b.id(slug)),
-		Tags:     tags,
+		Tags:     awsTags(tags),
+	})
+	return err
+}
+
+// removeTags removes keys in one UntagResource.
+func (b *awsBackend) removeTags(ctx context.Context, slug string, keys []string) error {
+	_, err := b.sm.UntagResource(ctx, &secretsmanager.UntagResourceInput{
+		SecretId: aws.String(b.id(slug)),
+		TagKeys:  keys,
 	})
 	return err
 }

@@ -131,6 +131,10 @@ type Decision struct {
 	GrantID   string
 }
 
+// Minter makes one release of a kind secret from its stored value (secrets.GitHubApp.Mint,
+// secrets.GoogleLogin.Mint). Its error never holds the stored value or a token.
+type Minter func(ctx context.Context, value string) (string, error)
+
 type Machine struct {
 	Store      *store.Store
 	Policy     *policy.Current
@@ -153,9 +157,9 @@ type Machine struct {
 	// name, the subject a pod's projected token must have proved for its launcher's service to be
 	// its own (requester).
 	ServiceAccounts map[string]string
-	// Minters maps a policy kind to the function that transforms that secret's stored value for
-	// one release. A release never returns the stored value of a kind secret.
-	Minters map[string]func(ctx context.Context, value string) (string, error)
+	// Minters maps each policy kind (policy.Kinds) to its Minter. A release never returns the
+	// stored value of a kind secret.
+	Minters map[string]Minter
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
 	missRereadsOnce sync.Once
@@ -265,8 +269,10 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err != nil {
 		return Request{}, err
 	}
-	if err := requireMaxGrant(set, names, lifetime); err != nil {
-		return Request{}, err
+	for _, name := range names {
+		if limit, over := overMaxGrant(set, name, lifetime); over {
+			return Request{}, fmt.Errorf("%w: %s allows at most %s; ask with agent-secrets --ttl %s", ErrGrantRequiresLifetime, name, limit, limit)
+		}
 	}
 	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, lifetime, set); err != nil {
 		return Request{}, err
@@ -369,19 +375,16 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 	return set, nil
 }
 
-// requireMaxGrant refuses a request naming a secret whose max-grant tag requires a signed
-// lifetime that is no longer than the tag. A name the set does not serve is left to evaluate,
-// which refuses it as unknown.
-func requireMaxGrant(set *policy.Set, names []string, lifetime *int) error {
-	for _, name := range names {
-		maxGrant := set.Secrets[name].MaxGrant
-		if maxGrant == nil || (lifetime != nil && time.Duration(*lifetime)*time.Second <= *maxGrant) {
-			continue
-		}
-		limit := formatGrantDuration(*maxGrant)
-		return fmt.Errorf("%w: %s allows at most %s; ask with agent-secrets --ttl %s", ErrGrantRequiresLifetime, name, limit, limit)
+// overMaxGrant reports whether a request signing lifetime (nil: until its session ends) asks for
+// longer than name's max-grant tag allows, and that bound as a --ttl the CLI accepts. A name with
+// no max-grant, or one the set does not serve (left to evaluate, which refuses it as unknown), is
+// never over.
+func overMaxGrant(set *policy.Set, name string, lifetime *int) (string, bool) {
+	maxGrant := set.Secrets[name].MaxGrant
+	if maxGrant == 0 || (lifetime != nil && time.Duration(*lifetime)*time.Second <= maxGrant) {
+		return "", false
 	}
-	return nil
+	return formatGrantDuration(maxGrant), true
 }
 
 // formatGrantDuration is a max-grant as a --ttl the CLI accepts: whole seconds only
@@ -719,12 +722,10 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)
 		}
 	}
-	requested := make([]string, len(names))
-	for i, g := range names {
-		requested[i] = g.name
-	}
-	if err := requireMaxGrant(set, requested, lifetime); err != nil {
-		return fmt.Errorf("%w: %w", record.ErrNotApprover, err)
+	for _, g := range names {
+		if limit, over := overMaxGrant(set, g.name, lifetime); over {
+			return fmt.Errorf("%w: %w: %s now allows grants of at most %s, shorter than this request asks, so no one may approve it now; its session asks again within that bound", record.ErrNotApprover, ErrGrantRequiresLifetime, g.name, limit)
+		}
 	}
 	return nil
 }

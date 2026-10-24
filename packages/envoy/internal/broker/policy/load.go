@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
@@ -48,9 +47,10 @@ const (
 	// Checked after every other reason, which each name something its owner must fix before a
 	// value would make it servable.
 	ReasonNoCurrentValue = "no-current-value"
-	// ReasonKindUnknown: the kind tag names no kind this broker can mint.
+	// ReasonKindUnknown: the kind tag names no kind this broker can mint (ValidKind).
 	ReasonKindUnknown = "kind-unknown"
-	// ReasonMaxGrantMalformed: max-grant is not a Go duration of at least one second.
+	// ReasonMaxGrantMalformed: max-grant is not a Go duration of at least one second
+	// (ParseMaxGrant).
 	ReasonMaxGrantMalformed = "max-grant-malformed"
 )
 
@@ -207,20 +207,15 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 		return Secret{}, ReasonNotOnAgentSecretsKey, nil
 	}
 	if raw, tagged := ls.Tags[TagMaxGrant]; tagged {
-		maxGrant, err := time.ParseDuration(raw)
-		if err != nil || maxGrant < time.Second {
+		if s.MaxGrant, err = ParseMaxGrant(raw); err != nil {
 			return Secret{}, ReasonMaxGrantMalformed, nil
 		}
-		s.MaxGrant = &maxGrant
 	}
 	if kind := ls.Tags[TagKind]; kind != "" {
-		switch kind {
-		case KindGitHubApp, KindGoogleLogin:
-			s.Kind = kind
-		default:
+		if !ValidKind(kind) {
 			return Secret{}, ReasonKindUnknown, nil
 		}
-		s.Source = KindSourcePrefix + s.Kind + ":" + ls.Source
+		s.Source = KindSource(kind, ls.Source)
 	}
 	if !ls.HasCurrentValue {
 		return Secret{}, ReasonNoCurrentValue, nil

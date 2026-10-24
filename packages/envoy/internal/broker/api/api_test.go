@@ -12,7 +12,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -888,18 +888,18 @@ func TestCreateRequestWithMaxGrantNeedsLifetime(t *testing.T) {
 
 // TestAFailedMintIs502MintFailed: a kind secret whose minter fails, such as a Google login that
 // needs a new sign-in, answers the session 502 MINT_FAILED with the minter's words, so it can tell
-// its person what to fix, rather than an opaque 500.
+// its person what to fix, rather than an opaque 500; and the broker logs it at ERROR for its
+// operator, naming the secret and the error's class, never the stored value.
 func TestAFailedMintIs502MintFailed(t *testing.T) {
+	logged := policytest.CaptureLog(t)
 	ts := newTestServerWith(t, func(d *api.Deps) {
-		d.Machine.Minters = map[string]func(context.Context, string) (string, error){
+		d.Machine.Minters = map[string]requests.Minter{
 			policy.KindGoogleLogin: func(context.Context, string) (string, error) {
-				return "", errors.New("Google login needs a new sign-in: invalid_grant (invalid_rapt)")
+				return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (invalid_rapt)", secrets.ErrMintRefused)
 			},
 		}
 	})
-	lapsed := policytest.Secret("LAPSED_LOGIN", testApprover, policy.TierAgent, "stored-login")
-	lapsed.Tags[policy.TagKind] = policy.KindGoogleLogin
-	ts.Secrets.Put(lapsed)
+	ts.Secrets.Put(policytest.KindSecret("LAPSED_LOGIN", testApprover, policy.TierAgent, policy.KindGoogleLogin, "stored-login"))
 	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LAPSED_LOGIN/reread", nil, nil); status != http.StatusOK {
 		t.Fatalf("reread LAPSED_LOGIN = %d %s", status, body)
 	}
@@ -914,6 +914,20 @@ func TestAFailedMintIs502MintFailed(t *testing.T) {
 	reply := decode[wireError](t, body)
 	if status != http.StatusBadGateway || reply.Code != "MINT_FAILED" || !strings.Contains(reply.Error, "invalid_rapt") || strings.Contains(reply.Error, "stored-login") {
 		t.Fatalf("POST values = %d %+v, want 502 MINT_FAILED naming invalid_rapt and not the stored value", status, reply)
+	}
+	line := ""
+	for l := range strings.Lines(logged.String()) {
+		if strings.Contains(l, requests.MintFailedMessage) {
+			line = l
+		}
+	}
+	for _, want := range []string{"ERROR " + requests.MintFailedMessage, "name=LAPSED_LOGIN", "kind=google-login", "class=refused", "invalid_rapt"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("mint failure log line %q does not hold %q (log: %q)", line, want, logged.String())
+		}
+	}
+	if strings.Contains(logged.String(), "stored-login") {
+		t.Fatalf("the broker's log holds the stored value: %q", logged.String())
 	}
 }
 

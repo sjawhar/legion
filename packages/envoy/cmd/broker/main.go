@@ -295,7 +295,7 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServiceAccounts: cfg.ServiceAccounts,
-		Minters: map[string]func(context.Context, string) (string, error){
+		Minters: map[string]requests.Minter{
 			policy.KindGitHubApp:   secrets.GitHubApp{}.Mint,
 			policy.KindGoogleLogin: secrets.GoogleLogin{}.Mint,
 		},

@@ -2,21 +2,14 @@ package secrets
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/githubappjwt"
 )
 
 const githubAPIBase = "https://api.github.com"
@@ -63,28 +56,29 @@ type githubMintedInstallation struct {
 }
 
 // Mint returns a token and expiry for every installation of the App in value that is not
-// suspended. The value is the JSON object stored in the secret, never part of an error.
+// suspended. The value is the JSON object stored in the secret, never part of an error. Every
+// error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
 func (m GitHubApp) Mint(ctx context.Context, value string) (string, error) {
 	var secret githubAppSecret
 	// encoding/json's syntax errors quote the offending byte, so this decode and the token's do
 	// not wrap their errors: the stored key and GitHub's token are both secrets.
 	if json.Unmarshal([]byte(value), &secret) != nil {
-		return "", errors.New("decode GitHub App secret: not a JSON object of its fields")
+		return "", fmt.Errorf("%w: decode GitHub App secret: not a JSON object of its fields", ErrMintStoredValue)
 	}
 	if !validGitHubAppID(secret.AppID) || secret.PrivateKey == "" {
-		return "", errors.New("GitHub App secret needs an app_id and private_key")
+		return "", fmt.Errorf("%w: GitHub App secret needs an app_id and private_key", ErrMintStoredValue)
 	}
-	key, err := parseGitHubAppKey(secret.PrivateKey)
+	key, err := githubappjwt.ParseKey(secret.PrivateKey)
 	if err != nil {
-		return "", fmt.Errorf("parse GitHub App private key: %w", err)
+		return "", fmt.Errorf("%w: parse GitHub App private key: %w", ErrMintStoredValue, err)
 	}
 	now := time.Now
 	if m.Now != nil {
 		now = m.Now
 	}
-	jwt, err := githubAppJWT(secret.AppID, key, now())
+	jwt, err := githubappjwt.Sign(secret.AppID, key, now())
 	if err != nil {
-		return "", fmt.Errorf("sign GitHub App JWT: %w", err)
+		return "", fmt.Errorf("%w: sign GitHub App JWT: %w", ErrMintStoredValue, err)
 	}
 	installations, err := m.installations(ctx, jwt)
 	if err != nil {
@@ -100,7 +94,7 @@ func (m GitHubApp) Mint(ctx context.Context, value string) (string, error) {
 			owner = installation.Account.Slug
 		}
 		if owner == "" {
-			return "", fmt.Errorf("github app %s installation %d names no account", secret.AppID, installation.ID)
+			return "", fmt.Errorf("%w: github app %s installation %d names no account", ErrMintUpstream, secret.AppID, installation.ID)
 		}
 		token, err := m.installationToken(ctx, jwt, installation.ID)
 		if err != nil {
@@ -113,11 +107,11 @@ func (m GitHubApp) Mint(ctx context.Context, value string) (string, error) {
 		}
 	}
 	if len(minted.Installations) == 0 {
-		return "", fmt.Errorf("github app %s has no installation", secret.AppID)
+		return "", fmt.Errorf("%w: github app %s has no installation", ErrMintRefused, secret.AppID)
 	}
 	encoded, err := json.Marshal(minted)
 	if err != nil {
-		return "", fmt.Errorf("encode GitHub App installations: %w", err)
+		return "", fmt.Errorf("%w: encode GitHub App installations: %w", ErrMintUpstream, err)
 	}
 	return string(encoded), nil
 }
@@ -134,43 +128,6 @@ func validGitHubAppID(id string) bool {
 	return true
 }
 
-func parseGitHubAppKey(text string) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(text))
-	if block == nil {
-		return nil, errors.New("no PEM block found")
-	}
-	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-		return key, nil
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, errors.New("not a PKCS1 or PKCS8 private key")
-	}
-	key, ok := parsed.(*rsa.PrivateKey)
-	if !ok {
-		return nil, errors.New("private key is not RSA")
-	}
-	return key, nil
-}
-
-func githubAppJWT(appID string, key *rsa.PrivateKey, now time.Time) (string, error) {
-	claims, err := json.Marshal(map[string]any{
-		"iat": now.Add(-time.Minute).Unix(),
-		"exp": now.Add(9 * time.Minute).Unix(),
-		"iss": appID,
-	})
-	if err != nil {
-		return "", err
-	}
-	signing := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." + base64.RawURLEncoding.EncodeToString(claims)
-	digest := sha256.Sum256([]byte(signing))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		return "", err
-	}
-	return signing + "." + base64.RawURLEncoding.EncodeToString(signature), nil
-}
-
 func (m GitHubApp) base() string {
 	if base := strings.TrimSuffix(m.Base, "/"); base != "" {
 		return base
@@ -178,37 +135,32 @@ func (m GitHubApp) base() string {
 	return githubAPIBase
 }
 
-func (m GitHubApp) client() *http.Client {
-	if m.HTTP != nil {
-		return m.HTTP
+// githubRequest is a call to GitHub's App API, authenticated as the App.
+func githubRequest(ctx context.Context, method, target, jwt string) (*http.Request, error) {
+	request, err := http.NewRequestWithContext(ctx, method, target, nil)
+	if err != nil {
+		return nil, err
 	}
-	return http.DefaultClient
+	request.Header.Set("Authorization", "Bearer "+jwt)
+	request.Header.Set("Accept", "application/vnd.github+json")
+	return request, nil
 }
 
 func (m GitHubApp) installations(ctx context.Context, jwt string) ([]githubInstallation, error) {
-	base, client := m.base(), m.client()
+	const what = "list GitHub App installations"
 	var installations []githubInstallation
 	for page := 1; ; page++ {
-		request, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/app/installations?per_page=100&page=%d", base, page), nil)
+		request, err := githubRequest(ctx, http.MethodGet, fmt.Sprintf("%s/app/installations?per_page=100&page=%d", m.base(), page), jwt)
 		if err != nil {
-			return nil, fmt.Errorf("list GitHub App installations: %w", err)
+			return nil, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 		}
-		request.Header.Set("Authorization", "Bearer "+jwt)
-		response, err := client.Do(request)
+		payload, err := mintCall(m.HTTP, request, what, "GitHub", http.StatusOK)
 		if err != nil {
-			return nil, fmt.Errorf("list GitHub App installations: %w", err)
-		}
-		payload, readErr := io.ReadAll(response.Body)
-		response.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("read GitHub App installations: %w", readErr)
-		}
-		if response.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("list GitHub App installations: GitHub returned %s", response.Status)
+			return nil, err
 		}
 		var entries []githubInstallation
-		if err := json.Unmarshal(payload, &entries); err != nil {
-			return nil, fmt.Errorf("decode GitHub App installations: %w", err)
+		if json.Unmarshal(payload, &entries) != nil {
+			return nil, fmt.Errorf("%w: decode GitHub App installations: not a JSON array of installations", ErrMintUpstream)
 		}
 		installations = append(installations, entries...)
 		if len(entries) < 100 {
@@ -218,29 +170,21 @@ func (m GitHubApp) installations(ctx context.Context, jwt string) ([]githubInsta
 }
 
 func (m GitHubApp) installationToken(ctx context.Context, jwt string, installationID int64) (githubInstallationToken, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, m.base()+"/app/installations/"+strconv.FormatInt(installationID, 10)+"/access_tokens", nil)
+	const what = "mint GitHub App installation token"
+	request, err := githubRequest(ctx, http.MethodPost, m.base()+"/app/installations/"+strconv.FormatInt(installationID, 10)+"/access_tokens", jwt)
 	if err != nil {
-		return githubInstallationToken{}, fmt.Errorf("mint GitHub App installation token: %w", err)
+		return githubInstallationToken{}, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
 	}
-	request.Header.Set("Authorization", "Bearer "+jwt)
-	response, err := m.client().Do(request)
+	payload, err := mintCall(m.HTTP, request, what, "GitHub", http.StatusCreated)
 	if err != nil {
-		return githubInstallationToken{}, fmt.Errorf("mint GitHub App installation token: %w", err)
-	}
-	payload, readErr := io.ReadAll(response.Body)
-	response.Body.Close()
-	if readErr != nil {
-		return githubInstallationToken{}, fmt.Errorf("read GitHub App installation token: %w", readErr)
-	}
-	if response.StatusCode != http.StatusCreated {
-		return githubInstallationToken{}, fmt.Errorf("mint GitHub App installation token: GitHub returned %s", response.Status)
+		return githubInstallationToken{}, err
 	}
 	var token githubInstallationToken
 	if json.Unmarshal(payload, &token) != nil {
-		return githubInstallationToken{}, errors.New("decode GitHub App installation token: not a JSON object of its fields")
+		return githubInstallationToken{}, fmt.Errorf("%w: decode GitHub App installation token: not a JSON object of its fields", ErrMintUpstream)
 	}
 	if token.Token == "" || token.ExpiresAt.IsZero() {
-		return githubInstallationToken{}, errors.New("GitHub returned an incomplete installation token")
+		return githubInstallationToken{}, fmt.Errorf("%w: GitHub returned an incomplete installation token", ErrMintUpstream)
 	}
 	return token, nil
 }

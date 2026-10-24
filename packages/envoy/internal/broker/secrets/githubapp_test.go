@@ -1,6 +1,7 @@
 package secrets_test
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -9,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -281,5 +283,58 @@ func TestGitHubAppMintAcceptsPKCS8Key(t *testing.T) {
 	defer server.Close()
 	if _, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), string(value)); err != nil {
 		t.Fatalf("Mint PKCS8 = %v", err)
+	}
+}
+
+// TestGitHubAppMintNamesTheClassOfEachFailure: every failure wraps the class the broker's log
+// names, so an operator can tell a bad stored key from GitHub refusing from GitHub being down.
+func TestGitHubAppMintNamesTheClassOfEachFailure(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := func(status int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "no", status)
+		}))
+	}
+	refused, down := answer(http.StatusUnauthorized), answer(http.StatusBadGateway)
+	defer refused.Close()
+	defer down.Close()
+	for name, tc := range map[string]struct {
+		app   secrets.GitHubApp
+		value string
+		class string
+	}{
+		"stored value is not JSON": {secrets.GitHubApp{}, "not json", "stored-value"},
+		"stored key is corrupt":    {secrets.GitHubApp{}, `{"app_id":"1","private_key":"x"}`, "stored-value"},
+		"GitHub answers 401":       {secrets.GitHubApp{Base: refused.URL, HTTP: refused.Client()}, githubAppValue(t, "1", key), "refused"},
+		"GitHub answers 502":       {secrets.GitHubApp{Base: down.URL, HTTP: down.Client()}, githubAppValue(t, "1", key), "upstream"},
+		"GitHub cannot be reached": {secrets.GitHubApp{Base: "http://127.0.0.1:1"}, githubAppValue(t, "1", key), "upstream"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := tc.app.Mint(t.Context(), tc.value)
+			if got := secrets.MintErrorClass(err); err == nil || got != tc.class {
+				t.Fatalf("Mint = %v (class %s); want class %s", err, got, tc.class)
+			}
+		})
+	}
+}
+
+// TestGitHubAppMintRefusesAnAnswerPastItsCap: an upstream answer is read to 1 MiB and no further,
+// so a GitHub that streams without end costs the broker a bounded read.
+func TestGitHubAppMintRefusesAnAnswerPastItsCap(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("["))
+		_, _ = w.Write(bytes.Repeat([]byte(" "), 2<<20))
+	}))
+	defer server.Close()
+	_, err = (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), githubAppValue(t, "1", key))
+	if !errors.Is(err, secrets.ErrMintUpstream) || !strings.Contains(err.Error(), "more than 1048576 bytes") {
+		t.Fatalf("Mint against an endless answer = %v; want ErrMintUpstream naming the cap", err)
 	}
 }

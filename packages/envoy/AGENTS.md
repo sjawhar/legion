@@ -2381,8 +2381,12 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier, source, kind and max grant, is recorded on
-every request. A kind source is `mint:<kind>:<store source>`, so a kind change ends a live grant.
+SHA-256 of every served secret's name, owner, tier, source and max grant, is recorded on
+every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read back by
+`policy.ParseKindSource`), so a kind change ends a live grant. `policy.Kinds`, `ValidKind` and
+`ParseMaxGrant` are the one statement of which kinds exist and what a max grant is, which the
+loader and `agent-secrets secret` both apply, and `Secret.MaxGrant` is a `time.Duration` (0: none)
+so a `Secret` compares equal to an unchanged reread of itself.
 A live grant is re-checked once the version moves, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
@@ -2535,14 +2539,16 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-AWS `create` writes on the settings' key with owner and tier tags, plus `kind` and `max-grant`
-only when the command names them, and no `ClientRequestToken` (the SDK sets one). A `retag` is one
-write (`retagChange`): it either sets tags or removes them, never both, and refuses `none` beside
-another change before any write, so a refused call never leaves it half applied. One that sets
-tags describes the secret and sends owner and tier in one `TagResource`, plus `kind` and
-`max-grant` when the command sets them, so an IAM condition on the request's tags sees them; one
-that removes tags (`--kind none`, `--max-grant none`) is one `UntagResource` of those keys. On
-`AccessDenied` for a retag that sets tags on a
+`secret.go` builds the one tag map a write sends, owner and tier plus `kind` and `max-grant` when
+the command names them, under the broker's own rules (`policy.ValidKind`, `policy.ParseMaxGrant`),
+and each backend writes a map it does not read into (`create(tags)`, `setTags`, `removeTags`).
+AWS `create` writes on the settings' key with those tags and no `ClientRequestToken` (the SDK sets
+one). A `retag` is one write: it either sets tags or removes them, never both, and refuses `none`
+beside another change before any read or write, so a refused call never leaves it half applied.
+One that sets tags describes the secret and sends owner and tier in one `TagResource`, plus `kind`
+and `max-grant` when the command sets them, so an IAM condition on the request's tags sees them;
+one that removes tags (`--kind none`, `--max-grant none`) reads nothing and is one
+`UntagResource` of those keys. On `AccessDenied` for a retag that sets tags on a
 secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
@@ -3120,9 +3126,12 @@ before `endEnrollment` wrote one, reads as `cancelled` from its request row. A m
 pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
 `anyone`) for every approver. `Values` releases a live grant's values, each read from the secret
 its request froze (its source: the ARN, or the Secret Manager resource name). A kind source is
-`mint:<kind>:<source>`: `Machine.release` reads `<source>` and passes that value to
-`Machine.Minters[kind]`. It never returns the stored value, and a minter's failure is
-`requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message. The usual re-check
+`mint:<kind>:<source>`: `Machine.release` parses it (`policy.ParseKindSource`; a malformed one is
+`policy.ErrKindSourceMalformed`), reads `<source>` through the store's own `Read`, and passes that
+value to `Machine.Minters[kind]`. It never returns the stored value. A minter's failure is
+`requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message, and one ERROR line
+for the operator, `broker: mint failed` (`requests.MintFailedMessage`) with the name, the kind and
+`class=` `stored-value`, `refused` or `upstream` (`secrets.MintErrorClass`). The usual re-check
 then verifies the enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the
 policy version moved since the grant was decided, or any granted name is a service's
 (`anyServiceOwned`: the version does not cover `BROKER_SERVICES`' accounts) — that the current
@@ -3134,7 +3143,7 @@ approve the secret, or once the new tags give its session the secret without ask
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
 let approve it), and that no granted name's `max-grant` is now shorter than the request's lifetime
-(`requireMaxGrant`, refused `GRANT_NOT_LIVE`; `currentPolicyAdmits` refuses approving such a
+(`overMaxGrant`, refused `GRANT_NOT_LIVE`; `currentPolicyAdmits` refuses approving such a
 pending request `NOT_APPROVER`); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
 scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
 `GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`

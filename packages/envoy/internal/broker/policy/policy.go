@@ -44,10 +44,10 @@ const (
 	KindGitHubApp = "github-app"
 	// KindGoogleLogin exchanges the stored authorized-user refresh token for an access token.
 	KindGoogleLogin = "google-login"
-	// TagMaxGrant bounds a request's signed grant lifetime for this secret.
+	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
-	// KindSourcePrefix opens the Source of a kind secret. The kind and store source are frozen
-	// into a request, so changing or clearing the kind ends every live grant.
+	// KindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
+	// are frozen into a request, so changing or clearing the kind ends every live grant.
 	KindSourcePrefix = "mint:"
 	// OwnerShared is the owner value of a secret nobody owns alone.
 	OwnerShared = "shared"
@@ -63,6 +63,52 @@ const (
 	Approval  = "approval"
 	Deny      = "deny"
 )
+
+// Kinds is every value a secret's kind tag may name. The broker holds a minter for each.
+var Kinds = []string{KindGitHubApp, KindGoogleLogin}
+
+// ValidKind reports whether kind is one of Kinds.
+func ValidKind(kind string) bool {
+	return slices.Contains(Kinds, kind)
+}
+
+// ErrMaxGrantMalformed is a max-grant tag that is not a Go duration of at least one second.
+var ErrMaxGrantMalformed = errors.New("max-grant is a duration of at least 1s")
+
+// ParseMaxGrant reads a max-grant tag: a Go duration (time.ParseDuration) of at least one second,
+// so 0 is free to mean that a secret sets none.
+func ParseMaxGrant(raw string) (time.Duration, error) {
+	maxGrant, err := time.ParseDuration(raw)
+	if err != nil || maxGrant < time.Second {
+		return 0, ErrMaxGrantMalformed
+	}
+	return maxGrant, nil
+}
+
+// KindSource is the Source of a kind secret: its kind frozen beside the store's own source.
+// A store's source never starts with KindSourcePrefix (an AWS source starts with "arn:", a
+// Secret Manager one with "projects/").
+func KindSource(kind, storeSource string) string {
+	return KindSourcePrefix + kind + ":" + storeSource
+}
+
+// ErrKindSourceMalformed is a source that opens with KindSourcePrefix but names no kind or no
+// store source, which no KindSource built.
+var ErrKindSourceMalformed = errors.New("a minted source names no kind or no store source")
+
+// ParseKindSource splits a source KindSource built into its kind and store source. minted is false
+// for a stored secret's source, which it answers whole as storeSource.
+func ParseKindSource(source string) (kind, storeSource string, minted bool, err error) {
+	rest, minted := strings.CutPrefix(source, KindSourcePrefix)
+	if !minted {
+		return "", source, false, nil
+	}
+	kind, storeSource, ok := strings.Cut(rest, ":")
+	if !ok || kind == "" || storeSource == "" {
+		return "", "", true, ErrKindSourceMalformed
+	}
+	return kind, storeSource, true, nil
+}
 
 // ErrUnknownSecret is a name no secret the policy serves carries: none exists under the namespace
 // prefix, or the one that does was refused.
@@ -87,17 +133,17 @@ type Secret struct {
 	// an underscore (<prefix>deel-api-key is DEEL_API_KEY).
 	Name string
 	// Source is what the secret's value is read by: its ARN in Secrets Manager, or its resource
-	// name in Secret Manager. A kind source starts with KindSourcePrefix and freezes the kind
-	// beside its store source.
+	// name in Secret Manager. A kind secret's is KindSource of its kind and that store source, so
+	// the kind is frozen into every request (ParseKindSource reads it back).
 	Source string
 	// Owner is OwnerShared, a person's email, or a registered service.
 	Owner string
 	// Tier is TierAgent or TierHuman.
 	Tier string
-	// Kind is empty for a stored secret, KindGitHubApp or KindGoogleLogin for a minted release.
-	Kind string
-	// MaxGrant, when set, is the greatest grant lifetime a request may sign for this secret.
-	MaxGrant  *time.Duration
+	// MaxGrant is the greatest grant lifetime a request may sign for this secret, or 0 when it sets
+	// none (ParseMaxGrant refuses anything under a second). A value, never a pointer, so a Secret
+	// compares equal to an unchanged reread of itself (Current.RefreshOne).
+	MaxGrant  time.Duration
 	ownership ownerKind
 }
 
@@ -112,20 +158,20 @@ func (secret Secret) approver() string {
 
 // Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
-	// Version is the SHA-256 of every served secret's name, owner, tier, source, kind and
-	// max-grant: equal versions are equal policies. A request records the version it was decided
-	// under, so a live grant is re-evaluated only once the policy changed.
+	// Version is the SHA-256 of every served secret's name, owner, tier, source and max-grant:
+	// equal versions are equal policies. A request records the version it was decided under, so a
+	// live grant is re-evaluated only once the policy changed.
 	Version string
 	Secrets map[string]Secret
 }
 
 // NewSet builds the one Set shape both Load and the single-name merges produce, keeping secrets
-// (keyed by Name) as its Secrets. Plain secrets keep the pre-kind digest bytes,
-// "<Name>\t<Owner>\t<Tier>\t<Source>\n"; a secret with Kind or MaxGrant adds those two
-// fields. Entries are ascending by the secret's name in the store (the slug) — the exact
-// order Load wrote before NewSet existed, so deployed plain-secret digests do not shift.
-// (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so
-// "a-b" < "a0" as slugs but "A0" < "A_B" as Names.)
+// (keyed by Name) as its Secrets. A secret with no max-grant writes the pre-kind digest bytes,
+// "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind is in its Source); one with a
+// max-grant adds it as a fifth field. Entries are ascending by the secret's name in the store
+// (the slug) — the exact order Load wrote before NewSet existed, so deployed plain-secret digests
+// do not shift. (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is
+// 0x5F, so "a-b" < "a0" as slugs but "A0" < "A_B" as Names.)
 func NewSet(secrets map[string]Secret) *Set {
 	type bySlug struct {
 		slug   string
@@ -138,15 +184,11 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		if s.secret.Kind == "" && s.secret.MaxGrant == nil {
+		if s.secret.MaxGrant == 0 {
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
 			continue
 		}
-		maxGrant := ""
-		if s.secret.MaxGrant != nil {
-			maxGrant = s.secret.MaxGrant.String()
-		}
-		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.Kind, maxGrant)
+		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant)
 	}
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }

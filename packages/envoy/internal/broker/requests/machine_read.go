@@ -8,9 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +21,12 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
+// MintFailedMessage is logged, at ERROR, each time a kind secret's minter fails a release,
+// followed by name=<the secret's name>, kind=<its kind>, class=<secrets.MintErrorClass of the
+// error> and error=<the minter's message>, which never holds the stored value or a token. The
+// session's answer is 502 MINT_FAILED; this line is the operator's.
+const MintFailedMessage = "broker: mint failed"
+
 // Values releases the values of a live grant to its own enrollment, and when the grant expires:
 // nil for a grant that lasts until its session ends. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
@@ -28,7 +34,7 @@ import (
 // (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
 // current policy still allows the session, with the names its operator withheld from it, every
 // granted name under the login that decided it (stillAllowed), and that no granted name's
-// max-grant is now shorter than the lifetime the grant's request signed (requireMaxGrant). A
+// max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
 // stored secret releases its frozen source. A kind secret reads that same stored source and
 // passes its value to the kind's minter. It holds no pooled connection across a Secrets Manager
 // read: the grant's names are read into memory before the first value is fetched.
@@ -67,17 +73,15 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		if err != nil {
 			return nil, nil, err
 		}
-		names := make([]string, len(granted))
-		for i, g := range granted {
+		for _, g := range granted {
 			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
 				return nil, nil, err
 			}
-			names[i] = g.name
-		}
-		// A max-grant added or lowered since the request was decided bounds this grant too: the
-		// version covers the tag, so this runs whenever it moved.
-		if err := requireMaxGrant(set, names, lifetime); err != nil {
-			return nil, nil, fmt.Errorf("%w: %w", ErrGrantNotLive, err)
+			// A max-grant added or lowered since the request was decided bounds this grant too:
+			// the version covers the tag, so this runs whenever it moved.
+			if limit, over := overMaxGrant(set, g.name, lifetime); over {
+				return nil, nil, fmt.Errorf("%w: %w: %s now allows grants of at most %s", ErrGrantNotLive, ErrGrantRequiresLifetime, g.name, limit)
+			}
 		}
 	}
 	values := map[string]string{}
@@ -100,37 +104,32 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	return values, expires, nil
 }
 
-type freshReader interface {
-	ReadFresh(context.Context, string) (string, error)
-}
-
-var _ freshReader = secrets.GCP{}
-
 // release is one granted name's value. A stored secret reads its frozen source. A kind source
-// reads that frozen store source, then passes its stored value to the named minter. The store read
-// makes a deletion stop a release at once, even before a policy refresh.
+// reads its frozen store source the same way, through the store's own Read (on Secret Manager
+// its deletion verdict is cached for 30 s, as for every secret), then passes that value to the
+// kind's minter and returns only what the minter makes. A deleted secret stops releasing once the
+// policy drops it: `agent-secrets secret delete` rereads the name at once.
 func (m *Machine) release(ctx context.Context, g requestedSecret) (string, error) {
-	source, minted := strings.CutPrefix(g.source, policy.KindSourcePrefix)
+	kind, source, minted, err := policy.ParseKindSource(g.source)
+	if err != nil {
+		return "", fmt.Errorf("secret %s: %w", g.name, err)
+	}
 	if !minted {
-		return m.Secrets.Read(ctx, g.source)
+		return m.Secrets.Read(ctx, source)
 	}
-	kind, source, ok := strings.Cut(source, ":")
 	mint := m.Minters[kind]
-	if !ok || source == "" || mint == nil {
-		return "", fmt.Errorf("secret %s is a minted kind, but this broker has no token minter", g.name)
+	if mint == nil {
+		return "", fmt.Errorf("secret %s is a minted kind %q, but this broker has no token minter for it", g.name, kind)
 	}
-	var value string
-	var err error
-	if reader, ok := m.Secrets.(freshReader); ok {
-		value, err = reader.ReadFresh(ctx, source)
-	} else {
-		value, err = m.Secrets.Read(ctx, source)
-	}
+	value, err := m.Secrets.Read(ctx, source)
 	if err != nil {
 		return "", err
 	}
 	token, err := mint(ctx, value)
 	if err != nil {
+		// The minter's error names its class and why, never the stored value or a token, so the
+		// line is safe to log; the session sees the same words as MINT_FAILED.
+		slog.Error(MintFailedMessage, "name", g.name, "kind", kind, "class", secrets.MintErrorClass(err), "error", err)
 		return "", fmt.Errorf("%w: %w", ErrMintFailed, err)
 	}
 	return token, nil

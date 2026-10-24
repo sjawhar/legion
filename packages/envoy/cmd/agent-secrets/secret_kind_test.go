@@ -129,12 +129,17 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 	}
 }
 
-// countingTagWrites is a secrets.Local that counts TagResource and UntagResource calls and can
-// refuse UntagResource as IAM refuses it.
+// countingTagWrites is a secrets.Local that counts DescribeSecret, TagResource and UntagResource
+// calls and can refuse UntagResource as IAM refuses it.
 type countingTagWrites struct {
 	*secrets.Local
-	tags, untags int
-	refuseUntag  bool
+	describes, tags, untags int
+	refuseUntag             bool
+}
+
+func (c *countingTagWrites) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	c.describes++
+	return c.Local.DescribeSecret(ctx, in, o...)
 }
 
 func (c *countingTagWrites) TagResource(ctx context.Context, in *secretsmanager.TagResourceInput, o ...func(*secretsmanager.Options)) (*secretsmanager.TagResourceOutput, error) {
@@ -151,8 +156,7 @@ func (c *countingTagWrites) UntagResource(ctx context.Context, in *secretsmanage
 }
 
 func kindTaggedSecret(name string) secrets.LocalSecret {
-	secret := policytest.Secret(name, "ada@example.com", policy.TierAgent, "value")
-	secret.Tags[policy.TagKind] = policy.KindGitHubApp
+	secret := policytest.KindSecret(name, "ada@example.com", policy.TierAgent, policy.KindGitHubApp, "value")
 	secret.Tags[policy.TagMaxGrant] = "1h"
 	return secret
 }
@@ -198,8 +202,8 @@ func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "removed kind, max-grant") {
 		t.Fatalf("removal: exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	if writes.tags != 0 || writes.untags != 2 {
-		t.Fatalf("removal made %d TagResource and %d UntagResource calls in all, want 0 and 2", writes.tags, writes.untags)
+	if writes.tags != 0 || writes.untags != 2 || writes.describes != 0 {
+		t.Fatalf("removal made %d TagResource, %d UntagResource and %d DescribeSecret calls in all, want 0, 2 and 0: a removal reads no tags", writes.tags, writes.untags, writes.describes)
 	}
 	tags = secrets.TagMap(describe(t, local, "APP_KEY").Tags)
 	if _, ok := tags[policy.TagKind]; ok {
