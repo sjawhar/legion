@@ -97,6 +97,19 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
   and the build's final step refuses an image where any file under `/usr/lib/openssh` or
   `/usr/bin/ssh-agent` carries one),
+  `psql` (from `postgresql-client`: `packages/dispatch/e2e/local-instance.ts` refuses to start
+  without it, and that file is the entry point of `bun run e2e`, the Dispatch browser suite a
+  reader-facing Dispatch change must pass before it merges, so a role whose image lacks `psql`
+  cannot run the suite its own change owes — Debian's `psql` is a Perl wrapper around the versioned
+  client, and it resolves because `perl-base` is in the image), `redis-cli` (from `redis-tools`: no
+  repository of the project speaks Redis today, and it is carried anyway, at about a megabyte,
+  because a second image roll costs more than a megabyte), `sqlite3` (Oh My Pi's own session files
+  are SQLite databases, and a role reading its own session, or a repository's SQLite fixture, has
+  no other way to open one), `nc` (from `netcat-openbsd`, for the reachability check a role would
+  otherwise write as an inline Python loop: the package ships `/usr/bin/nc.openbsd` and the `nc`
+  name comes from the alternatives system rather than being a file of the package, so every gate
+  asks for `nc` and never `nc.openbsd`), `dig` (from `dnsutils`: how a role whose connection to a
+  service name fails tells "the name does not resolve" from "the packets are dropped"),
   and `chromium` for the browser tools, installed without its Recommends (no
   setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
   its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
@@ -129,6 +142,74 @@ kept pod loads the release's published pair, installed from npm under the genera
 ("Contract discipline" below) — what the image does take from npm (the CodeGraph plugin and
 CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
 `worker.Dockerfile`.
+
+### The tools a role's own work needs
+
+The image carries the five clients above — `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — and for
+everything else the one documented step is the pinned form of the three package runners the image
+already has: `uvx`, `bunx` and `go run`. The two answer different halves of the question. The image
+answers the tools a non-root container can never fetch for itself; the runners answer the tools no
+image can anticipate.
+
+What decided it is the container, not the cost. Measured in a role container of a deployment: the
+role is an unprivileged user, `/usr/local/bin`, `/opt` and `/home` are read-only, and `apt-get`
+cannot take dpkg's lock even to download.
+
+```text
+$ id
+uid=1000(legion) gid=1000(legion) groups=1000(legion)
+$ apt-get install -d -y postgresql-client
+E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)
+E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?
+```
+
+So a role cannot install a compiled client for itself at all, however much room its disk has. The
+four priced options and their verdicts:
+
+| option | the measurement | verdict |
+| :--- | :--- | :--- |
+| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment | **chosen** |
+| a per-issue install onto the issue's disk | the issue's disk is 49 GiB with 2.5 GiB used, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client** by the `apt-get` refusal above, and still right for a language's own package set — which is the runner row below |
+| a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
+| extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected**: it is the withheld `operator-setup` capability under any reading (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200), and it is fragile for exactly the client this change exists for |
+| `runtime.kubernetes.setup`, the operator-set command every role container runs before its agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
+
+The pinned runner forms, as a role types them — the name is always written with its exact version,
+never bare:
+
+- `uvx <name>@<version>`, for a Python tool. `uvx ruff@0.14.0 --version` prints `ruff 0.14.0`, in
+  1.7 s with the uv cache empty and 0.15 s warm. A version that does not exist fails closed, exit
+  1, naming it: `uvx ruff@99.99.99 --version` prints `error: No solution found when resolving tool
+  dependencies … there is no version of ruff==99.99.99`.
+- `bunx --package <name>@<version> <binary>`, for an npm tool, naming the package and the binary
+  separately because they differ. `bunx --package @biomejs/biome@2.6.3 biome --version` prints
+  `Version: 2.6.3`, in 0.3 s with bun's cache warm; `bunx --package @biomejs/biome@99.99.99 biome
+  --version` fails closed, exit 1, with `error: No version matching "99.99.99" found for specifier
+  "@biomejs/biome" (but package exists)`.
+- `go run <module>@<version>`, for a Go tool. `go run github.com/nats-io/natscli/nats@v0.1.5
+  --version` prints `v0.1.5`, in 7.2 s with the module cache warm and 103 s on a cold one. `go run
+  github.com/nats-io/natscli/nats@v99.99.99 --version` fails closed, exit 1, with `go: …: invalid
+  version: unknown revision nats/v99.99.99`.
+
+Why the version is not optional: the unpinned command can run a different package altogether.
+
+```text
+$ bunx biome --version
+0.3.3
+$ bunx --package @biomejs/biome@2.6.3 biome --version
+Version: 2.6.3
+```
+
+The npm package `biome` is "A simple way to manage environment variables on a per-project basis",
+with one maintainer; the formatter is `@biomejs/biome`. Nothing in this repository refuses the
+unpinned command: no guard, no lint and no check stops a role typing a bare `bunx biome`. What this
+gives a role is a correct documented form and a tool that is already there, not a gate.
+
+The limit of the runners: a compiled tool with no ecosystem runner is an image change — a pull
+request against this repository — and it reaches a role only once a deployment pins the new digest,
+as every Legion change does.
+
+A role reading the skills finds the same rule where it works: `skills/legion-worker/references/tools.md`.
 
 ### Image size and pull time
 
@@ -183,7 +264,8 @@ leaves those agents' models unresolved (`--skip-agent-models`). It then checks e
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
 would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
-profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`, `ssh-keygen` and `flock` on `PATH` with `go version`
+profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`,
+`ssh-keygen`, `flock`, `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
@@ -273,13 +355,17 @@ A step of its own, before that final one, runs every toolchain command listed ab
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
 version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
+`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
+`sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
-throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. It reruns only
+throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
+five clients are odd the same way: `nc` takes no `--version` either, so the step runs `nc -h`, which
+prints its usage and exits 0, under the `nc` name the alternatives system installs and never
+`nc.openbsd`; and `dig -v` prints its version on stderr, not stdout. It reruns only
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && flock --version && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
