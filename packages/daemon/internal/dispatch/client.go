@@ -102,15 +102,31 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 	}, nil
 }
 
-// Ask reads GET /api/v1/asks/{id}.
+// Ask reads GET /api/v1/asks/{id}: the ask, who closed it, and the newest reply in its thread
+// (Dispatch lists the thread oldest first, as its own newest-reply rule orders it).
 func (c *HTTPClient) Ask(ctx context.Context, id string) (Ask, error) {
 	var response struct {
-		Ask askResponse `json:"ask"`
+		Ask     askResponse `json:"ask"`
+		Replies []struct {
+			ID     string `json:"id"`
+			Author actor  `json:"author"`
+		} `json:"replies"`
 	}
 	if err := c.request(ctx, http.MethodGet, "/api/v1/asks/"+url.PathEscape(id), nil, &response); err != nil {
 		return Ask{}, err
 	}
-	return Ask{ID: response.Ask.ID, IssueKey: deref(response.Ask.IssueKey), Kind: response.Ask.Kind, State: response.Ask.State, WaitingOn: response.Ask.WaitingOn}, nil
+	ask := Ask{ID: response.Ask.ID, IssueKey: deref(response.Ask.IssueKey), Kind: response.Ask.Kind, State: response.Ask.State, WaitingOn: response.Ask.WaitingOn}
+	switch {
+	case response.Ask.State == "answered" && response.Ask.Answer != nil:
+		ask.ClosedBy = Actor{Kind: "user", ID: response.Ask.Answer.User}
+	case response.Ask.State == "resolved" && response.Ask.Resolution != nil:
+		ask.ClosedBy = Actor(response.Ask.Resolution.Actor)
+	}
+	if count := len(response.Replies); count > 0 {
+		newest := response.Replies[count-1]
+		ask.LastReplyID, ask.LastReplyBy = newest.ID, Actor(newest.Author)
+	}
+	return ask, nil
 }
 
 // ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
@@ -230,13 +246,17 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	if response.IssueKey != nil {
 		issueKey = *response.IssueKey
 	}
-	return Approval{
+	approved := Approval{
 		IssueKey:      issueKey,
 		State:         response.Approval.State,
 		LatestVersion: response.Approval.LatestVersion,
 		Version:       response.Approval.Version,
 		Reason:        response.Approval.Reason,
-	}, nil
+	}
+	if response.Approval.State == "awaiting" {
+		approved.AskID, approved.WaitingOn = deref(response.Approval.AskID), response.Approval.WaitingOn
+	}
+	return approved, nil
 }
 
 // BuildCommit reads GET /healthz and returns the build commit Dispatch reports itself built from
@@ -384,6 +404,14 @@ type askResponse struct {
 	Kind      string  `json:"kind"`
 	State     string  `json:"state"`
 	WaitingOn string  `json:"waiting_on"`
+	// Answer is a person's answer: Dispatch takes one from a person alone (its answer route's
+	// requireHuman, and a review or carried approval in the reviewer's own name).
+	Answer *struct {
+		User string `json:"user"`
+	} `json:"answer"`
+	Resolution *struct {
+		Actor actor `json:"actor"`
+	} `json:"resolution"`
 }
 
 type repoProjectResponse struct {
@@ -409,6 +437,8 @@ type approvalResponse struct {
 	LatestVersion int     `json:"latest_version"`
 	Version       *int    `json:"version"`
 	Reason        *string `json:"reason"`
+	AskID         *string `json:"ask_id"`
+	WaitingOn     string  `json:"waiting_on"`
 }
 
 type actor struct {

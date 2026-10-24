@@ -65,19 +65,7 @@
   to `comment`, `suggest`, `doc-edit` and `doc-read`, which used to act on the link's owner and
   drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
   `dispatch read`.
-
-### Changed
-
-- The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
-  carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
-  `message` bodies and `issue-update`'s closing `reason` accept that many characters, and their
-  descriptions say so. Nothing gates the skew: a bundle of this release against a Dispatch server
-  still on 2,000 lets an agent compose a longer body and take a `400 CAP_EXCEEDED` from the
-  server, so install it after that server is deployed (`packages/envoy/CHANGELOG.md` has the
-  rollout order).
-- The generated `legion/` plugin carries the new `thermonuclear-deep-review` and
-  `thermonuclear-code-quality` rubrics (see `packages/pi-legion/CHANGELOG.md`), and the README no
-  longer says the dotfiles plugin ships a copy.
+- `claude plugin marketplace update legion-plugins`, then `claude plugin update claude-envoy@legion-plugins`, installs main's current tree: `.claude-plugin/plugin.json` declares no `version`, so Claude Code versions the plugin by its commit. Its fixed `1.0.0` held every install at the tree it was first installed from (`claude-envoy is already at the latest version (1.0.0)`).
 
 ### Added
 
@@ -118,9 +106,10 @@
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that returned its admission slot
   while its architect waits on a person, and the issue field `waitingOn` naming that gate version or
-  question and, once answered, `answeredAt`. The MCP server's strict state reader admits both, and
-  nothing this plugin reads or writes moved; the generated `legion/` architect and controller skills
-  carry the new wait. A session of it registers with a daemon at 36.
+  question and, once answered, `answeredAt`, which only a person's act (or a newer spec version)
+  sets. The MCP server's strict state reader admits both, and nothing this plugin reads or writes
+  moved; the generated `legion/` architect and controller skills carry the new wait and its
+  hand-back. A session of it registers with a daemon at 36.
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
   every credential, credential source and credential file path left out and a URL's userinfo masked
@@ -189,10 +178,16 @@
 - The channel server writes one notice to stderr when a section is off: the missing file, the section's error, or what a checkout's files hold that is not read.
 - `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
 - `envoy-send`, a command, counts `CLAUDE_CONFIG_DIR` only under Claude Code (`CLAUDE_CODE_CHILD_SESSION=1`): run from a plain terminal whose shell exports it, it does not read `$CLAUDE_CONFIG_DIR/envoy.json`. The hook and the channel server read `CLAUDE_CONFIG_DIR` whenever it is set.
-
-### Fixed
-
-- `claude plugin marketplace update legion-plugins`, then `claude plugin update claude-envoy@legion-plugins`, installs main's current tree: `.claude-plugin/plugin.json` declares no `version`, so Claude Code versions the plugin by its commit. Its fixed `1.0.0` held every install at the tree it was first installed from (`claude-envoy is already at the latest version (1.0.0)`).
+- The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
+  carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and
+  `message` bodies and `issue-update`'s closing `reason` accept that many characters, and their
+  descriptions say so. Nothing gates the skew: a bundle of this release against a Dispatch server
+  still on 2,000 lets an agent compose a longer body and take a `400 CAP_EXCEEDED` from the
+  server, so install it after that server is deployed (`packages/envoy/CHANGELOG.md` has the
+  rollout order).
+- The generated `legion/` plugin carries the new `thermonuclear-deep-review` and
+  `thermonuclear-code-quality` rubrics (see `packages/pi-legion/CHANGELOG.md`), and the README no
+  longer says the dotfiles plugin ships a copy.
 
 ## [1.0.0]
 

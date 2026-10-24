@@ -138,11 +138,14 @@ off a waiting root takes it out of line; taking it off a running tree does not s
 A root at `admitted` that now waits only for a person returns its slot rather than blocking the
 project: a closed design gate or root-level `dispatch ask` moves it to `awaiting_person`, while the
 architect's same session is suspended after its current turn. The root stays live for its children.
-`waitingOn` in `legion state` names the gate version or ask; after an approval, changes request,
-answer, resolution, agent-turn reply or newer spec version, `answeredAt` shows that admission will
-resume it ahead of never-run roots. A label removal or foreign Dispatch claim removes it instead;
-Legion never resumes work another owner took. A root whose claim a person or another session
-already holds keeps its slot while its architect asks that holder to release it.
+`waitingOn` in `legion state` names the gate version or ask. Only your act answers it: after your
+approval, changes request, answer, resolution or reply on one of the root's asks (a closed one
+included), or a newer spec version, `answeredAt` shows that admission will resume it ahead of
+never-run roots. An agent's reply, answer or resolution answers nothing. A label removal or
+foreign Dispatch claim removes it instead; Legion never resumes work another owner took. A root
+whose claim a person or another session already holds keeps its slot while its architect asks that
+holder to release it, and so does an admitted root whose label you took off, since only a labelled
+root is resumed.
 
 ## The design gate
 
@@ -165,12 +168,13 @@ architect has written its spec.
 When the architect registers a closed gate while the root is at `admitted` and no child still runs
 or is held, the root enters `awaiting_person`, giving its slot to another root while the architect
 session waits. A spec you approved before the architect registered it opens the gate at
-registration, so the root starts planning in its own slot. Approval and changes requested resume
-that session; a later spec version also
-returns the root because the approval request now needs the architect. After changes are
-requested, the architect revises the spec, asks for approval again and registers the new version,
-which starts a new wait and returns the slot again. The gate opens and planning starts only after
-that root regains a slot, so no child starts ahead of it.
+registration, so the root starts planning in its own slot; one you asked changes of keeps its slot
+while the architect revises. Approval, changes requested and your reply in the approval request's
+thread resume that session; a later spec version also returns the root because the approval
+request now needs the architect. The architect then revises the spec and hands the request back to
+you, by requesting approval again or replying in its thread for you to act, which starts a new wait
+and returns the slot again. The gate opens and planning starts only after that root regains a slot,
+so no child starts ahead of it.
 
 ## Handoffs on the issue branch
 

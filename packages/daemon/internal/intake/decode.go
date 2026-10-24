@@ -288,7 +288,8 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		return DispatchAskOpened{Key: event.IssueKey, Ask: ask.ID, Kind: ask.Kind, AuthorSession: session}, nil
 	case "ask.answered", "ask.resolved":
 		var ask struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
 		}
 		if err := json.Unmarshal(event.Payload, &ask); err != nil {
 			return nil, fmt.Errorf("decode Dispatch %s payload: %w", event.Type, err)
@@ -296,7 +297,21 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if ask.ID == "" {
 			return nil, fmt.Errorf("Dispatch %s payload has no id", event.Type)
 		}
-		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID}, nil
+		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID, Kind: ask.Kind, State: strings.TrimPrefix(event.Type, "ask."),
+			Actor: dispatch.Actor(event.Actor)}, nil
+	case "ask.handed_back":
+		// An approval request its asker returned to the person (Dispatch's handBackApprovalAsk):
+		// whatever the thread held, it now waits on the human, as a session's human-turn reply does.
+		var ask struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Payload, &ask); err != nil {
+			return nil, fmt.Errorf("decode Dispatch ask.handed_back payload: %w", err)
+		}
+		if ask.ID == "" {
+			return nil, fmt.Errorf("Dispatch ask.handed_back payload has no id")
+		}
+		return DispatchAskReply{Key: event.IssueKey, Ask: ask.ID, WaitingOn: "human", Actor: dispatch.Actor(event.Actor)}, nil
 	case "comment.created":
 		var comment struct {
 			Ask       string `json:"ask_id"`
@@ -308,7 +323,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if comment.Ask == "" {
 			return nil, nil
 		}
-		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn}, nil
+		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor)}, nil
 	case "issue.claimed", "issue.released":
 		var claim struct {
 			Claim *struct {

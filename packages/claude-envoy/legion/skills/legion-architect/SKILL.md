@@ -168,12 +168,13 @@ read covers a human who answers the question between your `dispatch request-appr
 yourself.
 
 Then end the turn: a closed registered gate returns the root's slot, and the daemon suspends this
-session after the turn and resumes it with a task naming the answer. Release no wave before
-`design-approved`; the daemon starts no phase before then. On `design-changes-requested`, or a
-resume task saying the gate is still closed, (1) revise the spec as the human's reason asks, (2) run
+session after the turn and resumes it with a task naming the human's answer; only the human's act
+resumes it. Release no wave before `design-approved`. On `design-changes-requested`, or a resume
+task saying the gate is still closed, (1) revise the spec as the human asks, (2) run
 `task(agent="plan-gap-analyst")` on that version with the code, the command output it relies on and
 the human's words, and resolve every finding, (3) request approval again (step 4), (4)
-`register_gate` that version (step 5), which starts the next wait, and (5) end the turn.
+`register_gate` that version (step 5), and (5) end the turn. Handing the request back to the human,
+by that request or a thread reply leaving the turn with them, starts the next wait.
 
 **After approval, the root spec changes only when what the tree delivers, or a decision a human
 settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes

@@ -224,20 +224,14 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A re-admitted root's architect registers its spec again, often at the same version: each
-	// generation's registration is its own fact. The approval this read found travels with it, so
-	// a spec a person approved before the architect registered opens the gate at registration,
-	// and the root keeps its admission slot instead of returning it to wait on a decision made.
+	// generation's registration is its own fact. What this read found of the person's review travels
+	// with it, so a spec a person approved or asked changes of before the architect registered is
+	// never waited on: the root keeps its admission slot, planning or revising.
+	changes, reason := approval.ChangesRequestedLatest()
 	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version),
-		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approvedLatest(approval)}, GateRegisterResponse{})
-}
-
-// approvedLatest is the version Dispatch shows approved when that approval is of its latest
-// version, and 0 otherwise: the gate seed's own reading of the same answer (daemon's seedGate).
-func approvedLatest(approval dispatch.Approval) int {
-	if approval.State == "approved" && approval.Version != nil && *approval.Version == approval.LatestVersion {
-		return *approval.Version
-	}
-	return 0
+		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
+			ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent"},
+		GateRegisterResponse{})
 }
 
 // documentOfIssue refuses a gate document the issue does not carry, as the shipped daemon does: an

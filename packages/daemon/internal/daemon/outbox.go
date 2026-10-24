@@ -1177,11 +1177,17 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 		return fmt.Errorf("read Dispatch approval %s: %w", payload.ArtifactID, err)
 	}
 	// The version Dispatch holds is the current one, even one the architect did not see: approved
-	// there, the gate opens at it; otherwise a later version still moves the gate to it, closed.
+	// there, the gate opens at it; changes requested on it, the gate closes with the reason, which
+	// answers a wait the registration started before the request reached the root (Seed tells the
+	// architect only when that closes a gate a racing registration opened); otherwise a later
+	// version still moves the gate to it, closed.
 	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
+	changes, reason := approval.ChangesRequestedLatest()
 	switch {
-	case approval.State == "approved" && approval.Version != nil && *approval.Version == approval.LatestVersion:
+	case approval.ApprovedLatest() != 0:
 		fact.Kind = intake.DispatchArtifactApproved
+	case changes >= payload.Version:
+		fact.Kind, fact.Reason, fact.Seed = intake.DispatchArtifactChangesRequested, reason, true
 	case approval.LatestVersion <= payload.Version:
 		return nil
 	}

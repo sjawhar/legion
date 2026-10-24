@@ -7,8 +7,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -61,26 +63,83 @@ func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.D
 	return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask}, fmt.Sprintf("question %s is awaiting an answer", fact.Ask))
 }
 
+// dispatchAskClosed answers a root waiting on a person when a person answered or resolved an ask
+// on it (answeredByPerson). A session's or Dispatch's own resolution, a settlement retraction among
+// them, answers nothing: only a person's act does. A review (a person's answer to an approval
+// request) answers a wait on the design gate through its own artifact.approved or
+// artifact.changes_requested event (applyArtifact), which Dispatch appends after the answer: woken
+// by the answer, the root could resume before the review reached its gate.
 func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
-	return intake.Result{}, e.answerAwaitedAsk(ctx, tx, fact.Key, fact.Ask)
-}
-
-func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
-	if fact.WaitingOn != "agent" {
+	if !fact.Actor.Person() {
 		return intake.Result{}, nil
 	}
-	return intake.Result{}, e.answerAwaitedAsk(ctx, tx, fact.Key, fact.Ask)
+	review := fact.Kind == "approval" && fact.State == "answered"
+	return intake.Result{}, e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, !review)
 }
 
-func (e *Engine) answerAwaitedAsk(ctx context.Context, tx pgx.Tx, key, ask string) error {
+// dispatchAskReply applies a reply on an ask of the issue, or Dispatch's hand-back of an approval
+// request. A person's reply answers a root waiting on a person (answeredByPerson) whatever the
+// ask's state: on an ask a session or settlement closed, a reply is the only answer a person can
+// give. A person's reply always hands an open ask to the agent (Dispatch's askReplyTurn), so one
+// leaving it with the human is a person's own hand-back of an approval request, which answers
+// nothing. A session of the root's own tree handing an ask to the person starts the root's wait
+// (handedBack). A session's reply answers nothing, whatever turn it leaves.
+func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
+	switch {
+	case fact.Actor.Person() && fact.WaitingOn != "human":
+		return intake.Result{}, e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, fact.WaitingOn == "agent")
+	case fact.Actor.Kind == "session" && fact.WaitingOn == "human":
+		return intake.Result{}, e.handedBack(ctx, tx, fact)
+	}
+	return intake.Result{}, nil
+}
+
+// answeredByPerson records a person's act on ask, an ask of the root key, as the answer of the
+// root's wait when it waits on that ask, or, when answersGate, on its design gate: the architect is
+// the tree's only agent while it waits, and the approval request's id is not recorded, so a
+// person's act on any of the root's asks counts.
+func (e *Engine) answeredByPerson(ctx context.Context, tx pgx.Tx, key, ask string, answersGate bool) error {
 	issue, err := e.store.Issue(ctx, tx, key)
-	if err != nil || issue == nil || !issue.AwaitingPerson() || issue.Awaiting.Ask != ask || issue.Awaiting.AnsweredAt != nil {
+	if err != nil || issue == nil || !issue.AwaitingPerson() || issue.Awaiting.AnsweredAt != nil {
 		return err
+	}
+	switch {
+	case issue.Awaiting.Ask != "" && issue.Awaiting.Ask == ask:
+		e.logOnCommit(ctx, "workflow: a person answered an architect ask", "issue", issue.Key, "ask", ask)
+	case issue.Awaiting.GateVersion != 0 && answersGate:
+		e.logOnCommit(ctx, "workflow: a person replied on a root waiting on its design gate", "issue", issue.Key, "ask", ask, "version", issue.Awaiting.GateVersion)
+	default:
+		return nil
 	}
 	at := e.now()
 	issue.Awaiting.AnsweredAt = &at
-	e.logOnCommit(ctx, "workflow: a person answered an architect question", "issue", issue.Key, "ask", ask)
 	return e.store.PutIssue(ctx, tx, *issue)
+}
+
+// handedBack starts a root's wait when a session of its own tree hands an ask on the admitted root
+// back to the person: a reply leaving the turn with them, or Dispatch's ask.handed_back of an
+// approval request. With its design gate registered and closed, the root waits on that gate at its
+// latest version, which the person's approval, changes request or reply answers; otherwise it waits
+// on the ask. awaitPerson's guards hold: a tree member mid-phase, or a root that could not resume,
+// keeps the slot.
+func (e *Engine) handedBack(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) error {
+	issue, err := e.store.Issue(ctx, tx, fact.Key)
+	if err != nil || issue == nil || issue.Phase != phase.Admitted {
+		return err
+	}
+	ownsTree, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.Actor.ID)
+	if err != nil || !ownsTree {
+		return err
+	}
+	gate, err := e.store.Gate(ctx, tx, issue.Key)
+	if err != nil {
+		return err
+	}
+	if gate != nil && !classify.DesignGateOpen(*gate) {
+		return e.awaitPerson(ctx, tx, *issue, record.Awaiting{GateVersion: gate.LatestVersion},
+			fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
+	}
+	return e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask}, fmt.Sprintf("ask %s was handed back to a person", fact.Ask))
 }
 
 // dispatchClaim keeps the newest Dispatch claim separate from LastDispatchSeq: claim events do

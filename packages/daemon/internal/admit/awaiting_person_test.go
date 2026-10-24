@@ -340,6 +340,8 @@ func TestANewerSpecVersionWakesARootAwaitingAGate(t *testing.T) {
 	}
 }
 
+// A session's reply that leaves the turn with the person answers nothing; a person's reply, which
+// hands the turn to the agent, answers the root.
 func TestOnlyAnAskReplyThatHandsTheTurnToTheAgentWakesTheRoot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
@@ -352,7 +354,7 @@ func TestOnlyAnAskReplyThatHandsTheTurnToTheAgentWakesTheRoot(t *testing.T) {
 	putIssue(t, pool, root)
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "reply-waits-human",
-		intake.DispatchAskReply{Key: root.Key, Ask: "ask-root", WaitingOn: "human"}, admission.engine, admission); err != nil {
+		intake.DispatchAskReply{Key: root.Key, Ask: "ask-root", WaitingOn: "human", Actor: architect}, admission.engine, admission); err != nil {
 		t.Fatalf("apply human-turn reply: %v", err)
 	}
 	if got := issue(t, pool, root.Key); got.Answered() {
@@ -360,7 +362,7 @@ func TestOnlyAnAskReplyThatHandsTheTurnToTheAgentWakesTheRoot(t *testing.T) {
 	}
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "reply-waits-agent",
-		intake.DispatchAskReply{Key: root.Key, Ask: "ask-root", WaitingOn: "agent"}, admission.engine, admission); err != nil {
+		intake.DispatchAskReply{Key: root.Key, Ask: "ask-root", WaitingOn: "agent", Actor: alice}, admission.engine, admission); err != nil {
 		t.Fatalf("apply agent-turn reply: %v", err)
 	}
 	if got := issue(t, pool, root.Key); !got.Answered() {
@@ -566,7 +568,7 @@ func TestAnAnsweredRootAPersonSetToTodoIsWrittenInProgressAtItsResume(t *testing
 		t.Fatalf("root after a person set todo = %#v, want it still waiting, at todo", got)
 	}
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "answered",
-		intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root"}, admission.engine, admission); err != nil {
+		intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "answered", Actor: alice}, admission.engine, admission); err != nil {
 		t.Fatalf("answer the question: %v", err)
 	}
 	apply(t, pool, admission, "run-finished", intake.DispatchIssue{

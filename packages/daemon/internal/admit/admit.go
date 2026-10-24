@@ -1162,8 +1162,8 @@ func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root re
 // phase untouched. Candidate's own promotion is what makes the tree live for these, since nothing
 // else reaches them afterward — Engine.ReenterChild only re-enters a live tree's reopened child on
 // its own live event, and a later todo observation of one already todo changes nothing. The
-// synthetic fact carries the child's own already-recorded fields: no live event reopened it, so
-// there is nothing newer to apply, only its own next generation to start.
+// synthetic fact carries the child's own already-recorded fields, its Dispatch claim among them: no
+// live event reopened it, so there is nothing newer to apply, only its own next generation to start.
 func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, candidate record.Issue, issues []record.Issue) error {
 	for _, child := range issues {
 		if child.Key == candidate.Key || child.Tree != candidate.Tree {
@@ -1174,7 +1174,7 @@ func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, cand
 		}
 		fact := intake.DispatchIssue{
 			Key: child.Key, Seq: child.LastDispatchSeq, Status: child.Status, Title: child.Title,
-			Parent: deref(child.Parent), Rank: child.Rank, HandedOver: child.HandedOver, ResolvedRepo: child.Repo,
+			Parent: deref(child.Parent), Rank: child.Rank, HandedOver: child.HandedOver, ResolvedRepo: child.Repo, ClaimedBy: child.ClaimedBy,
 		}
 		if err := a.engine.ReenterChild(ctx, tx, child, fact); err != nil {
 			return fmt.Errorf("re-enter stranded child %s: %w", child.Key, err)

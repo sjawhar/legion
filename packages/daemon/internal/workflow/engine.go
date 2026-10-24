@@ -362,13 +362,13 @@ func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, 
 
 // ResumeAwaitedRoot starts an architect in the session its daemon suspension kept, told what the
 // person answered. When that answer opened the design gate, it advances the now-admitted tree only
-// after the root has its slot again. A gate still closed — changes requested, or a newer version
-// that handed the approval request back — tells the architect to register the version it asks
-// approval of again, since that registration is what starts the root's next wait.
+// after the root has its slot again. A gate still closed — changes requested, a person's reply on
+// the approval request, or a newer version that handed the request back — tells the architect to
+// hand the request back to the person, since that hand-back is what starts the root's next wait.
 func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
 	task := ""
 	if waiting.Ask != "" {
-		task = fmt.Sprintf("Your question %s on %s was answered; read the answer and continue.", waiting.Ask, root.Key)
+		task = fmt.Sprintf("A person answered your ask %s on %s, or replied in its thread; read it and continue.", waiting.Ask, root.Key)
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
@@ -378,8 +378,10 @@ func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.I
 		if gate != nil && classify.DesignGateOpen(*gate) {
 			task = fmt.Sprintf("Your spec version %d on %s was approved; continue.", gate.LatestVersion, root.Key)
 		} else {
-			task = fmt.Sprintf("Your spec on %s is not approved at version %d: a person requested changes, or a newer version handed the approval request back to you. "+
-				"Read the review, revise the spec, request approval again, register that version with register_gate, then end your turn.", root.Key, waiting.GateVersion)
+			task = fmt.Sprintf("Your spec on %s is not approved at version %d: a person requested changes or replied in the approval request's thread, "+
+				"or a newer version handed the request back to you. Read the review and the thread, and revise the spec as they ask. "+
+				"Then hand the request back to the person: request approval again and register that version with register_gate, or answer in the request's thread. "+
+				"Handing it back starts your next wait and returns the slot; then end your turn.", root.Key, waiting.GateVersion)
 		}
 	}
 	if err := e.enqueue(ctx, tx, root.Key, record.SuperviseRequest{
@@ -425,7 +427,7 @@ func (e *Engine) recordChild(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	if resolution.Refusal != "" {
 		return e.refuseChild(ctx, tx, root, fact.Key, fact.ResolvedRepo, resolution)
 	}
-	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution)
+	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution, nil)
 }
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
@@ -489,7 +491,7 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}, &child); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
@@ -497,12 +499,18 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 
 // enterChild records a todo child under root's live tree, admitted at generation on the repository
 // at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
-// tree's gate is open. A re-entered child keeps the repository it was first recorded with.
-func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
+// tree's gate is open. A re-entered child (prior, its record) keeps the repository it was first
+// recorded with, and its Dispatch claim unless fact shows a newer one (ObserveClaim): admission's
+// synthetic fact for a stranded child names no claim at all.
+func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution, prior *record.Issue) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
 		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
-		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo, ClaimedBy: fact.ClaimedBy, ClaimSeq: fact.Seq}
+		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
+	if prior != nil {
+		child.ClaimedBy, child.ClaimSeq = prior.ClaimedBy, prior.ClaimSeq
+	}
+	child.ObserveClaim(fact.ClaimedBy, fact.Seq)
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}

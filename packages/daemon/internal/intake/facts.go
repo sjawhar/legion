@@ -123,13 +123,18 @@ const (
 	DispatchArtifactVersion          DispatchArtifactKind = "version"
 )
 
-// DispatchArtifact records one review or version event for a registered design document.
+// DispatchArtifact records one review or version event for a registered design document. Seed is
+// set on the gate seed's own read of Dispatch's approval (the daemon's seedGate) rather than on an
+// event: a changes request it reads closes the gate and answers a wait the registration started,
+// and tells the architect only when it closes a gate that was open, since otherwise the
+// registration, the event itself or the resume task already told it.
 type DispatchArtifact struct {
 	Key        string
 	ArtifactID string
 	Kind       DispatchArtifactKind
 	Version    int
 	Reason     string
+	Seed       bool
 }
 
 func (DispatchArtifact) isFact() {}
@@ -145,20 +150,30 @@ type DispatchAskOpened struct {
 
 func (DispatchAskOpened) isFact() {}
 
-// DispatchAskClosed is an answered or resolved ask. Both return a waiting architect to its tree.
+// DispatchAskClosed is an answered or resolved ask (State), its kind (`question`, or `approval`
+// for a design gate's request; empty when the event did not say) and the actor who closed it. Only
+// a person's answer or resolution returns a waiting architect to its tree; a session's or
+// Dispatch's own resolution does not.
 type DispatchAskClosed struct {
-	Key string
-	Ask string
+	Key   string
+	Ask   string
+	Kind  string
+	State string
+	Actor dispatch.Actor
 }
 
 func (DispatchAskClosed) isFact() {}
 
-// DispatchAskReply is a comment on an open ask that names whose turn it leaves. An agent turn
-// wakes a root that suspended itself on that ask; a human turn leaves it waiting.
+// DispatchAskReply is a comment on an ask, or Dispatch's ask.handed_back, with whose turn it
+// leaves and the actor who made it. WaitingOn is `agent` or `human` on an open ask (a hand-back
+// is `human`), and empty on a closed one. A person's reply that does not hand the ask back wakes a
+// root waiting on that ask, or an agent-turn one a root waiting on its design gate; a session of
+// the root's own tree handing an ask on an admitted root to the person starts a wait.
 type DispatchAskReply struct {
 	Key       string
 	Ask       string
 	WaitingOn string
+	Actor     dispatch.Actor
 }
 
 func (DispatchAskReply) isFact() {}
@@ -486,15 +501,23 @@ type SignOff struct{ Issue string }
 
 func (SignOff) isFact() {}
 
-// GateRegistered records a design document and its current version. ApprovedVersion is the version
-// Dispatch showed approved when register_gate read the document, set only when that approval is of
-// Dispatch's latest version (the read the gate seed makes), and 0 otherwise: a person who approved
-// before the architect registered has the gate open at registration itself.
+// GateRegistered records a design document and its current version, with what register_gate read
+// of Dispatch's approval of it, so a person's review given before the architect registered is never
+// waited on. ApprovedVersion is the version Dispatch showed approved, set only when that approval is
+// of Dispatch's latest version (the read the gate seed makes), and 0 otherwise: the gate opens at
+// registration. ChangesRequestedVersion is the version of a changes request Dispatch showed on its
+// latest version, with its reason, and 0 otherwise: the root keeps its slot with its architect told.
+// RequestWaitsOnAgent says Dispatch showed the open approval request waiting on the agent (a reply
+// or a newer version since it was handed to the person): no wait starts, since the person is not
+// asked to act, and the architect's hand-back of the request starts it.
 type GateRegistered struct {
-	Issue           string
-	ArtifactID      string
-	Version         int
-	ApprovedVersion int
+	Issue                   string
+	ArtifactID              string
+	Version                 int
+	ApprovedVersion         int
+	ChangesRequestedVersion int
+	ChangesReason           string
+	RequestWaitsOnAgent     bool
 }
 
 func (GateRegistered) isFact() {}

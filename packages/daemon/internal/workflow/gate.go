@@ -14,36 +14,51 @@ import (
 
 // gateRegistered records the gate an architect registered for its root, and logs it. With the
 // design gate off it is approved at once, and an open gate advances the admitted tree and releases
-// any READY the gate refused, including one refused before any gate was registered. A registration
-// Dispatch already showed approved at its latest version (ApprovedVersion, read by register_gate)
-// is recorded open before the closed check, so a root a person approved before its architect
-// registered keeps its slot and starts planning, rather than returning its slot to wait for the
-// gate seed's read of that same approval.
+// any READY the gate refused, including one refused before any gate was registered. What
+// register_gate read of Dispatch's approval travels with the registration, so a person's review
+// given before the architect registered is never left waiting on: an approval of the latest version
+// (ApprovedVersion) records the gate open, and the root keeps its slot and starts planning; a
+// changes request on it (ChangesRequestedVersion) records it closed with the architect told, and
+// the root keeps its slot at admitted to revise. A closed gate whose request Dispatch shows waiting
+// on the agent (RequestWaitsOnAgent: a reply or a newer version since the request) starts no wait
+// either, since the person is not asked to act; the architect's hand-back of the request starts it.
+// The architect is told the version the gate opened at, which an approval carried to a later
+// version makes the later one.
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
+	changesRequested := false
 	switch {
 	case e.cfg.DesignGate == config.DesignGateOff:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version)
 	case fact.ApprovedVersion >= fact.Version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion)
+	case fact.ChangesRequestedVersion >= fact.Version:
+		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateChangesRequested, fact.ChangesRequestedVersion)
+		changesRequested = true
 	}
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
 	}
 	e.logOnCommit(ctx, "workflow: design gate registered", "issue", issue.Key, "artifact", fact.ArtifactID,
-		"version", fact.Version, "open", classify.DesignGateOpen(gate), "policy", e.cfg.DesignGate)
+		"version", fact.Version, "open", classify.DesignGateOpen(gate), "changes_requested", changesRequested, "policy", e.cfg.DesignGate)
 	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err
 	}
-	if !classify.DesignGateOpen(gate) {
+	switch {
+	case changesRequested:
+		return intake.Result{}, e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-changes-requested", Version: gate.LatestVersion, Reason: fact.ChangesReason})
+	case !classify.DesignGateOpen(gate) && fact.RequestWaitsOnAgent:
+		e.logOnCommit(ctx, "workflow: root keeps its admission slot, since its approval request waits on the agent", "issue", issue.Key, "version", gate.LatestVersion)
+		return intake.Result{}, nil
+	case !classify.DesignGateOpen(gate):
 		return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{GateVersion: gate.LatestVersion},
 			fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
 	}
-	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
+	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion}); err != nil {
 		return intake.Result{}, err
 	}
 	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
@@ -118,7 +133,10 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 			return err
 		}
 	}
-	if fact.Kind == intake.DispatchArtifactChangesRequested {
+	// The gate seed's read of a changes request (Seed) tells the architect only when it closes a
+	// gate a racing registration opened: otherwise the registration, the live event or the resume
+	// task has told it already.
+	if fact.Kind == intake.DispatchArtifactChangesRequested && (!fact.Seed || wasOpen) {
 		if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
 			return err
 		}

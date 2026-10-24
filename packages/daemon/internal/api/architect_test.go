@@ -77,7 +77,10 @@ type statusRecorder struct {
 	// approved maps a document id to the version Dispatch shows approved, its latest; absent means
 	// no approval.
 	approved map[string]int
-	issues   map[string]dispatch.Issue
+	// approvals maps a document id to the whole approval Dispatch shows for it, read ahead of
+	// approved.
+	approvals map[string]dispatch.Approval
+	issues    map[string]dispatch.Issue
 }
 
 func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -117,6 +120,10 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 	issue, ok := r.documents[artifactID]
 	if !ok {
 		return dispatch.Approval{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "artifact not found"}
+	}
+	if approval, shown := r.approvals[artifactID]; shown {
+		approval.IssueKey = issue
+		return approval, nil
 	}
 	if version, approved := r.approved[artifactID]; approved {
 		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version}, nil
@@ -852,6 +859,40 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("gate facts = %#v, want the approved document to carry its approval and the other none", got)
+	}
+}
+
+// register_gate carries a changes request Dispatch shows on the document's latest version, with its
+// reason, so a request given between the architect's approval request and its registration keeps
+// the root in its slot with the architect told; and it carries an open request Dispatch shows
+// waiting on the agent, which starts no wait. A changes request a newer version superseded carries
+// nothing.
+func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	const changed, moved, superseded = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", "7c1e3a5b-9d2f-4b6a-8e0c-1d3f5a7b9c2e"
+	statuses.documents = map[string]string{changed: "LEGION-208", moved: "LEGION-208", superseded: "LEGION-208"}
+	reason := "name the rollback path"
+	statuses.approvals = map[string]dispatch.Approval{
+		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason},
+		moved:      {State: "awaiting", LatestVersion: 4, Version: new(3), AskID: "ask-approval", WaitingOn: "agent"},
+		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason},
+	}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	for _, artifact := range []string{changed, moved, superseded} {
+		if recorder := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 4,
+		}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gate register %s = %d: %s", artifact, recorder.Code, recorder.Body)
+		}
+	}
+	want := []intake.Fact{
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4},
+	}
+	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gate facts = %#v, want %#v", got, want)
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -256,25 +257,25 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch ask answered",
 			subject: "notifications.dispatch.issue.CAPTURE-4.ask.answered",
 			file:    "dispatch/ask-answered.json",
-			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007"},
+			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", State: "answered", Actor: dispatch.Actor{Kind: "user", ID: "human"}},
 		},
 		{
 			name:    "Dispatch ask resolved",
 			subject: "notifications.dispatch.issue.CAPTURE-4.ask.resolved",
 			file:    "dispatch/ask-resolved.json",
-			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007"},
+			want:    DispatchAskClosed{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", State: "resolved", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}},
 		},
 		{
 			name:    "Dispatch ask reply returning the turn to the agent",
 			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
 			file:    "dispatch/comment-ask-agent.json",
-			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent"},
+			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent", Actor: dispatch.Actor{Kind: "user", ID: "human"}},
 		},
 		{
 			name:    "Dispatch ask reply leaving the turn with the human",
 			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
 			file:    "dispatch/comment-ask-human.json",
-			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human"},
+			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}},
 		},
 		{
 			name:    "Dispatch issue claimed",
@@ -447,6 +448,22 @@ func TestADispatchIssueEventCarriesItsClaimHolder(t *testing.T) {
 	broken := strings.Replace(original, anchor, anchor+`,\"claim\":{\"actor\":{\"kind\":\"user\",\"id\":\"\"}}`, 1)
 	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(broken)); err == nil {
 		t.Fatal("decode of a claim with no actor id succeeded, want it refused")
+	}
+}
+
+// An approval request its asker hands back to the person is Dispatch's ask.handed_back, whose
+// payload is the ask: decoded as a reply that leaves the turn with the human, from the actor who
+// handed it back, which is what starts a root's wait on it.
+func TestADispatchAskHandedBackIsAHumanTurnReplyFromItsActor(t *testing.T) {
+	payload := `{"id":36,"issue_key":"CAPTURE-4","seq":11,"type":"ask.handed_back","actor":{"kind":"session","id":"session-architect"},"notify":true,` +
+		`"payload":{"id":"6c83cb7f-8f4e-4820-9e05-7c94fa725007","kind":"approval","state":"open"}}`
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-4.ask.handed_back", "CAPTURE", capturedRepositories, envelopeJSON(t, "dispatch-36", "dispatch", payload))
+	if err != nil {
+		t.Fatalf("decode ask.handed_back: %v", err)
+	}
+	want := DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}}
+	if decoded.Fact != want {
+		t.Fatalf("decoded ask.handed_back = %#v, want %#v", decoded.Fact, want)
 	}
 }
 

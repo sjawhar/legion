@@ -262,10 +262,15 @@ legion state --config legion.yaml --json |
 
 `waitingOn.kind` is `gate` with `gateVersion`, or `ask` with its ask identifier. `answeredAt` means
 the person answered; the root is ahead of never-run roots and resumes itself at the next free slot.
-Do not park or manually start it. An approval, requested changes, a question answer or resolution,
-an agent-turn reply, or a newer spec version wakes it. A missing `legion` label or a foreign
-Dispatch claim instead produces `unslotted`; Legion deliberately does not resume work another owner
-took. The merger's `READY` still waits for the design gate's current approved version.
+Do not park or manually start it. Only a person's act wakes it: an approval, requested changes, a
+person's answer, resolution or reply on one of the root's asks (a closed one included), and also a
+newer spec version, whoever wrote it, since the approval request then waits on the architect. An
+agent session's reply, answer or resolution never wakes it, nor does Dispatch retracting an ask. A
+root still `admitted` after its architect replied in an approval request's thread waits on a
+person only once the architect hands the request back (a reply leaving the turn with the human, or
+`dispatch request-approval`). A missing `legion` label or a foreign Dispatch claim instead produces
+`unslotted`; Legion deliberately does not resume work another owner took. The merger's `READY`
+still waits for the design gate's current approved version.
 
 ## An issue is held
 

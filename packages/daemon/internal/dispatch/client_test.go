@@ -83,9 +83,9 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 }
 
 // The list and the detail carry the issue's claim, which the record keeps as `<kind>:<id>`; an ask
-// detail carries whose turn an open ask waits on, which the boot catch-up reads for an agent-turn
-// reply it may have missed.
-func TestReadsCarryTheClaimHolderAndAnOpenAsksTurn(t *testing.T) {
+// detail carries whose turn an open ask waits on, who closed a closed one, and the newest reply in
+// its thread and its author, which the boot catch-up reads for a person's act it may have missed.
+func TestReadsCarryTheClaimHolderAndAnAsksTurnCloserAndNewestReply(t *testing.T) {
 	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -99,6 +99,18 @@ func TestReadsCarryTheClaimHolderAndAnOpenAsksTurn(t *testing.T) {
 		case "/api/v1/asks/6c83cb7f-8f4e-4820-9e05-7c94fa725007":
 			writeJSON(t, w, map[string]any{"ask": map[string]any{
 				"id": "6c83cb7f-8f4e-4820-9e05-7c94fa725007", "issue_key": "LEGION-1", "kind": "question", "state": "open", "waiting_on": "agent",
+			}, "replies": []map[string]any{
+				{"id": "reply-1", "author": map[string]any{"kind": "session", "id": "session-architect"}},
+				{"id": "reply-2", "author": map[string]any{"kind": "user", "id": "alice"}},
+			}})
+		case "/api/v1/asks/answered":
+			writeJSON(t, w, map[string]any{"ask": map[string]any{
+				"id": "answered", "issue_key": "LEGION-1", "kind": "question", "state": "answered", "answer": map[string]any{"user": "alice", "selected": []string{"Yes"}},
+			}, "replies": []map[string]any{}})
+		case "/api/v1/asks/resolved":
+			writeJSON(t, w, map[string]any{"ask": map[string]any{
+				"id": "resolved", "issue_key": "LEGION-1", "kind": "question", "state": "resolved",
+				"resolution": map[string]any{"kind": "retracted", "reason": "moot", "actor": map[string]any{"kind": "system", "id": "document-settlement"}},
 			}})
 		default:
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
@@ -125,8 +137,17 @@ func TestReadsCarryTheClaimHolderAndAnOpenAsksTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ask: %v", err)
 	}
-	if ask != (Ask{ID: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", IssueKey: "LEGION-1", Kind: "question", State: "open", WaitingOn: "agent"}) {
-		t.Fatalf("ask = %#v, want the open question waiting on the agent", ask)
+	if ask != (Ask{ID: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", IssueKey: "LEGION-1", Kind: "question", State: "open", WaitingOn: "agent",
+		LastReplyID: "reply-2", LastReplyBy: Actor{Kind: "user", ID: "alice"}}) {
+		t.Fatalf("ask = %#v, want the open question waiting on the agent with alice's reply newest", ask)
+	}
+	answered, err := client.Ask(context.Background(), "answered")
+	if err != nil || answered.ClosedBy != (Actor{Kind: "user", ID: "alice"}) {
+		t.Fatalf("answered ask = %#v, %v; want it closed by alice", answered, err)
+	}
+	resolved, err := client.Ask(context.Background(), "resolved")
+	if err != nil || resolved.ClosedBy != (Actor{Kind: "system", ID: "document-settlement"}) || resolved.LastReplyBy != (Actor{}) {
+		t.Fatalf("resolved ask = %#v, %v; want it closed by settlement with no reply", resolved, err)
 	}
 }
 
@@ -309,30 +330,51 @@ func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	}
 }
 
+// The artifact read carries the approval Dispatch derives, and, while a request is open, the
+// request's id and whose turn it waits on.
 func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/artifacts/artifact-6" {
-			t.Fatalf("request = %s %s, want GET /api/v1/artifacts/artifact-6", r.Method, r.URL.Path)
-		}
 		assertBearer(t, r)
-		writeJSON(t, w, map[string]any{
-			"id":        "artifact-6",
-			"issue_key": "LEGION-6",
-			"approval": map[string]any{
-				"state":          "approved",
-				"latest_version": 3,
-				"version":        3,
-			},
-		})
+		switch r.URL.Path {
+		case "/api/v1/artifacts/artifact-6":
+			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{"state": "approved", "latest_version": 3, "version": 3}})
+		case "/api/v1/artifacts/artifact-7":
+			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
+				"state": "awaiting", "latest_version": 4, "version": 3, "ask_id": "ask-approval", "waiting_on": "agent"}})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
 	}))
 	defer server.Close()
+	client := New(server.URL, dispatchToken)
 
-	approval, err := New(server.URL, dispatchToken).Approval(context.Background(), "artifact-6")
+	approval, err := client.Approval(context.Background(), "artifact-6")
 	if err != nil {
 		t.Fatalf("read approval: %v", err)
 	}
-	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 {
+	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 {
 		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3", approval)
+	}
+	awaiting, err := client.Approval(context.Background(), "artifact-7")
+	if err != nil {
+		t.Fatalf("read awaiting approval: %v", err)
+	}
+	if awaiting.State != "awaiting" || awaiting.AskID != "ask-approval" || awaiting.WaitingOn != "agent" || awaiting.ApprovedLatest() != 0 {
+		t.Fatalf("awaiting approval = %#v, want the open request ask-approval waiting on the agent", awaiting)
+	}
+}
+
+// A changes request counts only on Dispatch's latest version: a newer version supersedes it.
+func TestChangesRequestedLatestNamesOnlyTheLatestVersion(t *testing.T) {
+	reason := "name the rollback path"
+	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason}).ChangesRequestedLatest(); version != 4 || got != reason {
+		t.Fatalf("changes requested on the latest version = %d %q, want 4 with the reason", version, got)
+	}
+	if version, _ := (Approval{State: "changes_requested", LatestVersion: 5, Version: new(4)}).ChangesRequestedLatest(); version != 0 {
+		t.Fatalf("changes requested on an older version = %d, want 0", version)
+	}
+	if version, got := (Approval{State: "changes_requested", LatestVersion: 4, Version: new(4)}).ChangesRequestedLatest(); version != 4 || got == "" {
+		t.Fatalf("changes requested with no reason = %d %q, want 4 with Dispatch's default reason", version, got)
 	}
 }
 

@@ -120,25 +120,68 @@ func (c *Claim) Holder() string {
 	return c.Kind + ":" + c.ID
 }
 
+// Actor is who Dispatch names as having made a change: Kind `user` is a person, `session` an agent
+// session, and `system` Dispatch itself (its document settlement among them). Every Dispatch event
+// carries one, and so does an ask's answer, resolution and reply.
+type Actor struct {
+	Kind string
+	ID   string
+}
+
+// Person says whether the actor is a person: only a person's act answers a root waiting on one.
+func (a Actor) Person() bool { return a.Kind == "user" }
+
 // Ask is the bounded portion of a Dispatch ask detail the daemon needs to catch up a suspended
 // architect after boot. WaitingOn is whose reply an open ask needs next, `human` or `agent`; Dispatch
-// leaves it empty on an answered or resolved ask.
+// leaves it empty on an answered or resolved ask. ClosedBy is who closed a closed ask: the person
+// whose answer it carries (Dispatch takes an answer from a person alone), or the actor its
+// resolution names; zero on an open ask. LastReplyID and LastReplyBy are the newest reply in its
+// thread and its author, both zero when it has none.
 type Ask struct {
-	ID        string
-	IssueKey  string
-	Kind      string
-	State     string
-	WaitingOn string
+	ID          string
+	IssueKey    string
+	Kind        string
+	State       string
+	WaitingOn   string
+	ClosedBy    Actor
+	LastReplyID string
+	LastReplyBy Actor
 }
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
-// the document (empty for a project document).
+// the document (empty for a project document). While an approval request is open (State
+// `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`.
 type Approval struct {
 	IssueKey      string
 	State         string
 	LatestVersion int
 	Version       *int
 	Reason        *string
+	AskID         string
+	WaitingOn     string
+}
+
+// ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
+// version, and 0 otherwise.
+func (a Approval) ApprovedLatest() int {
+	if a.State == "approved" && a.Version != nil && *a.Version == a.LatestVersion {
+		return *a.Version
+	}
+	return 0
+}
+
+// ChangesRequestedLatest is the version of the changes request Dispatch shows on its latest version
+// and the request's reason, or 0 when the latest version has none: a newer version superseded it,
+// the latest review approves, or an approval request is open again.
+func (a Approval) ChangesRequestedLatest() (int, string) {
+	if a.State != "changes_requested" || a.Version == nil || *a.Version != a.LatestVersion {
+		return 0, ""
+	}
+	reason := "Dispatch reports changes requested"
+	if a.Reason != nil && *a.Reason != "" {
+		reason = *a.Reason
+	}
+	return *a.Version, reason
 }
 
 // Error is a non-success response from Dispatch. Code is empty only when the response did not
