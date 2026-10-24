@@ -17,7 +17,7 @@
       "surface": "This role container, the block copied from the page unedited, and the image's own PATH.",
       "command": "the published `python3 - <host> <port> <<'PY' … PY` block against a Service address that answers and against a port nothing listens on ; `command -v psql redis-cli mysql mongosh nc python3` ; `python3 -c 'import socket'`",
       "observed": "Run as published, with no edit, it prints `answered` and exits 0 against a Service address of the shape the section builds (`<name>.<namespace>.svc.cluster.local`, a port that answers), and against a port nothing listens on it ends in exactly ten seconds with `TimeoutError: timed out`, exit 1 — the two outcomes the section describes. It assumes nothing: `python3` is on the image's PATH and the block imports only the standard library's `socket`, while `psql`, `redis-cli`, `mysql`, `mongosh` and even `nc` are all absent, which is what the section says and why the step is this block rather than a client.",
-      "headSha": "63a5ab96903a95996e30bae1d0d8a7f2b15f5af5",
+      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
       "negativeControl": "The same block against the address of a workload that is demonstrably listening — my own Job, whose log carried Postgres's `database system is ready to accept connections` — times out in ten seconds from this container, which is this deployment's fence before the declarations are applied and the negative half of the step as a role meets it today."
     },
     {
@@ -25,7 +25,7 @@
       "surface": "This role container with the in-cluster configuration taken away, which is the shape a deployment that projects no token leaves.",
       "command": "env -u KUBERNETES_SERVICE_HOST -u KUBERNETES_SERVICE_PORT kubectl auth can-i create jobs | create services | --list | get jobs, each with its exit status",
       "observed": "Exactly the output the section now publishes: `dial tcp 127.0.0.1:8080: connect: connection refused` and `Warning: the server doesn't have a resource type 'jobs'`, with the same for `create services`. The exit status was 1 in all four shapes I tried, so the section's hedge (`may still exit 0`) did not reproduce here; the instruction built on it — read anything other than a bare `yes` as not having it — is the safe reading either way and is what a role acts on.",
-      "headSha": "63a5ab96903a95996e30bae1d0d8a7f2b15f5af5",
+      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
       "negativeControl": "With the configuration in place the same commands answer the bare `yes` and `no` the section predicts for a deployment whose declarations are not applied: `create jobs` yes, `create services` no."
     },
     {
@@ -33,15 +33,15 @@
       "surface": "A real Job in the namespace, submitted without the reachability label, from this role container.",
       "command": "kubectl apply of a Job with no reachability label ; kubectl wait --for=condition=Ready ; the section's own `kubectl get pod -l job-name=<workload> -o jsonpath='{.items[0].metadata.labels}'` ; `kubectl get endpoints <workload>` ; the published reachability block against its address ; kubectl delete job",
       "observed": "The unlabelled workload is admitted with no complaint, starts (Ready in 1 m 22 s) and costs its quota, exactly as the section now warns — nothing refuses it and nothing says so. The section's check runs and is useful: the jsonpath prints the pod's whole label set, which carries only the Job controller's own labels and the cluster's topology labels, so a role comparing it against the deployment's declaration sees at once that the opt-in label is absent. The reachability block times out against the workload's address while the workload is demonstrably up, which is the symptom the section names.",
-      "headSha": "63a5ab96903a95996e30bae1d0d8a7f2b15f5af5",
+      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
       "negativeControl": "The other half of the stated symptom could not be run and is recorded rather than simulated: `kubectl get endpoints <workload>` is refused `Forbidden … cannot get resource \"endpoints\"` for this identity (see the observations — the grant the child issue adds is on Services, and endpoints is a resource of its own)."
     },
     {
       "criterion": "No name of the private infrastructure appears anywhere this branch adds or edits, handoffs included.",
-      "surface": "The branch's whole diff against its fork point — 592 lines, five files — read line by line for the four names the cluster gave me at run time.",
+      "surface": "The branch's whole diff against its fork point — 592 lines, nine files — read line by line (corrected by the implementer on 2026-10-24: this said five files, which left out the four .legion/ handoffs, one of which is where the name was) for the four names the cluster gave me at run time.",
       "command": "jj diff --git --from 'fork_point(main@origin | @)' --to @- ; a grep of every added line for the namespace, the compute-class selector, the scratch storage class and the Job admission policy, each with word boundaries ; then the same four over every tracked file",
       "observed": "No private name is added anywhere, handoffs included. The namespace's literal is an ordinary English word, and the three added lines that match it are prose using that word — two in the guidance (`kubectl … no in-cluster configuration`, `shared with the team's …`) and one quoting the first inside the implement handoff — not the namespace in a Kubernetes context. The compute-class selector, the scratch storage class and the admission policy appear nowhere in the diff or in any tracked file. The section still names them only as placeholders and sends a role to its own credential for the namespace.",
-      "headSha": "63a5ab96903a95996e30bae1d0d8a7f2b15f5af5",
+      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
       "negativeControl": "The grep is over the diff rather than the tree, so a name that exists at main could not make the branch look clean, and the word-boundary matches were read in context rather than counted — which is the whole difficulty here, since the repository's own private-name check cannot see any of these four and a green lint is no evidence."
     },
     {
@@ -49,7 +49,7 @@
       "surface": "The page itself, parsed rather than retyped, against live admission; and the branch's own file list.",
       "command": "a script extracting the section's yaml block from docs/kubernetes.md, filling its two placeholders as a role fills them, then kubectl apply --dry-run=server ; jj diff --from 75e45efd --to @- --name-only",
       "observed": "The manifest as published is accepted (`job.batch/… created (server dry run)`). This round touched `docs/kubernetes.md` and the four handoffs and nothing else, so the capability row, its golden and the nine-path diff I verified last round stand unchanged. The section's advice to write manifests outside the checkout is sound and its premise is real: a file written into the workspace appears in `jj status` as an added path of the working-copy commit at once, and the password in it would reach the branch.",
-      "headSha": "63a5ab96903a95996e30bae1d0d8a7f2b15f5af5",
+      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
       "negativeControl": "`TMPDIR` in a role container is on the issue volume and outside the checkout, so the `cd \"${TMPDIR:-/tmp}\"` the sequence now opens with is both available and the right disk; the file I wrote into the workspace to prove the snapshot was removed and `jj status` is clean again."
     }
   ],

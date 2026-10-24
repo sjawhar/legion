@@ -2483,20 +2483,26 @@ kubectl auth can-i create services  # may it give one a name on the network
 
 Neither answer is the one a role with no credential gets. The image ships no kubeconfig and sets
 no `KUBECONFIG`, so without a projected token `kubectl` builds no in-cluster configuration at
-all: it falls back to `localhost:8080`, prints `dial tcp 127.0.0.1:8080: connect: connection
-refused` and `Warning: the server doesn't have a resource type 'jobs'`, and may still **exit 0**.
-That is as conclusive as `no` — nothing in this section applies, and a tool the work needs on
-the issue's own files arrives the way it already does, below. A plain `yes` to the first and `no`
-to the second is a deployment whose declarations are not applied yet: a workload can be started
-but not reached, which is what that namespace enforces for every build in it. Read anything
-other than a bare `yes` as not having it.
+all: it falls back to `localhost:8080` and **exits 1**, its last line `The connection to the
+server localhost:8080 was refused - did you specify the right host or port?` (measured from a
+role container with the in-cluster environment removed). That is as conclusive as `no` — nothing
+in this section applies, and a tool the work needs on the issue's own files arrives the way it
+already does, below. A plain `yes` to the first and `no` to the second is a deployment whose
+declarations are not applied yet: a workload can be started but never reached.
+
+**Unless both commands answer a bare `yes`, submit nothing.** The sequence below is
+unconditional and its only `kubectl delete job` is after the Service steps, which are refused
+`Forbidden` wherever the second answer is `no` — so a Job submitted on anything but two `yes`es
+is a four-processor workload nobody removes, sitting on the namespace's shared quota until its
+deadline runs out.
 
 The namespace is the role's own and is never written down: the projected credential names it in
 `/var/run/secrets/kubernetes.io/serviceaccount/namespace`, which is the namespace `kubectl` uses
 by default, so no command here passes `-n`.
 
-The admission rules the workload must satisfy, each enforced in the namespace rather than in
-anyone's good behaviour:
+The rules the workload must satisfy. Every one but the last is enforced by the namespace's
+admission rather than by anyone's good behaviour; the last is enforced by nothing, which is why
+it is marked where it stands:
 
 - it runs under gVisor (`runtimeClassName: gvisor`) on the compute class the deployment's
   declaration names, selected by `nodeSelector`; that class creates a machine rather than falling
@@ -2518,20 +2524,25 @@ anyone's good behaviour:
   reachable. **This is the one rule admission does not enforce**: a workload without that label
   is admitted, started, charged against the shared quota, and reachable by nothing, because the
   ingress rule selects the label rather than the namespace. Nothing refuses it and nothing says
-  so; the symptom is the reachability check below timing out against a Service that has
-  endpoints, which is why that check is the step after the wait rather than the last. A role that
-  sees it checks the label on its own pod
-  (`kubectl get pod -l job-name=<workload> -o jsonpath='{.items[0].metadata.labels}'`) against
-  the deployment's declaration. The label's name is in that declaration, with the compute class,
-  the storage class and the namespace; a role reads it there rather than here.
+  so; the symptom is the reachability check below never connecting and ending at its deadline,
+  which is what tells it apart from a database still starting up, and why that check is the step
+  after the wait rather than the last. A role that sees it compares the labels on its own pod
+  (`kubectl get pod -l job-name=<workload> -o jsonpath='{.items[0].metadata.labels}'`) with the
+  deployment's declaration — not the Service's endpoints, which this identity may not read
+  (`kubectl auth can-i get endpoints` answers `no`). The label's name is in that declaration,
+  with the compute class, the storage class and the namespace; a role reads it there rather than
+  here.
 
 Name the workload for the issue, as everything else on this cluster is named
 (`issue-legion-<project>-<issue key lowercased>`, `legion-<project>-<issue key lowercased>`
-above): `<issue key lowercased>-<what it is>`, for instance `infra-71-postgres`. Every project's
-agents share one identity in that namespace, so `postgres` or `db` is a name another role is
-using: the second `apply` of it either fails on the Job's immutable fields or patches that role's
-workload, `kubectl wait -l job-name=…` waits on its pod, and the `kubectl delete job` at the end
-of the sequence takes its running database and its Service away mid-test.
+above): `<issue key lowercased>-<what it is>`, for instance `infra-71-postgres`. An issue key
+carries its project, so that name is already unique among the projects whose agents share this
+namespace and its one identity — and a bare `postgres` or `db` is a name another role is using.
+Taking it does not overwrite that role's workload (this identity may not patch a Job: `kubectl
+auth can-i patch jobs` answers `no`, so the second `apply` is refused), but everything after it
+acts on the first role's workload all the same: `kubectl wait -l job-name=…` waits on its pod,
+the reachability check reaches its database, and the `kubectl delete job` at the end of the
+sequence takes it and its Service away mid-test.
 
 ```yaml
 apiVersion: batch/v1
@@ -2596,10 +2607,20 @@ uid=$(kubectl get job <workload> -o jsonpath='{.metadata.uid}')    # what the Se
 sed "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -    # the name on the network
 kubectl wait --for=condition=Ready pod -l job-name=<workload> --timeout=300s
 ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
-python3 - "<workload>.$ns.svc.cluster.local" 5432 <<'PY'           # does it answer?
-import socket, sys
-with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=10):
-    print("answered")
+python3 - "<workload>.$ns.svc.cluster.local" 5432 <<'PY'           # does it answer yet?
+import socket, sys, time
+host, port = sys.argv[1], int(sys.argv[2])
+deadline = time.monotonic() + 60
+while True:
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            print("answered")
+            break
+    except OSError as error:
+        if time.monotonic() >= deadline:
+            print(f"never answered: {type(error).__name__}: {error}")
+            sys.exit(1)
+        time.sleep(2)
 PY
 kubectl logs -l job-name=<workload> --tail=5                       # and what it says it is doing
 kubectl delete job <workload>                                      # takes its pod and its Service
@@ -2609,18 +2630,24 @@ kubectl get jobs,pods                                              # nothing of 
 That check is `python3`, which the image carries, because **the role container has no client for
 any of these servers**: `psql`, `redis-cli` and their kind are not in the image
 ([Worker image](#worker-image)), a role may not `exec` into the workload's pod, and installing
-one in its own pod is the withheld `operator-setup` capability. What the check proves is what a
-role needs first and what the label failure above hides: that the address resolves and the port
-answers. A timeout here, against a Service whose `kubectl get endpoints <workload>` shows
-endpoints, is the missing reachability label rather than a workload that has not started.
+one in its own pod is the withheld `operator-setup` capability. What it proves is what a role
+needs first: that the address resolves and the port answers.
+
+It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
+readiness probe, so `condition=Ready` means the container started, and a database spends its
+first seconds initialising with its listener closed — `postgres:16`'s entrypoint does exactly
+that. **So the two failures are different, and the loop is what separates them.** A connection
+*refused*, in the first seconds, is the workload reachable and not listening yet: the loop
+retries and it answers. A connection that *times out* every time until the deadline is the
+workload unreachable — the packets are dropped rather than refused, which is what the missing
+reachability label above produces, and `never answered: TimeoutError` is how the step reports it.
+Read the first as starting up and the second as the label.
+
 Speaking the protocol is a client library onto the issue's own disk, the way every other tool
 that works from the checkout arrives (below), run from the checkout against that same address —
-never a binary installed into the pod.
-
-Before the declarations are applied, the Service steps are refused `Forbidden` and the sequence
-stops there; that refusal is this deployment's state, not a mistake in the role's manifest. The
-last line asks only for Jobs and pods for the same reason: reading Services needs the same grant
-as creating them.
+never a binary installed into the pod. The last line asks only for Jobs and pods because this
+identity may not read Services either: `kubectl auth can-i get services` answers `no` wherever
+`create services` does.
 
 What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
 which belongs to another namespace and to one node at a time, and a role may not run a command
