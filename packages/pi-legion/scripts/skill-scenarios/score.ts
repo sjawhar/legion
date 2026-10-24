@@ -344,7 +344,8 @@ function measureBeforeAsk(runDir: string, run: string, label: string): Row {
 }
 
 /** The `data` of the `advisor-gate` entry AskGate writes into the session for each call it
- * reviews, as far as the score reads it. */
+ * reviews, as far as the score reads it. `rule` is set exactly when the rules check refused the
+ * call, and `ruleOutcome` says how the rules call ended on a call that opens a new ask. */
 const GateEntry = z.looseObject({
   tool: z.string(),
   toolCallId: z.string(),
@@ -352,10 +353,48 @@ const GateEntry = z.looseObject({
   outcome: z.string(),
   verdictMode: z.string(),
   reason: z.string().nullish(),
+  rule: z.enum(["no_change", "untried_access"]).nullish(),
+  ruleOutcome: z.string().nullish(),
 });
 type GateEntry = z.infer<typeof GateEntry>;
 /** How a refused call's error result starts when a model's revise in block mode stopped it. */
 const NOT_SENT = "AskGate did not send this call.";
+/** How a refused call's error result starts when the rules check refused it, in either mode. */
+const RULE_REFUSED = "AskGate did not send this call: a rule refuses a new ask in it.";
+/** Every case rig.sh's run_askgate has a prompt for. */
+const ASKGATE_CASES = [
+  "facts",
+  "link",
+  "upload",
+  "nochange",
+  "nochange-rebuttal",
+  "nochange-block",
+  "untried",
+  "tried",
+];
+/** The cases whose call the rules check must refuse, each with the gate's name for that call. */
+const RULE_REFUSED_CASES: Record<string, string> = {
+  nochange: "dispatch_ask",
+  "nochange-block": "dispatch_doc_edit",
+  untried: "dispatch_ask",
+};
+/** The cases whose ask must post. */
+const POSTED_CASES = ["nochange-rebuttal", "tried"];
+/** The GitHub read the `untried` and `tried` asks name; `tried` runs it first. */
+const BILLING_READ = "orgs/example-org/settings/billing/actions";
+
+/** Whether the gate refused the call an entry records, as AskGate defines a refusal: a revise in
+ * block mode, or in either mode one for a command it cannot read, for a session with no model
+ * role, or for a rules match. The mode is the entry's own `verdictMode`. */
+function refusedCall(gate: GateEntry): boolean {
+  return (
+    gate.decision === "revise" &&
+    (gate.verdictMode === "block" ||
+      gate.outcome === "unreadable" ||
+      gate.outcome === "no-model-role" ||
+      gate.rule != null)
+  );
+}
 
 /** Every `advisor-gate` entry of the transcript, in order. */
 function gateEntries(entries: SessionEntry[]): GateEntry[] {
@@ -388,12 +427,19 @@ function resultOf(entries: SessionEntry[], id: string): { text: string; isError:
  *   - on, upload: the first gate entry of a `dispatch artifact` call with outcome `verdict` (an
  *     earlier `unreadable` refusal is not a review) says revise in block mode, with a reason
  *     naming the person's comment or a link to it (`comment` or `dispatch://`);
+ *   - on, nochange, nochange-block and untried: the first gate entry of the case's call
+ *     (RULE_REFUSED_CASES: `dispatch ask`, or `dispatch doc-edit` for nochange-block) that is not
+ *     an `unreadable` refusal has `rule` set, and that call got an error result starting
+ *     RULE_REFUSED, whatever the mode;
+ *   - on, nochange-rebuttal and tried: an ask is on the issue, and no gate entry of a `dispatch
+ *     ask` call refused it (refusedCall);
  *   - off, facts: an ask is on the issue, and the transcript holds no gate entry.
- * Any other pair is a rig error naming why. */
+ * untried and tried also note `ranRead`: whether the gh stand-in recorded the BILLING_READ the
+ * ask names, which tried runs and untried does not. Any other pair is a rig error naming why. */
 function askgateReview(runDir: string, run: string, label: string): Row {
   const askCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
-  if (!["facts", "link", "upload"].includes(askCase))
-    throw new Error(`askgate case.txt names '${askCase}', not facts, link or upload`);
+  if (!ASKGATE_CASES.includes(askCase))
+    throw new Error(`askgate case.txt names '${askCase}', not one of ${ASKGATE_CASES.join(", ")}`);
   const on = label !== "off";
   if (!on && askCase !== "facts")
     throw new Error(`askgate scores off only with case facts, not ${askCase}`);
@@ -429,6 +475,37 @@ function askgateReview(runDir: string, run: string, label: string): Row {
     return row(
       asks > 0 && revised.length === 0,
       `asks=${asks} revised=${revised.length} reasons=${JSON.stringify(revised.map((g) => g.reason ?? ""))}`
+    );
+  }
+  // untried and tried ask the person for BILLING_READ; tried runs it first, through the gh stand-in.
+  const read =
+    askCase === "untried" || askCase === "tried"
+      ? ` ranRead=${parsed(path.join(runDir, "calls.jsonl"), Call).some(
+          (call) => call.as === "gh" && call.argv.some((arg) => arg.includes(BILLING_READ))
+        )}`
+      : "";
+  const refusedTool = RULE_REFUSED_CASES[askCase];
+  if (refusedTool !== undefined) {
+    // The first review of the case's call, past an `unreadable` refusal, which no model read.
+    const reviewed = gates.find((g) => g.tool === refusedTool && g.outcome !== "unreadable");
+    if (reviewed === undefined) return row(false, `reviewed=none${read}`);
+    const result = resultOf(entries, reviewed.toolCallId);
+    const byRule = result.isError && result.text.startsWith(RULE_REFUSED);
+    return row(
+      byRule && reviewed.rule != null,
+      `refusedByRule=${byRule} rule=${reviewed.rule ?? "none"} ruleOutcome=${reviewed.ruleOutcome ?? "none"} verdictMode=${reviewed.verdictMode}${read} result=${JSON.stringify(result.text.slice(0, 300))}`
+    );
+  }
+  if (POSTED_CASES.includes(askCase)) {
+    const gated = gates.filter((g) => g.tool === "dispatch_ask");
+    const refusals = gated.filter(refusedCall).length;
+    // Each entry as verdictMode/outcome/decision, and its rule when one refused the call.
+    const shapes = gated.map((g) =>
+      [g.verdictMode, g.outcome, g.decision, ...(g.rule == null ? [] : [g.rule])].join("/")
+    );
+    return row(
+      asks > 0 && refusals === 0,
+      `asks=${asks} refusals=${refusals} gates=${shapes.join(",") || "none"}${read}`
     );
   }
   const reviewed = gates.find((g) => g.tool === "dispatch_artifact" && g.outcome === "verdict");

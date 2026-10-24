@@ -37,14 +37,23 @@
 #                   search, never its own environment or the Dispatch HTTP API. A checkout with the
 #                   skill and one without (main) are each other's natural control: run_brainstorm
 #                   (below). Scored by brainstormSurface.
-#   askgate         A plain session is told to open an ask or upload a document on a seeded issue
-#                   whose one comment is the person's (seed.ts askgate), with AskGate, the Envoy
-#                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
-#                   built with --envoy-json holding {"askgate":{"enabled":false}}).
+#   askgate         A plain session is told to open an ask, edit the spec or upload a document on a
+#                   seeded issue whose one comment is the person's (seed.ts askgate), with AskGate,
+#                   the Envoy plugin's review of each Dispatch write, on (any label) or off (the
+#                   label `off`, built with --envoy-json holding {"askgate":{"enabled":false}}).
 #                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
-#                   that do not help the choice), `link` (an ask linking the person's comment) or
-#                   `upload` (an upload of the comment as a document to link). Each run writes it to
-#                   <run>/case.txt (run_askgate). Scored by askgateReview.
+#                   that do not help the choice), `link` (an ask linking the person's comment),
+#                   `upload` (an upload of the comment as a document to link), and five cases of
+#                   AskGate's rules check: `nochange` (an ask whose own recommendation keeps the
+#                   nightly export at 02:00 as it is), `nochange-rebuttal` (that ask, sent with
+#                   --advisor-rebuttal), `nochange-block` (a dispatch doc-edit that inserts that ask
+#                   as an ask block in the issue's spec), `untried` (an ask that asks the person to
+#                   run a gh read the agent did not run) and `tried` (that ask, after the agent ran
+#                   the read and got the gh stand-in's error). SKILL_SCENARIOS_ASKGATE_MODE, warn or
+#                   block, is the agent's OMP_ASKGATE; unset, the agent gets none and AskGate runs in
+#                   block mode. Each run writes the case to <run>/case.txt and a set mode to
+#                   <run>/mode.txt (run_askgate). Scored by askgateReview, which reads the mode from
+#                   AskGate's own record of each call: `facts` and `upload` pass only in block mode.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
 # whose skills state it. So every comparison carries an ablate label: a checkout of the head with
@@ -67,7 +76,9 @@
 #   SKILL_SCENARIOS_WORK      work directory, outside any checkout (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run may take (default 1500)
-#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link or upload (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link, upload, nochange, nochange-rebuttal,
+#                                 nochange-block, untried or tried (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_MODE  askgate: warn or block, the agent's OMP_ASKGATE (unset: block)
 #
 # Each run:
 #   - Its agent is `omp -p` on the Oh My Pi the daemon pins (.omp-pin), in the label's profile
@@ -379,7 +390,7 @@ start_dispatch() {
     pick_port dispatch_port
     offset=$(log_size dispatch)
     DATABASE_URL="postgres://postgres:ci@127.0.0.1:$pg_port/postgres?sslmode=disable" DISPATCH_E2E_PORT=$dispatch_port \
-      FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL= start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
+      FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL='' start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 300 "Dispatch to answer /api/v1/whoami" \
       curl -fsS -o /dev/null -H 'Authorization: Bearer e2e-token' "http://127.0.0.1:$dispatch_port/api/v1/whoami" || result=$?
@@ -448,16 +459,20 @@ seed_dispatch() {
   message=$(jq -r .message "$R/fixture.json")
 }
 
-# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with
-# Dispatch as its own and no Envoy (an address nothing listens on) or NATS, then reads back what it
-# left on Dispatch, for the score, with `seed.ts CAPTURE` (default `capture`).
+# dispatch_session NAME [CAPTURE [VAR=VALUE...]] runs $R/prompt.txt as a plain session outside
+# Legion, with Dispatch as its own and no Envoy (an address nothing listens on) or NATS, and each
+# VAR=VALUE as one more line of its pane file, then reads back what it left on Dispatch, for the
+# score, with `seed.ts CAPTURE` (default `capture`).
 dispatch_session() {
+  local name=$1 capture=${2:-capture}
+  shift $(($# < 2 ? $# : 2))
   base_env
   standins
   grep '^DISPATCH_' "$services_env" >>"$R/pane.env"
   echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
-  launch "$1"
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
+  [ $# = 0 ] || printf '%s\n' "$@" >>"$R/pane.env"
+  launch "$name"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "$capture" "$R/fixture.json" "$R") \
     >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
 }
 
@@ -484,19 +499,34 @@ run_measure_before_ask() {
 }
 
 # The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
-# write the agent makes. The case's prompt names that issue, and `link` names the comment too.
+# write the agent makes. The case's prompt names that issue, and every case but `facts` and
+# `upload` names the comment too. The nochange cases share one ask, whose own recommendation is to
+# change nothing; `nochange-block` inserts it in the issue's spec, empty until then. `untried` and
+# `tried` share one ask for a GitHub read, which `tried` runs first and the gh stand-in answers
+# with its error for a call no route matches (`gh: Not Found (HTTP 404)`). A set
+# SKILL_SCENARIOS_ASKGATE_MODE is the pane's OMP_ASKGATE and <run>/mode.txt; unset, the pane gets
+# no OMP_ASKGATE, so AskGate runs in block mode.
 run_askgate() {
-  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
+  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing
+  case $mode in '' | warn | block) ;; *) fail "SKILL_SCENARIOS_ASKGATE_MODE is '$mode', not warn or block" ;; esac
   printf '%s\n' "$askCase" >"$R/case.txt"
+  [ -z "$mode" ] || printf '%s\n' "$mode" >"$R/mode.txt"
   seed_dispatch askgate
   ref=$(jq -r .comment_ref "$R/fixture.json")
+  ask="Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as $ref asks? I recommend keeping it at 02:00 as it is."
+  billing='gh api orgs/example-org/settings/billing/actions'
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
   link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Move the nightly export to 04:00 UTC, as %s asks? I recommend moving it." Options: "Move it to 04:00", "Keep it at 02:00".\n' "$issue" "$ref" ;;
   upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
-  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
+  nochange) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$ask" ;;
+  nochange-rebuttal) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, and send it with the flag --advisor-rebuttal whose value is this line: "The person asked for the move, so keeping 02:00 needs their authority." Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$ask" ;;
+  nochange-block) printf 'With dispatch doc-edit, insert this ask block at the end of the spec of Dispatch issue %s, word for word, and do nothing else:\n\n:::ask{#export-time urgency="med"}\n%s\n\n- Keep it at 02:00\n- Move it to 04:00\n:::\n' "$issue" "$ask" ;;
+  untried) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Do not run the command it names yourself. Question: "Can you run %s and paste its output here? I need to know how many Actions minutes the organization has left before the nightly export moves to 04:00 UTC, as %s asks." Options: "Done", "Cannot run it".\n' "$issue" "$billing" "$ref" ;;
+  tried) printf 'First run %s yourself. It will fail. Then open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, with the exact error the command printed in place of <error>. Question: "I ran %s and it failed with <error>. Can you run it with your access and paste its output here? I need to know how many Actions minutes the organization has left before the nightly export moves to 04:00 UTC, as %s asks." Options: "Done", "Cannot run it".\n' "$billing" "$issue" "$billing" "$ref" ;;
+  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
   esac >"$R/prompt.txt"
-  dispatch_session "$name" capture-askgate
+  dispatch_session "$name" capture-askgate ${mode:+"OMP_ASKGATE=$mode"}
 }
 
 # A tiny to-do CLI in a scratch git repository with no Dispatch configuration and no word of due
@@ -568,6 +598,7 @@ MDEOF
   git -C "$R/cwd" add -A
   git -C "$R/cwd" -c user.name=rig -c user.email=rig@example.invalid -c commit.gpgsign=false \
     commit -qm "A tiny to-do CLI"
+  # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
   printf '/brainstorming a small feature: let a task in this to-do CLI carry an optional due date, and have `list` show overdue tasks first.\n' \
     >"$R/prompt.txt"
   dispatch_session "$name" capture-brainstorm
@@ -779,8 +810,12 @@ cmd_batch() {
   batch_scenario=$1
   case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | askgate) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload) ;;
-    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link or upload (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried) ;;
+    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+  esac
+  [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_MODE:-} in
+    '' | warn | block) ;;
+    *) fail "an askgate batch takes SKILL_SCENARIOS_ASKGATE_MODE unset, warn or block (got '$SKILL_SCENARIOS_ASKGATE_MODE')" ;;
   esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   shift 2
