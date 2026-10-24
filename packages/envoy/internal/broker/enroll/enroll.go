@@ -1011,17 +1011,29 @@ func (s *Service) SessionID(ctx context.Context, id string) (string, error) {
 	return *sessionID, nil
 }
 
-// Replay records a jti; a unique violation means it was seen. Expired rows are pruned here too,
-// so the table stays bounded without a separate job.
+// Replay records a jti, answering false when it was already recorded. It runs in the transaction
+// ctx carries (oauthstore.TxFrom), as machine.Service.LoginDevice records a device login's request
+// object in the OAuth provider's transaction, and on the pool when ctx carries none, so a caller
+// holding a transaction never waits for a second pooled connection. A jti recorded on the pool
+// also prunes the expired ones, so the table stays bounded without a separate job; one recorded in
+// a transaction prunes nothing, since the prune's row locks would hold every concurrent caller's
+// prune behind that transaction until it ends.
 func (s *Service) Replay(ctx context.Context, jti string, expires time.Time) (bool, error) {
-	_, err := s.Store.Pool.Exec(ctx, `insert into proof_jtis (jti, expires_at) values ($1,$2)`, jti, expires)
-	if store.IsUniqueViolation(err) {
-		return false, nil
+	var db execer = s.Store.Pool
+	tx, inTx := oauthstore.TxFrom(ctx)
+	if inTx {
+		db = tx
 	}
+	tag, err := db.Exec(ctx, `insert into proof_jtis (jti, expires_at) values ($1,$2) on conflict (jti) do nothing`, jti, expires)
 	if err != nil {
 		return false, err
 	}
-	_, _ = s.Store.Pool.Exec(ctx, `delete from proof_jtis where expires_at < now()`)
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	if !inTx {
+		_, _ = s.Store.Pool.Exec(ctx, `delete from proof_jtis where expires_at < now()`)
+	}
 	return true, nil
 }
 
