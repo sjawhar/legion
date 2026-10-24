@@ -9,6 +9,21 @@
   leaves AskGate on and names the file and `askgate.enabled`, and never fails the Dispatch or Envoy
   read. A checkout's `askgate` section is not read: `CheckoutEnvoyConfig.askgateError` names it,
   and `sessionSettings` says it in its notice.
+- `dispatch-execute` exports `readDocumentBlocks(client, target, context)`, with the types
+  `DocumentTarget`, `DocumentTargetContext`, `DocumentBlocks` and `DocumentBlock`. It reads the
+  blocks of the live document that `dispatch doc-edit` would edit for the same arguments. It
+  gives the document's own name, as Dispatch stores it, and each block's markdown, cut from the
+  UTF-8 byte range Dispatch reports. It finds the owner from the target, its ref or
+  `LEGION_ISSUE`, against `context`, and the document by id, slug, filename, the ref's slug, or
+  `spec` for an issue's primary document. Dispatch finds the document an upload replaces by its
+  exact name, so a caller that reads for an upload compares that name with the returned `name`.
+  It reads the text, then the blocks, then the text again, and refuses a document that changed
+  between the two text reads. A target that names no document of its owner gives `"not-found"`,
+  and every other failure throws. Each request carries the client's signal, so a stop ends the
+  read. AskGate in `@sjawhar/pi-envoy` reads a retyped block's text and an upload's current block
+  ids with it (dispatch://INFRA-168). The executor finds its owner and documents through the same
+  internal helper, and `dispatch doc-read --blocks` through the same read, with no change in
+  behaviour.
 
 ### Fixed
 
@@ -201,20 +216,6 @@
 
 ### Added
 
-- `dispatch-execute` exports `readDocumentBlocks(client, target, context)`, with the types
-  `DocumentTarget`, `DocumentTargetContext`, `DocumentBlocks` and `DocumentBlock`. It reads the
-  blocks of the live document that `dispatch doc-edit` would edit for the same arguments. It
-  gives the document's own name, as Dispatch stores it, and each block's markdown, cut from the
-  UTF-8 byte range Dispatch reports. It finds the owner from the target, its ref or
-  `LEGION_ISSUE`, against `context`, and the document by id, slug, filename, the ref's slug, or
-  `spec` for an issue's primary document. Dispatch finds the document an upload replaces by its
-  exact name, so a caller that reads for an upload compares that name with the returned `name`.
-  It reads the text, then the blocks, then the text again, and refuses a document that changed
-  between the two text reads. A target that names no document of its owner gives `"not-found"`,
-  and every other failure throws. AskGate in `@sjawhar/pi-envoy` reads a retyped block's text and
-  an upload's current block ids with it (dispatch://INFRA-168). The executor finds its owner and
-  documents through the same internal helper, and `dispatch doc-read --blocks` through the same
-  read, with no change in behaviour.
 - `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
   repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
   `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the

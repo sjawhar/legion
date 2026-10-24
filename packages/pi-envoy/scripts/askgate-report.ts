@@ -1,4 +1,5 @@
-// Reports on AskGate's advisor-gate session entries and samples the reviews it sent back.
+// Reports on AskGate's advisor-gate session entries, its rules check included, and samples the
+// reviews it sent back.
 // Usage: bun askgate-report.ts --sessions <dir> --since <RFC 3339> --sample <n> --out <dir>
 //   [--seed <n>]
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -17,12 +18,55 @@ export interface GateRecord {
   latencyMs: number | null;
   cost: number | null;
   text: string | null;
+  /** The rule the first matching new ask broke: set exactly when the rules check refused the call. */
+  rule: string | null;
+  /** How the rules call ended: `match`, `none`, `error`, `timeout`, `no-verdict`, … */
+  ruleOutcome: string | null;
+  /** The provider's error text, `timeout` or `no-verdict`. */
+  ruleError: string | null;
+  /** An ask's text could not be read, so it was judged without it. */
+  ruleTextMissing: boolean;
+  /** How many asks the rules request left out or cut. */
+  ruleAsksCut: number | null;
+  ruleLatencyMs: number | null;
+  ruleModel: string | null;
+  /** The call's breaker target, as `dispatch_ask issue=ACME-1`. */
+  target: string | null;
 }
 
 export interface ToolShare {
   tool: string;
   reviews: number;
   sentBack: number;
+}
+
+/** A value and how many entries hold it. */
+export interface Count {
+  name: string;
+  count: number;
+}
+
+export interface RuleStats {
+  /** Entries with a ruleOutcome: the gated calls whose rules call ran. */
+  calls: number;
+  outcomes: Count[];
+  latencyMedian: number | null;
+  latencyP90: number | null;
+  models: Count[];
+  /** Rules refusals by rule. */
+  matches: Count[];
+  /** Entries with a ruleError. */
+  errors: number;
+  /** The commonest error texts, most first. */
+  errorTexts: Count[];
+  textMissing: number;
+  /** Entries that left out or cut an ask, and how many asks they left out or cut. */
+  cutEntries: number;
+  cutAsks: number;
+  /** Entries with a rule. */
+  refusals: number;
+  /** Rules refusals whose next entry on the same target was a rebuttal or a breaker. */
+  overridden: { rebuttal: number; breaker: number };
 }
 
 export interface Stats {
@@ -35,6 +79,7 @@ export interface Stats {
   costCount: number;
   refusals: number;
   perTool: ToolShare[];
+  rules: RuleStats;
 }
 
 export interface Args {
@@ -53,6 +98,10 @@ function isObject(value: unknown): value is Json {
 
 function str(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function strOrNull(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
 }
 
 function num(value: unknown): number | null {
@@ -102,10 +151,18 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
       decision: str(data.decision),
       outcome: str(data.outcome),
       verdictMode: str(data.verdictMode),
-      reason: typeof reason === "string" ? reason : null,
+      reason: strOrNull(reason),
       latencyMs: num(data.latencyMs),
       cost: num(usage.cost),
       text: null,
+      rule: strOrNull(data.rule),
+      ruleOutcome: strOrNull(data.ruleOutcome),
+      ruleError: strOrNull(data.ruleError),
+      ruleTextMissing: data.ruleTextMissing === true,
+      ruleAsksCut: num(data.ruleAsksCut),
+      ruleLatencyMs: num(data.ruleLatencyMs),
+      ruleModel: strOrNull(data.ruleModel),
+      target: strOrNull(data.target),
     });
   }
   // The call comes before its entry, but the join waits for the whole file.
@@ -144,12 +201,14 @@ export function isSentBack(record: GateRecord): boolean {
   return record.decision === "revise";
 }
 
+/** A refused call: AskGate did not send it. A rules refusal is one in warn mode too. */
 export function isRefusal(record: GateRecord): boolean {
   return (
     record.decision === "revise" &&
     (record.verdictMode === "block" ||
       record.outcome === "unreadable" ||
-      record.outcome === "no-model-role")
+      record.outcome === "no-model-role" ||
+      record.rule !== null)
   );
 }
 
@@ -159,6 +218,92 @@ export function percentile(values: number[], p: number): number | null {
   const sorted = [...values].sort((a, b) => a - b);
   const rank = Math.max(1, Math.ceil((p / 100) * sorted.length));
   return sorted[rank - 1] ?? null;
+}
+
+const RULES = ["no_change", "untried_access"];
+const RULE_OUTCOMES = ["match", "none", "error", "timeout", "no-verdict", "abandoned", "shutdown"];
+/** How many of the commonest rules error texts the report prints. */
+const ERROR_TEXTS_SHOWN = 5;
+
+/**
+ * Counts each value. The names in `first` come first, in that order, even at zero; every other
+ * value follows, most first, then by name.
+ */
+function tally(values: string[], first: readonly string[] = []): Count[] {
+  const counts = new Map<string, number>(first.map((name) => [name, 0]));
+  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+  const rest = [...counts]
+    .filter(([name]) => !first.includes(name))
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return [
+    ...first.map((name) => ({ name, count: counts.get(name) ?? 0 })),
+    ...rest.map(([name, count]) => ({ name, count })),
+  ];
+}
+
+/**
+ * Counts the rules refusals (entries with a rule) that the agent overrode: in each session, in time
+ * order, the next entry with the refusal's target is a rebuttal or a breaker.
+ */
+export function overriddenRefusals(records: GateRecord[]): RuleStats["overridden"] {
+  const overridden = { rebuttal: 0, breaker: 0 };
+  const sessions = new Map<string, GateRecord[]>();
+  for (const record of records) {
+    const list = sessions.get(record.session) ?? [];
+    list.push(record);
+    sessions.set(record.session, list);
+  }
+  for (const list of sessions.values()) {
+    // A stable sort by time: entries stamped in the same millisecond keep their file order.
+    const ordered = list
+      .map((record, index) => {
+        const at = Date.parse(record.timestamp);
+        return { record, index, at: Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY };
+      })
+      .sort((a, b) => a.at - b.at || a.index - b.index);
+    // Walk back from the end, so each target's next outcome is known when its refusal is reached.
+    const next = new Map<string, string>();
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const { record } = ordered[i] as (typeof ordered)[number];
+      if (record.target === null) continue;
+      if (record.rule !== null) {
+        const after = next.get(record.target);
+        if (after === "rebuttal") overridden.rebuttal += 1;
+        else if (after === "breaker") overridden.breaker += 1;
+      }
+      next.set(record.target, record.outcome);
+    }
+  }
+  return overridden;
+}
+
+export function computeRuleStats(records: GateRecord[]): RuleStats {
+  const calls = records.filter((r) => r.ruleOutcome !== null);
+  const refusals = records.filter((r) => r.rule !== null);
+  const errors = records.filter((r) => r.ruleError !== null);
+  const cut = records.filter((r) => r.ruleAsksCut !== null && r.ruleAsksCut > 0);
+  const latencies = records.flatMap((r) => (r.ruleLatencyMs === null ? [] : [r.ruleLatencyMs]));
+  return {
+    calls: calls.length,
+    outcomes: tally(
+      calls.map((r) => r.ruleOutcome as string),
+      RULE_OUTCOMES
+    ),
+    latencyMedian: percentile(latencies, 50),
+    latencyP90: percentile(latencies, 90),
+    models: tally(records.flatMap((r) => (r.ruleModel === null ? [] : [r.ruleModel]))),
+    matches: tally(
+      refusals.map((r) => r.rule as string),
+      RULES
+    ),
+    errors: errors.length,
+    errorTexts: tally(errors.map((r) => r.ruleError as string)).slice(0, ERROR_TEXTS_SHOWN),
+    textMissing: records.filter((r) => r.ruleTextMissing).length,
+    cutEntries: cut.length,
+    cutAsks: cut.reduce((sum, r) => sum + (r.ruleAsksCut as number), 0),
+    refusals: refusals.length,
+    overridden: overriddenRefusals(records),
+  };
 }
 
 export function computeStats(records: GateRecord[]): Stats {
@@ -182,6 +327,7 @@ export function computeStats(records: GateRecord[]): Stats {
     costCount: costs.length,
     refusals: records.filter(isRefusal).length,
     perTool: [...byTool.values()].sort((a, b) => (a.tool < b.tool ? -1 : a.tool > b.tool ? 1 : 0)),
+    rules: computeRuleStats(records),
   };
 }
 
@@ -193,14 +339,22 @@ function ms(value: number | null): string {
   return value === null ? "n/a" : `${value} ms`;
 }
 
+/** How many code points of a rules error text the report prints. */
+const ERROR_TEXT_POINTS = 200;
+
 export function formatReport(stats: Stats, seed: number): string[] {
   const cost =
     stats.costMedian === null
       ? "n/a"
       : `$${stats.costMedian.toFixed(4)} (${stats.costCount} reviews with a cost)`;
+  const rules = stats.rules;
+  const overridden = rules.overridden.rebuttal + rules.overridden.breaker;
   return [
     "A gated call is any advisor-gate entry. A review is one where the model gave a verdict.",
     "Sent back means the decision was revise.",
+    "A rules call is an entry with a ruleOutcome. A rules refusal is an entry with a rule.",
+    "A rules refusal was overridden when the next entry on its target, in its session, is a rebuttal or a breaker.",
+    `The rules error lines show the ${ERROR_TEXTS_SHOWN} commonest error texts.`,
     `gated calls: ${stats.gatedCalls}`,
     `reviews: ${stats.reviews}`,
     `sent back: ${share(stats.sentBack, stats.reviews)} (${stats.sentBack} of ${stats.reviews} reviews)`,
@@ -212,6 +366,24 @@ export function formatReport(stats: Stats, seed: number): string[] {
       (t) =>
         `tool ${t.tool}: ${t.reviews} reviews, sent back ${share(t.sentBack, t.reviews)} (${t.sentBack})`
     ),
+    `rules calls: ${rules.calls}`,
+    `rules outcomes: ${rules.outcomes.map((c) => `${c.name} ${c.count}`).join(", ")}`,
+    `rules latency median: ${ms(rules.latencyMedian)}`,
+    `rules latency p90: ${ms(rules.latencyP90)}`,
+    ...rules.models.map((m) => `rules model ${m.name}: ${m.count}`),
+    `rules matches: ${rules.matches.map((c) => `${c.name} ${c.count}`).join(", ")}`,
+    `rules errors: ${rules.errors}`,
+    ...rules.errorTexts.map((e) => {
+      const points = Array.from(e.name);
+      const text =
+        points.length > ERROR_TEXT_POINTS
+          ? `${points.slice(0, ERROR_TEXT_POINTS - 1).join("")}…`
+          : e.name;
+      return `rules error ${JSON.stringify(text)}: ${e.count}`;
+    }),
+    `rules text missing: ${rules.textMissing}`,
+    `rules asks cut: ${rules.cutAsks} asks in ${rules.cutEntries} entries`,
+    `rules refusals overridden: ${overridden} of ${rules.refusals} (rebuttal ${rules.overridden.rebuttal}, breaker ${rules.overridden.breaker})`,
     `seed: ${seed}`,
   ];
 }
@@ -250,6 +422,7 @@ export function sampleLine(record: GateRecord): string {
     tool: record.tool,
     toolCallId: record.toolCallId,
     verdictMode: record.verdictMode,
+    rule: record.rule,
     reason: record.reason,
     text: record.text,
   });

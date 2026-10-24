@@ -166,18 +166,24 @@ left on when the switch's event runs, and a wake dropped there would be lost.
 ## AskGate
 
 AskGate (`extensions/askgate/`) reviews each Dispatch write of a main agent before it posts. The
-README's "AskGate" section says what it reviews, the switch, the modes and the model role.
-`envoy.ts` reads the switch at load (`askgateSetting` in `@legion/envoy-client/envoy-config`, the
-top-level `askgate` section of the session's envoy.json) and calls `registerAskGate` only with
-Dispatch on and the switch not off. `registerAskGate` (`askgate.ts`) loads Oh My Pi's own modules
-through string-literal `import()`, declared in `../pi-shared/src/omp-host.d.ts`, then binds the
-core, so its handlers register after the factory returns. The runner reads an event's handlers
-when the event fires, so they still fire. `session_start` waits for that load and shows a load
-failure or a switch that does not parse as a notice. `askgate-core.ts` holds every rule of the
-gate and takes the host through its dependencies, so `askgate.test.ts` drives it with fakes. The
-model walk (`askModel` in `createAskGate`) is the one path a review takes to the model.
-`rules.md`, `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an
-upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
+README's "AskGate" section says what it reviews, the switch, the modes, the model role, the rules
+check and the record. `envoy.ts` reads the switch at load (`askgateSetting` in
+`@legion/envoy-client/envoy-config`, the top-level `askgate` section of the session's envoy.json)
+and calls `registerAskGate` only with Dispatch on and the switch not off. `registerAskGate`
+(`askgate.ts`) loads Oh My Pi's own modules through string-literal `import()`, declared in
+`../pi-shared/src/omp-host.d.ts`, then binds the core, so its handlers register after the factory
+returns. The runner reads an event's handlers when the event fires, so they still fire.
+`session_start` waits for that load and shows a load failure or a switch that does not parse as a
+notice. `askgate-core.ts` holds the gate and takes the host through its dependencies, so
+`askgate.test.ts` drives it with fakes. Beside it, `new-asks.ts` finds the new asks a call opens,
+and reads markdown as the Dispatch server does. `rules-check.ts` runs the rules check through the
+model walk and the Dispatch client that the core passes in, so it never imports `askgate-core.ts`.
+`text.ts` is the leaf that holds the text helpers both checks share. The model walk (`askModel` in
+`createAskGate`) is the one path either check takes to the model. `rules.md`, `askgate-system.md`,
+`askgate-request.md` and `askgate-upload.md` (the instruction an upload of a markdown document
+gets: failure 10 alone) are the charter check's prompts, and `rule-check-system.md`,
+`rule-check.md` and `rule-check-request.md` are the rules check's. The modules import each prompt
+`with { type: "text" }`.
 
 ## Legion
 
@@ -438,7 +444,7 @@ state never nudges.
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
 | Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no Dispatch or Envoy section and turns AskGate off (its "AskGate" tests turn it on, with the host modules stood in) with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
-| AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules.md` and the three prompt files, `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and `scripts/askgate-report.ts` the report over the `advisor-gate` entries |
+| AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `new-asks.ts`, `rules-check.ts` and `text.ts` its modules, the seven prompt files (`*.md`), `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and `scripts/askgate-report.ts` the report over the `advisor-gate` entries |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The four skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |

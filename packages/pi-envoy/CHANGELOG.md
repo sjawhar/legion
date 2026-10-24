@@ -16,6 +16,17 @@
   reads the file, after the command's own `cd`. Its rules now also send back a fact the reader
   does not need and text longer than its decision needs, and a claim about what the person said
   is sourced only by a link to where they wrote it.
+- AskGate's rules check: a second model call judges only the new asks a Dispatch write opens
+  against two rules. A new ask is a `dispatch ask`, an ask block that a `doc-edit` inserts or a
+  block that it retypes into an ask, and an ask block in an issue spec or in a markdown upload. One
+  rule refuses an ask whose own recommendation is to change nothing. The other refuses an ask for a
+  step the person must do with their own hands when the agent did not try its own access first. A
+  match refuses the call in `warn` mode as well as in `block` mode. `--advisor-rebuttal '<line>'`
+  on a command, `"advisor_rebuttal": "<line>"` in a device's JSON, or the third attempt on the same
+  target sends the call anyway. The `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`,
+  `ruleOutcome`, `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut` and
+  `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors
+  and the refusals the agent overrode.
 
 ### Fixed
 
