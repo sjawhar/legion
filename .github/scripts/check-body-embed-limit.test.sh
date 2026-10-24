@@ -490,6 +490,26 @@ check "exits 1" "$(is "$status" 1)"
 check "never credits a template literal's /* ... */ line either" \
   "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:4) does not name maxInputChars')"
 
+# RED (tester, round 4): the two cases above both close their block on its own line, so
+# `comment_flags` never carries `inside` past it. A template literal whose line opens with an
+# UNTERMINATED `/*` sets `inside` and nothing clears it: every line below - the backtick line
+# that ends the literal, and any code after it - is classified as comment text, and the
+# contiguous run above the declaration swallows the literal's prose. The declaration then
+# carries no comment of its own, yet the check reports `and each names the other`. This is the
+# false acceptance of rounds 2 and 3 reached through the new direction, and the shape compiles:
+# an unterminated `/*` outside a string would be a parse error, inside one it is just text.
+root=$(fixture template-literal-unterminated-block)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+const s = `
+/* maxInputChars is named here, inside a template literal
+`;
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "an unterminated /* inside a string credits nothing below it" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:4) does not name maxInputChars')"
+
 echo "case: contracts/AGENTS.md names each constant on a different line"
 root=$(fixture contracts-agents)
 cat > "$root/packages/contracts/AGENTS.md" <<'MD'
