@@ -178,6 +178,38 @@ func TestProvisionDissociatesAnOldSharedCloneAfterSymlinkedFeedOwnerQuarantine(t
 	}
 }
 
+// A GitHub source has no feed quarantine. Provisioning must not derive and delete relative
+// quarantine names from that empty source.
+func TestProvisionFromGitHubLeavesRelativeQuarantineSentinels(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, sentinel := range []string{filepath.Join(work, ".legacy"), filepath.Join(root, ".legacy")} {
+		if err := os.WriteFile(sentinel, []byte("sentinel"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+
+	if _, err := Provision(context.Background(), newLocalRunner(t), provisionRequest(t)); err != nil {
+		t.Fatalf("Provision from GitHub: %v", err)
+	}
+	for _, sentinel := range []string{filepath.Join(work, ".legacy"), filepath.Join(root, ".legacy")} {
+		if _, err := os.Stat(sentinel); err != nil {
+			t.Fatalf("relative quarantine sentinel %s: %v", sentinel, err)
+		}
+	}
+}
+
 // A previous Jujutsu import can retain a feed-only commit in its operation view after Git drops the
 // ref that first introduced it. Provisioning must name that lost operation history too.
 func TestProvisionNamesJujutsuOperationHistoryThatLostBorrowedObjects(t *testing.T) {

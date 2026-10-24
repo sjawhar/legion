@@ -18,16 +18,17 @@ import (
 // any git there. A foreign feed is quarantined outside the new feed path, so the uncredentialed
 // provisioner can preserve a legacy clone that borrowed its objects before the quarantine is removed.
 func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log func(string)) (bool, error) {
+	quarantines := feedQuarantines(gitDir)
 	owner := filepath.Dir(gitDir)
 	if info, err := os.Lstat(owner); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		legacy := owner + ".legacy"
-		if _, err := os.Lstat(legacy); !errors.Is(err, fs.ErrNotExist) {
+		quarantine := quarantines[1]
+		if _, err := os.Lstat(quarantine.remove); !errors.Is(err, fs.ErrNotExist) {
 			if err == nil {
-				return false, fmt.Errorf("the feed's legacy owner %s already exists", legacy)
+				return false, fmt.Errorf("the feed's legacy owner %s already exists", quarantine.remove)
 			}
 			return false, err
 		}
-		if err := os.Rename(owner, legacy); err != nil {
+		if err := os.Rename(owner, quarantine.remove); err != nil {
 			return false, fmt.Errorf("quarantine the symlink at the feed's %s: %w", owner, err)
 		}
 		log(fmt.Sprintf("the feed's %s is not one this fetch wrote (it is a symlink): quarantined; the feed is filled afresh", owner))
@@ -50,14 +51,14 @@ func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log
 	if why == "" {
 		return true, nil
 	}
-	legacy := gitDir + ".legacy"
-	if _, err := os.Lstat(legacy); !errors.Is(err, fs.ErrNotExist) {
+	quarantine := quarantines[0]
+	if _, err := os.Lstat(quarantine.feed); !errors.Is(err, fs.ErrNotExist) {
 		if err == nil {
-			return false, fmt.Errorf("the feed's legacy repository %s already exists", legacy)
+			return false, fmt.Errorf("the feed's legacy repository %s already exists", quarantine.feed)
 		}
 		return false, err
 	}
-	if err := os.Rename(gitDir, legacy); err != nil {
+	if err := os.Rename(gitDir, quarantine.feed); err != nil {
 		return false, fmt.Errorf("quarantine the feed's %s, which %s: %w", gitDir, why, err)
 	}
 	log(fmt.Sprintf("the feed's %s is not one this fetch wrote (%s): quarantined; the feed is filled afresh", repo, why))

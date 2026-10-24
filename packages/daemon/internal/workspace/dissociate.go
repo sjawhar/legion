@@ -10,29 +10,37 @@ import (
 	"strings"
 )
 
-// legacyFeedPaths are the two quarantines ownFeedRepository creates: a bare feed moved aside, or
-// a symlinked owner moved aside without following its target.
-func legacyFeedPaths(feed string) []string {
-	return []string{feed + ".legacy", filepath.Join(filepath.Dir(feed)+".legacy", filepath.Base(feed))}
+// feedQuarantine is the cross-container hand-off from workspace-fetch to workspace-init.
+type feedQuarantine struct {
+	feed   string
+	remove string
+}
+
+// feedQuarantines are the two possible quarantines ownFeedRepository creates: a bare feed moved
+// aside, or a symlinked owner moved aside without following its target.
+func feedQuarantines(feed string) [2]feedQuarantine {
+	return [2]feedQuarantine{
+		{feed: feed + ".legacy", remove: feed + ".legacy"},
+		{feed: filepath.Join(filepath.Dir(feed)+".legacy", filepath.Base(feed)), remove: filepath.Dir(feed) + ".legacy"},
+	}
 }
 
 // dissociateLegacyClone repacks a legacy alternate clone after workspace-fetch quarantines a
 // foreign feed and before provisioning reads the clone. This process holds no provisioning token.
 func dissociateLegacyClone(ctx context.Context, run Runner, cloneDir, feed string, log func(string)) error {
-	for _, legacy := range legacyFeedPaths(feed) {
-		if _, err := os.Lstat(legacy); errors.Is(err, fs.ErrNotExist) {
+	if feed == "" {
+		return nil
+	}
+	for _, quarantine := range feedQuarantines(feed) {
+		if _, err := os.Lstat(quarantine.feed); errors.Is(err, fs.ErrNotExist) {
 			continue
 		} else if err != nil {
 			return fmt.Errorf("read quarantined feed: %w", err)
 		}
-		if err := dissociateClone(ctx, run, cloneDir, feed, legacy, log); err != nil {
+		if err := dissociateClone(ctx, run, cloneDir, feed, quarantine.feed, log); err != nil {
 			return err
 		}
-		quarantine := legacy
-		if legacy == filepath.Join(filepath.Dir(feed)+".legacy", filepath.Base(feed)) {
-			quarantine = filepath.Dir(legacy)
-		}
-		if err := os.RemoveAll(quarantine); err != nil {
+		if err := os.RemoveAll(quarantine.remove); err != nil {
 			return fmt.Errorf("remove quarantined feed: %w", err)
 		}
 	}
