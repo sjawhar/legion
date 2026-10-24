@@ -1895,3 +1895,62 @@ func TestRoleRunsSkipsAnotherRolesUndecodableRow(t *testing.T) {
 		}
 	})
 }
+
+// A root keeps one relayed decision per Dispatch reference, the newest by its time: a later one
+// replaces it (an approval after a changes request of the same spec), an older one arriving late
+// does not. Its next admission takes them all, newest first and ties by reference, leaving none for
+// the one after.
+func TestAParkedDecisionKeepsTheNewestPerRefAndIsTakenNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issueFixture("LEGION-210")))
+	})
+	for _, decision := range []ParkedDecision{
+		{Root: "LEGION-210", Ref: "dispatch://LEGION-210/ask/a", Decision: DecisionAskAnswered, Actor: "user:alice", At: t0},
+		{Root: "LEGION-210", Ref: "dispatch://LEGION-210/spec", Decision: DecisionDesignChangesRequested, Actor: "user:alice", At: t0},
+		{Root: "LEGION-210", Ref: "dispatch://LEGION-210/spec", Decision: DecisionDesignApproved, Actor: "user:alice", At: t0.Add(2 * time.Second)},
+		{Root: "LEGION-210", Ref: "dispatch://LEGION-210/ask/a", Decision: DecisionAskResolved, Actor: "user:bob", At: t0.Add(time.Second)},
+		{Root: "LEGION-210", Ref: "dispatch://LEGION-210/ask/a", Decision: DecisionAskAnswered, Actor: "user:carol", At: t0.Add(-time.Second)},
+	} {
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, records.AddParkedDecision(ctx, tx, decision))
+		})
+	}
+	var taken []ParkedDecision
+	inTx(t, st, func(tx pgx.Tx) {
+		var err error
+		taken, err = records.TakeParkedDecisions(ctx, tx, "LEGION-210")
+		must(t, err)
+	})
+	want := []ParkedDecision{
+		{Root: "LEGION-210", Ref: "dispatch://LEGION-210/spec", Decision: DecisionDesignApproved, Actor: "user:alice", At: t0.Add(2 * time.Second)},
+		{Root: "LEGION-210", Ref: "dispatch://LEGION-210/ask/a", Decision: DecisionAskResolved, Actor: "user:bob", At: t0.Add(time.Second)},
+	}
+	if len(taken) != len(want) {
+		t.Fatalf("taken %#v, want %#v", taken, want)
+	}
+	for i := range want {
+		got := taken[i]
+		if got.Root != want[i].Root || got.Ref != want[i].Ref || got.Decision != want[i].Decision || got.Actor != want[i].Actor || !got.At.Equal(want[i].At) {
+			t.Fatalf("taken[%d] = %#v, want %#v: each ref keeps its newest decision", i, got, want[i])
+		}
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		again, err := records.TakeParkedDecisions(ctx, tx, "LEGION-210")
+		must(t, err)
+		if len(again) != 0 {
+			t.Fatalf("a second take = %#v, want none", again)
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.AddParkedDecision(ctx, tx, ParkedDecision{Root: "LEGION-210", Ref: "dispatch://LEGION-210/spec", Decision: DecisionDesignChangesRequested, Actor: "user:carol", At: t0.Add(time.Hour)}))
+		newer, err := records.TakeParkedDecisions(ctx, tx, "LEGION-210")
+		must(t, err)
+		if len(newer) != 1 || newer[0].Decision != DecisionDesignChangesRequested || newer[0].Actor != "user:carol" {
+			t.Fatalf("a take after a new decision on a taken ref = %#v, want that decision: a take frees the ref", newer)
+		}
+	})
+}

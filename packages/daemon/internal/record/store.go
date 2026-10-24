@@ -452,6 +452,36 @@ func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, sessi
 	return claims, nil
 }
 
+func (s *Postgres) AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error {
+	if _, err := tx.Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at) values ($1, $2, $3, $4, $5)
+		on conflict (root, ref) do update set decision = excluded.decision, actor = excluded.actor, at = excluded.at
+		where parked_decisions.at <= excluded.at`, decision.Root, decision.Ref, string(decision.Decision), decision.Actor, decision.At); err != nil {
+		return fmt.Errorf("keep the decision %s on %s: %w", decision.Ref, decision.Root, err)
+	}
+	return nil
+}
+
+func (s *Postgres) TakeParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error) {
+	rows, err := tx.Query(ctx, `with taken as (delete from parked_decisions where root = $1 returning ref, decision, actor, at)
+		select ref, decision, actor, at from taken order by at desc, ref`, root)
+	if err != nil {
+		return nil, fmt.Errorf("take the decisions kept for %s: %w", root, err)
+	}
+	defer rows.Close()
+	var decisions []ParkedDecision
+	for rows.Next() {
+		decision := ParkedDecision{Root: root}
+		if err := rows.Scan(&decision.Ref, &decision.Decision, &decision.Actor, &decision.At); err != nil {
+			return nil, fmt.Errorf("scan a decision kept for %s: %w", root, err)
+		}
+		decisions = append(decisions, decision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("take the decisions kept for %s: %w", root, err)
+	}
+	return decisions, nil
+}
+
 func (s *Postgres) ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error) {
 	var session string
 	if err := tx.QueryRow(ctx, "select session from claims where token = $1", string(token)).Scan(&session); err != nil {

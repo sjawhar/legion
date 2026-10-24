@@ -184,8 +184,12 @@ type Notice struct {
 	// it to its architect's session (the daemon's rehold), which stops at a cap.
 	Resends int `json:"resends,omitempty"`
 	// ResendOf is the outbox row a re-held copy copies. The copy is published under that row's
-	// dedupe key (OutboxKey), so a session that already has the notice recognises the copy. The
-	// row is the daemon's own bookkeeping: the executor publishes the notice without it.
+	// dedupe key (OutboxKey), so the listener's report of a failed forward names the original row,
+	// whichever copy failed (exceptionNotice), and the listener's role lane drops a copy that
+	// reaches the holder the original reached within its delivery caches
+	// (packages/envoy/cmd/listener/delivery.go). The stream and the hosts treat the key as no dedupe
+	// key (dedupeKeyNamesItsEvent, packages/contracts/src/envelope.ts). The row is the daemon's own
+	// bookkeeping: the executor publishes the notice without it.
 	ResendOf int64 `json:"resend_of,omitempty"`
 	// CatchUp is a catch-up notice's account of the tree, and absent from every other kind.
 	CatchUp *CatchUp `json:"catch_up,omitempty"`
@@ -197,6 +201,19 @@ type Notice struct {
 	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
 	// live row's the session's environment to fix, and neither is the controller's.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
+	// Actor is who made the spec decision a design-approved, design-changes-requested or
+	// carried-gate-opened notice reports, or the decision a parked-decision notice relays: the
+	// Dispatch actor as `<kind>:<id>`, a person `user:<login>`. Empty where no person decided:
+	// gates.design off opened the gate.
+	Actor string `json:"actor,omitempty"`
+	// Ref is that decision's Dispatch reference: `dispatch://<KEY>/spec` for a spec decision,
+	// `dispatch://<KEY>/ask/<id>` for an answer or a resolution, `dispatch://<KEY>/comment/<id>`
+	// for a reply.
+	Ref string `json:"ref,omitempty"`
+	// Decision is what a parked-decision notice relays, and Root the root of the tree it was made
+	// on. Every other kind carries neither.
+	Decision DecisionKind `json:"decision,omitempty"`
+	Root     string       `json:"root,omitempty"`
 }
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
@@ -265,6 +282,15 @@ func (ControllerNotice) OutboxKind() OutboxKind { return OutboxKindControllerNot
 // slot nor a place in the waiting line, which it took out of the workflow; its reason names the
 // status the root stood at. When admission sends each is its rule (admit.Admission.wakeController
 // and its callers, admit's releaseUnslotted).
+//
+// A parked-decision notice names a person's decision on a tree Legion is not running, which
+// nobody inside the tree will hear: a spec decision the notice executor could not deliver to the
+// tree's architect (it stopped with its finished tree, or its claim ended), or a person's answer,
+// resolution or reply (one that leaves the turn with the agent, or one under a closed ask) on an ask
+// of an issue whose tree lingers or has closed. Its issue is where the decision was made, Root the
+// tree's root, Decision what the person did, Ref where in Dispatch, Actor who; a spec decision
+// carries its Version, a changes request its Reason. The controller decides whether the tree runs
+// again (skill://legion-controller/references/parked-decisions.md).
 const (
 	TriageNotice         NoticeKind = "triage"
 	SlotFreeNotice       NoticeKind = "slot-free"
@@ -272,7 +298,48 @@ const (
 	TickNotice           NoticeKind = "tick"
 	UnslottedNotice      NoticeKind = "unslotted"
 	AwaitingPersonNotice NoticeKind = "awaiting-person"
+	ParkedDecisionNotice NoticeKind = "parked-decision"
 )
+
+// DecisionKind is what a person did that a parked-decision notice relays.
+type DecisionKind string
+
+const (
+	DecisionDesignApproved         DecisionKind = "design-approved"
+	DecisionDesignChangesRequested DecisionKind = "design-changes-requested"
+	DecisionCarriedGateOpened      DecisionKind = "carried-gate-opened"
+	DecisionAskAnswered            DecisionKind = "ask-answered"
+	DecisionAskResolved            DecisionKind = "ask-resolved"
+	DecisionAskReply               DecisionKind = "ask-reply"
+)
+
+// SpecDecision is the decision a notice of kind reports when kind is one of the three a person's
+// spec decision writes (workflow's gate.go), and whether it is. The notice executor relays those
+// three to the controller when nobody in the tree will hear them; every other kind is the
+// machinery's, which a stopped tree needs nobody to hear.
+func SpecDecision(kind NoticeKind) (DecisionKind, bool) {
+	switch decision := DecisionKind(kind); decision {
+	case DecisionDesignApproved, DecisionDesignChangesRequested, DecisionCarriedGateOpened:
+		return decision, true
+	default:
+		return "", false
+	}
+}
+
+func validDecisionKind(kind DecisionKind) bool {
+	switch kind {
+	case DecisionDesignApproved, DecisionDesignChangesRequested, DecisionCarriedGateOpened,
+		DecisionAskAnswered, DecisionAskResolved, DecisionAskReply:
+		return true
+	default:
+		return false
+	}
+}
+
+// PersonActor says whether actor, as Dispatch names an event's author (`<kind>:<id>`), is a person.
+func PersonActor(actor string) bool {
+	return strings.HasPrefix(actor, "user:") && len(actor) > len("user:")
+}
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
@@ -637,9 +704,24 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if (value.Kind == "catch-up") != (value.CatchUp != nil) {
 			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
 		}
+		if _, spec := SpecDecision(value.Kind); !spec && (value.Actor != "" || value.Ref != "") {
+			return fmt.Errorf("a %s notice carries an actor or a ref; only a spec decision's does", value.Kind)
+		}
+		if value.Decision != "" || value.Root != "" {
+			return fmt.Errorf("a %s notice carries a decision or a root; only a parked-decision controller notice does", value.Kind)
+		}
 	case ControllerNotice:
 		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
+		}
+		if (value.Kind == ParkedDecisionNotice) != (value.Decision != "") {
+			return fmt.Errorf("a %s controller notice carries a decision only when it is %s", value.Kind, ParkedDecisionNotice)
+		}
+		if value.Kind == ParkedDecisionNotice && (!validDecisionKind(value.Decision) || value.Root == "" || value.Ref == "" || !PersonActor(value.Actor)) {
+			return fmt.Errorf("a parked-decision notice needs a known decision, its tree's root, the decision's Dispatch reference and the person who made it")
+		}
+		if value.Kind != ParkedDecisionNotice && (value.Actor != "" || value.Ref != "" || value.Root != "") {
+			return fmt.Errorf("a %s controller notice carries an actor, a ref or a root; only a parked-decision does", value.Kind)
 		}
 	case SuperviseRequest:
 		if !validSuperviseOp(value.Op) {
@@ -708,7 +790,7 @@ func validNoticeKind(kind NoticeKind) bool {
 // architect's.
 func controllerOnlyNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice:
+	case TriageNotice, SlotFreeNotice, TodoNotice, TickNotice, UnslottedNotice, AwaitingPersonNotice, ParkedDecisionNotice:
 		return true
 	default:
 		return false

@@ -135,6 +135,17 @@ type Awaiting struct {
 	AnsweredAt  *time.Time
 }
 
+// ParkedDecision is a person's decision on a tree nobody in it could hear, which the daemon relayed
+// to the controller (a parked-decision notice), kept until the root's next admission names it in
+// its architect's start task (workflow.Engine.ParkedDecisionTask).
+type ParkedDecision struct {
+	Root     string
+	Ref      string
+	Decision DecisionKind
+	Actor    string
+	At       time.Time
+}
+
 // AwaitingPerson says whether the issue is a root waiting on a person (phase awaiting_person).
 func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson && i.Awaiting != nil }
 
@@ -533,6 +544,12 @@ type Store interface {
 	OpenProductionChecksOfTree(ctx context.Context, tx pgx.Tx, tree string) ([]ProductionCheck, error)
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
+	// AddParkedDecision keeps a relayed decision for its root's next admission. A ref the root
+	// already keeps keeps its newest decision: a later one, by At, replaces it, so a changes request
+	// the person has since followed with an approval of the same spec is not what the start names.
+	AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error
+	// TakeParkedDecisions deletes and returns every decision root keeps, newest first, ties by ref.
+	TakeParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error)
 	// ClaimSession is the session claims records for token, "" and no error when the token holds
 	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
 	// reviewer's own review from another review-App session's by the Legion footer each carries
