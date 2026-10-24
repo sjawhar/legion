@@ -624,7 +624,9 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # psql, redis-cli and sqlite3 answer --version, psql's being the Debian Perl wrapper, which resolves
 # because perl-base is in the image; nc takes no --version, its -h printing usage and exiting 0, and
 # it is checked under `nc`, the name the alternatives system installs, never nc.openbsd; and dig -v
-# prints its version on stderr.
+# prints its version on stdout, measured in a pod of this image (`dig -v 2>/dev/null` prints
+# `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing), so the step takes it as
+# it comes.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \

@@ -541,7 +541,8 @@ into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so
 throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
 five clients are odd the same way: `nc` takes no `--version` either, so the step runs `nc -h`, which
 prints its usage and exits 0, under the `nc` name the alternatives system installs and never
-`nc.openbsd`; and `dig -v` prints its version on stderr, not stdout. It reruns only
+`nc.openbsd`; and `dig -v` prints its version on stdout, measured in a pod of the image (`dig -v
+2>/dev/null` prints `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing). It reruns only
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
