@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-149",
-  "completed": "2026-10-24T16:29:41Z",
+  "completed": "2026-10-24T17:00:52Z",
   "proof": [
     {
       "criterion": "A head pushed with the `skip-checks: true` trailer line gets none of the checks the base branch requires, so a handoff-only commit left above the reviewed head leaves a merge head a required check blocks while Legion reads it as green.",
@@ -19,6 +19,14 @@
       "observed": "implementer 6 parts, 31178 bytes, sentence x2 (its role residue and worker-common); planner 6 parts, 21771 bytes, x1; tester 6 parts, 21315 bytes, x1; reviewer 6 parts, 31472 bytes, x1; merger 4 parts, 25703 bytes, x1; architect 3 parts, 26324 bytes, x0 - correct, since an architect runs no retro push and its prompt took the split-claims edit instead.",
       "headSha": "50f9aeaa4999295cc267ab76781fc8aacb5be8cc",
       "negativeControl": "Two. The same program with one word of the sentence changed (`never` to `always`) reported x0 for all six roles, so the counter is not matching loosely. And at the branch's pre-change commit 76581c7406b611a41939c35a27fa4e5473d7757c, `jj file show` of all four edited texts piped to `grep -cF` of the sentence returned 0 for every one of them."
+    },
+    {
+      "criterion": "The rule this change states cannot be un-stated again with every required lane green: an edit that removes or rewords the canonical sentence in any of the four instruction texts fails a check.",
+      "surface": "The repository's own test lane, `packages/pi-legion` under Bun - the suite CI runs as the `test` job, which already pins prompt wording the same way (the `skip-checks` recipe's shape, `packages/pi-legion/src/skills-guard.test.ts:132-145`). The new test reads the four files themselves, two under the staged skills partition and two under `packages/daemon/internal/prompts` through this test file's own `promptsRoot`.",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; then, as the control, the canonical sentence in packages/daemon/internal/prompts/roles/implementer.md replaced by `Retro's push follows the same path rule as any other.` and the same command re-run, then the file restored",
+      "observed": "10 pass, 0 fail, 22 expect() calls with the sentence in place. With it un-stated in one of the four files the new test failed, reporting `found: 0` against the expected `found: 1` for packages/daemon/internal/prompts/roles/implementer.md while the other nine tests still passed, so the lock fails for the right reason and names the file. The file was restored byte for byte (`jj diff --stat` on it: 0 files changed).",
+      "headSha": "5b1160331cb9b724e49e706803e31885a15cfd25",
+      "negativeControl": "The un-stating described above is itself the control: it is the exact regression the reviewer's finding names - the rule removed while every other lane stays green - and it turns this lane red."
     }
   ],
   "filesChanged": [
@@ -30,7 +38,8 @@
     "packages/daemon/internal/prompts/go/architect-common.md - the one clause split into two claims: GitHub's runs follow the line, the daemon's carry follows the paths.",
     "packages/daemon/internal/prompts/go/reviewer.md - the same split for the reviewer's CI read.",
     "packages/claude-envoy/legion/ - regenerated with `bun run build`; only legion/ changed, dist/ byte-identical.",
-    "packages/pi-legion/CHANGELOG.md - one `### Changed` entry under `## [Unreleased]` naming INFRA-149."
+    "packages/pi-legion/CHANGELOG.md - one `### Changed` entry under `## [Unreleased]` naming INFRA-149.",
+    "packages/pi-legion/src/skills-guard.test.ts - the lock the review round asked for: one test asserting the canonical sentence appears exactly once in each of the four texts, counted per file and never against a composed prompt, with a comment saying why it exists."
   ],
   "trickyParts": [
     "The canonical sentence sits on one unbroken line in each of the four texts, breaking those files' ~100-character prose wrap, because the acceptance criterion is a literal `grep -cF` of the whole sentence and a wrapped copy would not match it.",
@@ -45,7 +54,9 @@
     "The plan's acceptance item `grep -rn 'READY_CHECKS_NOT_GREEN|no check is required on|refused at READY' returns nothing` assumed #2121 had merged, since that pull request is what removes those phrases. It has not, so they still stand elsewhere on main. This change introduces none of them; verified over the files it edits.",
     "The plan's inventory said 25 lines in 13 files. Recomputed against main before the forward merge it was 25 lines in 15 files, and after the merge 26 lines in 15 files - the extra line is this change's own new cure paragraph in skills/legion-retro/SKILL.md. Every line is dispositioned in `discoveredComplexity` below.",
     "A forward merge of main was needed and made. The first push, head 971887b32548d649e3c563d479614096231d3a2e, opened pull request sjawhar/legion#2143 and GitHub reported it CONFLICTING/DIRTY: `gh api repos/sjawhar/legion/commits/971887b3.../check-runs` returned an empty list and `gh api repos/sjawhar/legion/compare/main...legion/INFRA-149` read diverged, 5 ahead and 20 behind, because GitHub computes no merge ref for a conflicting head and starts no `pull_request` workflow for it at all. A conflict is one of the two sanctioned reasons to bring the base in, so main was merged forward with `jj new legion/INFRA-149 main@origin` and never `jj rebase`, which would rewrite every descendant of the fork point. One conflict, `packages/pi-legion/CHANGELOG.md`, where main and this branch each added entries under `### Changed`; both sides' entries are kept. The unchanged-diff fingerprint is identical across the merge, 5cf3735f357de9825ff2a4fccaa76a43d5067232d071ec51ed1be9538aa0f9de before at 971887b3 and after at 946624b2bfcba3a5c7cb931e6165d2ad74080c07, so the branch's own diff did not change; it is posted on the pull request as sjawhar/legion#2143 comment 6386663958. At the merge head GitHub reports MERGEABLE and has started lint, typecheck, test and pr-title. Every check above was re-run at the merged state and is green there, and the race condition was checked again after the merge: #2121 still OPEN with mergedAt null, and skills/legion-worker/references/skip-checks-trailer.md still absent, so the landing file is unchanged.",
-    "The plan gave the scratch-branch deletion to the tester. The architect asked for it at 02:46Z rather than leaving the branch standing in a shared repository, so the implementer did it; the tester's step for it is already done. Both measurement commits remain readable by SHA."
+    "The plan gave the scratch-branch deletion to the tester. The architect asked for it at 02:46Z rather than leaving the branch standing in a shared repository, so the implementer did it; the tester's step for it is already done. Both measurement commits remain readable by SHA.",
+    "Round 2, answering the reviewer's one finding. The canonical sentence had no test, so a later edit could restore the contradiction with every required lane green. One test now locks it. Placement settled by the architect at 16:58Z after the tester and the architect had given different answers: a single test in packages/pi-legion/src/skills-guard.test.ts covers all four files, because that file reads `packages/daemon/internal/prompts` directly through its own `promptsRoot` (line 24, used at lines 48 and 135) even though the shared `@legion/pi-shared/test/skills-guard` helpers stage only `skills/`. No Go-side test was added, since two pins of one fact would make one edit fail in two places, and no pin was added for the generated `packages/claude-envoy/legion/` mirror, whose `legion-plugin-fresh.test.ts` already fails when it drifts from these sources.",
+    "The `Size:` line the reviewer corrected is refreshed in the pull request body in this round's push, together with the `Threads` section and the `CI` line."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -57,6 +68,8 @@
     "UNCHANGED, test source that pins the wording rather than stating the rule: packages/daemon/internal/prompts/prompts_test.go:43 and roles_test.go:27.",
     "Checks run at the final head, all green: `cd packages/daemon && go test -count=1 ./internal/prompts/` ok 0.136s; `cd packages/pi-legion && bun test` 491 pass 8 skip 0 fail; `cd packages/claude-envoy && bun test` 173 pass 1 skip 0 fail and `bun run check-dist` reporting `dist/ and legion/ match a fresh build`; `bunx biome check .` exit 0 (its one warning and two infos are in packages/pi-shared/src/handoff-commit.ts and packages/claude-envoy/tests/dist-fresh.test.ts, neither touched here); `bash .github/scripts/check-private-names.sh` clean over 4823 files.",
     "Baselines taken before any edit, at the branch head 76581c7406b611a41939c35a27fa4e5473d7757c on 2026-10-24 at 02:50Z, so any failure after the edits is this change's: `go test ./internal/prompts/` ok 0.124s and `bun test src/skills-guard.test.ts` 9 pass 0 fail.",
-    "No simplify pass ran: the diff is markdown only (four instruction texts, three describing sentences, the generated mirror and the changelog), and `skill://legion-worker/references/pr-body.md` gives a docs-only diff no `ce-simplify-code` pass and no `Thermo` line."
+    "No simplify pass ran: the diff is markdown only (four instruction texts, three describing sentences, the generated mirror and the changelog), and `skill://legion-worker/references/pr-body.md` gives a docs-only diff no `ce-simplify-code` pass and no `Thermo` line.",
+    "Round 2 checks: `cd packages/pi-legion && bun test` 492 pass 8 skip 0 fail (491 before the new test); `bun run typecheck` in packages/pi-legion exit 0; `bunx biome check packages/pi-legion/src/skills-guard.test.ts` clean. A root `bunx tsc --noEmit` exits 1 printing the compiler's help because the repository root carries no tsconfig inputs - that is the pre-existing shape of the command, and the typecheck that matters runs per package.",
+    "No second `ce-simplify-code` pass: `skill://legion-worker/references/pr-body.md` gives the pass to the first implementing round only, and a round answering a review runs none. The diff now carries one TypeScript test file, so a `Thermo` line stops being owed as a docs-only exemption, but the pass itself still belongs to round one, which was docs-only."
   ]
 }
