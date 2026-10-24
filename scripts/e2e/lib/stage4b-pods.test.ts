@@ -627,7 +627,7 @@ if absent=$(pod_connect absent); then echo "absent read: $absent"; fi`);
     expect(out).toEndWith("FAIL: the operator could not read pod pod-c\n");
   });
 
-  test("a role with no readable Oh My Pi fails, naming its container", () => {
+  test("a role with no readable Oh My Pi fails, naming its role's namespaces", () => {
     const { exitCode, out } = judge({
       pods: { "pod-a": movedPod() },
       envs: { "pod-a/architect": handedEnv() },
@@ -635,7 +635,7 @@ if absent=$(pod_connect absent); then echo "absent read: $absent"; fi`);
     });
     expect(exitCode).toBe(1);
     expect(out).toContain(
-      "FAIL: claim-b's tester in pod pod-a has no readable Oh My Pi environment in its tester container"
+      "FAIL: claim-b's tester in pod pod-a has no readable Oh My Pi environment in its tester namespaces"
     );
   });
 
@@ -832,7 +832,7 @@ pod_shape_verdict "$work/pod-watch-wrong-shape.json" | sed 's/^/control /'`);
 // The pod-watch-verdict checkpoint's matching (pod_watch_verdict, never_scheduled_deaths): the
 // daemon names a dead process by its claim, whose last word is its role, and its incarnation,
 // `<pod uid>/<generation>`; the driver records an action by pod uid, with the role for a kill
-// (driver_action). A `kill-container` accounts for a death of the role it killed, any generation, in
+// (driver_action). A `kill-role` accounts for a death of the role it killed, any generation, in
 // its pod and no other role's; a `delete-pod` or `close` for a death of any role in its pod. Neither
 // accounts for another pod, a pod whose uid it is a prefix of included; a death whose pod the
 // scheduler never placed is accounted for by that pod's own conditions; and a record line in any
@@ -912,7 +912,7 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
           ["uid-a2/1", "implementer"],
           ["uid-b/1", "implementer"],
         ],
-        ["kill-container uid-a implementer"]
+        ["kill-role uid-a implementer"]
       )
     ).toEqual(["uid-a2/1", "uid-b/1"]);
   });
@@ -924,7 +924,7 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
           ["uid-a/1", "implementer"],
           ["uid-a/1", "tester"],
         ],
-        ["kill-container uid-a implementer"]
+        ["kill-role uid-a implementer"]
       )
     ).toEqual(["uid-a/1"]);
   });
@@ -955,22 +955,24 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
   });
 
   test("a record line in another form is named, a kill without its role included", () => {
-    expect(verdict([], ["kill-container uid-a"])).toEqual([
-      "driver action kill-container uid-a 2026-10-08T14:00:00.000Z is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME",
+    expect(verdict([], ["kill-role uid-a"])).toEqual([
+      "driver action kill-role uid-a 2026-10-08T14:00:00.000Z is not kill-role UID TIME ROLE, delete-pod UID TIME or close UID TIME",
     ]);
   });
 
   // An unreadable line accounts for nothing: a death in its pod is named beside the line, whatever
-  // the line's kind (an old kind, a deletion with a field too many, a kill with one too many).
+  // the line's kind (an old kind — a bare kill, or the one-container-per-role layout's kill of a role
+  // container — a deletion with a field too many, a kill with one too many).
   test("an unreadable line accounts for no death in its pod, and the verdict names both", () => {
     for (const line of [
       "kill uid-a",
+      "kill-container uid-a tester",
       "delete-pod uid-a extra",
-      "kill-container uid-a tester extra",
+      "kill-role uid-a tester extra",
     ]) {
       const [kind, uid, ...rest] = line.split(" ");
       expect(verdict([["uid-a/1", "tester"]], [line])).toEqual([
-        `driver action ${[kind, uid, "2026-10-08T14:00:00.000Z", ...rest].join(" ")} is not kill-container UID TIME ROLE, delete-pod UID TIME or close UID TIME`,
+        `driver action ${[kind, uid, "2026-10-08T14:00:00.000Z", ...rest].join(" ")} is not kill-role UID TIME ROLE, delete-pod UID TIME or close UID TIME`,
         "uid-a/1",
       ]);
     }
@@ -985,9 +987,9 @@ sed -n 's/^incarnation \\([^ ]*\\) of .* died with no driver action.*/\\1/p; /^d
     writeFileSync(
       join(evidence, "driver-actions.txt"),
       [
-        "kill-container uid-a 2026-10-08T14:00:00.000Z planner",
-        "kill-container uid-b 2026-10-08T14:01:00.000Z architect",
-        "kill-container uid-c 2026-10-08T14:02:00.000Z merger",
+        "kill-role uid-a 2026-10-08T14:00:00.000Z planner",
+        "kill-role uid-b 2026-10-08T14:01:00.000Z architect",
+        "kill-role uid-c 2026-10-08T14:02:00.000Z merger",
         "delete-pod uid-c 2026-10-08T14:03:00.000Z",
       ]
         .map((line) => `${line}\n`)

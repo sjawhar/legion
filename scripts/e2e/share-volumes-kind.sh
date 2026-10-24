@@ -224,7 +224,9 @@ done
 pass
 
 begin pod-shares
-container=architect
+# An issue pod has one container, `roles`, which mounts every pod-block volume at the block's path
+# (a path outside the image's home), and every role's namespaces see it there.
+container=roles
 for _ in $(seq 1 90); do
   kind_k -n legion exec "$pod" -c "$container" -- true >/dev/null 2>&1 && break
   sleep 2

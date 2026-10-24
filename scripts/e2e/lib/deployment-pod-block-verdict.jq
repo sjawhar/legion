@@ -5,10 +5,11 @@
 #   block      the block, `runtime.kubernetes.pod` as the run's legion.yaml holds it
 #              (--slurpfile, one JSON object): service_account, env, volumes, volume_mounts, in the
 #              shape Legion's loader reads (packages/daemon/internal/config/kubernetes.go).
-#   processes  what the pod's architect container runs (--rawfile): for each process, a line
-#              `#<pid> <comm>`, then one `NAME=VALUE` line for each of the block's env names the
-#              process has. The block's environment reaches a role's processes when its launcher
-#              starts them, not through the container spec.
+#   processes  what the architect's processes hold (--rawfile), read in the architect's own
+#              namespaces of the pod's `roles` container: for each process, a line `#<pid> <comm>`,
+#              then one `NAME=VALUE` line for each of the block's env names the process has. The
+#              block's environment reaches a role's processes when its launcher starts them, not
+#              through the container spec.
 # Output: {process, missing, wrong}:
 #   process    {pid, comm} of the process holding the most of the block's env names (the lowest pid
 #              on a tie), or null when no process holds one;
@@ -19,8 +20,12 @@
 #              path), a projected token's audience, expiry or path, a mount's sub_path or read_only,
 #              an env value. A value is never printed, only its name, so a verdict never carries an
 #              env value.
-# Every container of the pod but its init containers is a role container, and each must carry every
-# mount. A projected token with no expiration_seconds expires in 3600 s (the API server's default),
+# An issue pod's one container, `roles`, carries every mount, each at the block's path except one at
+# or under the image's home (/home/legion), which that container mounts at the same path under
+# /var/run/legion/home and each role's namespaces bind back under the home
+# (internal/runtime/sandbox/names.go containerHomePath). Any other container but the init
+# containers carries every mount at the block's path. A projected token with no expiration_seconds
+# expires in 3600 s (the API server's default),
 # and a mount with no read_only is read-only (Legion's loader). A Secret or ConfigMap volume is
 # compared by its kind and object name, not its `items`; a token is checked as carried, never as
 # accepted by the service it is for.
@@ -80,14 +85,18 @@
      | ($b.volume_mounts // [])[] as $m
      # read_only is true unless the block says false; `//` would read a false as absent.
      | (if $m | has("read_only") then $m.read_only else true end) as $want_ro
-     | ([$c.volumeMounts // [] | .[] | select(.name == $m.volume and .mountPath == $m.mount_path)] | first) as $pm
-     | if $pm == null then {missing: "mount \($m.volume) at \($m.mount_path) in container \($c.name)"}
+     | (if $c.name != "roles" then $m.mount_path
+        elif $m.mount_path == "/home/legion" then "/var/run/legion/home"
+        elif ($m.mount_path | startswith("/home/legion/")) then "/var/run/legion/home/" + ($m.mount_path | ltrimstr("/home/legion/"))
+        else $m.mount_path end) as $at
+     | ([$c.volumeMounts // [] | .[] | select(.name == $m.volume and .mountPath == $at)] | first) as $pm
+     | if $pm == null then {missing: "mount \($m.volume) at \($at) in container \($c.name)"}
        else
-         (if ($pm.subPath // "") != ($m.sub_path // "") then {wrong: "mount \($m.volume) at \($m.mount_path) in container \($c.name) has sub_path \($pm.subPath // "")"} else empty end),
-         (if ($pm.readOnly == true) != $want_ro then {wrong: "mount \($m.volume) at \($m.mount_path) in container \($c.name) has read_only \($pm.readOnly == true)"} else empty end)
+         (if ($pm.subPath // "") != ($m.sub_path // "") then {wrong: "mount \($m.volume) at \($at) in container \($c.name) has sub_path \($pm.subPath // "")"} else empty end),
+         (if ($pm.readOnly == true) != $want_ro then {wrong: "mount \($m.volume) at \($at) in container \($c.name) has read_only \($pm.readOnly == true)"} else empty end)
        end),
     (($env | to_entries[]) as $e
-     | if $process == null then {missing: "env \($e.key) on any process of the architect container"}
+     | if $process == null then {missing: "env \($e.key) on any process of the architect"}
        elif $process.env[$e.key] == null then {missing: "env \($e.key) on process \($process.pid)"}
        elif $process.env[$e.key] != ($e.value | tostring) then {wrong: "env \($e.key) on process \($process.pid) differs from the block"}
        else empty end)
