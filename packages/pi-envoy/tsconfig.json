@@ -25,6 +25,7 @@
     "extensions/envoy.ts",
     "extensions/askgate/*.ts",
     "extensions/dispatch-first-omp.test.ts",
+    "extensions/askgate/*.ts",
     "../pi-shared/src/omp-host.d.ts",
     "scripts/*.ts",
     "src/**/*.ts"
