@@ -42,7 +42,7 @@ const RoleTopicPrefix = "notifications.role."
 // to. It carries the controller notices (record.ControllerNotice), each an outbox row of its own:
 // every hold and a tree architect's own failed claim (workflow's noticeWithController), a root in
 // triage handed to Legion (admission), a root admission took out of the workflow because it held
-// no slot and waited for none (`unslotted`, admit's releaseUnslotted), and the walk wakes admission
+// no slot and waited for none (`unslotted`, admit's releaseUnslotted), and the slot wakes admission
 // sends through wakeController, `slot-free`, `todo` and `tick` (admit.Admission.wakeController and
 // its callers say when; the tick alone carries `openCapabilities`, the deployment capabilities with
 // no decision, admit.Admission.ReportCapabilities). It sits among the issue topics, where no issue

@@ -71,9 +71,16 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 	if lead, _, _ := strings.Cut(start.Task, "\n"); lead != "Production check of LEGION-209: child." {
 		t.Fatalf("the check task opens %q, want the line a resumed session tells the check by", lead)
 	}
-	for _, want := range []string{"sjawhar/legion", "#43", "merge-43", "Look 1, woken by the merge.", "handoff_complete", "pass", "pending", "fail", "the daemon wakes the check"} {
+	for _, want := range []string{"sjawhar/legion", "#43", "merge-43", "Look 1, woken by the merge.", "handoff_complete", "pass", "pending", "fail", "the daemon wakes the check",
+		"fail for a defect, a dispatch ask and never an issue you file", "on the tree's root while the root is before accepting, else on the controller's report issue"} {
 		if !strings.Contains(start.Task, want) {
 			t.Fatalf("the check task lacks %q:\n%s", want, start.Task)
+		}
+	}
+	// A defect the check finds is an ask a person answers, never an issue the implementer files.
+	for _, never := range []string{"dispatch issue", "issue of its own"} {
+		if strings.Contains(start.Task, never) {
+			t.Fatalf("the check task still says %q:\n%s", never, start.Task)
 		}
 	}
 	if strings.Contains(start.Task, "last look") {

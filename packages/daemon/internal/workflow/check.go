@@ -136,7 +136,7 @@ func checkTask(issue record.Issue, check record.ProductionCheck, cause, detail s
 		"read whether production carries the merge, then report with the legion tool's handoff_complete and a verdict, committing nothing: " +
 		"pass once you drove the changed path in production and wrote the pull request's Production: line naming the merge commit and what woke this look; " +
 		"pending when production does not carry the merge yet, the summary naming what is missing and the Production: line left at `pending deploy of <merge commit>`; " +
-		"fail for a defect, filed as an issue of its own in the project with `dispatch issue`, linking the pull request and this closed issue, and named in the Production: line and the summary. " +
+		"fail for a defect, a dispatch ask and never an issue you file (skill://legion-worker/references/findings.md), on the tree's root while the root is before accepting, else on the controller's report issue, since this closed issue takes none, naming the pull request, the merge commit, what you drove and what failed, and named in the Production: line and the summary. " +
 		"Wait for no deploy in this session: the daemon wakes the check on the deploy's event.")
 	if last {
 		text.WriteString(" On this last look a pending closes the check as not run: before reporting it, write on the pull request that the check did not run because production did not carry the merge within the bound.")

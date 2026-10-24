@@ -845,9 +845,9 @@ const firstControllerTick = time.Minute
 
 // tickController applies a ControllerTick fact once shortly after the runtime starts
 // (firstControllerTick, or the interval when that is shorter) and then every controllerWake, so
-// admission wakes the controller even when no event arrives: a walk that found nothing, the last
-// tree finishing, a tree waiting on a refused root claim, or a quiet day would otherwise leave the
-// controller idle and the daily report unposted until the next wake. Each tick's event id is its
+// admission wakes the controller even when no event arrives: the last tree finishing, a tree
+// waiting on a refused root claim, or a quiet day would otherwise leave the controller idle and the
+// daily report unposted until the next wake. Each tick's event id is its
 // own (the project, this boot, and the tick's time), since processed_events is shared by every
 // project's daemon. A failed apply is logged, and the next tick tries again.
 func (w *workflowRuntime) tickController(ctx context.Context) {
