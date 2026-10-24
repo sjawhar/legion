@@ -798,14 +798,25 @@ describe("DispatchClient", () => {
   // the cut after redaction lengthened the text, would leave its first half closing the excerpt,
   // which the message spells as `\ud83d`; the excerpt ends before the emoji instead. The first
   // body puts the emoji's first unit last inside the limit; the second puts it two units earlier,
-  // and redacting the 8 bearer characters at its start as `[redacted]` adds the two.
+  // and redacting the 8 bearer characters at its start as `[redacted]` adds the two. A bearer of
+  // one character reads nothing past the limit, so what it scans ends on that first unit itself,
+  // whether or not the body holds the bearer; a longer one reads past it.
   const emojiAtLimit = `<style>${"s".repeat(64 * 1024 - 56)}</style>${"q".repeat(40)}😀 after the limit`;
   const emojiAfterRedaction = `<style>${pieceBearer.slice(0, 8)}${"s".repeat(64 * 1024 - 66)}</style>${"q".repeat(40)}😀 after the limit`;
+  const beforeEmoji = "q".repeat(40);
   test.each([
-    ["the scan limit, under a bearer", "secret", emojiAtLimit],
-    ["the scan limit, with no bearer", "", emojiAtLimit],
-    ["the cut after redaction lengthened the text", pieceBearer, emojiAfterRedaction],
-  ] as const)("ends an excerpt before an emoji %s would split", async (_cut, bearer, body) => {
+    ["the scan limit, under a bearer", "secret", emojiAtLimit, beforeEmoji],
+    [
+      "the scan limit, under a one-character bearer it does not hold",
+      "Z",
+      emojiAtLimit,
+      beforeEmoji,
+    ],
+    ["the scan limit, under a one-character bearer it holds", "q", emojiAtLimit, "[redacted]"],
+    ["the scan limit, under a two-character bearer it holds", "qq", emojiAtLimit, "[redacted]"],
+    ["the scan limit, with no bearer", "", emojiAtLimit, beforeEmoji],
+    ["the cut after redaction lengthened the text", pieceBearer, emojiAfterRedaction, beforeEmoji],
+  ] as const)("ends an excerpt before an emoji %s would split", async (_cut, bearer, body, quoted) => {
     const { fetchImpl } = fakeFetch([
       new Response(body, { status: 502, headers: { "Content-Type": "text/html" } }),
     ]);
@@ -816,7 +827,7 @@ describe("DispatchClient", () => {
       (error: Error) => error.message
     );
 
-    expect(message).toContain(`("${"q".repeat(40)}")`);
+    expect(message).toContain(`("${quoted}")`);
     expect(message).not.toContain("\\ud83d");
     expect(message).not.toContain("after the limit");
   });

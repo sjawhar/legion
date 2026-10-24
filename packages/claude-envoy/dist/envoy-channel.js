@@ -39273,7 +39273,7 @@ function redactBearer(text, bearer) {
     const end = covered.indexOf(0, start);
     kept = end === -1 ? scanned.length : end;
   }
-  return cutUnits(`${redacted}${cutUnits(scanned, EXCERPT_SCAN_LIMIT).slice(kept)}`, EXCERPT_SCAN_LIMIT);
+  return cutUnits(`${redacted}${cutUnits(text, EXCERPT_SCAN_LIMIT).slice(kept)}`, EXCERPT_SCAN_LIMIT);
 }
 function excerpt(text, token) {
   const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");

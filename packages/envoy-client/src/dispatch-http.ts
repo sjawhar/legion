@@ -287,10 +287,12 @@ function redactBearer(text: string, bearer: string): string {
     const end = covered.indexOf(0, start);
     kept = end === -1 ? scanned.length : end;
   }
-  // Both cuts stop before an emoji the limit would split (`cutUnits`); the scan above is not cut
-  // shorter, so a run of the bearer across the limit is redacted as before.
+  // The kept tail comes from the text cut to the limit (`cutUnits`), never from the scan window:
+  // a bearer of one character scans exactly to the limit, so that window can end on half an emoji.
+  // A run starts and ends on a bearer character, never inside a pair (a header value holds no
+  // surrogate), and redaction can lengthen the text, so the result is cut to the limit again.
   return cutUnits(
-    `${redacted}${cutUnits(scanned, EXCERPT_SCAN_LIMIT).slice(kept)}`,
+    `${redacted}${cutUnits(text, EXCERPT_SCAN_LIMIT).slice(kept)}`,
     EXCERPT_SCAN_LIMIT
   );
 }
