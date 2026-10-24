@@ -34,6 +34,14 @@
 //   bun scripts/e2e/lib/dispatch-user-turns.ts publish <nats-url> <subject> <data>
 //     publishes <data> on <subject> as a bare bus client, with no listener in between: what any
 //     process that can reach NATS can put on a session's agent subject.
+//   bun scripts/e2e/lib/dispatch-user-turns.ts edit <dispatch-url> <login> <issue> <old> <new> <shot.png>
+//     opens <issue>'s Spec tab as <login> (the trusted identity header, which the page's document
+//     socket carries too), waits up to 15 s for the document's connection dot to read connected,
+//     selects the first <old> in the editor, types <new> over it, and waits until the issue's
+//     events hold an artifact.version by <login> newer than any before the edit, then closes the
+//     page. Prints {"connected","version","seq"}: the version that settlement wrote and its event's
+//     seq. Exits 1 naming the step that failed: a dot that never read connected is a sign-in that
+//     did not reach the document's socket.
 //
 // Playwright is resolved from packages/dispatch, the package that owns the browser suite.
 import { createRequire } from "node:module";
@@ -55,6 +63,8 @@ interface PageLike {
   getByTestId(id: string): LocatorLike;
   waitForTimeout(ms: number): Promise<void>;
   evaluate<T, A>(fn: (arg: A) => Promise<T>, arg: A): Promise<T>;
+  keyboard: { type(text: string): Promise<void> };
+  locator(selector: string): LocatorLike;
 }
 interface LocatorLike {
   locator(selector: string): LocatorLike;
@@ -74,12 +84,8 @@ interface LocatorLike {
   count(): Promise<number>;
 }
 
-async function withPage<T>(
-  base: string,
-  login: string,
-  session: string,
-  run: (page: PageLike) => Promise<T>
-): Promise<T> {
+/** A browser page signed in as login through Dispatch's trusted identity header, for run. */
+async function withSignedInPage<T>(login: string, run: (page: PageLike) => Promise<T>): Promise<T> {
   const require = createRequire(
     new URL("../../../packages/dispatch/package.json", import.meta.url)
   );
@@ -90,13 +96,23 @@ async function withPage<T>(
       extraHTTPHeaders: { "X-Dispatch-User": login },
       viewport: { height: 1000, width: 1280 },
     });
-    const page: PageLike = await context.newPage();
-    await page.goto(`${base}/agents/${encodeURIComponent(session)}/live`);
-    await page.getByTestId("agent-thread").waitFor({ timeout: 30_000 });
-    return await run(page);
+    return await run(await context.newPage());
   } finally {
     await browser.close();
   }
+}
+
+async function withPage<T>(
+  base: string,
+  login: string,
+  session: string,
+  run: (page: PageLike) => Promise<T>
+): Promise<T> {
+  return withSignedInPage(login, async (page) => {
+    await page.goto(`${base}/agents/${encodeURIComponent(session)}/live`);
+    await page.getByTestId("agent-thread").waitFor({ timeout: 30_000 });
+    return await run(page);
+  });
 }
 
 /** Every message the thread shows, a person's and the session's alike, as text. */
@@ -394,6 +410,109 @@ async function publish(): Promise<void> {
   }
 }
 
+/** The issue's `artifact.version` events by login, newest last: {version, seq}, read as login. */
+async function personsVersions(
+  base: string,
+  login: string,
+  issue: string
+): Promise<{ version: number; seq: number }[]> {
+  const response = await fetch(
+    `${base}/api/v1/issues/${encodeURIComponent(issue)}/events?order=desc&limit=200`,
+    { headers: { "X-Dispatch-User": login } }
+  );
+  if (!response.ok) throw new Error(`read ${issue}'s events: ${response.status}`);
+  const events = (await response.json()) as {
+    type: string;
+    seq: number;
+    actor: { kind: string; id?: string };
+    payload: { version?: { number?: number } };
+  }[];
+  return events
+    .filter(
+      (event) =>
+        event.type === "artifact.version" &&
+        event.actor.kind === "user" &&
+        event.actor.id === login &&
+        typeof event.payload.version?.number === "number"
+    )
+    .map((event) => ({ seq: event.seq, version: event.payload.version?.number ?? 0 }))
+    .sort((left, right) => left.seq - right.seq);
+}
+
+async function edit(): Promise<void> {
+  const [base, login, issue, old, replacement, shot] = args;
+  if (!base || !login || !issue || !old || !replacement || !shot) {
+    refuse("usage: edit <dispatch-url> <login> <issue> <old> <new> <shot.png>");
+  }
+  const before = (await personsVersions(base, login, issue)).at(-1)?.seq ?? 0;
+  const result = await withSignedInPage(login, async (page) => {
+    await page.goto(`${base}/issues/${encodeURIComponent(issue)}/spec`);
+    const editor = page.getByRole("textbox", { name: "Document editor" });
+    await editor.waitFor({ timeout: 30_000 });
+    // The connection dot's accessible name reads "connected" only once the document's socket is
+    // signed in and synced (ConnectionDot.tsx; packages/dispatch/e2e/editor.ts, connectedDot).
+    try {
+      await page.getByRole("status", { name: "connected" }).waitFor({ timeout: 15_000 });
+    } catch {
+      await page.screenshot({ fullPage: true, path: shot });
+      throw new Error(
+        "the document's connection dot never read connected in 15 s: the sign-in did not reach its socket"
+      );
+    }
+    // Selects the first `old` the way a drag does: a DOM range over it and the selectionchange
+    // ProseMirror's DOMObserver reads (packages/dispatch/e2e/editor.ts, selectEditorText), so the
+    // typing below replaces it as a person's typing does.
+    await page.evaluate(async (quote: string) => {
+      const root = document.querySelector('[role="textbox"][aria-label="Document editor"]');
+      if (!(root instanceof HTMLElement)) throw new Error("no document editor on the page");
+      root.focus();
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const runs: { node: Node; start: number; end: number }[] = [];
+      let text = "";
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const start = text.length;
+        text += node.textContent ?? "";
+        runs.push({ end: text.length, node, start });
+      }
+      const index = text.indexOf(quote);
+      const first = runs.find((run) => run.start <= index && index < run.end);
+      const last = runs.find(
+        (run) => run.start < index + quote.length && index + quote.length <= run.end
+      );
+      if (index < 0 || first === undefined || last === undefined) {
+        throw new Error(`the editor does not hold: ${quote}`);
+      }
+      const range = document.createRange();
+      range.setStart(first.node, index - first.start);
+      range.setEnd(last.node, index + quote.length - last.start);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+      // ProseMirror reads the selection on its next tick; the typing waits for it.
+      const settled = Promise.withResolvers<void>();
+      setTimeout(settled.resolve, 100);
+      await settled.promise;
+    }, old);
+    await page.keyboard.type(replacement);
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const newer = (await personsVersions(base, login, issue)).filter((v) => v.seq > before);
+      const settled = newer.at(-1);
+      if (settled !== undefined) {
+        await page.screenshot({ fullPage: true, path: shot });
+        return { connected: true, seq: settled.seq, version: settled.version };
+      }
+      if (Date.now() > deadline) {
+        await page.screenshot({ fullPage: true, path: shot });
+        throw new Error(`no artifact.version by ${login} on ${issue} within 60 s of the edit`);
+      }
+      await page.waitForTimeout(500);
+    }
+  });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
 if (command === "send") await send();
 else if (command === "complete") await complete();
 else if (command === "list") await list();
@@ -401,7 +520,8 @@ else if (command === "forge") await forge();
 else if (command === "count") await count();
 else if (command === "envelope") await envelope();
 else if (command === "publish") await publish();
+else if (command === "edit") await edit();
 else
   refuse(
-    `unknown command ${command ?? "(none)"}: send, complete, list, forge, count, envelope or publish`
+    `unknown command ${command ?? "(none)"}: send, complete, list, forge, count, envelope, publish or edit`
   );
