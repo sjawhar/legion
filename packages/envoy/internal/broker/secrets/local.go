@@ -21,9 +21,9 @@ import (
 
 // Local stands in, in memory, for the AWS calls the broker and the agent-secrets CLI make: Secrets
 // Manager's ListSecrets, DescribeSecret and GetSecretValue, which the broker reads with, its
-// CreateSecret, PutSecretValue, TagResource, DeleteSecret and RestoreSecret, which the CLI writes
-// with, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for local development
-// (LocalFromFile), and tests build one with NewLocal.
+// CreateSecret, PutSecretValue, TagResource, UntagResource, DeleteSecret and RestoreSecret, which
+// the CLI writes with, and KMS's ListAliases. BROKER_FAKE_SECRETS_FILE loads one for local
+// development (LocalFromFile), and tests build one with NewLocal.
 type Local struct {
 	mu      sync.Mutex
 	secrets map[string]LocalSecret
@@ -376,6 +376,23 @@ func (l *Local) TagResource(_ context.Context, in *secretsmanager.TagResourceInp
 	s.Tags = withTags(s.Tags, in.Tags)
 	l.secrets[s.Name] = s
 	return &secretsmanager.TagResourceOutput{}, nil
+}
+
+// UntagResource removes the requested tags from the secret SecretId names.
+func (l *Local) UntagResource(_ context.Context, in *secretsmanager.UntagResourceInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.UntagResourceOutput, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	secret, err := l.changeable(in.SecretId)
+	if err != nil {
+		return nil, err
+	}
+	tags := maps.Clone(secret.Tags)
+	for _, key := range in.TagKeys {
+		delete(tags, key)
+	}
+	secret.Tags = tags
+	l.secrets[secret.Name] = secret
+	return &secretsmanager.UntagResourceOutput{}, nil
 }
 
 // withTags is a copy of held with tags set over it, so no map a caller handed Local changes.

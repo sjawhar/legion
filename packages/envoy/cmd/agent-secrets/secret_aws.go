@@ -9,7 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,13 +27,15 @@ import (
 )
 
 // secretsAPI is the Secrets Manager calls the secret forms make: ListSecrets and DescribeSecret to
-// read, and the five writes. *secretsmanager.Client and secrets.Local both satisfy it.
+// read, and writes for values, tags and deletion. *secretsmanager.Client and secrets.Local satisfy
+// it.
 type secretsAPI interface {
 	secretsmanager.ListSecretsAPIClient
 	DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
 	CreateSecret(ctx context.Context, in *secretsmanager.CreateSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
 	PutSecretValue(ctx context.Context, in *secretsmanager.PutSecretValueInput, o ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error)
 	TagResource(ctx context.Context, in *secretsmanager.TagResourceInput, o ...func(*secretsmanager.Options)) (*secretsmanager.TagResourceOutput, error)
+	UntagResource(ctx context.Context, in *secretsmanager.UntagResourceInput, o ...func(*secretsmanager.Options)) (*secretsmanager.UntagResourceOutput, error)
 	DeleteSecret(ctx context.Context, in *secretsmanager.DeleteSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error)
 	RestoreSecret(ctx context.Context, in *secretsmanager.RestoreSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.RestoreSecretOutput, error)
 }
@@ -116,13 +120,13 @@ func checkSettingsKeyARN(settings Settings) error {
 	return nil
 }
 
-// ownerTierTags is the owner and tier tags, which create and retag always send together
-// (cmdSecretRetag says why).
-func ownerTierTags(owner, tier string) []smtypes.Tag {
-	return []smtypes.Tag{
-		{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
-		{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
+// awsTags is tags as Secrets Manager's tag list, in key order: the inverse of secrets.TagMap.
+func awsTags(tags map[string]string) []smtypes.Tag {
+	list := make([]smtypes.Tag, 0, len(tags))
+	for _, key := range slices.Sorted(maps.Keys(tags)) {
+		list = append(list, smtypes.Tag{Key: aws.String(key), Value: aws.String(tags[key])})
 	}
+	return list
 }
 
 // isAccessDenied reports whether err is AWS's AccessDeniedException, which the SDK answers as a
@@ -177,6 +181,7 @@ func (b *awsBackend) list(ctx context.Context) ([]secretView, error) {
 			views = append(views, secretView{
 				Name: b.displayName(id), SecretName: id,
 				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
+				Kind: tags[policy.TagKind], GitHubOwners: tags[policy.TagGitHubOwners], MaxGrant: tags[policy.TagMaxGrant],
 				HasValue: secrets.HasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
 				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
@@ -195,6 +200,7 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	return secretView{
 		Name: b.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
 		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
+		Kind: tags[policy.TagKind], GitHubOwners: tags[policy.TagGitHubOwners], MaxGrant: tags[policy.TagMaxGrant],
 		HasValue: secrets.HasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
 		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
@@ -202,12 +208,12 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	}, nil
 }
 
-func (b *awsBackend) create(ctx context.Context, slug, owner, tier, value string) error {
+func (b *awsBackend) create(ctx context.Context, slug string, tags map[string]string, value string) error {
 	_, err := b.sm.CreateSecret(ctx, &secretsmanager.CreateSecretInput{
 		Name:         aws.String(b.id(slug)),
 		KmsKeyId:     aws.String(b.settings.KMSKeyARN),
 		SecretString: aws.String(value),
-		Tags:         ownerTierTags(owner, tier),
+		Tags:         awsTags(tags),
 	})
 	return err
 }
@@ -219,19 +225,28 @@ func (b *awsBackend) set(ctx context.Context, slug, value string) error {
 	return err
 }
 
-func (b *awsBackend) currentTags(ctx context.Context, slug string) (owner, tier string, err error) {
+func (b *awsBackend) currentTags(ctx context.Context, slug string) (map[string]string, error) {
 	held, err := b.sm.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(b.id(slug))})
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-	tags := secrets.TagMap(held.Tags)
-	return tags[policy.TagOwner], tags[policy.TagTier], nil
+	return secrets.TagMap(held.Tags), nil
 }
 
-func (b *awsBackend) retag(ctx context.Context, slug, owner, tier string) error {
+// setTags writes tags in one TagResource, which keeps every tag it does not name.
+func (b *awsBackend) setTags(ctx context.Context, slug string, tags map[string]string) error {
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(b.id(slug)),
-		Tags:     ownerTierTags(owner, tier),
+		Tags:     awsTags(tags),
+	})
+	return err
+}
+
+// removeTags removes keys in one UntagResource.
+func (b *awsBackend) removeTags(ctx context.Context, slug string, keys []string) error {
+	_, err := b.sm.UntagResource(ctx, &secretsmanager.UntagResourceInput{
+		SecretId: aws.String(b.id(slug)),
+		TagKeys:  keys,
 	})
 	return err
 }
