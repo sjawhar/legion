@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-71",
+  "completed": "2026-10-24T22:13:49Z",
+  "plan": "dispatch://INFRA-71/artifact/plan-md (version 7)",
+  "note": "This generation has no code change in sjawhar/legion. The root's deliverable merged at 7bf2759c6e1768cac003c18368530a731016285e on 2026-10-24T19:37:08Z and closed the issue; it was reopened and re-admitted only so this tree keeps a live architect for two children that were still running at the merge. The plan document names what merged, what is outstanding and whose it is, and what would have to be true for the root to close again. The retro of the previous generation removed .legion/INFRA-71/ from the merged head, so this file is the directory's only member again.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker/references/merge-gate.md, 'After the merge': the one piece of this issue's work still owned by this tree is the production check on 7bf2759c, which is the implementer's — one look is taken, none is open, and the bound wake is 2026-11-07T19:37Z. That reference is what says how a look is taken and how pass, pending and fail are reported.",
+      "skill://legion-worker: the phase contract, including what an implementer does when a phase opens with nothing to implement — report it to the architect rather than find work, which is this generation's whole shape."
+    ],
+    "test": [
+      "skill://legion-worker: the phase contract. There is no change in this repository to drive this generation, and version 33's four acceptance items are the production check's work on the merged commit after a person applies dispatch://INFRA-206; this skill is what tells a tester handed an empty phase to report that rather than invent a surface.",
+      "none beyond it: I looked through skills/ for a skill about proving work that is already merged, about a cluster declaration in another repository, or about a production check a tester owns, and there is none — the production check belongs to the implementer, and the declaration test of acceptance item 4 belongs to dispatch://INFRA-206's repository, which declares the policy this one does not."
+    ],
+    "review": [
+      "skill://legion-worker and skill://legion-worker/references/merge-gate.md: whatever this generation ends with, a reviewer reads the plan beside the issue and judges a diff; this plan proposes none, so the reference that matters is the one saying what READY and the merge gate require of a head.",
+      "skill://legion-worker/references/review-threads.md: only if a round opens threads. Nothing in this generation is expected to."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: nothing in this tree can close the root — close_root is refused once a phase has started (close_root.go:29-30, CLOSE_AFTER_PHASE_STARTED), the workflow's own closing act is a merge and this generation has none, and an architect may not write a lifecycle status (architect-common.md:28).",
+        "answer": "Section 4 item 5 states it with that evidence and names the closing act: a human setting dispatch://INFRA-71 to done, reached with a dispatch ask. Section 5 item 1 puts to the architect when that ask is opened, since a tree left open with no act that can close it is the shape this issue has already cost a day to."
+      },
+      {
+        "finding": "F2: a sibling child will falsify a sentence of this root's merged deliverable — docs/kubernetes.md:2655-2657 says the check is python3 because the role container has no client for these servers, and dispatch://INFRA-221's pull request #2149 puts psql, redis-cli, sqlite3, nc and dig into the worker image, with documentation edits confined to the image-contents region.",
+        "answer": "Section 5 item 2 routes it into INFRA-221's own round, decided while #2149 is still in review, and names the forward merge of main that pull request owes since it edits capabilities.go and docs/kubernetes.md, both touched by 7bf2759c. It is not new work for this root and not one of INFRA-215's banked gaps, which are gaps in the text as written."
+      },
+      {
+        "finding": "F3: the production check's recorded next wake is its bound, and nothing here drives the deploy that would let it pass.",
+        "answer": "Section 3's table records the check's state as read from the issue record (one look, none open, next wake 2026-11-07T19:37Z) and section 4 item 4 names both ways it closes: a look reporting pass or fail, or the bound wake reporting pending and closing it as not run."
+      },
+      {
+        "finding": "F4: what becomes of dispatch://INFRA-215, the nine banked findings, before the close — released and run, left in triage with the consequence stated, or ended — is a scope choice only the architect can make, and it is not handed over by a root's linger.",
+        "answer": "Section 4 item 3 makes its deliberate disposition a condition of the close and says it is not carried by a linger; section 3 records it as the architect's."
+      },
+      {
+        "finding": "F5: acceptance item 4's 'test over the declaration itself' has two readings, and under the one where the declaration is the deployment's there is nothing in this repository to test.",
+        "answer": "Section 2 settles it on the architect's own authoritative answer — the declaration is the deployment's, the test belongs to dispatch://INFRA-206 — and carries the evidence that this repository declares no network policy, ingress rule, admission policy or quota: the only matches in the tree are four lines of prose."
+      },
+      {
+        "finding": "F6: two things on the merged pull request a later role reads as owed — the envoy-go-race re-run its body called owed rather than skipped, and a Fast-follow line routing two findings to dispatch://INFRA-199.",
+        "answer": "Both checked rather than assumed, and recorded in section 1 as discharged: gh pr checks 2092 answers envoy-go-race pass (run 40124980899), and INFRA-199 is done, so the route is gone and the two findings concerned the pinned-tool guard, which was removed from this branch and never merged from it."
+      },
+      {
+        "finding": "F7: a generation discrepancy — the brief said generation 3 while the pod's environment says 4 — and a line-number caution, since the workspace head and main differ.",
+        "answer": "The plan names no generation number, since read_record answers it and nothing in the plan turns on it: the record's issue generation is 3 and the pod's launch generation is 4. Section 1 cites both heads explicitly, the merge commit for main's line numbers and cb184b9d for the workspace's, and says why they differ. The plan reviewer's one non-blocking note, that the heading sits at 2517 rather than 2511 at the merge commit, was checked against the raw file at that commit: 2511 is correct and the plan stands."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
