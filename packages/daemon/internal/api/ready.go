@@ -92,7 +92,7 @@ func readyChecks(ctx context.Context, github githubrest.Client, rules config.Mer
 	head := shortSHA(pull.Head.SHA)
 	number := pr.Number
 	if pull.Merged {
-		answer.note = fmt.Sprintf("pull request #%d is already merged, so READY was published without reading its head's checks or handoffs", number)
+		answer.note = fmt.Sprintf("pull request #%d is already merged, so READY was published without reading its head's handoffs", number)
 		return answer, nil
 	}
 	if pull.State == "closed" {

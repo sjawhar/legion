@@ -1645,7 +1645,7 @@ func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *te
 	const (
 		stillCarries  = `READY_HEAD_CARRIES_HANDOFFS: head c0de00000000 of pull request #42 still carries .legion/LEGION-208/`
 		readRefused   = `GITHUB_READ_FAILED: GitHub's read of .legion/LEGION-208/ at head c0de00000000 of pull request #42 failed, so whether the head still carries it is unknown: complete again`
-		alreadyMerged = `pull request #42 is already merged, so READY was published without reading its head's checks or handoffs`
+		alreadyMerged = `pull request #42 is already merged, so READY was published without reading its head's handoffs`
 	)
 	for _, tc := range []struct {
 		name      string

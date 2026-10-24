@@ -150,18 +150,21 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 // yet to say who took it (ghautomerge.Disappeared) — is the case where something has gone wrong
 // with the row, while the notice's premise is that nothing has: it would tell the architect the
 // merge has not been withdrawn and the daemon goes on submitting it while quoting a cause whose
-// own words are the opposite, and the single telling for a disagreement is finishRefused's, once
-// it has stood past ghautomerge.LagBound (merge-stalled) or GitHub has named what took the arm
-// away (merge-removed). A refusal a retry would meet again (ghautomerge.Refused) and a removal
-// (ghautomerge.Removed) end the row, and finishRefused tells the architect of each itself. A
-// GitHub read that failed, a mutation refusal a retry may not meet again and the re-read after
-// it, a read carrying no updatedAt, and the record read that decides the row, which is a Postgres
-// error, are the daemon's own trouble: each retries on the row's backoff and must spend neither
-// the one notice nor render its own error as GitHub's last answer, and the genuine wait that
-// follows is what the architect is to be told of. Naming the three that carry the notice leaves a
-// wait type added to ghautomerge later silent by default rather than wrong by default. A reopen's
-// queue that took the row since starts it over unarmed, unwarned and freshly queued, and its own
-// payload stands: the replacement writes nothing then, and the notice rolls back with it.
+// own words are the opposite. What telling a disagreement has is finishRefused's, and it differs
+// by kind: a ghautomerge.Lagging's is merge-stalled, once it has stood past ghautomerge.LagBound;
+// a ghautomerge.Disappeared's is merge-removed if GitHub names what took the arm away, and nothing
+// at all if it never does, since Submit then answers Disappeared on every run, the row neither
+// ending nor telling anyone and the outbox's own log line for the failed row its only signal. A
+// refusal a retry would meet again (ghautomerge.Refused) and a removal (ghautomerge.Removed) end
+// the row, and finishRefused tells the architect of each itself. A GitHub read that failed, a
+// mutation refusal a retry may not meet again and the re-read after it, a read carrying no
+// updatedAt, and the record read that decides the row, which is a Postgres error, are the daemon's
+// own trouble: each retries on the row's backoff and must spend neither the one notice nor render
+// its own error as GitHub's last answer, and the genuine wait that follows is what the architect is
+// to be told of. Naming the three that carry the notice leaves a wait type added to ghautomerge
+// later silent by default rather than wrong by default. A reopen's queue that took the row since
+// starts it over unarmed, unwarned and freshly queued, and its own payload stands: the replacement
+// writes nothing then, and the notice rolls back with it.
 func (r *outbox) rememberWait(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge, arm bool, cause error) error {
 	now := r.now().UTC()
 	// A row a daemon before record.ReadyMerge.Queued enqueued carries no queue time: its created_at
