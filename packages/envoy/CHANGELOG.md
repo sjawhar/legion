@@ -28,7 +28,8 @@
   proof within `BROKER_PROOF_SKEW_SECONDS` of the broker's clock, and spends a per-address rate
   limit bucket of its own (429 `RATE_LIMITED` with `Retry-After`). A login through the earlier
   `POST /v1/launcher-credentials` route, which cannot refresh, keeps its seven-day credential, or
-  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter. The provider's device codes, tokens,
+  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter (that route is removed since: see the
+  Breaking entry on the hand-built machine login under Changed). The provider's device codes, tokens,
   DPoP proofs and nonces and its HMAC secret live in the tables migration 0016 creates. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
   its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
   logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
@@ -506,6 +507,22 @@
 
 ### Changed
 
+- **Breaking:** the secrets broker serves a person's machine login only through the OAuth device
+  grant. `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
+  the login helpers before legion-envoy 14 used, are gone: the POST answers `405 Method Not
+  Allowed` (Dispatch's `GET` on that path remains) and the poll `404`. Migration 0017 drops their
+  `machine_login_polls` table. A broker of the release before this one still boots on the
+  migrated database, its two removed routes answering 500. Dispatch's routes are unchanged:
+  `GET /v1/launcher-credentials`, `POST /v1/launcher-credentials/{id}/revoke-by-approver`,
+  `POST /v1/machine-logins/lookup` and the record decisions, as is the Legion daemon's
+  `POST /v1/launcher-credentials/token`. A login such a route opened and left pending is still
+  decided by its code; its machine learns nothing of it and logs in again.
+- **Breaking:** `agent-secrets-helper` answers `enroll-box` and `unenroll-box`, the ops of an
+  `agent-secrets` before legion-envoy 10, `BAD_REQUEST unknown op`; `agent-secrets enroll` and
+  `unenroll` ask only `enroll-session-key` and `unenroll-session-key`, never falling back to a
+  helper before legion-envoy 10; `agent-secrets enroll` takes no `--kind`, so `--kind box` exits 2
+  naming the flag; and `POST /v1/enrollments` refuses the kinds `host` and `box`, which only such a
+  helper sent, `400 INVALID_KIND`, where it recorded them as `session`.
 - **Breaking:** the secrets broker needs `BROKER_MACHINE_LOGIN_URL`, the absolute http(s) URL of
   Dispatch's machine-login page (`https://<dispatch>/credentials/machine`), and refuses to start
   without it. The device authorization answer's `verification_uri` names that page, where the
@@ -515,7 +532,7 @@
   broker of this release: against an earlier broker, `agent-secrets machine login` fails. Upgrade
   the broker before the helpers. The broker still serves `POST /v1/launcher-credentials` and
   `GET /v1/launcher-credentials/{pending}` for helpers from earlier releases, whose logins it never
-  refreshes.
+  refreshes. (Superseded by the Breaking entry above: those routes are removed.)
 - `BROKER_LAUNCHER_CREDENTIAL_SECONDS` defaults to 2592000 (30 days), up from 604800 (7 days), and
   is how long a machine login lasts without a refresh: an approval mints its credential for that
   long, and each refresh moves its expiry to that long from then. Its maximum stays 2592000.
@@ -736,7 +753,8 @@
   clients in the field keep working through the rollout in either order: the broker records an
   older helper's `host` or `box` as `session` and logs `an enrollment named a legacy kind`; this
   helper asks an older broker, which refuses `session` with `400 INVALID_KIND`, once more as
-  `host` or `box`. The broker is forward-only from this migration: a broker before it inserts
+  `host` or `box` (the broker's half is removed since: it now refuses `host` and `box` with
+  `400 INVALID_KIND`). The broker is forward-only from this migration: a broker before it inserts
   `host` and `box`, which the new constraint refuses, so roll forward rather than back.
 - **Breaking:** a grant lasts until its session ends unless its request asked for a shorter
   lifetime (`--ttl`, above); there is no fixed lifetime and no cap. `BROKER_MAX_GRANT_SECONDS`
@@ -774,7 +792,8 @@
   stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
   until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
   naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
-  refused for that first, whatever `--kind` it carries, as before.
+  refused for that first, whatever `--kind` it carries, as before. (Superseded by the Breaking
+  entry on `enroll-box`, `unenroll-box` and `--kind` under Changed: those fallbacks are removed.)
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not

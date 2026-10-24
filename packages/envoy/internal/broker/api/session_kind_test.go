@@ -1,7 +1,6 @@
 // session_kind_test.go pins POST /v1/enrollments's kinds on the real broker api_test.go mounts: a
-// machine session enrolls as kind session, the kind an agent-secrets-helper before it sent (host
-// for its own sessions, box for a key a launcher enrolled through it) still enrolls and is recorded
-// as session, and no other kind does.
+// machine session enrolls as kind session, and no other kind does, the kinds an
+// agent-secrets-helper before legion-envoy 10 sent (host, box) among them.
 package api_test
 
 import (
@@ -12,7 +11,7 @@ import (
 func TestEveryMachineSessionIsOneKind(t *testing.T) {
 	ts := newTestServer(t)
 	credentialID, machineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
-	for _, kind := range []string{"session", "host", "box"} {
+	for _, kind := range []string{"session"} {
 		key := newSigningKey(t)
 		status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
 			"kind": kind, "runtime_id": kind + "-" + t.Name(), "operator": testApprover, "thumbprint": thumbprintOf(t, key),
@@ -29,7 +28,7 @@ func TestEveryMachineSessionIsOneKind(t *testing.T) {
 			t.Fatalf("GET /v1/enrollments/self of a %s enrollment = %d %s, want kind session", kind, status, body)
 		}
 	}
-	for _, kind := range []string{"", "container", "Session"} {
+	for _, kind := range []string{"", "container", "Session", "host", "box"} {
 		status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
 			"kind": kind, "runtime_id": "other-" + t.Name(), "operator": testApprover, "thumbprint": thumbprintOf(t, newSigningKey(t)),
 		})
