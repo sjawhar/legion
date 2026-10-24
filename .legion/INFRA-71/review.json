@@ -2,57 +2,44 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T08:40:00Z",
+  "completed": "2026-10-24T09:55:00Z",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 5,
+  "important": 1,
   "minor": 3,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:2614",
-      "description": "The architect's first required change, which I measured independently: the diagnostic for the one failure that announces nothing tells a role to read the workload's endpoints, and this identity has no grant there — `kubectl auth can-i get endpoints` and `list endpoints` both answer `no` from a role container holding the credential. The check for the silent failure would itself be refused. Drop the command; the symptom (the pod Ready while the published reachability block times out) and the label comparison the bullet already prints land a role on the cause without it."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2532",
-      "description": "The architect's second required change, measured here too: the naming clause says a second `apply` of a name in use \"either fails on the Job's immutable fields or patches that role's workload\". `kubectl auth can-i patch jobs` and `update jobs` both answer `no`, so it cannot patch another role's workload at all — it is refused `cannot patch resource \"jobs\"`. The other two consequences are real and the advice stands; the sentence wants what the cluster does."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2487",
-      "description": "The gate paragraph quotes an output no kubectl here produces, and an exit status that is mine to own: I reported `exit 0` last round from a pipeline, so what I measured was `head`'s status rather than `kubectl`'s, and the text took it. Measured properly, with the in-cluster configuration taken away: exit **1**, and the output is `The connection to the server localhost:8080 was refused - did you specify the right host or port?` — not `dial tcp 127.0.0.1:8080: connect: connection refused` plus `Warning: the server doesn't have a resource type 'jobs'`, which is what a different simulation (an emptied environment) prints. The paragraph's conclusion is right and its evidence is wrong; quote what a credential-less role gets, or state it without quoting."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2597",
-      "description": "The reachability check runs the instant `kubectl wait --for=condition=Ready` returns, and the pod template carries no readiness probe, so Ready means the container started. The example's image is `mirror.gcr.io/library/postgres:16`, whose entrypoint runs its whole initialisation with the TCP listener disabled before restarting the server, so at that moment the port is normally still closed and `socket.create_connection` fails at once with `ConnectionRefusedError`. The paragraph below names only the timeout and assigns it one cause — the missing reachability label — so the likeliest outcome of the published sequence has no reading offered, and the reading a role will reach for is wrong. Loop the connect for about a minute, and name the refusal as a server still starting. (The mechanism is read from the upstream entrypoint and the absent probe; the Service half cannot be driven here.)"
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2492",
-      "description": "The gate does not stop a role, and today every role reaches the stop. Before the declarations are applied the Service steps are refused `Forbidden` — the recorded state of this deployment — and the sequence is written unconditionally, so a role applies the Job, reads its uid, is refused, and only afterwards reads at :2620 that this was expected. The only `kubectl delete job` is below the step that failed, so the Job it started stays on a shared quota until its deadline. Say at the gate that unless both answers are a bare `yes` the role does not apply the Job; that also makes the paragraph at :2620-2621 unnecessary."
+      "file": "docs/kubernetes.md:2649",
+      "description": "Inside the previous round's fixes. The sentence replacing the RBAC rule — \"this identity may not read Services either: `kubectl auth can-i get services` answers `no` wherever `create services` does\" — is measured only in deployments where the sequence never runs, and cannot hold where it does. `kubectl apply` is client-side by default (`--server-side=false`) and reads the live object before creating it: measured from this role container, applying the section's own Service ends `Error from server (Forbidden): error when retrieving current configuration of: … cannot get resource \"services\"` with no create attempted, while `kubectl create` of the same file is refused on `create`. So the Service step at :2607 needs `get services` as well as `create services` — which also means the gate's two `create` answers do not predict that the sequence completes: a deployment granting create without get passes the gate with two bare `yes`es and is refused at that step with the Job already submitted. Nothing is orphaned (the `delete` is unconditional and no `errexit` is set), so the cost is a wasted submission. Either state the measurement without the rule, or name both verbs and gate on them."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:2498",
-      "description": "The delta amended the section opener to carry the exception and left the preamble directly above the bullets promising that each of them is \"enforced in the namespace rather than in anyone's good behaviour\" — the sentence a reader scanning the bullets actually meets, four lines above the bullet that says admission does not enforce it. One clause there."
+      "file": "docs/kubernetes.md:2527",
+      "description": "Inside the previous round's fixes, and this round's own two edits disagreeing. The label bullet says the symptom of the missing reachability label is \"the reachability check below never connecting and ending at its deadline, which is what tells it apart from a database still starting up\" — but both failure shapes never connect and both end at the deadline. What tells them apart is the exception class, which the paragraph eight lines below states correctly (a refusal is a server still starting, `never answered: TimeoutError` is the label). Measured here: a port refusing throughout ends `never answered: ConnectionRefusedError`, exit 1 at 60.1 s. A reader who meets that and acts on the bullet reads it as the label, which is the opposite of what the paragraph says. Distinct from dispatch://INFRA-215, which records that a persistent refusal has no reading of its own; this gives it the wrong one."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:2622",
-      "description": "\"reading Services needs the same grant as creating them\" is not how RBAC works: verbs are granted independently, and this identity in this namespace is the counterexample — `delete jobs` yes while `patch jobs` no. The conclusion (the last line asks only for Jobs and pods) is right because `get services` and `list services` both measure `no`, which is what the sentence should say."
+      "file": "docs/kubernetes.md:2529",
+      "description": "Inside the previous round's fixes. \"A role that sees it compares the labels on its own pod\" — the pod that must carry the reachability label is the workload's, which is what the bracketed command reads; the role's own pod is in the namespace Legion's pods run in, where this identity has no read at all (measured: `kubectl auth can-i get pods -n legion` and `list pods -n legion` both `no`). The implementer's handoff glosses it the same wrong way, so the prose is what misleads, not the command. One word."
     },
     {
       "severity": "minor",
-      "file": ".legion/INFRA-71/test.json:20",
-      "description": "All five test-phase proofs record `headSha` `63a5ab96903a95996e30bae1d0d8a7f2b15f5af5`, which does not exist — GitHub answers 422 for it. The commit is `63a5ab96903a68505eb288ad63a223398f13c7e1`, which `implement.json` cites correctly; the first twelve digits match and the rest is wrong, so no proof of that phase can be resolved by a later reader. The same handoff's private-name sweep describes its surface as \"592 lines, five files\" where that diff is nine files; the line count is exact and the file count understates it by the four handoffs, which are the files the sweep most needed to cover."
+      "file": ".legion/INFRA-71/implement.json:14",
+      "description": "This round's work, outside the code commit. The first proof's negative control claims \"every command the sequence still names is in the `yes` set above, and every one in the `no` set is gone from it\" — the sequence still names the Service `apply`, whose verbs (`create services`, `get services`) are both measured `no`, which the section itself says is refused here. Scope the claim to the diagnostic and read commands. The same round's test handoff says \"30 check runs\" at the code head where GitHub reports 40; 30 is that endpoint's default page size, and the substantive claim (all success or skipped) holds."
     }
   ],
   "verified": [
-    "All seven findings of the previous round are fixed, each checked rather than read: the namespace literal is redacted and appears nowhere on the branch; the reachability step is a python3 standard-library connect and `which psql` confirms why; the workload is named for its issue; the gate says neither answer is what a credential-less role gets; the label bullet is marked as the one rule admission does not enforce; the manifests are written outside the checkout; and the last line asks only for Jobs and pods.",
-    "Every other command the section names is within this identity's grant, measured from this role container: create/get/delete jobs, get and list pods, watch pods, get pods/log — all yes; create and get services, get and list endpoints, patch and update jobs, create pods — all no.",
-    "CI at code head 63a5ab96: 45 check runs, none unsuccessful, the required lint, typecheck, test and pr-title all success; compare 63a5ab96...5713433a is .legion/ only.",
-    "Considered and dismissed: that the workload's name should also carry `<project>`. An issue key carries its project's prefix, so `infra-71-postgres` is already unique among the projects of the deployment whose agents share that namespace and identity."
+    "All eight findings of the previous round are fixed, each checked by running it: the endpoints command is gone and the identity's refusal is quoted beside it; the naming clause says the second apply is refused rather than patching; the gate quotes exactly what a credential-less role gets, measured again here (exit 1, `The connection to the server localhost:8080 was refused - did you specify the right host or port?`); the gate now instructs rather than describes; the reachability block loops and names the two failure shapes apart; the bullets' preamble carries the exception; the Services line no longer asserts an RBAC rule; and all five test-phase `headSha` values resolve.",
+    "The published reachability block, run unedited under the image's python3: `answered` and exit 0 against a listener, and `never answered: ConnectionRefusedError`, exit 1 at 60.1 s against a port refusing throughout.",
+    "Every command the sequence names is within this identity's grant except the Service step, which the section says is refused: create/get/list/watch/delete jobs, get/list/watch pods and pods/log all yes; create and get services, get and list endpoints, patch and update jobs, create pods, and pods in Legion's own namespace all no.",
+    "CI at code head 0ca46259: 40 check runs, none unsuccessful at the read, the required lint, typecheck and test success; compare 0ca46259...64baceb1 is .legion/ only.",
+    "No name of the deployment's cluster is added anywhere in the delta, and none appears in the commit messages, the title or the body."
+  ],
+  "improvementsNotRequested": [
+    "A third outcome of the reachability step — an address that does not resolve — ends `never answered: gaierror`, which the paragraph does not name; it would mean the Service was never created.",
+    "The workload name is unique across projects but not across the six roles of one issue, which meet the same three consequences the naming clause warns about.",
+    "A copy-pasted sequence under `set -e` would stop above the delete; a `trap … EXIT` would make the gate's own warning structural rather than behavioural.",
+    "plan.json's citation of AGENTS.md:155 for the public-repository rule was true when written and is line 145 at this head."
   ]
 }
