@@ -2,55 +2,54 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-83",
-  "completed": "2026-10-24T21:40:00Z",
+  "completed": "2026-10-24T22:40:00Z",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 0,
-  "round": 10,
+  "important": 1,
+  "minor": 1,
+  "round": 11,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/internal/daemon/auto_merge.go:164",
-      "description": "The warn gate lets a disagreement spend the one merge-waiting notice, and the notice then says the opposite of what the daemon is about to do. A ghautomerge.Lagging - GitHub showing the pull request closed, or at another head than the record awaits - is a wait (ghautomerge.go:271), and permanentRefusal answers false for it until it is Stalled (outbox.go:420, Lagging.Stalled at ghautomerge.go:276 bounds that at LagBound). So a row past mergeWaitWarn that meets a fresh disagreement satisfies every term of the gate and emits merge-waiting, whose reason renders that cause as 'GitHub last answered' under the sentence 'The merge has not been withdrawn, the issue stays in awaiting_merge and the daemon goes on submitting it'. Two things are then wrong at once: the notice tells the architect the merge stands while quoting GitHub saying its pull request is closed, and within LagBound the same row ends and sends merge-stalled saying the daemon stopped submitting - two tellings about one row, the second contradicting the first, on an issue whose subject is a record that says what is not so. The doc comment anticipates only the stalled half. One clause closes it: exclude a Lagging cause from warn as well, so a disagreement never spends the notice."
+      "file": "packages/daemon/internal/daemon/auto_merge.go:170-172",
+      "description": "Lagging was not the only cause of its kind, and the exclusion list caught one of two. ghautomerge.Disappeared - 'pull request #N of <repo> is no longer armed or queued at READY's head <sha>, and its timeline names no removal since: the daemon waits for GitHub to record one' (ghautomerge.go:413) - declares Is(wait.ErrWaiting) at :418 and is returned by removal() at removal.go:147, which Submit returns from its armed branch, so it reaches rememberWait through readyMerge's general error arm and satisfies every term of the new gate. The notice it would carry says 'The merge has not been withdrawn, the issue stays in awaiting_merge and the daemon goes on submitting it', on the premise the function's own doc states, that nothing has gone wrong with the row. With Disappeared the arm the daemon placed is gone from GitHub and the row is reading the timeline rather than submitting, so both clauses are false; and when the removal is real and only the timeline lagged, the next run reads Removed, which permanentRefusal ends with merge-stalled's sibling merge-removed saying the daemon submits it no further - two tellings about one row within a minute, the second contradicting the first, which is exactly what round ten closed for Lagging. When the read was merely ahead of itself, the one notice has been spent on a transient and the genuine wait that follows is never told. The remedy is not a third exclusion: make the gate an allowlist of the causes whose premise the notice states - Armed, Unmergeable, Merging - so a wait type added later is silent by default rather than wrong by default. That also deletes the gate's now-dead last term: with the stalled Lagging half already excluded, permanentRefusal can only be true for Refused or Removed, neither of which declares Is(wait.ErrWaiting) nor wraps a waiting error, so the earlier conjunct has already short-circuited and !permanentRefusal can no longer change the value of warn."
     },
     {
-      "severity": "important",
-      "file": "the pull request body, the first paragraph of ## Verification",
-      "description": "It states the head's CI as a present fact and the body contradicts it. 'No CI verdict exists for this head yet, and its absence is not a pass' and 'The last head whose base-required set was read complete and green is the code head b2350b438c51' were both true when written at 2adb7d20 and are false now: I read 2adb7d20's own check runs this round and every required name's newest run is complete and successful there, and the tester's own block in the same body records the same thing. So the ledger the architect reads at acceptance and the merger quotes disagrees with itself, which is the shape round nine found in Proven by. The same paragraph also carries 'cited by run id and never by head' as a rule - the instruction the architect withdrew at 16:33Z after checking it from a pod, on the ground that a run id naming the head's present condition is the record this issue deletes. Scope the first clause to the completion that wrote it, re-derive or drop the superlative, and take the withdrawn rule out."
+      "severity": "minor",
+      "file": "packages/daemon/internal/workflow/review.go:67-68",
+      "description": "Still reads 'since the merger's READY check posts a conflicting head whose required checks all succeeded'. After this change READY reads no check of the head at all, so the clause states a reader that no longer exists. It is the same class the diff corrects twice in this very file (:129-134 and :474-478) and once in the requiredchecks package doc, and the branch's own sweep cannot catch it: the retired-phrase list is READY_CHECKS_NOT_GREEN, 'no check is required on' and 'refused at READY'. required_checks.go:69's 'the reader READY uses' is the same family and is already on the fast-follow line; this one is in a file the diff edits for exactly this reason, so it belongs with the fix rather than after it."
     }
   ],
-  "roundNineFindingsVerified": [
-    "Finding 1 (the body's Proven by naming round two's merge as this round's) fixed: the line now names Tests run 40123322551 at code head b2350b438c51, and gh api .../actions/runs/40123322551 answers that head_sha with conclusion success, so the citation is re-derivable and belongs to the head it is cited at.",
-    "Finding 2 (the sweep proof's surface naming a corpus its command never read) fixed in the tester's own artifact: the command now carries a grep over docs/solutions with every file it names read for whether it instructs or narrates, and the observed field records the census. I re-derived the census myself rather than reading it: fourteen files under docs/solutions reference the deleted line, twelve carry a dispatch://INFRA-83 supersede note, and I read both that do not. The INFRA-149 learning uses the line inside a quoted false claim from a dated incident and instructs only about claim hygiene; docs/solutions/github-api/a-forge-write-that-answered-5xx...-LEGION-247.md:54 names it in past tense inside its Evidence section. Both narrate, so under the architect's round-four rule both rightly carry no note, and the census and its verdict are right.",
-    "Finding 3 (the trailer reference stating the path rule without its exception) fixed in 2adb7d20c730b042c9f1013839d3c62f27f779eb: the first section now ends with 'except retro's push, which never carries the line whatever paths it touches, for the reason the next section gives', which is a pointer rather than a second copy, so the literal pin still counts exactly one occurrence per file. The generated mirror moved with it as a rebuild."
-    ],
-  "settledNotReopened": "The code-quality half proposed again that the CI-line guard drop its verb grammar for a bare mention pin, on the ground that the bare form matches nothing in the tree today and closes three of the four holes the comment names. I am not carrying it as a finding. The architect ruled in round four that the guard may fire on the instruction and not on any mention, and in round five the implementer gave the reason I accepted on the record: zero hits today is the state of the tree, not a property of the rule, and a skill that must one day say the line is gone would be refused by a ban that cannot tell the two apart. The pair's re-proposal rests on the same measurement that reason already answered. Its live half - that the negation lookbehind does not compose with the re- prefix, so 'never re-writes the CI line' matches - is real, fails closed as a red lane rather than a silent pass, and is disclosed on the body's risk list and the fast-follow line.",
-  "whatIVerifiedMyself": [
-    "The round-nine fixes above, each at the head rather than from the replies.",
-    "The docs/solutions census re-derived: fourteen files, twelve noted, both unnoted ones read and judged against the architect's instruct-or-narrate rule.",
-    "The Lagging path of finding 1 traced through permanentRefusal, Lagging.Is and Lagging.Stalled rather than taken from the report.",
-    "The body's two stale CI claims checked against the check runs of the head they describe.",
-    "I read the required checks of the code commit on GitHub myself before deciding and carry no verdict or run id forward as a record of what the head holds now: the required set is lint, typecheck, test and pr-title with no branch-protection checks, every required name's newest run at the code commit had completed and succeeded when I read it, nothing there was failed, cancelled or timed out, the only lane still running was the non-required dispatch check, and the compare from that commit to the pull request's head returned handoffsOnly true over two files."
+  "roundTenFindingsVerified": [
+    "Finding 1 (the warn gate admitting an unstalled Lagging) fixed in 2f833383049eb6e65ab8b4be36992031a12c6dc3 as prescribed, with TestAREADYMergeDisagreementSpendsNoWaitingNotice driving a CLOSED read past mergeWaitWarn and asserting no notice and warned false, then an OPEN/BLOCKED read asserting exactly one notice naming BLOCKED and not CLOSED. I read the test for whether it would fail without the gate change: in phase one pullJSON stamps updatedAt at now against a clock at now, so Stalled is false and permanentRefusal does not fire, and every remaining term is true - the assertion of zero notices is what the old gate would break. The doc comment now carries the reason rather than only the stalled half.",
+    "Finding 2 (the Verification paragraph stating the head's CI as a present fact) fixed in the same commit: the paragraph now states an observation with a time and a named head, says in terms that it states no verdict for this head, names what the earlier wording claimed and why it was wrong, and the withdrawn 'by run id and never by head' instruction is gone from it."
   ],
-  "myOwnLineCorrected": "The risk bullet I wrote in round nine - that three sentences are verbatim in both skills/legion-worker/SKILL.md and references/skip-checks-trailer.md - stopped being true when 2adb7d20 added the exception clause to one copy: exactly one sentence, the pinned one, is now verbatim in both. The duplication the bullet discloses still stands; the count was mine and is corrected in this round's body edit rather than left for the merger to quote.",
+  "myOwnLinesCorrected": "The Look at first line I wrote in round ten described the Verification paragraph as stating this head's CI as a present fact. 2f833383 rewrote that paragraph to say the opposite, so my pointer now asserts of the body the property this branch exists to delete while the paragraph it points at denies it; and its auto_merge.go:164 citation drifted six lines when that commit added comment lines, so it no longer lands on the gate. Both corrected in this round's body edit.",
+  "whatIVerifiedMyself": [
+    "The Disappeared path of finding 1 traced through removal.go:147, ghautomerge.go:403-418 and Submit's armed branch rather than taken from the report.",
+    "The dead last term of the gate reasoned out from Refused and Removed declaring no Is and being returned bare.",
+    "review.go:67-68 read in context against the two corrections the same diff makes in the same file.",
+    "The body's Size line: it says +1665 and claims to have been re-read at this head; GitHub answers 1675 additions at c1d161f9. Minor, disclosed by its own sentence that the figure moves with every push, and not carried as a finding - but it is the third round in which a body figure outlived the push that made it true.",
+    "I read the required checks of the code commit on GitHub myself before deciding and carry no verdict or run id forward as what the head holds now: the required set is lint, typecheck, test and pr-title with no branch-protection checks, every required name's newest run at the code commit had completed and succeeded when I read it, nothing there was failed, cancelled or timed out, the only lane still running was the non-required dispatch check, and the compare from that commit to the pull request's head returned handoffsOnly true over two files."
+  ],
+  "residualRiskNoted": "With Lagging excluded, a disagreement whose pull request keeps being touched never satisfies Stalled, since that reads GitHub's latest updatedAt on every run, so such a row now raises neither merge-stalled nor merge-waiting and retries indefinitely. That is the fix's intent and the alarm is not gone - Lagging is not Routine, so the outbox keeps logging it at warning level - but the operator log is now its only signal, and the allowlist in finding 1 does not change that either way. Recorded on the pull request's risk list rather than carried as a finding.",
   "thermonuclear": {
-    "head": "2f512dd89d3d29c6be9ae7bf7135d3bf2c091a0d",
-    "deepReview": "APPROVE at 2f512dd8, body returned in full on the first invocation. Its three Lows are the two findings above and the count in my own risk bullet; it ran its own deletion-survival sweep over every removed line of fifty characters or more, re-derived the docs/solutions census independently, and re-derived the Proven by run id against the commit it names.",
-    "codeQuality": "CHANGES at 2f512dd8, body returned in full on the first invocation. Its blocking finding is the bare-pin proposal recorded above as settled rather than carried; its other two are the literal pin's deformation of three documents and the new clause leaving its paragraph unwrapped, both on the fast-follow line.",
-    "perHalf": "Both halves returned a body with a verdict line on their first invocation this round. Neither needed a re-run, unlike round nine's deep-review half."
+    "head": "c1d161f994cde372be7b3894257bc5b688412205",
+    "deepReview": "CHANGES at c1d161f9, body returned in full on the first invocation. Its Medium findings are the two carried above; it enumerated every error Submit can return against the gate, re-derived every run id in the body against the commit it names, and confirmed the new test fails without the gate change. It could not execute the daemon package here - no Postgres - and said so rather than implying it had.",
+    "codeQuality": "CHANGES at c1d161f9, body returned in full on the first invocation. Its first finding is the dead permanentRefusal term and the five-term conjunction, which folds into finding 1's allowlist; its third is that the new test hand-rolls a GitHub stand-in the suite already has in newMergeGitHub, losing that helper's bearer recording and head assertion, which is on the fast-follow line.",
+    "perHalf": "Both halves returned a body with a verdict line on their first invocation. Neither needed a re-run."
   },
   "fastFollow": [
-    "The literal pin forces a 187-character line in skills/legion-worker/SKILL.md, references/skip-checks-trailer.md and skills/legion-retro/SKILL.md, each otherwise wrapped near 98 columns, so any reflow turns that lane red in three files at once; normalising whitespace before the count frees them and keeps the invariant.",
-    "The CI-line guard's negation lookbehind does not compose with its own re- prefix.",
-    "Neither guard reads docs/solutions, the one corpus this branch has had to sweep by hand twice.",
-    "packages/daemon/internal/daemon/required_checks.go:69 still calls requiredchecks.Required the reader READY uses; classify.Judge lost its last caller outside its package; readyChecks reads no check; rememberWait keeps a positional bool its callee can derive; the compare command is hand-maintained in two files."
+    "The new test builds its own httptest server with a mutex and a mutable flag where newMergeGitHub already answers differently per read, losing that helper's bearer recording and its assertion that a merge mutation names READY's head.",
+    "required_checks.go:69 still calls requiredchecks.Required the reader READY uses.",
+    "The literal pin forces a 187-character line in three otherwise narrow documents; the CI-line guard's negation lookbehind does not compose with its own re- prefix; neither guard reads docs/solutions.",
+    "classify.Judge lost its last caller outside its package; readyChecks reads no check; rememberWait keeps a positional bool its callee can derive; the compare command is hand-maintained in two files."
   ],
   "threads": {
-    "onGitHub": 13,
-    "resolved": 13,
-    "answeredByMe": 13,
+    "onGitHub": 14,
+    "resolved": 14,
+    "answeredByMe": 14,
     "botThreadsAdjudicated": 0,
-    "note": "Counted at the forge with the paginated read. The two I opened in round nine are answered by the implementer and by me and resolved by it as the pull request's author; the eleven before them were closed the same way. No bot has opened a thread on #2121."
+    "note": "Counted at the forge. The one I opened in round ten is answered by the implementer and by me and resolved by it as the pull request's author; the thirteen before it were closed the same way. No bot has opened a thread on #2121."
   }
 }
