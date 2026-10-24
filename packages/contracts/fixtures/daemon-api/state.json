@@ -296,7 +296,7 @@
     {
       "name": "network",
       "status": "withheld",
-      "detail": "dispatch://LEGION-5: reaches beyond the pod's own network: the pod is the boundary"
+      "detail": "dispatch://LEGION-5: reaches beyond the pod's own network: the pod is the boundary, except a workload a role starts where its deployment's cluster admits it, carrying the pod label that deployment's declaration names for a workload asking to be reachable, and the Service fronting that workload"
     },
     {
       "name": "operator-setup",

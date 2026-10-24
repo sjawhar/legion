@@ -92,7 +92,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `openssh-client`, which also brings `ssh`, `scp` and
   `sftp`: they reach no host that `curl`, `wget`, `git`, `python3` and `socat` on the same apt line
   could not already reach, and what a pod may reach is Legion's ruling, the withheld `network`
-  capability row — dispatch://LEGION-5, the pod is the boundary — a declaration the capability report
+  capability row — dispatch://LEGION-5, the pod is the boundary, except a workload a role starts
+  where its deployment's cluster admits it and the Service fronting it
+  ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role))
+  — a declaration the capability report
   renders, not a network control this repository ships; the package's setuid
   `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
   and the build's final step refuses an image where any file under `/usr/lib/openssh` or
@@ -1622,7 +1625,10 @@ the probe passed; the live rows (`subagents`, `web-search`, `mcp`, `repository-e
 inside its own Oh My Pi and reports them with its ready, and the daemon renders each from what its
 live sessions reported (LEGION-663; the paragraphs after the deployment rows); the withheld rows
 carry the ruling that keeps them from
-every worker (`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`:
+every worker (`network`: dispatch://LEGION-5, the pod is the boundary, except a workload a role
+starts where its deployment's cluster admits it and the Service fronting it
+([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role));
+`operator-setup`:
 dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: dispatch://LEGION-551
 and dispatch://LEGION-205); and the four deployment rows are the daemon's to measure from its own
 configuration and its own boot, since no image or pod can show them:
