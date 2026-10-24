@@ -8,19 +8,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 ### Added
 
 - A ninth Legion skill, `leading-a-work-stream`: what a lead of a team of agents does and does not
-  do, who decides which steps, check-ins, and a new rule that a lead proves its facts about its
-  own stream with a command and its output, not a reading. It is the dotfiles skill of the same
-  name, copied with that rule added; the rule's cause was a lead that reported five of its six
-  agents as not live, from a session list that was cut in the middle. A claim that nothing exists
-  also names its search and a positive control on the same path as the things claimed absent,
-  after a census that searched for `kind: Service` found none of the Services built in code.
+  do, who decides which steps, the day's plan with the team, and how a lead reads the stream's
+  state from records rather than reports. It is the dotfiles skill of the same name at its latest
+  text, with names taken out and two additions. A lead proves its facts with a command and its
+  output, and a claim that nothing exists names its search and a positive control on the same
+  path. In a Legion tree the daemon's workflow and the role prompt keep their own sequence. The
+  dotfiles copy goes once a release carries this one.
 
-- An architect asks a person only about what the issue leaves open, and only when that point
-  changes what the tree delivers, carries a cost or risk the person would weigh, or needs what only
-  that person can provide. When the issue already says to do a thing, it does not ask whether. It
-  decides the rest, writes the decision and its reason in the spec, and takes the option that is
-  easy to undo when it is unsure. The deployment's owner said Legion's architects asked him too
-  many questions that did not need him.
+- An architect's questions about its own tree follow `dispatch-writing-specs`, "Questions". When
+  the issue already says to do a thing, it does not ask whether. It asks about an open point only
+  when that point changes what the tree delivers, carries a cost or risk the person would weigh,
+  or needs what only that person can provide. A finding outside the tree is always an ask. A cost
+  or risk the person would weigh is now also a reason for a new version of an approved spec. The
+  deployment's owner said Legion's architects asked him too many questions that did not need him.
 
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and

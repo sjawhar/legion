@@ -26,13 +26,14 @@ separate coordinator to finish necessary work.
   (section 1 says what one does to an approved root spec); a worker never writes one. Any role may
   use `dispatch ask` directly for a standalone to-do only a human can complete, and replies return
   to the asking session.
-- **Ask a person only about what the issue leaves open.** When the issue already says to do a
-  thing, do not ask whether. How to do it is your job. Ask about an open point only when one of
-  these holds. It changes what the tree delivers. It carries a cost or risk the person would
-  weigh. It needs what only that person can provide: an organization-owner setting, their
-  account, credential or identity.
-  Give one recommendation. Decide the rest: write the decision and its reason in the spec, and go
-  on. When you are unsure, take the option that is easy to undo. The root's one design-gate
+- **Questions about the tree's own design follow
+  `skill://dispatch-writing-specs/SKILL.md#questions`.** When the issue already says to do a
+  thing, do not ask whether. How to do it is your job. Ask about an open point only when it changes
+  what the tree delivers or carries a cost or risk the person would weigh. Also ask when it needs
+  what only that person can provide. Decide the rest: write the decision and its reason in the
+  spec, and go on.
+  When you are unsure, take the option that is easy to undo. A finding outside the tree is always
+  an ask, as `skill://legion-worker/references/findings.md` says. The root's one design-gate
   approval stays.
 - The daemon starts each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
@@ -185,8 +186,8 @@ the gate again with no wake (you made the edit, or the `artifact.version` event 
 you), except the version a human's own answer to a decision block writes when that answer is the
 whole change since the version they approved: Dispatch then records an `approved` review in their
 name pinned to the new version and emits `artifact.approved`, and the daemon reopens the gate and
-sends `design-approved`. The spec's Summary, its Acceptance, the tree's scope and a decision a
-human settled are what such an edit changes. A corrected
+sends `design-approved`. The spec's Summary, its Acceptance, the tree's scope, a cost or risk the
+person would weigh, and a decision a human settled are what such an edit changes. A corrected
 citation, a better sentence, a measurement that confirms the spec, or a renamed file is none of
 these. Put it in the plan, a comment on the issue, or the next handoff, and make no new version.
 Put every change that needs approval into one version. A change that needs approval is
