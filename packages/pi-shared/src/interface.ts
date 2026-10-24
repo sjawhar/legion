@@ -23,10 +23,10 @@ export const ENVOY_PLUGIN_INTERFACE_KEY = Symbol.for("legion.pi-shared.envoy-plu
 export const LEGION_PLUGIN_LOADED_KEY = Symbol.for("legion.pi-legion.loaded");
 /** The pre-split package's Legion marker; its presence means @sjawhar/pi-legion-envoy is loaded. */
 export const LEGACY_LEGION_LOADED_KEY = Symbol.for("legion.pi-envoy.legion-loaded");
-/** The `details` of an `envoy-message` the Envoy extension writes into its own session (the
- * session-id-changed notice): the session's own doing, never an event from outside, so Legion's
- * phase-stall check does not re-arm a quiet stall on it. */
-export const LOCAL_ENVOY_NOTICE = { localNotice: true } as const;
+/** The marker an `envoy-message` the Envoy extension wrote into its own session carries; it is
+ * defined in a leaf module (`./envoy-notice`) because the phase-stall check reads it and is
+ * bundled by a host with no Oh My Pi, which this module's logger would drag in. */
+export { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
 
 export interface EnvoyPluginInterface {
   readonly version: number;

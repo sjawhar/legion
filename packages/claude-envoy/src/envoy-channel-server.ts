@@ -45,6 +45,7 @@ import {
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
+import { stallLimits } from "@legion/pi-shared/stall-limits"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -69,6 +70,13 @@ import {
   stopPane,
 } from "./legion-claim"
 import { createInboxNotifier, INBOX_CAPABILITIES, INBOX_VARIABLE } from "./legion-inbox"
+import {
+  createPhaseHookEndpoint,
+  PHASE_HOOK_TOOL_NAME,
+  paneReminderLog,
+  phaseHookToolDefinition,
+  phaseStallFile,
+} from "./legion-phase-hook"
 import {
   executeLegionTool,
   LEGION_TOOL_NAME,
@@ -1087,12 +1095,30 @@ export async function runEnvoyChannelServer(): Promise<void> {
   let runtime: ChannelToolRuntime | undefined
   let claim: LegionClaim | undefined
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl)
+  // INFRA-220: the phase reminder's Claude Code host (`./legion-phase-hook`), which Claude Code's
+  // own hooks drive through the `legion_phase_hook` tool. It is started here, beside the claim it
+  // gates on, and restores this session's record as it starts, before any hook can be answered.
+  const phaseLog = paneReminderLog(logLegion)
+  const phaseHook =
+    pane === undefined || daemon === undefined
+      ? undefined
+      : createPhaseHookEndpoint({
+          stateFile: phaseStallFile(pane.configDir, identity.id),
+          claim: () => claim?.capability(),
+          readState: () => daemon.state(),
+          project: configuredValue(process.env["LEGION_PROJECT"]),
+          limits: stallLimits(process.env, phaseLog),
+          log: phaseLog,
+        })
   const toolDefinitions = [
     ...channelToolDefinitions(),
-    ...(daemon === undefined ? [] : [legionToolDefinition()]),
+    ...(daemon === undefined ? [] : [legionToolDefinition(), phaseHookToolDefinition()]),
   ]
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (phaseHook !== undefined && request.params.name === PHASE_HOOK_TOOL_NAME) {
+      return mcpResult(await phaseHook.handle(request.params.arguments))
+    }
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime: LegionToolRuntime = {
         daemon,

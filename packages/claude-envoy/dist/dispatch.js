@@ -14549,7 +14549,43 @@ var LEGION_ROLES = [
   "reviewer",
   "merger"
 ];
+var PROJECT_TOKEN = /^[a-z0-9]+$/;
 var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+function roleForPhase(phase) {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return;
+  }
+}
+function isLegionProjectToken(project) {
+  return PROJECT_TOKEN.test(project);
+}
+function assertLegionProjectToken(project) {
+  if (!isLegionProjectToken(project)) {
+    throw new Error(`Invalid Legion project token: ${project}`);
+  }
+}
+function roleToken(project, issue2, role) {
+  assertLegionProjectToken(project);
+  const dispatchMatch = DISPATCH_KEY_PATTERN.exec(issue2);
+  if (!dispatchMatch)
+    throw new Error(`Invalid IssueKey: ${issue2}`);
+  const [, dispatchProject, number4] = dispatchMatch;
+  return `legion-${project}-${dispatchProject?.toLowerCase()}-${number4}-${role}`;
+}
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;

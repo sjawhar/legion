@@ -1,4 +1,4 @@
-import { LOCAL_ENVOY_NOTICE } from "./interface";
+import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
 
 /**
  * The phase-stall check (LEGION-208 Stage 4b, task 4b.15; made endless by INFRA-220). A phase
@@ -175,8 +175,10 @@ export function assistantRanTool(message: unknown): boolean {
 
 /** The state one recorded entry holds, or undefined when it holds none this build understands.
  * `quiet` and `text-call` are the build now in the pods: both mean the phase is open and nothing
- * has been reminded about it yet, so a session resumed on one is reminded rather than left alone. */
-function phaseStallFrom(data: object): PhaseStallState | undefined {
+ * has been reminded about it yet, so a session resumed on one is reminded rather than left alone.
+ * Exported for the host whose record is not a transcript entry: the Claude Code state file
+ * (`packages/claude-envoy/src/legion-phase-hook.ts`) reads the same mapping rather than its own. */
+export function phaseStallFrom(data: object): PhaseStallState | undefined {
   if (!("state" in data) || typeof data.state !== "string") return undefined;
   const recorded = "count" in data ? data.count : undefined;
   const count =
@@ -225,20 +227,27 @@ export function restorePhaseStall(branch: readonly unknown[]): PhaseStallState {
   return (data === undefined ? undefined : phaseStallFrom(data)) ?? { state: "closed", count: 0 };
 }
 
-/** Whether the architect has already been told about the run of reminders the restored state
- * belongs to, and the idempotency key that notice was sent under. The machine never reads these
- * two, and each host persists them its own way — the Oh My Pi transcript entry, the Claude Code
- * state file — but they ride the same record, so a relaunch mid-run neither repeats an accepted
- * notice nor loses the key a refused one must be retried under. */
-export function restorePhaseStallReport(branch: readonly unknown[]): {
+/** Whether the architect has already been told about the run of reminders one record belongs to,
+ * and the idempotency key that notice was sent under. The machine never reads these two, and each
+ * host persists them its own way — the Oh My Pi transcript entry, the Claude Code state file —
+ * but they ride the same record, so a relaunch mid-run neither repeats an accepted notice nor
+ * loses the key a refused one must be retried under. */
+export function phaseStallReportFrom(data: object | undefined): {
   readonly reported: boolean;
   readonly reportKey: string | undefined;
 } {
-  const data = lastPhaseStallData(branch);
   const reported = data !== undefined && "reported" in data && data.reported === true;
   const key =
     data !== undefined && "reportKey" in data && typeof data.reportKey === "string"
       ? data.reportKey
       : undefined;
   return { reported, reportKey: key };
+}
+
+/** `phaseStallReportFrom` over the branch's last phase-stall entry. */
+export function restorePhaseStallReport(branch: readonly unknown[]): {
+  readonly reported: boolean;
+  readonly reportKey: string | undefined;
+} {
+  return phaseStallReportFrom(lastPhaseStallData(branch));
 }

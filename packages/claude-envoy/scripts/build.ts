@@ -14,6 +14,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { thirdPartyNotices } from "../../../scripts/third-party-notices"
+import { PHASE_HOOK_TOOL_NAME } from "../src/legion-phase-hook"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const repoRoot = resolve(packageRoot, "..", "..")
@@ -89,11 +90,64 @@ export function claudeAgent(file: string, source: string): string {
   return `---\n${lines.join("\n")}\n---\n${source.slice(match[0].length)}`
 }
 
+/** The phase reminder's hook entries (INFRA-220): the events Claude Code fires at a phase
+ *  worker, each an `mcp_tool` hook on the pane's own Legion MCP server, which `claude` registers
+ *  as the bare name `legion` (packages/daemon/internal/runtime/tmux/claude.go), and on the tool
+ *  `legion_phase_hook` that server offers (packages/claude-envoy/src/legion-phase-hook.ts).
+ *  Claude Code substitutes each `${…}` as a string, which the endpoint parses.
+ *
+ *  They belong to the Legion plugin alone, never to `hooks/hooks.json`: `@sjawhar/claude-envoy`
+ *  is also installed as a plain Claude Code plugin, where `--mcp-config` registers no `legion`
+ *  server and every one of these would be a hook error on every turn. A Legion pane loads both
+ *  plugin directories, so its worker still gets them. */
+// biome-ignore-start lint/suspicious/noTemplateCurlyInString: Claude Code substitutes each `${…}`
+// into the hook's input before it calls the tool; they are its syntax, not this file's.
+const LEGION_HOOKS: readonly {
+  readonly event: string
+  readonly input: Readonly<Record<string, string>>
+  readonly timeout: number
+}[] = [
+  {
+    event: "Stop",
+    input: {
+      event: "Stop",
+      lastAssistantMessage: "${last_assistant_message}",
+      stopHookActive: "${stop_hook_active}",
+    },
+    // The `Stop` answer waits on the reminder's record check, which bounds its own daemon read at
+    // 5 s (RECORD_READ_BOUND_MS, packages/pi-shared/src/phase-reminder.ts); the others answer from
+    // memory and the state file alone.
+    timeout: 30,
+  },
+  {
+    event: "StopFailure",
+    input: { event: "StopFailure", lastAssistantMessage: "${last_assistant_message}" },
+    timeout: 10,
+  },
+  {
+    event: "PostToolUse",
+    input: { event: "PostToolUse", toolName: "${tool_name}", agentId: "${agent_id}" },
+    timeout: 10,
+  },
+  {
+    event: "PostToolUseFailure",
+    input: { event: "PostToolUseFailure", toolName: "${tool_name}", agentId: "${agent_id}" },
+    timeout: 10,
+  },
+  {
+    event: "UserPromptSubmit",
+    input: { event: "UserPromptSubmit", prompt: "${prompt}" },
+    timeout: 10,
+  },
+]
+// biome-ignore-end lint/suspicious/noTemplateCurlyInString: the hook inputs end here.
+
 /** `legion/`, the Legion plugin a Claude Code pane loads with `--plugin-dir` beside this one
  *  (packages/daemon/internal/runtime/tmux/claude.go): its manifest, named `legion`, so Claude Code
  *  names its skills and agents `legion:<name>`; the skills pi-legion ships, staged by the one script
- *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); and pi-legion's task agents
- *  in Claude Code's format (`claudeAgent`). Generated, never edited by hand. */
+ *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); pi-legion's task agents
+ *  in Claude Code's format (`claudeAgent`); and the phase reminder's hooks (`LEGION_HOOKS`).
+ *  Generated, never edited by hand. */
 export async function buildLegionPlugin(outdir: string): Promise<void> {
   await mkdir(join(outdir, ".claude-plugin"), { recursive: true })
   await writeFile(
@@ -124,6 +178,36 @@ export async function buildLegionPlugin(outdir: string): Promise<void> {
     const source = await readFile(join(agents, name), "utf8")
     await writeFile(join(outdir, "agents", name), claudeAgent(name, source))
   }
+  await mkdir(join(outdir, "hooks"))
+  await writeFile(
+    join(outdir, "hooks", "hooks.json"),
+    `${JSON.stringify(
+      {
+        description:
+          "Legion: tell a phase worker whose turn ends with its phase still open, through the legion_phase_hook tool on the pane's own Legion MCP server.",
+        hooks: Object.fromEntries(
+          LEGION_HOOKS.map(({ event, input, timeout }) => [
+            event,
+            [
+              {
+                hooks: [
+                  {
+                    type: "mcp_tool",
+                    server: "legion",
+                    tool: PHASE_HOOK_TOOL_NAME,
+                    input,
+                    timeout,
+                  },
+                ],
+              },
+            ],
+          ]),
+        ),
+      },
+      null,
+      2,
+    )}\n`,
+  )
 }
 
 /** Each file under `fresh` or `committed` that is missing from the other or differs in bytes,
