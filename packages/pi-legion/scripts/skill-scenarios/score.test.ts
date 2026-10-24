@@ -244,6 +244,16 @@ run("askgate-on-1", askgate("facts"), [
   refused("call-a", factsReason),
   factsGate("block"),
 ]);
+// on, facts: the agent read `dispatch ask --help` first; the refused ask is the call scored.
+run("askgate-on-25", askgate("facts"), [
+  ...header,
+  turn[0],
+  toolCall("call-help", "bash", { command: "dispatch ask --help" }),
+  result("call-help", "Usage: dispatch ask [flags]"),
+  askCall,
+  refused("call-a", factsReason),
+  factsGate("block"),
+]);
 // on, facts: the gate only warned, and the call went out.
 run("askgate-on-2", askgate("facts"), [
   ...header,
@@ -792,6 +802,6 @@ test("askgate off, facts: passes when the ask exists and the gate wrote nothing"
 
 test("askgate: another label and case pair is unscored, saying why", () => {
   expect(out).toContain("askgate-off-4\trig error: askgate scores off only with case facts");
-  expect(out).toContain("askgate\ton\t11/24\t");
+  expect(out).toContain("askgate\ton\t12/25\t");
   expect(out).toContain("askgate\toff\t1/3\t");
 });

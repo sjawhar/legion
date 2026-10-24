@@ -456,8 +456,13 @@ function askgateReview(runDir: string, run: string, label: string): Row {
   });
   if (!on) return row(asks > 0 && gates.length === 0, `asks=${asks} gateEntries=${gates.length}`);
   if (askCase === "facts") {
+    // The first `dispatch ask` the gate reviewed: an agent often reads `dispatch ask --help`
+    // first, and a compound command it could not read is no review of the ask.
     const call = toolCalls(entries).find(
-      (c) => c.tool === "bash" && /\bdispatch\s+ask\b/.test(c.args)
+      (c) =>
+        c.tool === "bash" &&
+        /\bdispatch\s+ask\b/.test(c.args) &&
+        gates.some((g) => g.toolCallId === c.id && g.outcome !== "unreadable")
     );
     if (call === undefined) return row(false, "askCall=none");
     const result = resultOf(entries, call.id);
