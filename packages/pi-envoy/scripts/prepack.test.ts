@@ -126,4 +126,56 @@ describe("the dispatch CLI the package ships", () => {
       await rm(work, { recursive: true, force: true });
     }
   }, 120_000);
+
+  test("the packed bundle carries AskGate's prompt files inlined, so no session reads them from disk", async () => {
+    // The prompts are imported `with { type: "text" }` and inlined by `bun build`; `files` ships
+    // only dist and bin, so a prompt that failed to inline would leave the gate with no text at all.
+    const work = await mkdtemp(path.join(tmpdir(), "pi-envoy-prompts-"));
+    try {
+      const pack = Bun.spawnSync(
+        [
+          "bash",
+          path.join(REPO_ROOT, "scripts/e2e/lib/pack-plugin.sh"),
+          "pi-envoy",
+          path.join(work, "out"),
+        ],
+        { stderr: "pipe" }
+      );
+      expect({
+        exit: pack.exitCode,
+        stderr: pack.exitCode === 0 ? "" : pack.stderr.toString(),
+      }).toEqual({ exit: 0, stderr: "" });
+      const unpacked = path.join(work, "plugin");
+      Bun.spawnSync(["mkdir", "-p", unpacked]);
+      expect(
+        Bun.spawnSync([
+          "tar",
+          "xzf",
+          pack.stdout.toString().trim(),
+          "-C",
+          unpacked,
+          "--strip-components=1",
+        ]).exitCode
+      ).toBe(0);
+      const bundle = await readFile(path.join(unpacked, "dist/envoy.js"), "utf8");
+      const askgate = path.join(PACKAGE_ROOT, "extensions/askgate");
+      for (const prompt of [
+        "askgate-system.md",
+        "askgate-request.md",
+        "askgate-upload.md",
+        "rules.md",
+        "rule-check-system.md",
+        "rule-check.md",
+        "rule-check-request.md",
+      ]) {
+        // The bundle holds each prompt as a JavaScript string, so one long line of it is the probe.
+        const [line] = readFileSync(path.join(askgate, prompt), "utf8")
+          .split("\n")
+          .filter((text) => text.trim().length > 40);
+        expect({ prompt, inlined: bundle.includes(line) }).toEqual({ prompt, inlined: true });
+      }
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
