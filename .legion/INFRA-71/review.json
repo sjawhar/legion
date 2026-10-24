@@ -2,41 +2,19 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T17:20:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-24T19:05:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2619",
-      "description": "An instruction that cannot be followed as published, and the architect's own required change. `kubectl wait --for=condition=Ready pod -l job-name=<workload> --timeout=300s` runs two lines after the Job is applied, when the Job's pod does not exist yet, and `kubectl wait` on a selector matching nothing refuses rather than waits. Reproduced from this role container: `error: no matching resources found`, exit 1, at once; `--for=create` against the same selector does wait (it polls to its timeout). The tester reproduced it twice against a real Job, with the pod appearing about five seconds later. Where the declarations are applied the preceding Service steps usually cover the race, so the failure is rare and reads to a role like a workload that never started — a section about diagnosing workloads whose second step misdiagnoses itself. Wait on the Job, or `--for=create` first, or retry the wait once; measured at the head, not reasoned."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2673",
-      "description": "The evidence passage says the manifest went through admission \"together with one deliberate breakage of each rule, each refused naming the rule\". The last of those rules is the reachability label, which the same section says in bold admission does not enforce: a workload without it is admitted, started and silently unreachable. So that breakage cannot have been refused, and a reader who takes the bullet at its word concludes a missing label is caught at submission, skips the one check this section exists to teach, and then reads the silent timeout as a broken cluster. One word: each *enforced* rule."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:2675",
-      "description": "Two claims in the passage whose whole purpose is the section's trustworthy account of itself. First, it records the Job half submitted \"here\", in a deployment where two of the gate's three answers are `no` and the section's one bolded rule says submit nothing — with no acknowledgement, so the rule reads as advisory or the author as not following it. Mark that run as the deliberate, bounded exception it was and name what made it safe (short deadline and ttl, the delete verified, `delete jobs` measured `yes` first). Second, the run is presented as a transcript of the published lines (\"everything above is a transcript\"), but the published wait line failed on that very run — the ~80 s Ready came from a re-issued wait, as the tester records. Fix it with the wait line itself."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:2681",
-      "description": "The architect's second required change, and three words. The not-executed bullet says the reachability check \"against a real workload\" is written from the declarations, while the bullet above records that same block run against a real workload whose packets were dropped. What has never run is the check against a workload reachable **by its Service name**."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": [
-    "The previous round's four findings are fixed, each checked by running it: `kubectl get jobs,pods` exits 0 here and `kubectl get jobs,pods,svc` exits 1 with `cannot list resource \"services\"`, which is what the rewritten paragraph now says; the gate asks the third verb and explains why it is not a duplicate; the label bullet names `TimeoutError` as the symptom, agreeing with the paragraph under the sequence; \"the workload's pod\" is explicit, and a role may not read its own (`get pods -n legion` → `no`).",
-    "CI at code head 32dc3a0f: the required lint, typecheck, test and pr-title all success; the non-required `dispatch` lane was still in progress at my read, having started at 16:00:25Z, and it touches no package this branch changes. compare 32dc3a0f...ad39d557 is .legion/ only.",
-    "No name of the deployment's cluster is added anywhere in the delta, the commit messages, the title or the body, and none of my own measurements quoting a refusal or a listing is reproduced where it would carry one."
+    "The previous round's four findings are fixed, each checked by running it rather than reading it. The wait: the sequence now waits twice and names the workload per run, and measured again from this container, `--for=condition=Ready` on a selector matching nothing still exits 1 at once with `error: no matching resources found` while `--for=create` on the same selector polls to its timeout — which is why the first of the two is the one reachable the instant the apply returns. The rename reaches every site: four `<workload>` placeholders, one in the Job and three in the Service (name, owner reference, selector), all filled by the single global substitution with none left. The evidence passage now says `each enforced rule` with the reason the label rule has no breakage to record; it carries a bullet naming the deliberate submission against the gate's own rule and what bounded it, which reads as an admission and closes `not an exception anyone inherits`; and the not-executed bullet says `by its Service name`, so the two bullets no longer overlap about the same block.",
+    "Both thermonuclear passes returned a substantive body and approved with no defect, each read rather than its exit taken: the published block is `bash -n` clean, the generated name is valid as a Job name and as the first DNS label of the address the check builds, every verb the sequence needs is granted (measured), the evidence bullets are true of what was run, and no name of the deployment's cluster appears anywhere in the delta, the commit messages, the title or the body. Their findings are improvements, recorded in the pull request body or on dispatch://INFRA-215.",
+    "CI at code head 35faab4e: the required lint, typecheck, test and pr-title are all success. Two non-required lanes are red there — `envoy-go-race` and `dispatch`, both a bare `Process completed with exit code 1` with a cache-restore warning — and both were green at the previous code head, whose whole difference from this one is `docs/kubernetes.md` and three `.legion/` files, so neither red can be this delta's doing; the re-run is owed and recorded as owed rather than as a pass. compare 35faab4e...<the approved head> is .legion/ only."
   ],
-  "recordedNotRequested": [
-    "The gate's consequence overstates what a stopped sequence costs: `delete jobs` is granted beside `create jobs` and the sequence's `delete` is unconditional, so a Job submitted on fewer than three `yes`es is removable with one line the section does not give the role that stopped.",
-    "The `create services` yes / `get services` no cell is called a deployment whose declarations are not applied and is sent away by the gate, where its Service step would work as `kubectl create`; and the sentence introducing the third verb attributes to a create-allowed role a refusal measured from an identity holding neither verb. Nothing dispatch://INFRA-206 grants produces that cell.",
-    "The body's own `Change` bullet still says a role can tell in two commands, and `Proven by` still says a server-side dry run with nothing created; both are superseded by the three-verb gate and by this round's real Job run. The implementer's lines, not the reviewer's."
+  "judgedBelowTheBar": [
+    "The transcript justifying the per-run name quotes the Ready wait reporting `condition met` for one pod and `NotFound` for the other, where the tester's control at this head got `condition met` for both: an example narrower than the failure it illustrates. The operative instruction — a fresh suffix every run — is unaffected, and a role that meets the other pair has already left the prescribed path, so it does not reach the approval bar. Routed to dispatch://INFRA-215 with the clause that settles it: one pod or both, depending on how far the previous run's pod has got.",
+    "The gate's `a four-processor workload nobody removes` overstates what a stopped sequence costs, and the `create services` yes / `get services` no cell is described as an unapplied deployment where its Service step would work as `kubectl create`. Both in the body's risks; neither changes an action a role takes on the path the section prescribes."
   ]
 }
