@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-71",
+  "completed": "2026-10-24T09:55:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:2649",
+      "description": "Inside the previous round's fixes. The sentence replacing the RBAC rule — \"this identity may not read Services either: `kubectl auth can-i get services` answers `no` wherever `create services` does\" — is measured only in deployments where the sequence never runs, and cannot hold where it does. `kubectl apply` is client-side by default (`--server-side=false`) and reads the live object before creating it: measured from this role container, applying the section's own Service ends `Error from server (Forbidden): error when retrieving current configuration of: … cannot get resource \"services\"` with no create attempted, while `kubectl create` of the same file is refused on `create`. So the Service step at :2607 needs `get services` as well as `create services` — which also means the gate's two `create` answers do not predict that the sequence completes: a deployment granting create without get passes the gate with two bare `yes`es and is refused at that step with the Job already submitted. Nothing is orphaned (the `delete` is unconditional and no `errexit` is set), so the cost is a wasted submission. Either state the measurement without the rule, or name both verbs and gate on them."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:2527",
+      "description": "Inside the previous round's fixes, and this round's own two edits disagreeing. The label bullet says the symptom of the missing reachability label is \"the reachability check below never connecting and ending at its deadline, which is what tells it apart from a database still starting up\" — but both failure shapes never connect and both end at the deadline. What tells them apart is the exception class, which the paragraph eight lines below states correctly (a refusal is a server still starting, `never answered: TimeoutError` is the label). Measured here: a port refusing throughout ends `never answered: ConnectionRefusedError`, exit 1 at 60.1 s. A reader who meets that and acts on the bullet reads it as the label, which is the opposite of what the paragraph says. Distinct from dispatch://INFRA-215, which records that a persistent refusal has no reading of its own; this gives it the wrong one."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:2529",
+      "description": "Inside the previous round's fixes. \"A role that sees it compares the labels on its own pod\" — the pod that must carry the reachability label is the workload's, which is what the bracketed command reads; the role's own pod is in the namespace Legion's pods run in, where this identity has no read at all (measured: `kubectl auth can-i get pods -n legion` and `list pods -n legion` both `no`). The implementer's handoff glosses it the same wrong way, so the prose is what misleads, not the command. One word."
+    },
+    {
+      "severity": "minor",
+      "file": ".legion/INFRA-71/implement.json:14",
+      "description": "This round's work, outside the code commit. The first proof's negative control claims \"every command the sequence still names is in the `yes` set above, and every one in the `no` set is gone from it\" — the sequence still names the Service `apply`, whose verbs (`create services`, `get services`) are both measured `no`, which the section itself says is refused here. Scope the claim to the diagnostic and read commands. The same round's test handoff says \"30 check runs\" at the code head where GitHub reports 40; 30 is that endpoint's default page size, and the substantive claim (all success or skipped) holds."
+    }
+  ],
+  "verified": [
+    "All eight findings of the previous round are fixed, each checked by running it: the endpoints command is gone and the identity's refusal is quoted beside it; the naming clause says the second apply is refused rather than patching; the gate quotes exactly what a credential-less role gets, measured again here (exit 1, `The connection to the server localhost:8080 was refused - did you specify the right host or port?`); the gate now instructs rather than describes; the reachability block loops and names the two failure shapes apart; the bullets' preamble carries the exception; the Services line no longer asserts an RBAC rule; and all five test-phase `headSha` values resolve.",
+    "The published reachability block, run unedited under the image's python3: `answered` and exit 0 against a listener, and `never answered: ConnectionRefusedError`, exit 1 at 60.1 s against a port refusing throughout.",
+    "Every command the sequence names is within this identity's grant except the Service step, which the section says is refused: create/get/list/watch/delete jobs, get/list/watch pods and pods/log all yes; create and get services, get and list endpoints, patch and update jobs, create pods, and pods in Legion's own namespace all no.",
+    "CI at code head 0ca46259: 40 check runs, none unsuccessful at the read, the required lint, typecheck and test success; compare 0ca46259...64baceb1 is .legion/ only.",
+    "No name of the deployment's cluster is added anywhere in the delta, and none appears in the commit messages, the title or the body."
+  ],
+  "improvementsNotRequested": [
+    "A third outcome of the reachability step — an address that does not resolve — ends `never answered: gaierror`, which the paragraph does not name; it would mean the Service was never created.",
+    "The workload name is unique across projects but not across the six roles of one issue, which meet the same three consequences the naming clause warns about.",
+    "A copy-pasted sequence under `set -e` would stop above the delete; a `trap … EXIT` would make the gate's own warning structural rather than behavioural.",
+    "plan.json's citation of AGENTS.md:155 for the public-repository rule was true when written and is line 145 at this head."
+  ]
+}

@@ -1,6 +1,9 @@
 # Legion on Kubernetes
 
-This runbook covers the worker image, the session store, the Kubernetes runtime, and the operator-launched controller.
+This runbook covers the worker image, the session store, the Kubernetes runtime, the
+operator-launched controller, and the one thing in it a role does for itself: running a workload
+in the cluster from a role container ([Running a workload in the cluster from a
+role](#running-a-workload-in-the-cluster-from-a-role)).
 
 The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286). Its runtime's section below is kept for reference and goes with `packages/daemon` at Stage 7 (LEGION-223).
 
@@ -92,7 +95,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `openssh-client`, which also brings `ssh`, `scp` and
   `sftp`: they reach no host that `curl`, `wget`, `git`, `python3` and `socat` on the same apt line
   could not already reach, and what a pod may reach is Legion's ruling, the withheld `network`
-  capability row — dispatch://LEGION-5, the pod is the boundary — a declaration the capability report
+  capability row — dispatch://LEGION-5, the pod is the boundary, except a workload a role starts
+  where its deployment's cluster admits it and the Service fronting it
+  ([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role))
+  — a declaration the capability report
   renders, not a network control this repository ships; the package's setuid
   `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
   and the build's final step refuses an image where any file under `/usr/lib/openssh` or
@@ -1672,7 +1678,10 @@ the probe passed; the live rows (`subagents`, `web-search`, `mcp`, `repository-e
 inside its own Oh My Pi and reports them with its ready, and the daemon renders each from what its
 live sessions reported (LEGION-663; the paragraphs after the deployment rows); the withheld rows
 carry the ruling that keeps them from
-every worker (`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`:
+every worker (`network`: dispatch://LEGION-5, the pod is the boundary, except a workload a role
+starts where its deployment's cluster admits it and the Service fronting it
+([Running a workload in the cluster from a role](#running-a-workload-in-the-cluster-from-a-role));
+`operator-setup`:
 dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: dispatch://LEGION-551
 and dispatch://LEGION-205); and the four deployment rows are the daemon's to measure from its own
 configuration and its own boot, since no image or pod can show them:
@@ -2492,6 +2501,251 @@ kubectl -n legion delete pod legion-issue-shell
 The pod carries no credential. An agent of the issue can plant git and jj configuration in the clone
 ([Trust model](#trust-model-the-provisioning-token)), which this shell's `jj` obeys, and the pod
 gives that configuration nothing to take. Run no command in it that holds a token.
+
+### Running a workload in the cluster from a role
+
+A role sometimes needs something *running* rather than installed — a database for a test, a
+broker, a second copy of an application under test. Its own pod cannot hold one and the worker
+image cannot carry a running server, so it starts one in the cluster as a Job and reaches it by a
+Service name. What makes that possible is the deployment's, not Legion's: the ingress rule that
+admits connections from the namespace Legion's pods run in, the grant on Services and the
+admission rule that holds them, and the quota that counts them are declared in the deployment's
+own repository and applied by a person (dispatch://INFRA-206). This section is what a role does
+where they exist. Every rule below is that issue's and this issue's specification
+(dispatch://INFRA-71), each one stated as the condition the namespace's admission enforces; a
+workload that breaks one is refused at submission with a message naming the rule it broke, so
+nothing here has to be taken on trust — with the one exception this section marks where it
+arises, the reachability label, which admission does not check and whose absence is a workload
+that starts, costs its quota and answers nothing.
+
+**A role has this only where its deployment gives it.** Every Legion pod sets
+`automountServiceAccountToken: false` (`AutomountServiceAccountToken`,
+`internal/runtime/sandbox/manifest.go`), so a role holds a Kubernetes credential only where its
+operator projects one through `runtime.kubernetes.pod.volumes`
+([Configuration](#configuration)); the image carries the client and no credential for it
+([Worker image](#worker-image)). Three answers tell a role which deployment it is in, and they
+are the gate for everything below:
+
+```sh
+kubectl auth can-i create jobs      # may this role start a workload at all
+kubectl auth can-i create services  # may it give one a name on the network
+kubectl auth can-i get services     # `kubectl apply` reads the live object before it creates one
+```
+
+The third is not a duplicate of the second. `kubectl apply` is client-side by default and reads
+the object it is about to create, so a role that may create a Service but not read one gets
+`Error from server (Forbidden): error when retrieving current configuration of: … cannot get
+resource "services"` and never reaches the create; `kubectl create` of the same file is refused
+on the create instead. Both verbs are needed for the step as written, which is why the gate asks
+for both.
+
+None of the three is the answer a role with no credential gets. The image ships no kubeconfig
+and sets no `KUBECONFIG`, so without a projected token `kubectl` builds no in-cluster
+configuration at all: it falls back to `localhost:8080` and **exits 1**, its last line `The
+connection to the server localhost:8080 was refused - did you specify the right host or port?`
+(measured from a role container with the in-cluster environment removed). That is as conclusive
+as `no` — nothing in this section applies, and a tool the work needs on the issue's own files
+arrives the way it already does, below. A `yes` to the first and a `no` to either of the others
+is a deployment whose declarations are not applied yet: a workload can be started but never
+reached.
+
+**Unless all three commands answer a bare `yes`, submit nothing.** The sequence below is
+unconditional and its only `kubectl delete job` is after the Service steps, which are refused
+`Forbidden` wherever either Service answer is `no` — so a Job submitted on anything less is a
+four-processor workload nobody removes, sitting on the namespace's shared quota until its
+deadline runs out.
+
+The namespace is the role's own and is never written down: the projected credential names it in
+`/var/run/secrets/kubernetes.io/serviceaccount/namespace`, which is the namespace `kubectl` uses
+by default, so no command here passes `-n`.
+
+The rules the workload must satisfy. Every one but the last is enforced by the namespace's
+admission rather than by anyone's good behaviour; the last is enforced by nothing, which is why
+it is marked where it stands:
+
+- it runs under gVisor (`runtimeClassName: gvisor`) on the compute class the deployment's
+  declaration names, selected by `nodeSelector`; that class creates a machine rather than falling
+  back to a general one, so a small workload waits about eighty seconds to start;
+- its largest container requests at least four processors — a smaller job belongs in the role's
+  own pod;
+- it bounds itself **twice**: `activeDeadlineSeconds` on the Job *and* on its pod template, each
+  at most twelve hours, with `ttlSecondsAfterFinished` on the Job at most twenty-four, so the Job
+  and its pod go on their own and nobody may orphan one. Each of the three is a refusal of its
+  own: a manifest that sets the deadline on the template alone is refused as plainly as one that
+  sets neither;
+- it carries no identity: `automountServiceAccountToken: false`, and no service account of its
+  own;
+- it mounts only an empty directory, the downward API, or an ephemeral filesystem volume of the
+  scratch storage class the deployment's declaration names, whose claim template carries no
+  labels, annotations, data source, volume or selector. **No disk outlives the workload**, which
+  is what a database a test fills and discards needs;
+- it carries the pod label the deployment's declaration names for a workload that asks to be
+  reachable. **This is the one rule admission does not enforce**: a workload without that label
+  is admitted, started, charged against the shared quota, and reachable by nothing, because the
+  ingress rule selects the label rather than the namespace. Nothing refuses it and nothing says
+  so; the symptom is the reachability check below ending at its deadline with `TimeoutError`
+  every try — *that* class, not a refusal, which is a workload still starting up, and the
+  distinction the paragraph under the sequence sets out. It is why the check is the step after
+  the wait rather than the last. A role that sees it compares the labels on **the workload's**
+  pod (`kubectl get pod -l job-name=<workload> -o jsonpath='{.items[0].metadata.labels}'`, which
+  is a pod of this namespace; a role may not read its own, in the namespace Legion's pods run
+  in) with the deployment's declaration — not the Service's endpoints, which this identity may
+  not read (`kubectl auth can-i get endpoints` answers `no`). The label's name is in that
+  declaration, with the compute class, the storage class and the namespace; a role reads it
+  there rather than here.
+
+Name the workload for the issue, as everything else on this cluster is named
+(`issue-legion-<project>-<issue key lowercased>`, `legion-<project>-<issue key lowercased>`
+above): `<issue key lowercased>-<what it is>`, for instance `infra-71-postgres`. An issue key
+carries its project, so that name is already unique among the projects whose agents share this
+namespace and its one identity — and a bare `postgres` or `db` is a name another role is using.
+Taking it does not overwrite that role's workload (this identity may not patch a Job: `kubectl
+auth can-i patch jobs` answers `no`, so the second `apply` is refused), but everything after it
+acts on the first role's workload all the same: `kubectl wait -l job-name=…` waits on its pod,
+the reachability check reaches its database, and the `kubectl delete job` at the end of the
+sequence takes it and its Service away mid-test.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: <workload>                        # yours; the Service below is named for it and owned by it
+spec:
+  activeDeadlineSeconds: 3600           # on the Job, at most 43200
+  ttlSecondsAfterFinished: 3600         # at most 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        <the pod label the deployment's declaration names for a workload that asks to be reachable>
+    spec:
+      restartPolicy: Never
+      activeDeadlineSeconds: 3600         # on the pod template, at most 43200
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      nodeSelector:
+        <the compute-class selector the deployment's declaration names>
+      containers:
+        - name: db
+          image: mirror.gcr.io/library/postgres:16   # the mirror, as every image here is pulled
+          env:
+            - { name: POSTGRES_PASSWORD, value: <a password you choose> }
+          resources:
+            requests: { cpu: "4", memory: 8Gi }      # the largest container asks at least 4 CPU
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+      volumes:
+        - name: data
+          emptyDir: {}                    # dies with the pod, by design
+```
+
+The name on the network is a Service, held to a cluster-internal address: no node port, no load
+balancer, no external address and no external name. It is admitted only while the Job it fronts
+owns it, so removing the Job removes it too and leaves nothing for a person to sweep — which is
+why its `ownerReferences` carries the Job's own uid, read back after the Job is created:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: <workload>
+  ownerReferences:
+    - { apiVersion: batch/v1, kind: Job, name: <workload>, uid: <the Job's uid> }
+spec:
+  type: ClusterIP                         # the only kind this namespace admits
+  selector: { job-name: <workload> }      # the label the Job puts on its own pods
+  ports: [{ port: 5432, targetPort: 5432 }]
+```
+
+The whole sequence, from a role container holding nothing but its checkout and that credential.
+**Write both manifests outside the checkout** — `$TMPDIR` or `/tmp`, never the issue's workspace:
+the workspace is a jj working copy of this public repository, so a `workload.yaml` left there is
+snapshotted into the role's working-copy commit and the password in it can reach the branch.
+
+```sh
+cd "${TMPDIR:-/tmp}"                                               # not the checkout: see above
+kubectl apply -f workload.yaml                                     # the Job
+uid=$(kubectl get job <workload> -o jsonpath='{.metadata.uid}')    # what the Service must name
+sed "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -    # the name on the network
+kubectl wait --for=condition=Ready pod -l job-name=<workload> --timeout=300s
+ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+python3 - "<workload>.$ns.svc.cluster.local" 5432 <<'PY'           # does it answer yet?
+import socket, sys, time
+host, port = sys.argv[1], int(sys.argv[2])
+deadline = time.monotonic() + 60
+while True:
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            print("answered")
+            break
+    except OSError as error:
+        if time.monotonic() >= deadline:
+            print(f"never answered: {type(error).__name__}: {error}")
+            sys.exit(1)
+        time.sleep(2)
+PY
+kubectl logs -l job-name=<workload> --tail=5                       # and what it says it is doing
+kubectl delete job <workload>                                      # takes its pod and its Service
+kubectl get jobs,pods                                              # nothing of it is left
+```
+
+That check is `python3`, which the image carries, because **the role container has no client for
+any of these servers**: `psql`, `redis-cli` and their kind are not in the image
+([Worker image](#worker-image)), a role may not `exec` into the workload's pod, and installing
+one in its own pod is the withheld `operator-setup` capability. What it proves is what a role
+needs first: that the address resolves and the port answers.
+
+It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
+readiness probe, so `condition=Ready` means the container started, and a database spends its
+first seconds initialising with its listener closed — `postgres:16`'s entrypoint does exactly
+that. **So the two failures are different, and the loop is what separates them.** A connection
+*refused*, in the first seconds, is the workload reachable and not listening yet: the loop
+retries and it answers. A connection that *times out* every time until the deadline is the
+workload unreachable — the packets are dropped rather than refused, which is what the missing
+reachability label above produces, and `never answered: TimeoutError` is how the step reports it.
+Read the first as starting up and the second as the label.
+
+Speaking the protocol is a client library onto the issue's own disk, the way every other tool
+that works from the checkout arrives (below), run from the checkout against that same address —
+never a binary installed into the pod. The last line asks only for Jobs and pods because reading
+a Service needs `get services`, the gate's third answer; where that is `no`, as it is in this
+deployment today, the line is refused like the Service steps above it.
+
+**What of this has been run, and where.** This section is written partly from commands executed
+in the deployment it describes and partly from the declarations dispatch://INFRA-206 carries,
+and a reader is owed the boundary rather than a uniform voice:
+
+- *Executed from a role container here, at this change's head*: the three gate commands and the
+  whole grant matrix behind them (`create`/`delete jobs`, `get pods`, `pods/log` `yes`;
+  `patch`/`update jobs`, `get`/`list endpoints`, `get`/`create services`, `create pods` `no`);
+  the Job manifest above through the namespace's own admission, server-side with nothing
+  created, together with one deliberate breakage of each rule, each refused naming the rule; the
+  credential-less gate, with the in-cluster environment removed; and the reachability block, run
+  as published against a listener, against a port that refuses and then listens, and against an
+  address whose packets are dropped.
+- *Not executed anywhere yet*: creating the Job for real, the Service steps, the wait, the logs
+  and the delete. The Service steps are refused `Forbidden` in this deployment — on `get` before
+  the create is attempted — so the sequence has never run past its second line here. Those lines
+  are written from the declarations and wait on a person applying them; read them as a design
+  until a role has run them end to end and said so.
+
+What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
+which belongs to another namespace and to one node at a time, and a role may not run a command
+inside its pod — the grant is create, read, follow and delete, never `exec`. A formatter started
+that way would never see the file it would format, so **a tool that works on the checkout does not
+belong here**: those arrive through the image's package runners onto the issue's own disk, which
+every role of the issue shares and which outlives any one pod. That is also why the two notes
+recording `kubectl auth can-i` answering `no` are not contradicted here
+(`a-pod-rehearses-a-checkpoints-own-readers-…-LEGION-578.md` in `docs/solutions/legion/`, and
+`prove-a-published-worker-image-from-a-pod-…-LEGION-764.md` in `docs/solutions/testing/`): each
+answers for a different verb — creating a Sandbox, creating a pod, `exec` into one — in the
+namespace Legion's own pods run in, which this changes nothing about.
+
+Two costs are shared and are the reason a role cleans up after itself rather than waiting for a
+deadline. One quota covers that whole namespace and is shared with the team's builds, so a
+workload left running is charged against both. And every project's agents hold the one identity
+(`legion-worker`), so a password written into a Job is readable by every other agent, and any of
+them may delete any workload there; narrowing that to a per-project identity is
+dispatch://INFRA-153's work, not something to design around here.
 
 ### Issue sizing: one reservation per pod
 

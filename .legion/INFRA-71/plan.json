@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-71",
+  "completed": "2026-10-24T05:23:42Z",
+  "plan": "dispatch://INFRA-71/artifact/plan-md (version 4)",
+  "note": "This handoff replaces the one written on 2026-10-21 for the scope the human's rewrite superseded. The specification is approved at version 32; everything the earlier plan, implement, test and review handoffs describe is being removed from this branch by the first task below.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase contract — the shared workspace, the push and handoff rules, the pull-request body and the proof every phase records. The pull request already exists (sjawhar/legion#2092) and its body is edited rather than replaced.",
+      "skill://legion-worker/references/pr-body.md: the definition of a proof (criterion, surface, command, observed, head SHA, negative control) that each entry of the implement handoff's proof array must meet, and the simplify pass on the settled head.",
+      "skill://legion-worker/references/cleanup-deletion.md: the first task is a deletion of code, a command and documentation — two whole changes removed from a live branch by new commits — which is exactly what that reference governs.",
+      "skill://dispatch: required before any write to Dispatch, which the implementer makes when it reports on the issue."
+    ],
+    "test": [
+      "skill://legion-worker: the tester drives the changed surface and reads CI for lint, types and the unit suites rather than re-running them.",
+      "skill://legion-worker/references/pr-body.md: what the tester verifies in the implementer's proof, and its own E2E line and proof array.",
+      "plan.md sections 3 and 4: each acceptance row names its command and the phase that owns it, and marks which four wait on a person's apply of dispatch://INFRA-206; rows 5, 6 and 7 are re-runnable on this tree today with no cluster."
+    ],
+    "review": [
+      "skill://legion-worker and skill://legion-worker/references/review-threads.md: one disposition reply per thread, resolved one by one, never in bulk.",
+      "skill://legion-worker/references/merge-gate.md: the approval of the head, retro, READY, and what READY refuses — this branch's history carries another issue's commits deliberately, so the reviewer reads plan.md section 1 before judging the diff.",
+      "plan.md section 6: the two departures from the specification's text, which the reviewer reads beside the approved document."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the guidance is justified by an acceptance line about changing no image, but the capability row ships inside the image too (worker-image.yaml's filter covers packages/daemon/** and packages/contracts/**), so this pull request triggers an image build.",
+        "answer": "Decision D5: the acceptance line binds the runs ('Each item is a run … from a role container of a live issue pod, with no change to the worker image'), not the diff. The plan states that the row change ships in the daemon and in the image, that a deployment's probe table carries it only once it pins a new digest while its state output carries it with the daemon, and that no proof in section 4 needs a new image."
+      },
+      {
+        "finding": "F2: a role container's kubectl identity is the deployment's gift, not Legion's — every Legion pod sets automountServiceAccountToken false (manifest.go:414) and a live runtime test asserts the token is absent; this deployment projects one through runtime.kubernetes.pod.volumes.",
+        "answer": "Task T3's first bullet: the guidance opens by saying a role has this only where its deployment gives it, cites manifest.go:414, docs/kubernetes.md:68-69 and :3189-3196, and gives the one command that tells a role whether it has it."
+      },
+      {
+        "finding": "F3: the namespace, its compute class and its admission-policy names are the private infrastructure's, which AGENTS.md:155 keeps out of this public tree, and check-private-names.sh cannot see them, so a green lint is no evidence of compliance.",
+        "answer": "Decision D3 and departure 1: the guidance names nothing — placeholders in the document's own convention, and a role reading its own namespace from /var/run/secrets/kubernetes.io/serviceaccount/namespace, which its kubectl already uses by default. Put to the architect in section 5 item 1, since the approved specification writes the name literally."
+      },
+      {
+        "finding": "F4: 'a pod created after the apply' does not follow from an ingress rule, a Service grant and quota counters — none of the three needs a new pod; only a pod-template or identity change would, and that lives in a third repository.",
+        "answer": "Section 5 item 4 puts it to the architect, and task T5 plans the stricter reading the specification states, which is safe either way. The gate is named as one command: kubectl auth can-i create jobs answering yes in a role container."
+      },
+      {
+        "finding": "F5: the architect's caution that first-turn-notice.ts must stay is refuted by the pull request's own diff — the file is added by it, workspace-recreated.ts loses three helpers to it, and extensions/legion.ts was rewritten into an owedNotices list to carry the second notice.",
+        "answer": "Decision D4: the clean cutover returns workspace-recreated.ts, extensions/legion.ts and extensions/legion.test.ts to main and deletes first-turn-notice.* with setup-report.*. Reported to the architect in section 5 item 2 with the file numbers, since it contradicts his caution."
+      },
+      {
+        "finding": "F6: the removal reaches two hunks belonging to neither half — the four .legion/INFRA-71/*.json handoffs of the abandoned scope, and a true correction of the LEGION_STATE_DIR row with an install-step clause glued onto it.",
+        "answer": "Decisions D6 and D7: the stale handoffs stay and are overwritten in place by their own phases in this generation, and retro removes the directory before READY; the LEGION_STATE_DIR correction is kept without its clause, because names.go:59 makes it true and reverting would put a false line back into main. Neither is left silent."
+      },
+      {
+        "finding": "F7: the removal's completeness should not rest on a human reading the diff.",
+        "answer": "Task T1's acceptance and section 4 row 5: the sorted output of jj diff --from main@origin --name-only must equal the issue's own file list, and seven greps (repo-tool.sh, legion-setup, setup-report, first-turn-notice, check-check-commands, LEGION_SETUP_, .legion-setup) must return nothing outside .legion/."
+      },
+      {
+        "finding": "F8: the row's reproductions and the exact command that regenerates the golden, which the implementer must be told rather than guess.",
+        "answer": "Task T2 names the command verbatim — cd packages/daemon && go test ./internal/api/ -update — and the complete list of reproductions: worker.Dockerfile:465-467 and docs/kubernetes.md:94-95 and :1678-1682 by hand, the golden never by hand, with bun test packages/contracts added to the task's checks."
+      },
+      {
+        "finding": "F9: relaxing the ruling test is not the smallest honest change — capabilities_test.go:85 has two loops, the second covering every row, and the Ruling doc comment at capabilities.go:72-76 would also become false.",
+        "answer": "Decision D1: the ruling stays dispatch://LEGION-5 and only the summary changes, so no test and no doc comment moves. Recorded as a departure from the architect's brief wording in section 6 and raised with him in section 5 item 3."
+      },
+      {
+        "finding": "F10: a withheld row renders unconditionally, so a narrowed summary would assert the grant in deployments that never applied the declarations, this one included until the apply.",
+        "answer": "Decision D2 and acceptance row 6: the summary names the exception as one a deployment grants rather than a fact about every worker, which is both what makes it true before and after the apply and why task T2 may land ahead of the gate."
+      },
+      {
+        "finding": "F11: the change edits a surface legion state --json renders, and the repository has a contract-bump rule and per-package changelogs.",
+        "answer": "Decision D8: no DaemonAPIVersion bump, no version.json, no plugin manifest edit and no changelog entry, with the reason — the detail string is a value inside an unchanged shape (legion-api.ts:321-325), there is no daemon changelog, and the contracts schema is untouched."
+      },
+      {
+        "finding": "F12: docs/kubernetes.md declares itself an operator runbook, and nothing a role reads points at the new section, while skills/ and the plugin are image inputs this issue may not change.",
+        "answer": "Task T3's last paragraph: the document's scope sentence at :3 admits role-facing content, and root AGENTS.md gains one pointer line to the section's anchor — the one discovery path available without an image change, since AGENTS.md is loaded by every session in this repository and is not an image input."
+      },
+      {
+        "finding": "F13: 'near the shell-on-a-volume section' is a location, not a convention.",
+        "answer": "Task T3 names the insertion point (a new ### between 'A shell on an issue's volume' at :2389 and 'Issue sizing' at :2508) and the five conventions that section group follows: attributed prose, one yaml manifest with placeholders and end-of-line comments, one sh block giving the whole sequence, a closing paragraph on the credential, and anchor cross-links."
+      },
+      {
+        "finding": "F14: every admission item is unsourced inside this repository, and two docs/solutions notes record kubectl answering no for other verbs in the agents' own namespace.",
+        "answer": "Task T3 requires each item to carry its attribution to dispatch://INFRA-206 or to this issue's specification rather than reading as this repository's knowledge, and task T4 moves the three places that still say the pod is the boundary and has the guidance name, in one clause, what those two notes actually answered. No note is rewritten."
+      },
+      {
+        "finding": "F15: a server-side dry run looks like pre-apply proof and is not — it is authorized as a create and fails with the same refusal before the grant exists.",
+        "answer": "Section 4's closing paragraph: pre-apply evidence is kubectl apply --dry-run=client for the manifest's validity and kubectl auth can-i create jobs recorded answering no as the negative control, each recorded as what it is and neither offered as partial proof of a criterion."
+      },
+      {
+        "finding": "F16: four things would widen the change — the test relaxation, keeping the first-turn-notice extraction, carrying the LEGION_STATE_DIR correction without a reason, and adding a new capability row.",
+        "answer": "The first two are cut by decisions D1 and D4, the third is an explicit reasoned keep (D7), and D8 writes 'no new capability row' into the plan with the evidence that capabilities_test.go:19-22 pins all twenty names."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The specification names the cluster namespace literally, in its prose and in two of its acceptance commands. (Redacted by the implementer on 2026-10-24: this field quoted those two commands with the name in them, which is a name of the private infrastructure and may not stand in this public tree; the departure needs only the sentence.)",
+      "plan": "The guidance this repository ships names no namespace, compute class or admission policy: it uses the document's own placeholder convention and tells a role to read its own namespace from /var/run/secrets/kubernetes.io/serviceaccount/namespace, which is the namespace its kubectl already uses by default.",
+      "evidence": "AGENTS.md:155 keeps every name of the private infrastructure out of this public tree — admission-policy names among them — and carves out only Legion's own names; .github/scripts/check-private-names.sh matches only the deployment repository's token, the company, private internal hosts and tailnet hosts, so it cannot see a namespace name and a green lint job is no evidence of compliance. docs/kubernetes.md:2477-2496 already writes <project>, <issue key lowercased> and <runtime.kubernetes.image> the same way. The acceptance's commands still run exactly as written, since the name they pass is the default.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "The architect's brief said the withheld network row and its ruling both change here; the specification itself says the capability row is superseded 'with its ruling dispatch://LEGION-5 cited where it is changed'.",
+      "plan": "Only the row's Summary changes; Site stays SiteWithheld and Ruling stays dispatch://LEGION-5, with the narrowing's reason written where a public reader meets it.",
+      "evidence": "packages/daemon/internal/capabilities/capabilities_test.go:85 holds every withheld row's ruling, and in a second loop every comma-separated citation of every row, to a dispatch://LEGION- prefix, and capabilities.go:72-76 documents Ruling as 'the dispatch://LEGION-<n> a withheld row cites': citing this issue means relaxing both loops and falsifying that comment, and it puts a key a public reader cannot resolve into legion state --json. The ruling that withholds the general case is unchanged; what changed is its extent, which the summary carries.",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}

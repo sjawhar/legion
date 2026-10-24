@@ -96,7 +96,7 @@ var Table = []Capability{
 	{Name: Toolchain, Site: SiteImage, Summary: "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun, uv, kubectl, jq, ssh-keygen and flock"},
 	{Name: ResourceLimits, Site: SiteDeployment, Summary: "runs within the CPU and memory the deployment's pod resources give it"},
 	{Name: PoolCapacity, Site: SiteDeployment, Summary: "starts in a Legion pool with room for the image probe's reservation at boot"},
-	{Name: Network, Site: SiteWithheld, Summary: "reaches beyond the pod's own network: the pod is the boundary", Ruling: "dispatch://LEGION-5"},
+	{Name: Network, Site: SiteWithheld, Summary: "reaches beyond the pod's own network: the pod is the boundary, except a workload a role starts where its deployment's cluster admits it, carrying the pod label that deployment's declaration names for a workload asking to be reachable, and the Service fronting that workload", Ruling: "dispatch://LEGION-5"},
 	{Name: OperatorSetup, Site: SiteWithheld, Summary: "installs or configures its own dependencies in the pod: Legion owns its dependencies", Ruling: "dispatch://LEGION-200"},
 	{Name: ProductionIdentities, Site: SiteWithheld, Summary: "acts under a production identity of its own", Ruling: "dispatch://LEGION-551, dispatch://LEGION-205"},
 }
