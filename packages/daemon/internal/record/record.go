@@ -386,7 +386,7 @@ const (
 	// CheckRecorded is a look's pass: the implementer drove the change in production and
 	// recorded it on the pull request.
 	CheckRecorded CheckOutcome = "recorded"
-	// CheckDefect is a look's fail: the change misbehaved in production, filed as an issue.
+	// CheckDefect is a look's fail: the change misbehaved in production, asked about in a Dispatch ask.
 	CheckDefect CheckOutcome = "defect"
 	// CheckNotRun is a check that closed with no look that could see the change in production:
 	// the last look reported pending, or a look could not run.

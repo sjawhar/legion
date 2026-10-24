@@ -3230,10 +3230,18 @@ The current helper logs in through `LoginDevice` instead, the OAuth provider's (
 storage `internal/broker/oauthstore`, migration 0016) device authorization step behind
 `POST /v1/oauth/device_authorization`: the same request object and refusals as `Login`, its
 `dpop_jkt` required to be the object's key thumbprint, the record's code the provider's user code,
-and no poll row. `ApplyDecision` records each decision on the device code too (`decideDevice`), so
-the machine's poll of `POST /v1/oauth/token` gets `access_denied` or, on approval, a DPoP-bound
-token pair (RFC 9449) whose answer carries `credential_id` and `credential_expires_at`
-(`TokenHooks`). A refresh grant first moves the credential's expiry to
+and no poll row. It runs in the provider's transaction, and so does its request object's `jti`
+(`enroll.Service.Replay` writes in the transaction its context carries, `oauthstore.TxFrom`, and on
+the pool only when it carries none): a device login holds that transaction's one pooled
+connection and never waits for a second, which a burst of logins as large as the pool would
+otherwise turn into a stall of every database route, `/healthz` among them
+(`TestDeviceLoginsNeedOnlyTheirTransactionsConnection`). Every step the provider's transactions
+run (`LoginDevice`, the token hooks, `Store.Reused`, `ApproveDevice` inside `ApplyDecision`)
+writes through the transaction it is handed, never the pool. `ApplyDecision` records each
+decision on the device code too (`decideDevice`), so the machine's poll of `POST /v1/oauth/token`
+gets `access_denied` or, on approval, a DPoP-bound token pair (RFC 9449) whose answer carries
+`credential_id` and `credential_expires_at` (`TokenHooks`). A refresh grant first moves the
+credential's expiry to
 `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from now (`Refreshed`, under the credential's row lock) and
 is refused `invalid_grant` when the credential is revoked or past its expiry; the device code
 grant takes the same row lock without moving the expiry (`Live`) and is refused the same way, so

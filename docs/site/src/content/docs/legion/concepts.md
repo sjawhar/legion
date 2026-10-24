@@ -57,16 +57,22 @@ only) the daemon launches it as a pod in the cluster and relaunches it when it d
 reaches it through Dispatch. The daemon wakes it when something needs a judgment no tree owns:
 
 - a new `triage` issue labelled `legion` to admit, park, or leave alone;
-- a free admission slot to fill (see [Admission](#admission-and-the-legion-label));
 - a tree its own architect escalated, or one whose architect ran out of launches.
 
-The daemon also wakes it on a timer, every `controller_wake_interval_seconds` (an hour by
-default), and on its first turn of each UTC day the controller posts a report on what Legion
-finished, closed and is running.
+The daemon also wakes it when an admission slot frees and on a timer, every
+`controller_wake_interval_seconds` (an hour by default), and on its first turn of each UTC day the
+controller posts a report on what Legion finished, closed and is running. A free slot is never a
+reason for the controller to take an issue: it starts no work a person did not hand over.
+
+No Legion agent files an issue for a problem it finds outside its own issue. It opens a Dispatch ask
+on Legion's daily report issue instead, naming the issue it came from and where the fix belongs
+(the repository or layer, and saying so when it is not Legion), with its evidence and a
+recommendation, and you decide whether it needs an issue. The controller files that issue, with the
+`legion` label only when your answer asks Legion to work it. The issues an agent still files on
+its own are an architect's children of its own tree.
 
 The only statuses the controller sets are `todo`, `backlog` and `icebox` (`triage` is set by
-whoever files an issue). It reads pull requests as the review App, so its walk can say whether a
-linked pull request is open, merged or closed, and never touches a tree's work.
+whoever files an issue). It reads pull requests as the review App, and never touches a tree's work.
 
 ## Trees and the architect
 
@@ -124,12 +130,13 @@ the label, is in `todo`, and a slot is free. The number of slots is `admission_c
 configuration, four by default; a labelled `todo` root that finds no free slot waits in line, in the
 project board's order, and takes the next one.
 
-There are two ways an issue gets the label:
+An issue gets the label only by a person's decision:
 
 - **A person hands it over**, from the issue header in the Dispatch dashboard.
-- **The controller takes it.** Whenever a slot is free, the controller labels the
-  highest-priority `todo` issue that has no children and that nobody else is working, and says so
-  in a comment on the issue.
+- **A person asks the controller to**, in a message, a Slack request, or the answer to one of its
+  asks, and the controller sets the label for them.
+
+A free slot stays free until a person hands Legion an issue: the controller never takes one.
 
 A child issue needs no label: it runs under its tree once the root is admitted. Taking the label
 off a waiting root takes it out of line; taking it off a running tree does not stop the tree.
@@ -223,8 +230,9 @@ Legion uses GitHub's own review mechanisms rather than labels:
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
   the issue and tells the architect; neither stops a worker. At the round cap the architect decides,
-  in the turn the notice wakes, whether to narrow the next rounds, split work into an issue of its own, or let
-  converging rounds run, and posts that decision on the issue. Every move back to an earlier phase
+  in the turn the notice wakes, whether to narrow the next rounds, split work off (into a sibling
+  child, or, on a root, an ask whether the rest needs an issue of its own), or let converging rounds
+  run, and posts that decision on the issue. Every move back to an earlier phase
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
   daemon's own move when CI turns red or the head starts conflicting with its base. Once
   `max_fix_attempts` runs out, CI red within the attempt that ran it out - the head whose push was
@@ -297,9 +305,10 @@ deployment instructions say (the merge commit published to your deploy role, wit
 awaited), reads whether production carries the merge, and ends one of three ways: `pass`, once
 the implementer drove the change in production through a user's own access path and wrote the
 pull request's `Production:` line, naming the merge commit and what woke the look; `pending`,
-when production does not carry the merge yet; or `fail`, a defect, filed as a new issue of its own
-in the project, linked to the pull request and the closed issue. The record lives on the pull
-request alone: Dispatch refuses a write on a closed issue.
+when production does not carry the merge yet; or `fail`, a defect, which the implementer asks you
+about in a Dispatch ask on Legion's daily report issue, naming the issue, the pull request, the
+merge commit, what it drove and what failed, so you decide whether it needs an issue.
+The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
 
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its
 conversation and the issue's volume kept, and the daemon wakes the check — the pod comes back and

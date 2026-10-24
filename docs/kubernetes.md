@@ -1817,37 +1817,43 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    A relaunch, whose volume already holds the feed, fetches the delta into it alone (`the feed
    holds <owner>/<repo> already: …`), after removing every git lock file a fetch killed mid-update
    left in the feed, each logged with its age. It takes an existing feed only in the shape the
-   fetch writes: no symlink anywhere, its owner directory included; no gitfile; no hook but git's
-   samples; a configuration holding only the keys git's bare init and clone and the fetch write,
-   each line in git's own form (a `[section]` header alone on its line, or a tab-indented `key =
-   value` with no quote, escape or comment), since git also reads a key written on its header's
-   line; nothing in `info/` but git's `exclude` and `refs`, and the temporary file
-   update-server-info writes `info/refs` or `objects/info/packs` through, which git never reads;
-   and no alternates. Before this release any role could
-   write the issue volume's `/legion/feed`, so a volume carried over may hold a repository there
-   that would run a hook or follow a setting in the token-holding fetch: such a feed is removed,
-   logged (`the feed's <owner>/<repo> is not one this fetch wrote (<why>): removed; the feed is
-   filled afresh`), and filled from the repository cache. Every fetch from GitHub then points the
-   feed's `HEAD` at the branch GitHub names as the default now (`git ls-remote --symref`, under the
-   same credential and bound), since a fetch never moves `HEAD` and prunes the branch a rename
-   left behind; a move is logged (`the default branch of <owner>/<repo> is now <name> (HEAD named
-   <ref>)`). A branch GitHub renamed between the fetch and that read is not yet in the feed, so
-   `HEAD` stays until a fetch brings it, logged (`GitHub's default branch of <owner>/<repo> is now
-   <name>, which this fetch did not bring: HEAD stays at <ref> until a fetch brings it`). Once the
-   fetch may start — at once, or once the cache is ready — the cache's stream,
-   its verification and the delta from GitHub share one 30-minute bound
+   fetch and Git maintenance write: no symlink anywhere, its owner directory included; no gitfile;
+   no hook but git's samples; a configuration holding only the keys git's bare init and clone and
+   the fetch write, each line in git's own form (a `[section]` header alone on its line, or a
+   tab-indented `key = value` with no quote, escape or comment), since git also reads a key written
+   on its header's line; Git's `gc.pid`, `gc.log`, packed refs and reflogs; `info/exclude`,
+   `info/refs`, and the temporary files `update-server-info` leaves; and
+   `objects/info/packs` plus commit-graph files. An alternate object store is refused. A legacy
+   shared clone that has already lost its feed is rebuilt instead of repaired in place: keep the
+   issue status, suspend its Sandbox, save any unpushed workspace work, and move the clone and its
+   workspace aside together. The next provision creates both again. Sessions stay in their configured
+   store — the SQL store, or `/legion/sessions` on the volume — and this procedure does not touch
+   them. Set `LEGION_DAEMON_URL=<daemon url>` and run `legion claims retry --claim
+   legion-<project>-<issue>-architect --operator-token-file <0600 file>`. The architect then runs
+   `retry_or_escalate` with `retry` on the held role. A done issue with an open production check has
+   no command relaunch; its next check wake does (dispatch://LEGION-815). Before this release, any
+   role could write the issue volume's `/legion/feed`, so a carried-over volume may hold a repository
+   there that would run a hook or follow a setting in the token-holding fetch: such a feed is removed,
+   logged, and filled from the repository cache. Every fetch from GitHub then
+   points the feed's `HEAD` at the branch GitHub names as the default now (`git
+   ls-remote --symref`, under the same credential and bound), since a fetch never moves `HEAD` and
+   prunes the branch a rename left behind; a move is logged (`the default branch of
+   <owner>/<repo> is now <name> (HEAD named <ref>)`). A branch GitHub renamed between the fetch and
+   that read is not yet in the feed, so `HEAD` stays until a fetch brings it, logged (`GitHub's
+   default branch of <owner>/<repo> is now <name>, which this fetch did not bring: HEAD stays at
+   <ref> until a fetch brings it`). Once the fetch may start — at once, or once the cache is ready
+   — the cache's stream, its verification and the delta from GitHub share one 30-minute bound
    (`workspace.FetchTimeout`), each given what remains of it, so the fetch's waits, transfers and
    checks end within 70 minutes (`workspace.FetchBudget`) however long it waited, and the few local
    git commands around them take moments; a step with nothing left fails the fetch, naming the
    bound. Each transfer from GitHub is tried again up to four times after a transient failure,
-   within that bound.
-   It is the only process that holds the provisioning token
+   within that bound. It is the only process that holds the provisioning token
    ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the issue's clone and its jj workspace on the issue's own volume from
    the read-only feed, taking no lock and waiting on no other pod: no other pod mounts the volume.
-   The clone is a `git clone --shared` of the feed, so its objects stay in the feed
-   (`.git/objects/info/alternates` names `/legion/feed/<owner>/<repo>.git/objects`) and only what
-   the issue's own commits add is written into the clone; its `origin` names GitHub, and
+   The clone is a local `git clone` of the feed. Git hard-links the feed's object files when the
+   filesystem allows, but the clone owns those links, so replacing the feed cannot remove history
+   its refs need; it has no `.git/objects/info/alternates`. Its `origin` names GitHub, and
    `jj git init --colocate` makes it jj's, tracking the default branch as a `jj git clone` would.
    Its environment is the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME=true` when the volume must
    already hold the clone or a retained session (the launching claim resumes a session, or any
@@ -1892,9 +1898,9 @@ role container mount it at `/legion`, and each role container again at Oh My Pi'
 through a `subPath`, so a session survives its pod. The feed is the volume's `feed` directory:
 `workspace-fetch` mounts that `subPath` alone, read-write, at `/legion/feed`, and `workspace-init`
 and every role container mount the same `subPath` again, read-only, at `/legion/feed` over their
-whole-volume mount, so the path the clone's alternates names is one in every container and no
-agent writes what the token-holding container reads. The kubelet makes the directory on first use,
-so a volume that has none is relaunched as it is: nothing on it moves. Each role's Secret,
+whole-volume mount. The clone's object store owns its links to that feed, and no agent writes what
+the token-holding container reads. The kubelet makes the directory on first use, so a volume that
+has none is relaunched as it is: nothing on it moves. Each role's Secret,
 `<sandbox>-<role>-boot`, holds that role's launcher token and its gh bundle: for every GitHub owner
 of the project, `github-hosts-<owner>`, gh's `hosts.yml` carrying a GitHub App installation token
 under user `x-access-token`, and `github-config-<owner>`, a `config.yml` of `version: "1"`, and
@@ -2946,15 +2952,15 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
 - **`workspace-init`** mounts the issue's volume, the feed read-only over it, and the config home —
   never the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
   --default-branch <name> --root /legion --credential-helper '!legion git-credential' --feed
-  /legion/feed`: the clone is a `git clone --shared` of the feed, its origin set to
+  /legion/feed`: the clone is a local `git clone` of the feed, its origin set to
   `https://github.com/<owner>/<repo>`, and its fetch reaches that remote at the feed over git's
   file transport, bringing the default branch and the issue's branch alone, each by its exact
   name, then the workspace add, `update-stale`, and the configuration writes, once it has removed
-  the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). The shared
-  clone copies no object, but its checkout of the working tree and jj's import of every commit
-  follow the repository's size, so the two share one bound of their own, `workspace.CloneTimeout`
-  (30 minutes), the import given what the checkout left, rather than `workspace.CommandTimeout`;
-  every other command here keeps the 5 minutes.
+  the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). Local clone
+  object entries survive a feed replacement, while its checkout of the working tree and jj's import
+  of every commit follow the repository's size, so the two share one bound of their own,
+  `workspace.CloneTimeout` (30 minutes), the import given what the checkout left, rather than
+  `workspace.CommandTimeout`; every other command here keeps the 5 minutes.
   It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own
   volume, and no other provision shares the repository. What an agent of the issue planted can run
   there, with nothing to take that the agent does not already hold.

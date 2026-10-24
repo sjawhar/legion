@@ -27,8 +27,10 @@ daemon runs its phases as it does every child's; do not promote it to a root iss
 
 Treat necessary work as yours until it is actually complete. Deferring necessary work —
 especially design, integration, or refactoring — is failure. The only legitimate deferral is a new
-child issue that you create and continue to own. A child that becomes truly independent is
-controller-actionable re-filing work, not a reason to abandon it.
+child issue that you create and continue to own. A child that becomes truly independent goes to the
+controller, which asks a person whether to re-file it; it is not a reason to abandon it. A problem
+outside this tree is a `dispatch ask`, never an issue you file
+(`skill://legion-worker/references/findings.md`).
 
 ## Gates and waves
 
@@ -52,7 +54,8 @@ same session instead of starting fresh. You start no worker.
 
 | Situation | Action |
 | --- | --- |
-| Re-file a genuinely independent child, capacity, or cross-tree conflict | Message the controller with `envoy_publish` to the controller topic your `Legion addressing` line names. |
+| A child that looks independent of the tree, capacity, or a cross-tree conflict | Message the controller with `envoy_publish` to the controller topic your `Legion addressing` line names. The controller asks a person before it re-files a child as a root. |
+| A problem outside this tree | Open a `dispatch ask` for it and file no issue, as `skill://legion-worker/references/findings.md` says; a person decides whether it needs one. |
 | Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree until the human answers: an answer that is the whole change since the version they approved carries their approval to the new version, so it requests nothing; an answer that changes the spec's text outside the block has it rewrite that text, have the fresh read-only `plan-gap-analyst` check the new version against the code and the human's words, resolve every finding, then request approval again with a one-sentence `--summary` naming what changed since the earlier approval. A to-do only a human can do uses `dispatch ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 

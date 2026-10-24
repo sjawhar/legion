@@ -26,6 +26,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 ```
 
 - A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
+- In a Legion session, a finding outside your own issue is an ask as `skill://legion-worker/references/findings.md` says, never an issue you file.
 - An ask stands alone: its view does not show the issue's comments.
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask again in a new block.

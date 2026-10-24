@@ -28,6 +28,7 @@ with the `read` tool: a read by filesystem path stops at 300 lines.
 | You review or approve, build the READY packet, or check the merge in production | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
+| You find a problem outside your issue, or the production check fails | `skill://legion-worker/references/findings.md` |
 
 ## Identity, scope, and role
 
@@ -35,19 +36,18 @@ The daemon spawns you as a separate `omp --mode rpc` process (behind `legion wor
 in a tmux pane or an Agent Sandbox pod) with `LEGION_TREE`, `LEGION_ISSUE`, `LEGION_ROLE`,
 `LEGION_GENERATION`, `LEGION_PROJECT`, `LEGION_BOOT_TOKEN_FILE` (the file holding your boot
 token; the extension reads it for you), `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and
-`LEGION_WORKSPACE` in your environment. The extension
-completes the boot handshake for you at session start — it registers with the daemon, claims
-your role, and signals readiness. You never call `envoy_role_set` yourself.
+`LEGION_WORKSPACE` in your environment. The extension completes the boot handshake for you at
+session start — it registers with the daemon, claims your role, and signals readiness. You never
+call `envoy_role_set` yourself.
 
 Your role token is not the issue key spelled out literally. The daemon encodes it as
 `legion-<project>-<key>-<role>` with the issue key lower-cased. For example, project `acme`, issue
 `LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`. Never hand-format one for another role: your own role
 topic and the topic of the architect that owns your issue are in the `Legion addressing` line of
 your system prompt (the daemon appends it; it names the tree root's architect, also on a child
-issue), a sibling role's topic is yours with the
-trailing `-<role>` replaced, and the `roleToken` helper in `@legion/contracts` computes any other
-one exactly the way the daemon does — prefer a topic you've already been given before recomputing
-one.
+issue), a sibling role's topic is yours with the trailing `-<role>` replaced, and the `roleToken`
+helper in `@legion/contracts` computes any other one exactly the way the daemon does — prefer a
+topic you've already been given before recomputing one.
 
 If the handshake fails (a rejected boot token, or a bootstrap failure after your role
 registered), the extension logs it and exits the process outright — it does not retry, and
@@ -62,14 +62,14 @@ You never start another Legion role: the daemon starts every phase worker itself
 workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
 is a Legion role. A subagent runs in your pane as you, with every host tool but the `legion` tool
 (it is never offered one), so completing your phase is yours alone: give a subagent no completion
-step.
-Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
-`envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
+step. Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect
+with `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. A `write` to `agent://` only reaches
 agents inside your own process, not the architect's separate one. Never write a decision block
 into a spec yourself: the architect decides whether the human must answer it and writes the block,
 since a new version of an approved root spec closes the tree's design gate. A standalone to-do
-only a human can do is a `dispatch ask`, and its replies return to your own session.
+only a human can do is a `dispatch ask`, and its replies return to your own session. So is a
+problem outside your tree, never an issue you file: `skill://legion-worker/references/findings.md`.
 
 Because the same agent works its role until the issue closes, you may receive more than one
 assignment across your lifetime: your session stays live after your phase ends, and when a later

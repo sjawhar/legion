@@ -33,13 +33,11 @@ to `in_progress`; when every slot is taken, the issue waits in `todo` and takes 
 in the board's order. A labelled issue in `triage` goes to the controller first, which admits it,
 parks it, or leaves it for you.
 
-You do not have to hand work over yourself. When a slot is free, the controller takes the
-highest-priority `todo` issue that has no children and that nobody else is working, adds the
-`legion` label, and posts a comment saying it took the issue, who will be asked to approve the
-spec, and how to undo it. An issue that is claimed by someone, or still being designed (an open
-question, a spec awaiting approval), is left alone; one linked to a pull request is skipped, with
-the pull request's state named in the controller's summary (open: work in flight; merged or
-closed: reported for a person to close or decide).
+The controller never takes an issue on its own, whatever slots are free: Legion works only what a
+person hands it. You can also ask the controller to hand an issue over for you, in a message or in
+Slack, and when an agent finds a problem outside its own issue it asks you in a Dispatch ask whether
+to file one, rather than filing it; answer with `File it for Legion` and the controller files it
+labelled `legion`.
 
 Do not label child issues: a child runs under its tree once the root is admitted.
 

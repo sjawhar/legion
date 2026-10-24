@@ -127,7 +127,7 @@ func TestARecordedRootKeepsItsRepositoryAcrossAnEditAndAReadmission(t *testing.T
 			notes = append(notes, post.Body)
 		}
 	}
-	want := "Legion keeps acme/tools as this issue's repository; the change to acme/widgets in Dispatch is not applied — an issue's repository is fixed when Legion records it. Create a new issue for acme/widgets instead."
+	want := "Legion keeps acme/tools as this issue's repository; the change to acme/widgets in Dispatch is not applied — an issue's repository is fixed when Legion records it. Work on acme/widgets needs an issue of its own, which a person decides on."
 	if len(notes) != 1 || notes[0] != want {
 		t.Fatalf("repository notes = %q, want one saying %q", notes, want)
 	}

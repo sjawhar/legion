@@ -16,7 +16,7 @@ The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in 
 3. **Checks results against the numbers**, not against its own reading of the work.
 4. **Coaches each agent's loop**: is it measuring, predicting, trying enough designs? Procedure, not solutions.
 5. **Makes the stream faster**: finds where agents lose time and changes the skill, tool or step that causes it.
-6. **Proves its facts with a command.** A claim about what exists or what a thing can do rests on a command and its output, not on a reading. A lead's facts about its own stream are the ones nobody else checks.
+6. **Proves its facts with a command.** A claim about what exists or what a thing can do rests on a command and its output, not on a reading. A claim that nothing exists rests on a command whose search could have found it. State the search you ran and why it could match. Its positive control takes the same path as the things claimed absent. A lead's facts about its own stream are the ones nobody else checks.
 
 ## What a lead does not do
 

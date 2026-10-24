@@ -36,13 +36,13 @@ printf 'username=x-access-token\npassword=%s\n' "$(cat "$LEGION_PROVISIONING_TOK
 
 // remote is how a clone or fetch reaches the repository: the environment it runs with, the
 // directory of the one-shot credential that environment names, if any, removed once it is done,
-// the bookmarks a fetch brings (every one when empty), and, for a pod's feed, the feed repository
-// the shared clone keeps its objects in (ensureRepoClone).
+// the bookmarks a fetch brings (every one when empty), and, for a pod's feed, the local feed
+// directory the clone starts from.
 type remote struct {
 	env      []string
 	dir      string
 	branches []string
-	shared   string
+	feed     string
 }
 
 // newProvisioningCredential ports workspace.ts's createProvisioningCredential, the one-shot
@@ -215,12 +215,12 @@ func GitHubURL(repository ghrepo.Repository) string {
 	return "https://github.com/" + repository.String()
 }
 
-// feedRemote reaches GitHubURL, the remote the shared clone's origin names, at the feed repository
-// instead, over git's file transport alone: no credential, and no network. The feed is GitHub as
-// it stood when the pod's workspace-fetch ran, and a tree agent may have pushed since, so a fetch
-// from it brings the repository's default branch and the issue's own bookmark alone, each by its
-// exact name: every other bookmark keeps its target and its tracking. The shared clone itself is
-// made shared with the feed (ensureRepoClone), so its history stays there.
+// feedRemote reaches GitHubURL, the remote the clone's origin names, at the feed repository instead,
+// over git's file transport alone: no credential, and no network. The feed is GitHub as it stood
+// when the pod's workspace-fetch ran, and a tree agent may have pushed since, so a fetch from it
+// brings the repository's default branch and the issue's own bookmark alone, each by its exact
+// name: every other bookmark keeps its target and its tracking. The local clone owns object-store
+// entries for the feed's history, so replacing a foreign feed cannot invalidate its refs.
 func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch string) remote {
 	return remote{
 		env: []string{
@@ -230,17 +230,16 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 			"GIT_CONFIG_VALUE_0=" + GitHubURL(repo),
 		},
 		branches: []string{defaultBranch, bookmark},
-		shared:   feed,
+		feed:     feed,
 	}
 }
 
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
 // contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
-// clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.shared) it is a git
-// clone shared with the feed (sharedClone), which copies none of the history. The steps whose
-// duration follows the repository's size (the clone, or a shared clone's checkout and then jj's
-// import of every commit) share one CloneTimeout, counted on clock from the first's start, each
-// given what remains of it (cloneSteps), not the runner's slow-command budget.
+// clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.feed) it is a local git
+// clone followed by Jujutsu's import of every commit. The size-following steps share one
+// CloneTimeout, counted on clock from the first's start, each given what remains of it
+// (cloneSteps), not the runner's slow-command budget.
 func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, remote, defaultBranch string, source remote) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
@@ -268,8 +267,8 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 	}()
 
 	steps := cloneSteps{clock: clock, deadline: clock.Now().Add(CloneTimeout)}
-	if source.shared != "" {
-		if err := sharedClone(ctx, run, steps, temporary, remote, defaultBranch, source); err != nil {
+	if source.feed != "" {
+		if err := feedClone(ctx, run, steps, temporary, remote, defaultBranch, source); err != nil {
 			return err
 		}
 	} else if err := steps.run(ctx, run, []string{"jj", "git", "clone", remote, temporary}, source.env); err != nil {
@@ -294,17 +293,16 @@ func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, rem
 	return nil
 }
 
-// sharedClone makes the colocated clone at temporary from a pod's feed without copying its
-// history: `git clone --shared` writes objects/info/alternates naming the feed's objects, which
-// every container of the pod mounts at the same path; origin is then set to remote, GitHub, as a
-// `jj git clone` of it would leave it; `jj git init --colocate` makes it jj's; and the default
-// branch's bookmark tracks origin's, as jj's own clone tracks it, so a later fetch moves it. The
-// clone checks out the feed's HEAD, as `jj git clone` checks out GitHub's: on a clone with no
+// feedClone makes the colocated clone at temporary from a pod's feed. A local-path `git clone`
+// creates object-store entries for the clone, hard-linking feed objects where the filesystem allows,
+// so removing or replacing the feed cannot strip the clone's history. Origin is then set to remote,
+// GitHub, as a `jj git clone` of it would leave it; `jj git init --colocate` makes it jj's; and the
+// default branch's bookmark tracks origin's, as jj's own clone tracks it, so a later fetch moves it.
+// The clone checks out the feed's HEAD, as `jj git clone` checks out GitHub's: on a clone with no
 // working tree jj's first snapshot would record every file deleted in the clone's own workspace. A
-// default branch the feed lacks is left untracked, for the base's own refusal to name
-// (baseCommit).
-func sharedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, remote, defaultBranch string, source remote) error {
-	if err := steps.run(ctx, run, []string{"git", "clone", "--shared", "--quiet", source.shared, temporary}, source.env); err != nil {
+// default branch the feed lacks is left untracked, for the base's own refusal to name (baseCommit).
+func feedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, remote, defaultBranch string, source remote) error {
+	if err := steps.run(ctx, run, []string{"git", "clone", "--quiet", source.feed, temporary}, source.env); err != nil {
 		return err
 	}
 	gitDir := filepath.Join(temporary, ".git")

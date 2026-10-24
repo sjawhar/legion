@@ -812,7 +812,7 @@ func TestWorkspaceInitReportsAFailedProvisioning(t *testing.T) {
 	v.setenv(t)
 
 	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
-	if code != 1 || !strings.Contains(stderr, "git clone --shared --quiet "+filepath.Join(v.feed, "acme", "widgets.git")) || stdout != "" {
+	if code != 1 || !strings.Contains(stderr, "git clone --quiet "+filepath.Join(v.feed, "acme", "widgets.git")) || stdout != "" {
 		t.Fatalf("exit %d, stdout %q, stderr %q; want 1 naming the failed clone", code, stdout, stderr)
 	}
 }
