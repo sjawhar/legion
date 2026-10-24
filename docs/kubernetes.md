@@ -97,11 +97,14 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
   and the build's final step refuses an image where any file under `/usr/lib/openssh` or
   `/usr/bin/ssh-agent` carries one),
-  `psql` (from `postgresql-client`: `packages/dispatch/e2e/local-instance.ts` refuses to start
-  without it, and that file is the entry point of `bun run e2e`, the Dispatch browser suite a
-  reader-facing Dispatch change must pass before it merges, so a role whose image lacks `psql`
-  cannot run the suite its own change owes — Debian's `psql` is a Perl wrapper around the versioned
-  client, and it resolves because `perl-base` is in the image), `redis-cli` (from `redis-tools`: no
+  `psql` (from `postgresql-client`: the Dispatch browser suite `bun run e2e`, which a
+  reader-facing Dispatch change must pass before it merges, reaches `psql` through
+  `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
+  database reset — and the local stack `bun run dispatch:local`
+  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without it on `PATH`, so a role
+  whose image lacks `psql` cannot run the suite its own change owes — Debian's `psql` is a Perl
+  wrapper around the versioned client, and it resolves because `perl-base` is in the image),
+  `redis-cli` (from `redis-tools`: no
   repository of the project speaks Redis today, and it is carried anyway, at about a megabyte,
   because a second image roll costs more than a megabyte), `sqlite3` (Oh My Pi's own session files
   are SQLite databases, and a role reading its own session, or a repository's SQLite fixture, has
@@ -164,19 +167,23 @@ E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission d
 E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?
 ```
 
-So a role cannot install a compiled client for itself at all, however much room its disk has. The
-four priced options and their verdicts:
+So `apt` cannot install into a system prefix here at all. Unpacking a package's files under `$HOME`
+or onto the issue's disk is a separate question, and it works for some tools and not for others
+(the extraction row below), but Legion rules it out either way: installing a tool for a role is the
+withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`,
+ruling dispatch://LEGION-200). So the answer for a role is the image or a pinned runner, never an
+extraction, however much room its disk has. The five priced options and their verdicts:
 
 | option | the measurement | verdict |
 | :--- | :--- | :--- |
-| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest — the build that added them is 24 layers and 1027 MiB (1,076,758,160 bytes) against the 24 layers and 1019 MiB (1,068,467,415 bytes) of the image pinned before it: 7.9 MiB on an image of a gigabyte | **chosen** |
-| a per-issue install onto the issue's disk | the issue's disk is 49 GiB with 2.5 GiB used, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client** by the `apt-get` refusal above, and still right for a language's own package set — which is the runner row below |
+| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-c6e0ee37272e` (revision `c6e0ee37272ead7d79630fa0bcf0f4e7582e15e7`), is 24 layers and 1026.9 MiB (1,076,762,438 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,284,674 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,282,712 bytes (327,156,512 → 335,439,224) and every other layer differs by at most 2 KB of compression noise | **chosen** |
+| a per-issue install onto the issue's disk | the issue's disk is 49 GiB with 2.5 GiB used, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client**: `apt` refuses above, and unpacking one by hand is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row |
 | a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
 | extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected**: it is the withheld `operator-setup` capability under any reading (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200), and it is fragile for exactly the client this change exists for |
 | `runtime.kubernetes.setup`, the operator-set command every role container runs before its agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
 
-The pinned runner forms, as a role types them — the name is always written with its exact version,
-never bare:
+The pinned runner forms, as a role types them — the coordinate and its exact version both written
+out, never a bare name:
 
 - `uvx <name>@<version>`, for a Python tool. `uvx ruff@0.14.0 --version` prints `ruff 0.14.0`, in
   1.7 s with the uv cache empty and 0.15 s warm. A version that does not exist fails closed, exit
@@ -192,19 +199,42 @@ never bare:
   github.com/nats-io/natscli/nats@v99.99.99 --version` fails closed, exit 1, with `go: …: invalid
   version: unknown revision nats/v99.99.99`.
 
-Why the version is not optional: the unpinned command can run a different package altogether.
+Why the version alone is not the rule: a pin has two halves, the coordinate and the version, and
+an unpinned command loses the first one. The coordinate is the registry name the project itself
+publishes, scope and all, checked once before first use rather than assumed from the binary's name
+— `npm view <name> version description repository.url homepage`, whose answer for the real package
+names the project's own repository and site and whose answer for the squatter names neither:
+
+```text
+$ npm view biome version description repository.url homepage
+version = '0.3.3'
+description = 'A simple way to manage environment variables on a per-project basis'
+$ npm view @biomejs/biome version description repository.url homepage
+version = '2.6.3'
+description = 'Biome is a toolchain for the web: formatter, linter and more'
+repository.url = 'git+https://github.com/biomejs/biome.git'
+homepage = 'https://biomejs.dev'
+```
+
+Pinning the version while leaving the name alone runs the squatter at a version, obeying "pin the
+version" to the letter:
 
 ```text
 $ bunx biome --version
+0.3.3
+$ bunx biome@0.3.3 --version
 0.3.3
 $ bunx --package @biomejs/biome@2.6.3 biome --version
 Version: 2.6.3
 ```
 
-The npm package `biome` is "A simple way to manage environment variables on a per-project basis",
-with one maintainer; the formatter is `@biomejs/biome`. Nothing in this repository refuses the
-unpinned command: no guard, no lint and no check stops a role typing a bare `bunx biome`. What this
-gives a role is a correct documented form and a tool that is already there, not a gate.
+Each runner's syntax makes a different half easy to get wrong: `bunx`'s `--package <name>@<version>
+<binary>` form exists because the coordinate and the binary name differ, so a bare `bunx
+<binary>@<version>` is a coordinate nobody checked, while `uvx <name>@<version>` and `go run
+<module>@<version>` take the coordinate directly — a Go module path is a URL, so its identity is
+the path itself — and leave the version as the half to watch. Nothing in this repository refuses
+the unpinned command: no guard, no lint and no check stops a role typing a bare `bunx biome`. What
+this gives a role is a correct documented form and a tool that is already there, not a gate.
 
 The limit of the runners: a compiled tool with no ecosystem runner is an image change — a pull
 request against this repository — and it reaches a role only once a deployment pins the new digest,
@@ -222,11 +252,18 @@ pull request that added them): the Debian layer grows from about 30 MiB to 307 M
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
 tree with the two npm language servers is 66 MiB. The five client tools
 ([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB of that
-total: 24 layers and 1027 MiB (1,076,758,160 bytes) where the image pinned before them was 24
-layers and 1019 MiB (1,068,467,415 bytes), each read from its own manifest. On EKS, how long a node takes to pull that is not
-recorded here: the stage 4a launch below is where it is measured. The pull must fit the launch's
-wait for the role's launcher before any init container runs: `worker_boot_timeout_seconds`
-(`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
+total, measured like for like against this branch's own base: the head
+`ghcr.io/sjawhar/legion-worker:sha-c6e0ee37272e` (revision
+`c6e0ee37272ead7d79630fa0bcf0f4e7582e15e7`) is 24 layers and 1026.9 MiB (1,076,762,438 bytes)
+where the base it forks from, `:sha-92dbeea3d391` (revision
+`92dbeea3d3911b5fb08e279fb201634a84ffe72e`), is 24 layers and 1019.0 MiB (1,068,477,764 bytes) —
+8,284,674 bytes, of which the runtime stage's Debian layer is 8,282,712 bytes (327,156,512 →
+335,439,224) and every other layer differs by at most 2 KB. Each size is read from that image's
+own manifest in the registry and each revision from its config blob. On EKS, how long a node takes
+to pull that is not recorded here: the stage 4a launch below is where it is measured. The pull
+must fit the launch's wait for the role's launcher before any init container runs:
+`worker_boot_timeout_seconds` (`packages/daemon/internal/config/config.go`; 120 s by default),
+which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
 "Liveness rules" below); a launch whose launcher has not connected by then fails and is counted. On
 GKE Autopilot (measured 2026-10-16), an issue or controller pod usually waits for a node of its own

@@ -52,6 +52,12 @@ related_issues:
    Debian packages extracted for OpenSSH, release binaries for jq and shellcheck) and tell every
    subagent to prepend `$HOME/.local/bin` to `PATH`, since a subagent's shell starts without
    it. A harness that needs them fails before its first case otherwise.
+   *2026-10-24:* the worker image carries `jq` and `ssh-keygen` as real binaries now, and the five
+   clients `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` with them, so the installs above are no
+   longer the step for those. Installing a tool under `$HOME/.local` is the withheld
+   `operator-setup` capability in any case, and the current rule for a tool the image lacks is
+   `skills/legion-worker/references/tools.md`: the image, or a pinned `uvx`, `bunx --package` or
+   `go run`. What the item records is what that pod carried then.
 
 ## Evidence
 
