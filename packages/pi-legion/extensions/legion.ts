@@ -23,8 +23,22 @@ import {
   LEGION_PLUGIN_LOADED_KEY,
   readEnvoyPluginInterface,
 } from "@legion/pi-shared/interface";
+import {
+  createPhaseReminder,
+  type EnvoyPublish,
+  type PhaseStallEntry,
+} from "@legion/pi-shared/phase-reminder";
+import {
+  assistantRanTool,
+  assistantText,
+  inboundKind,
+  PHASE_STALL_ENTRY,
+  restorePhaseStall,
+  restorePhaseStallReport,
+} from "@legion/pi-shared/phase-stall";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
+import { stallLimits } from "@legion/pi-shared/stall-limits";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -35,16 +49,8 @@ import {
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
-import { createPhaseReminder, type EnvoyPublish } from "../src/phase-reminder";
-import {
-  assistantRanTool,
-  assistantText,
-  inboundKind,
-  PHASE_STALL_ENTRY,
-} from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
 import { daemonLaunchedController } from "../src/slack-channels";
-import { stallLimits } from "../src/stall-limits";
 import { createLegionTool } from "../src/tools";
 import {
   branchHoldsWorkspaceRecreatedNotice,
@@ -160,7 +166,7 @@ export default function legionExtension(pi: PiApi): void {
         { deliverAs: "steer", triggerTurn: true }
       ),
     armTimer: (callback, delayMs) => paneContext?.setTimeout(callback, delayMs),
-    appendEntry: (entry) => pi.appendEntry(PHASE_STALL_ENTRY, entry),
+    saveEntry: (entry) => pi.appendEntry(PHASE_STALL_ENTRY, entry),
     claim: () =>
       paneContext === undefined
         ? undefined
@@ -252,8 +258,16 @@ export default function legionExtension(pi: PiApi): void {
     // run outside every hook.
     paneContext = context;
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
-    // an Envoy notice rather than a new assignment, and must find the phase still open.
-    phaseReminder.restore(context.sessionManager.getBranch?.() ?? []);
+    // an Envoy notice rather than a new assignment, and must find the phase still open. The
+    // transcript is this host's store for that record; the runner is handed the record alone.
+    const branch = context.sessionManager.getBranch?.() ?? [];
+    const report = restorePhaseStallReport(branch);
+    const stallEntry: PhaseStallEntry = {
+      ...restorePhaseStall(branch),
+      reported: report.reported,
+      ...(report.reportKey === undefined ? {} : { reportKey: report.reportKey }),
+    };
+    phaseReminder.restore(stallEntry);
     const session = classifySession(process.env);
     if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the

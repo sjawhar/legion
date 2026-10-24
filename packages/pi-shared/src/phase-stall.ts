@@ -1,4 +1,4 @@
-import { LOCAL_ENVOY_NOTICE } from "@legion/pi-shared/interface";
+import { LOCAL_ENVOY_NOTICE } from "./interface";
 
 /**
  * The phase-stall check (LEGION-208 Stage 4b, task 4b.15; made endless by INFRA-220). A phase
@@ -226,10 +226,10 @@ export function restorePhaseStall(branch: readonly unknown[]): PhaseStallState {
 }
 
 /** Whether the architect has already been told about the run of reminders the restored state
- * belongs to, and the idempotency key that notice was sent under. These two are the plugin's
- * alone — the Claude Code bridge writes neither and the machine reads neither — but they ride the
- * same entry, so a relaunch mid-run neither repeats an accepted notice nor loses the key a
- * refused one must be retried under. */
+ * belongs to, and the idempotency key that notice was sent under. The machine never reads these
+ * two, and each host persists them its own way — the Oh My Pi transcript entry, the Claude Code
+ * state file — but they ride the same record, so a relaunch mid-run neither repeats an accepted
+ * notice nor loses the key a refused one must be retried under. */
 export function restorePhaseStallReport(branch: readonly unknown[]): {
   readonly reported: boolean;
   readonly reportKey: string | undefined;

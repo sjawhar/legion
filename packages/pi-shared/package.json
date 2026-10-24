@@ -53,6 +53,18 @@
       "types": "./src/legion-claim-core.ts",
       "bun": "./src/legion-claim-core.ts"
     },
+    "./phase-stall": {
+      "types": "./src/phase-stall.ts",
+      "bun": "./src/phase-stall.ts"
+    },
+    "./phase-reminder": {
+      "types": "./src/phase-reminder.ts",
+      "bun": "./src/phase-reminder.ts"
+    },
+    "./stall-limits": {
+      "types": "./src/stall-limits.ts",
+      "bun": "./src/stall-limits.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"

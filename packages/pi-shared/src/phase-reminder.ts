@@ -3,14 +3,12 @@ import { ROLE_TOPIC_PREFIX, roleForPhase, roleToken } from "@legion/contracts";
 import type { LegionIssue, LegionState } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport";
-import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
+import type { ClaimCapability } from "./legion-phase-ops";
 import {
   type PhaseStall,
   type PhaseStallInput,
   type PhaseStallState,
   reminderText,
-  restorePhaseStall,
-  restorePhaseStallReport,
   stepPhaseStall,
 } from "./phase-stall";
 import type { StallLimits } from "./stall-limits";
@@ -38,8 +36,10 @@ export interface PhaseReminderLog {
   readonly warn: (message: string, context?: Record<string, unknown>) => void;
 }
 
-/** What one recorded transcript entry carries. `reported` and `reportKey` are the plugin's alone:
- * the Claude Code bridge never writes them and the machine never reads them. */
+/** What one recorded entry carries. The machine never reads `reported` and `reportKey`, and each
+ * host persists them its own way — the Oh My Pi transcript entry, the Claude Code state file —
+ * but they ride the same record, so a relaunch mid-run neither repeats an accepted notice nor
+ * loses the key a refused one is retried under. */
 export interface PhaseStallEntry {
   readonly state: PhaseStall;
   readonly count: number;
@@ -54,8 +54,9 @@ export interface PhaseReminderDeps {
   /** The host's managed one-shot timer (`SessionContext.setTimeout`): it cannot be cancelled, so
    * every callback guards itself on the generation it was armed at. */
   readonly armTimer: (callback: () => void | Promise<void>, delayMs: number) => void;
-  /** Writes the state into the session transcript (`pi.appendEntry`), on every change of it. */
-  readonly appendEntry: (entry: PhaseStallEntry) => void;
+  /** Persists the record where this host's relaunch reads it again — the Oh My Pi transcript
+   * entry, the Claude Code state file — on every change of it. */
+  readonly saveEntry: (entry: PhaseStallEntry) => void;
   /** This session's own claim, or undefined before it has registered one. */
   readonly claim: () => ClaimCapability | undefined;
   /** The daemon's whole state, read as the `legion` tool's `read_record` reads it. */
@@ -72,8 +73,8 @@ export interface PhaseReminderDeps {
 }
 
 export interface PhaseReminder {
-  /** `session_start`: the state the branch's last entry recorded. */
-  readonly restore: (branch: readonly unknown[]) => void;
+  /** `session_start`: the record this host persisted, or undefined when it holds none yet. */
+  readonly restore: (entry: PhaseStallEntry | undefined) => void;
   /** `session_start`, once the claim bootstrap has returned: the resume reminder, for a worker
    * the daemon relaunched into an open phase that nothing else will wake. */
   readonly armResumeReminder: () => void;
@@ -138,7 +139,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   let turnRunning = false;
   /** What the worker said as its last turn settled: the architect notice quotes its head. */
   let lastAssistantText = "";
-  /** The entry last written or restored, so only a change of the recorded value is appended. */
+  /** The entry last saved or restored, so only a change of the recorded value is saved. */
   let recorded = "";
 
   const entryOf = (): PhaseStallEntry => ({
@@ -153,7 +154,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     const written = JSON.stringify(entry);
     if (written === recorded) return;
     recorded = written;
-    deps.appendEntry(entry);
+    deps.saveEntry(entry);
   };
   recorded = JSON.stringify(entryOf());
 
@@ -297,13 +298,15 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   };
 
   return {
-    restore: (branch) => {
-      stall = restorePhaseStall(branch);
+    restore: (entry) => {
+      stall =
+        entry === undefined
+          ? { state: "closed", count: 0 }
+          : { state: entry.state, count: entry.count };
       // The run of reminders the restored count belongs to keeps its notice: a relaunch mid-run
       // neither repeats one the listener accepted nor mints a second key for one it refused.
-      const report = restorePhaseStallReport(branch);
-      reported = report.reported;
-      reportKey = report.reportKey;
+      reported = entry?.reported ?? false;
+      reportKey = entry?.reportKey;
       recorded = JSON.stringify(entryOf());
     },
     armResumeReminder: () => {
