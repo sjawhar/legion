@@ -1028,6 +1028,15 @@
 
 ### Fixed
 
+- A burst of device logins no longer stalls the secrets broker's database pool. Each
+  `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while
+  it recorded its request object's `jti` on a second one, so as many concurrent logins as the
+  pool had connections (the pgx default, the greater of 4 and the CPU count) waited on each other
+  until the 45 s request deadline, and every database route, `/healthz` among them, waited
+  behind them; the route needs no credential, and a `login_hint` per request slips its person
+  bucket. The `jti` is now written in the provider's transaction, so a device login holds one
+  connection, and a refused login leaves no `jti` behind.
+
 - `agent-secrets secret` no longer tells a person on a machine whose Application Default
   Credentials are its own identity (a dev box's workload identity federation credential, a
   service account key, the metadata server's identity) to run

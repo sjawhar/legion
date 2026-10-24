@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -76,13 +77,20 @@ type Rig struct {
 type Option func(*rigConfig)
 
 type rigConfig struct {
-	lease time.Duration
+	lease    time.Duration
+	maxConns int
 }
 
 // WithLease sets the enrollment lease the broker grants, an hour by default, for a test whose
 // launcher must renew a session within it.
 func WithLease(lease time.Duration) Option {
 	return func(c *rigConfig) { c.lease = lease }
+}
+
+// WithPoolMaxConns caps the broker's database pool at n connections (pgx's pool_max_conns), for a
+// test that starves it; pgx's default otherwise.
+func WithPoolMaxConns(n int) Option {
+	return func(c *rigConfig) { c.maxConns = n }
 }
 
 // NewRig holds two secrets the person ada@example.com owns: TEST_SECRET, human-tier, which a
@@ -97,7 +105,11 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	for _, option := range options {
 		option(&config)
 	}
-	st := storetest.Open(t)
+	var params []string
+	if config.maxConns > 0 {
+		params = append(params, "pool_max_conns="+strconv.Itoa(config.maxConns))
+	}
+	st := storetest.Open(t, params...)
 	operator := "ada@example.com"
 	local := secrets.NewLocal(
 		policytest.Secret("TEST_SECRET", operator, policy.TierHuman, "test-secret-v1"),
