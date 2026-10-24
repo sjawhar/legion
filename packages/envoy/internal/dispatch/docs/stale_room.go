@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/pglisten"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
 // documentChangedChannel carries the artifact id of a document whose stored history has just
@@ -145,6 +145,7 @@ func (s *Service) RunStaleRoomEviction(ctx context.Context) {
 func (e *staleRoomEvictor) run(ctx context.Context) {
 	ctx = store.WithTransactionTracking(ctx)
 	listener := &pglisten.Listener{
+		Owner:       "dispatch",
 		Dial:        e.dial,
 		Channels:    []string{documentChangedChannel},
 		ListenIdle:  e.listenIdle,

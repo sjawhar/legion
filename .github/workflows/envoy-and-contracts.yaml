@@ -388,6 +388,7 @@ jobs:
               - 'packages/envoy/internal/contracts/**'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pgmigrate/**'
+              - 'packages/envoy/internal/pglisten/**'
               - 'packages/envoy/internal/routing/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
