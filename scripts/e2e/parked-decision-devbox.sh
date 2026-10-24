@@ -342,13 +342,16 @@ controller_quit() {
   until_true 300 "the listener to answer that the controller role $controller_token has no live holder" role_unheld
 }
 controller_session_id() { daemon_state | jq -er '.controllerLocator.sessionId // empty'; }
-# controller_session_file SESSION prints the session file of the run's profile whose header, its
-# first line, carries SESSION in the field controller-up found session 1's id in.
+# session_header FILE prints FILE's Oh My Pi session header, its first line of type `session`, and
+# fails while there is none: the pinned build writes a `title` line before the header.
+session_header() { jq -cen 'first(inputs | select(type == "object" and .type == "session"))' "$1" 2>/dev/null; }
+# controller_session_file SESSION prints the session file of the run's profile whose session header
+# carries SESSION in the field controller-up found session 1's id in.
 controller_session_file() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    if head -n 1 -- "$file" | jq -e --arg field "$session_field" --arg s "$1" '.[$field] == $s' >/dev/null 2>&1; then
+    if session_header "$file" | jq -e --arg field "$session_field" --arg s "$1" '.[$field] == $s' >/dev/null 2>&1; then
       printf '%s\n' "$file"
       return 0
     fi
@@ -366,14 +369,19 @@ controller_delivered() { [ "$(controller_deliveries "$1" "$2")" -ge 1 ]; }
 controller_deliveries() { { grep -F '"customType":"envoy-message"' "$1" || true; } | grep -cF -- "$2" || true; }
 # set_status_after FILE ISSUE NEEDLE: an assistant message of FILE calls the legion tool with
 # {op: set_status, issue: ISSUE, status: todo}, after the first Envoy delivery holding NEEDLE when
-# NEEDLE is set, and anywhere in the file when it is empty.
+# NEEDLE is set, and anywhere in the file when it is empty. Eval code that calls the tool hands it no
+# arguments call_arguments can read (lib/omp-tool-calls.jq), so such a cell counts when its code
+# names set_status, ISSUE and todo, each of the last two as a quoted string.
 set_status_after() {
   jq -R -s -e -L "$root/scripts/e2e/lib" --arg issue "$2" --arg needle "$3" 'include "omp-tool-calls";
     [split("\n") | to_entries[] | {i: .key, raw: .value, m: (.value | fromjson? // null)}] as $lines
     | (if $needle == "" then -1 else
         ([$lines[] | select((.raw | contains("\"customType\":\"envoy-message\"")) and (.raw | contains($needle))) | .i] | first) end) as $after
     | $after != null and any($lines[]; .i > $after and .m.type? == "message" and .m.message.role? == "assistant"
-        and any(.m.message.content[]?; calls("legion") and (call_arguments | .op == "set_status" and .issue == $issue and .status == "todo")))
+        and any(.m.message.content[]?; calls("legion") and (
+          (call_arguments | .op == "set_status" and .issue == $issue and .status == "todo")
+          or (.name == "eval" and ((.arguments.code? // "") | tostring
+            | contains("set_status") and test("[\"'"'"'`]" + $issue + "[\"'"'"'`]") and test("[\"'"'"'`]todo[\"'"'"'`]"))))))
   ' "$1" >/dev/null
 }
 # todo_by_daemon_after ISSUE SEQ: Dispatch shows ISSUE set `todo` by the daemon's session after the
@@ -417,7 +425,13 @@ architect_turn_holds() {
 waits_on_gate() {
   daemon_state | jq -e --arg k "$1" '.issues[$k].phase == "awaiting_person" and .issues[$k].waitingOn.kind == "gate"' >/dev/null
 }
-parked() { daemon_state | jq -e --arg k "$1" '.issues[$k].phase == "done" and .issues[$k].slot == null' >/dev/null; }
+# parked ISSUE: the tree left the workflow (phase done, no slot) and its architect is suspended. A
+# park lands while the architect's last turn may still run, its suspension held for that turn; a
+# decision made then reaches that live session as its notice, which leaves the daemon nothing to
+# relay, so a check approves a parked tree only once this holds.
+parked() {
+  daemon_state | jq -e --arg k "$1" '.issues[$k].phase == "done" and .issues[$k].slot == null and .issues[$k].architect.state == "suspended"' >/dev/null
+}
 active() { daemon_state | jq -e --arg k "$1" '.admission.active | index($k) != null' >/dev/null; }
 park() { "$work/legion" status "$1" backlog --operator-token-file "$work/operator-token" --config "$work/legion.yaml" >/dev/null; }
 # parked_by ISSUE prints `<kind>:<id>` of the newest status write to backlog on ISSUE.
@@ -553,7 +567,10 @@ begin boot
 pick_port port_daemon
 pick_port port_worker_stream
 write_legion_config
-out=$("$work/legion" start --check-config --config "$work/legion.yaml") || fail "legion start --check-config refused the run's legion.yaml: $out"
+# In the environment start_daemon gives the daemon: boot refuses a first gh on PATH that is a script,
+# such as the devbox's dotfiles shim, and realbin puts the real gh first (lib/rig.sh, real_bin_path).
+out=$(HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" "$work/legion" start --check-config --config "$work/legion.yaml") ||
+  fail "legion start --check-config refused the run's legion.yaml: $out"
 [ "$(head -n 1 <<<"$out")" = "Config OK: project=$project" ] || fail "legion start --check-config said: $out"
 note "$(head -n 1 <<<"$out")"
 start_daemon
@@ -585,8 +602,9 @@ until_true 120 "the profile to hold the controller's session file" compgen -G "$
 mapfile -t files < <(compgen -G "$profile_agent/sessions/*/*.jsonl")
 [ "${#files[@]}" = 1 ] || fail "the profile holds ${#files[@]} session files, want 1: ${files[*]}"
 session1_file=${files[0]}
-session_field=$(head -n 1 -- "$session1_file" | jq -er --arg s "$session1" 'first(to_entries[] | select(.value == $s) | .key)') ||
-  fail "the header of $session1_file names no field holding $session1: $(head -n 1 -- "$session1_file")"
+until_true 60 "$session1_file to hold its session header" session_header "$session1_file"
+session_field=$(session_header "$session1_file" | jq -er --arg s "$session1" 'first(to_entries[] | select(.value == $s) | .key)') ||
+  fail "the session header of $session1_file names no field holding $session1: $(session_header "$session1_file")"
 note "session 1's file $session1_file; its header names the session in .$session_field"
 until_true 300 "session 1's first turn to start itself, with nothing typed" started_itself "$session1_file"
 note "the first user message is the start message, and an assistant message follows ($(since "$waited"))"
@@ -633,7 +651,7 @@ done
 [ "$(parked_by "$tree5")" = "session:$dispatch_agent_session" ] || fail "$tree5's park is by $(parked_by "$tree5"), want session:$dispatch_agent_session"
 has_mark "$tree1" || fail "$tree1 carries no hold mark from $session1"
 ! has_mark "$tree2" || fail "$tree2, the operator's park, carries a hold mark"
-note "$tree1 (the daemon's session, with the hold mark) and $tree2 (the daemon's session, no mark), $tree4 (by $proof_human_user) and $tree5 (by session $dispatch_agent_session) are phase done with no slot ($(since "$waited"))"
+note "$tree1 (the daemon's session, with the hold mark) and $tree2 (the daemon's session, no mark), $tree4 (by $proof_human_user) and $tree5 (by session $dispatch_agent_session) are phase done with no slot, each architect suspended ($(since "$waited"))"
 pass
 done_with trees-parked
 
@@ -688,7 +706,7 @@ fi
 [ "$(controller_deliveries "$session1_file" "$needle2")" = 1 ] ||
   fail "session 1 holds $(controller_deliveries "$session1_file" "$needle2") deliveries of '$needle2', want 1"
 dispatch_status_is "$tree2" backlog >/dev/null || fail "$tree2 is $(dispatch_get "issues/$tree2" | jq -r .status), want backlog"
-parked "$tree2" || fail "$tree2 is no longer phase done with no slot: $(daemon_state | jq -c --arg k "$tree2" '.issues[$k] | {phase, slot}')"
+parked "$tree2" || fail "$tree2 is no longer phase done with no slot and its architect suspended: $(daemon_state | jq -c --arg k "$tree2" '.issues[$k] | {phase, slot, architect: .architect.state}')"
 ! todo_by_daemon_after "$tree2" "$reply_seq" || fail "Dispatch shows $tree2 set todo after the reply"
 dispatch_events "$tree2" | jq -e --argjson seq "$reply_seq" '[.[] | select(.seq > $seq and .type == "issue.updated" and .payload.status == "todo")] == []' >/dev/null ||
   fail "Dispatch shows a status todo event on $tree2 after the reply"
@@ -736,7 +754,7 @@ fi
 for tree in $tree2 $tree4 $tree5; do
   ! set_status_after "$session1_file" "$tree" "" || fail "session 1 set $tree, which is no hold of Legion's own, to todo"
   dispatch_status_is "$tree" backlog >/dev/null || fail "$tree is $(dispatch_get "issues/$tree" | jq -r .status), want backlog"
-  parked "$tree" || fail "$tree is no longer phase done with no slot: $(daemon_state | jq -c --arg k "$tree" '.issues[$k] | {phase, slot}')"
+  parked "$tree" || fail "$tree is no longer phase done with no slot and its architect suspended: $(daemon_state | jq -c --arg k "$tree" '.issues[$k] | {phase, slot, architect: .architect.state}')"
   dispatch_events "$tree" | jq -e --argjson seq "${seq_of[$tree]}" '[.[] | select(.seq > $seq and .type == "issue.updated" and .payload.status == "todo")] == []' >/dev/null ||
     fail "Dispatch shows a status todo event on $tree after the approval"
   read_of[$tree]=$(any_read_comment "$tree")
