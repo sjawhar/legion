@@ -7,8 +7,8 @@
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
   the calling process's environment: tmux printed the tabs as `_` to a process with neither `TMUX`
   nor a UTF-8 locale, and the answer read as one field. A Claude Code session in a tmux pane has
-  `TMUX`, so its title was not affected; the real-tmux test, which ran tmux with neither, failed in
-  such an environment and now passes.
+  `TMUX`, so its title was not affected; the real-tmux test, which ran tmux without `-u`, failed in
+  such an environment and now passes. The daemon's real-tmux test rig reads tmux with `-u` too.
 
 - The `dispatch` command (`dist/dispatch.js`) waits at most 1 s for tmux to name the session's
   pane, then kills the tmux client and sends the call without the pane. A tmux client waiting to

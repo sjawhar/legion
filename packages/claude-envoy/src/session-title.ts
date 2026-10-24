@@ -15,8 +15,8 @@ export interface SessionTitleEnvironment {
  */
 export type SessionTitle = (sessionId: string) => string
 
-/** What `tmux -S <socket> display-message -p` prints for `pane` and `format`; undefined when tmux
- *  cannot say. */
+/** What `tmux -u -S <socket> display-message -p` prints for `pane` and `format`; undefined when
+ *  tmux cannot say. */
 export type TmuxQuery = (socket: string, pane: string, format: string) => string | undefined
 
 // `automatic-rename` is the window option, which tmux expands as a format variable (1 or 0). A
