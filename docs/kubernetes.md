@@ -169,7 +169,7 @@ four priced options and their verdicts:
 
 | option | the measurement | verdict |
 | :--- | :--- | :--- |
-| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment | **chosen** |
+| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest — the build that added them is 24 layers and 1027 MiB (1,076,758,160 bytes) against the 24 layers and 1019 MiB (1,068,467,415 bytes) of the image pinned before it: 7.9 MiB on an image of a gigabyte | **chosen** |
 | a per-issue install onto the issue's disk | the issue's disk is 49 GiB with 2.5 GiB used, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client** by the `apt-get` refusal above, and still right for a language's own package set — which is the runner row below |
 | a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
 | extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected**: it is the withheld `operator-setup` capability under any reading (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200), and it is fragile for exactly the client this change exists for |
@@ -220,7 +220,10 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. On EKS, how long a node takes to pull that is not
+tree with the two npm language servers is 66 MiB. The five client tools
+([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB of that
+total: 24 layers and 1027 MiB (1,076,758,160 bytes) where the image pinned before them was 24
+layers and 1019 MiB (1,068,467,415 bytes), each read from its own manifest. On EKS, how long a node takes to pull that is not
 recorded here: the stage 4a launch below is where it is measured. The pull must fit the launch's
 wait for the role's launcher before any init container runs: `worker_boot_timeout_seconds`
 (`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
