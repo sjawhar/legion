@@ -2995,7 +2995,7 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   and the fetch fails (`FeedEntry`, `internal/workspace/clone.go`), as it does when a pack does
   not index or the history is not whole. A feed is filled beside its final path and renamed into
   place once whole, with git's automatic garbage collection off and every fetch's objects kept as
-  a pack, since the issue's clone keeps its objects there. It mounts no other part of the issue's
+  a pack, since the issue's clone's object store owns its links to that feed. It mounts no other part of the issue's
   volume and no config home, and it takes an existing feed repository only in the shape it writes
   (no symlink, gitfile, hook, alternates, configuration key of anyone else's, or configuration line
   outside git's own form; see "Anatomy of a Sandbox pod"), so nothing an earlier release's agents

@@ -365,7 +365,8 @@ func (r *liveRig) agentPid(c *liveClaim) (string, error) {
 }
 
 // shimPid is the pid of the `legion worker-shim` that started the agent at pid agent, its parent.
-// A role container's PID 1 is its `legion launcher`, which starts a shim for each generation.
+// The `roles` container's PID 1 is its `legion launcher`, which starts a shim for each
+// generation of every role.
 func (r *liveRig) shimPid(c *liveClaim, agent string) (string, error) {
 	const findShim = `parent=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$1/status") && tr '\0' '\n' <"/proc/$parent/cmdline" | grep -qx worker-shim && echo "$parent"`
 	pid, err := r.exec(c, "sh", "-c", findShim, "shim", agent)

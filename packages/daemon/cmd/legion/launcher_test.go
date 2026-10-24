@@ -35,7 +35,7 @@ func (b *syncBuffer) String() string {
 
 // An issue pod's one container runs `legion launcher --roles-dir <dir> --role <r>…`, the command
 // the daemon's pod builder renders: one connection per role, each with the token in that role's
-// own directory, the pod's uid from POD_UID as a role container's launcher always took it, and a
+// own directory, the pod's uid from POD_UID as the single-role launcher always took it, and a
 // log whose lines each name their role.
 func TestTheLauncherCommandServesEveryRoleOfARolesDirectory(t *testing.T) {
 	rolesDir := t.TempDir()

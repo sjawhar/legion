@@ -100,7 +100,7 @@ runtime:
     #                                  # (every Stage 4a/4b run), or to pin a different published pair than
     #                                  # this binary links.
     # setup: [/bin/sh, -c, '{ omp plugin marketplace update acme-skills || omp plugin marketplace add acme/agent-skills; } && omp plugin install agent-skills@acme-skills --force']
-    #                                  # a command every role's container runs before each start of its
+    #                                  # a command every role runs before each start of its
     #                                  # Oh My Pi, in its working directory with the role's environment
     #                                  # (its git answers github.com with the role's App token); Oh My Pi
     #                                  # starts only once it exits 0, and a failure counts as a failed

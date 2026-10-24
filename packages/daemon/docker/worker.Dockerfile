@@ -477,7 +477,7 @@ ARG PI_CODEGRAPH_VERSION
 # inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
 # util-linux (flock): the install Legion renders for an installing launch serialises on the issue's
 # shared bun install cache with /usr/bin/flock (installBlock,
-# packages/daemon/internal/runtime/sandbox/plugins.go), so a role container whose image lacks it
+# packages/daemon/internal/runtime/sandbox/plugins.go), so a pod whose image lacks it
 # fails every installing launch. The entry buys nothing today — Debian's priority:required set
 # already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
 # failure the day a base drops it. Do not delete it as redundant.

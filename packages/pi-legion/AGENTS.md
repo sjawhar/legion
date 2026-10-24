@@ -133,7 +133,7 @@ and `live` is gone from the capability status enum), after contract 20's control
 controller holds the review App's GitHub token like every role — `POST
 /legion/v1/controller/github-credential` answers the operator-launched controller's `legion
 controller start` the review App's gh files for the current controller capability, and the
-daemon-launched controller's pod gets the GitHub variables above like any role's container),
+daemon-launched controller's pod gets the GitHub variables above like any role of an issue pod),
 contract 19's token file (LEGION-631: the three routes that redeemed a grant for a GitHub or git
 credential and the grant request's `push` are gone, the pane
 gains the GitHub variables above and loses the absolute-path pins of its gh, git and jj, the
@@ -243,7 +243,7 @@ grant on `/grants` and posts it with the request, so no grant is written to the 
 keeps its claim for resumption.
 
 A daemon that sets `controller: daemon` launches the controller itself, in a Sandbox pod of its own
-whose one container, `controller`, runs `legion launcher` as an issue pod's role containers do: the
+whose one container, `controller`, runs `legion launcher` as an issue pod's `roles` container does: the
 launcher starts the session's shim and Oh My Pi with `LEGION_CONTROLLER=1` and
 `LEGION_BOOT_TOKEN_FILE`, the generation's boot token it wrote into its private directory from the
 daemon's start command (`controllerSession` in

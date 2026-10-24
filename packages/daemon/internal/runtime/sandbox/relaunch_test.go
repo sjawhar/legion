@@ -461,7 +461,7 @@ func TestASuspendedSandboxsInstallingResumeReplacesAndInstallsNothing(t *testing
 	}
 }
 
-// Stage 4b's finished-idle-planner-death: `kill 1` in a role container ends that role's launcher,
+// Stage 4b's finished-idle-planner-death: `kill 1` in an issue pod's `roles` container ends its launcher,
 // the kubelet restarts the container under restartPolicy Always, and the new launcher connects
 // before the pod status drops the killed instance's terminated state. The replacement generation
 // is judged by its own launcher, not by that stale status: reading it as dead reported every
@@ -484,7 +484,7 @@ func TestAReplacementGenerationOutlivesTheKilledInstancesTerminatedStatus(t *tes
 			}
 		}
 	})
-	g.eventually("the store to see the killed role container", func() bool {
+	g.eventually("the store to see the killed roles container", func() bool {
 		status := containerStatus(g.r.storedPod(name), workerContainer)
 		return status != nil && status.State.Terminated != nil
 	})

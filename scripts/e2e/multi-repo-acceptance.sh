@@ -486,8 +486,8 @@ require_pod_for_issue() {
 # role's. lib/as-role.py resolves the role's agent process in the pod and runs the credential
 # probes under that process's own environment; its header says how the agent is told apart from the
 # shim's other children and why the probes are built as they are. It is streamed to `python3 -I -`
-# in the role's container over `kubectl exec -i` and prints one JSON object, which this script keeps
-# byte for byte as evidence and judges with jq. python3 is the pod's own: every role container's
+# in the pod's roles container over `kubectl exec -i` and prints one JSON object, which this script keeps
+# byte for byte as evidence and judges with jq. python3 is the pod's own: the pod's
 # image is checked for it at boot (internal/capabilities/image.go).
 as_role_script="$script_dir/lib/as-role.py"
 
@@ -529,7 +529,7 @@ resolve_trusted_root() {
 }
 
 # as_role_probe <pod> <container> <proc root> <github url> <trusted root> runs lib/as-role.py in the
-# role's container with that file as stdin, and prints its JSON object.
+# pod's roles container with that file as stdin, and prints its JSON object.
 as_role_probe() {
   local pod=$1 container=$2 proc_root=$3 github_url=$4 trusted_root=$5
   kubectl exec -i "$pod" -c "$container" -- python3 -I - \

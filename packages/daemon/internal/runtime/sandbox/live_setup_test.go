@@ -32,7 +32,7 @@ func (r *liveRig) checkSetupRan() error {
 }
 
 // checkSetupRecord proves c's current setup ran before its current stub agent. awaitRunning calls
-// it after every successful launch or resume, so the proof covers every role container the rig
+// it after every successful launch or resume, so the proof covers every role the rig
 // starts, including each separately provisioned issue pod, instead of only the root architect.
 func (r *liveRig) checkSetupRecord(c *liveClaim) error {
 	out, err := r.exec(c, "cat", "--", c.marker)

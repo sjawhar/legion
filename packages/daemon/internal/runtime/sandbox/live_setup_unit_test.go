@@ -521,7 +521,7 @@ func TestLiveSetupNeverRecordsAHelperValue(t *testing.T) {
 	}
 }
 
-// Every role container sets XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
+// Every role is told XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
 // global scope when GIT_CONFIG_GLOBAL is unset, so a helper written there must not count.
 func TestLiveSetupIgnoresTheXDGGlobalConfig(t *testing.T) {
 	r := newSetupRig(t, private)

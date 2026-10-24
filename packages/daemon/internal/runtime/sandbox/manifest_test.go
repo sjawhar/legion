@@ -557,7 +557,7 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
 // nothing an agent wrote reaches workspace-init's jj. The config home is the one home the two
-// agree on: a role container's cache and data homes are the issue's scratch's on the issue's
+// agree on: a role's cache and data homes are the issue's scratch's on the issue's
 // volume and its state home its own directory there
 // (TestTheIssuesRolesShareOneScratchAndOneGoCachePair,
 // TestEachRolesAgentIsToldAStateHomeOfItsOwn), while the setup containers keep the image's home
@@ -613,7 +613,7 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
-// The role containers of one issue pod share the pod's network namespace, the workspace path, the
+// The roles of one issue pod share the pod's network namespace, the workspace path, the
 // Oh My Pi profile path and the rest of the issue's scratch, and Oh My Pi's browser broker lock is
 // an abstract unix socket named from the lock path under its state root: one state root would
 // make it one name in every container, the first role's lock blocking every other role's broker.
@@ -676,7 +676,7 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 }
 
 // The six directories a role's tools write to without being told where are the issue's, not the
-// role's: every role container of a workflow pod and the controller's is told the same temporary
+// role's: every role of a workflow pod and the controller is told the same temporary
 // directory, cache home, data home and bun install cache — the four directly under the issue's
 // scratch on its volume — and the same Go build and module cache pair beside the workspaces. A
 // directory per role is what this replaces, by the human's decision of 2026-10-20: disk is cheap,
@@ -766,7 +766,7 @@ func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 	}
 	// The runtime names these three on the issue's volume for a reason of their own and does not
 	// ask the shim to make them: LEGION_WORKSPACE is the issue's checkout, which workspace-init
-	// provisions before any role container starts, and UV_PYTHON_INSTALL_DIR and UV_CACHE_DIR are
+	// provisions before the pod's launcher container starts, and UV_PYTHON_INSTALL_DIR and UV_CACHE_DIR are
 	// uv's own, which uv makes and the tree's pods share by design
 	// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume). Every other path the runtime names there is
 	// a directory it tells the role to write in, so a fourth exemption has to be argued for rather
@@ -861,10 +861,9 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // its containers reaches the token at all.
 //
 // What the boundary protects is identity, not a repository-write token kept off the tree volume:
-// an implement-role container now holds the implement App's token — the same lease as the
-// provisioning token — read-only in its own gh volume (GHConfigDir), and a review-role container
-// the review App's. What the fetch container's boundary still keeps is that no review-role
-// container ever holds the implement App's token, which is what lets the reviewer's approval
+// an implement role now holds the implement App's token — the same lease as the
+// provisioning token — read-only in its own gh directory (GHConfigDir), and a review role the
+// review App's. What the fetch container's boundary still keeps is that no review role ever holds the implement App's token, which is what lets the reviewer's approval
 // count and the daemon's fix-attempt counting read a push's App from the App that made it.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -1821,7 +1820,7 @@ func kubeExpand(input string, env map[string]string) string {
 // Whatever text a launch carries reaches the process as written: the worker's argv and plain
 // environment travel in the launcher's start command, which no kubelet expands, so `$(NAME)` and
 // `$$` in the inlined system prompt, an operator's instructions, and a spec's env values mean
-// what they say in a pod as in a pane. The role container's own command and env, which the kubelet
+// what they say in a pod as in a pane. The `roles` container's own command and env, which the kubelet
 // does expand, still survive it.
 func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	r, err := configure(goldenOptions())
