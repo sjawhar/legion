@@ -85,6 +85,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   The notice is deleted rather than rewritten to a kind the older daemon knows: it says only that a
   merge is still waiting, and the nearest older kind, `merge-refused`, would tell an architect that
   a merge ended when it has not. Dropping it loses one telling; the row goes on submitting.
+- Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits
+  touch (INFRA-149). Before, the `legion-worker` skill, the `legion-retro` skill and the daemon's
+  worker and implementer prompts all decided the line by the paths a push changed, so a retro with
+  no learning to write — whose one commit is the removal of `.legion/<issue>/` — added the line and
+  left the commit that merges with no check runs at all, which a base branch that requires a check
+  blocks while Legion carries the earlier code head's verdict and reads the head as green. Three
+  further sentences, in the merge-gate reference and the architect and reviewer prompts, now tie
+  the absence of a workflow run to that line rather than to the paths; the daemon's own carry of a
+  code head's verdict stays keyed to paths, since it classifies by path and reads no commit
+  message. The `legion-retro` skill also gives a retro worker the cure for a head it has already
+  pushed with the line. The sentence has a fifth home here,
+  `legion-worker/references/skip-checks-trailer.md`, which the entry above moved the trailer's
+  contract into, and the skills guard counts it in all five.
 - No Legion role, and no subagent of one, files an issue for a problem it finds outside its own
   issue. It opens a `dispatch ask` on the controller's report issue instead, naming the issue it
   came from and where the fix belongs (and that it is not Legion's when it is not), with its

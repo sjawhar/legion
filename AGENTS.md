@@ -113,6 +113,7 @@ repository both GitHub Apps are installed on, and leaves out, and reports in `le
 | Deployment instructions (`legion.yaml` `instructions:`) | `packages/daemon/internal/config/files.go` | Operator markdown appended to every pane's system prompt |
 | Add phase guidance     | `skills/legion-worker/SKILL.md`                | See `skills/AGENTS.md`                          |
 | Change architect loop  | `skills/legion-architect/SKILL.md`             | See `skills/AGENTS.md`                          |
+| Write or fix a test    | `docs/testing.md`                              | The rules a test must follow that the code does not show: unix socket paths in Go tests |
 | Handoff ledger         | `.legion/` on issue branch                     | Committed phase output; retro's last commit removes `.legion/<issue>/` before READY, so none reaches the default branch |
 | Envoy event routing    | `packages/envoy/`                              | See `packages/envoy/AGENTS.md`                  |
 | Shared event contracts | `packages/contracts/`                          | See `packages/contracts/AGENTS.md`               |

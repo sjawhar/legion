@@ -23,10 +23,13 @@ jj -R "$LEGION_WORKSPACE" describe -r @- --config 'templates.commit_trailers=""'
 
 ## Every other push carries no such line
 
-Every other push — code, red tests, `docs/solutions/`, retro's removal of `.legion/<KEY>/`, a
-forward merge, a rewrite — carries no such line and none of GitHub's bracket keywords
-(`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`), which start no workflow
-wherever they stand. The daemon classifies a push by the paths its commits touch, never by the
+Every other push — code, red tests, `docs/solutions/`, a forward merge, a rewrite — carries no
+such line and none of GitHub's bracket keywords (`[skip ci]`, `[ci skip]`, `[no ci]`,
+`[skip actions]`, `[actions skip]`), which start no workflow wherever they stand.
+Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
+That is sjawhar/legion#2143's sentence, and `packages/pi-legion/src/skills-guard.test.ts` counts
+it here and in the four other texts that state it, so none of the five can drift from the rest.
+The daemon classifies a push by the paths its commits touch, never by the
 trailer: a wrong trailer stalls the issue (a trailered code push gets no verdict carried, and a
 head with no CI is one a base that requires a check will not merge, so the merge waits and the
 daemon tells the issue's architect once it has waited an hour) and never passes it.

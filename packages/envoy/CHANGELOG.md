@@ -1028,6 +1028,31 @@
 
 ### Fixed
 
+- `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
+  but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
+  which replaces a machine's own credentials for every program that uses them. A write under
+  Google Cloud Application Default Credentials that are a machine's own identity (a dev box's
+  workload identity federation credential, a service account key, the metadata server's identity)
+  runs under the person's gcloud login where it was refused, and so does every form on a machine
+  with no Application Default Credentials: the CLI asks the first `gcloud` on `PATH` for that login
+  (`gcloud auth list`, then `gcloud auth print-access-token`), reads none of gcloud's files, and
+  leaves the machine's credentials as they are. A person's login is an account gcloud names by a
+  plain email address, never a service account or a workload or workforce identity federation
+  login (`principal://…`); where gcloud holds several, the command uses the one
+  `CLOUDSDK_CORE_ACCOUNT` names, and a command it prints for running again (`pipe the value in: …
+  < FILE`) starts with that `CLOUDSDK_CORE_ACCOUNT=…`. gcloud runs with its file logging off and
+  prints the token in its private format, so the token reaches none of gcloud's log files, and
+  with impersonation, an access token and a credential file override cleared, and a write whose
+  token Google answers as another account's is refused. A write with no person's login, or several
+  and none named, is refused before the value is read, naming `gcloud auth login` or each login,
+  and a refusal names the credentials it found by their type, never by a file. Reads under a
+  machine's own credentials, and every form under a person's own Application Default Credentials,
+  are unchanged. `GOOGLE_APPLICATION_CREDENTIALS` stays the person's own choice: a file it names
+  that cannot be loaded is refused naming that variable (the Google library's error, quoted, can
+  name the file), a machine's credentials it names are refused for a write rather than replaced,
+  and a command printed for running again starts with `GOOGLE_APPLICATION_CREDENTIALS=…`, naming
+  the file. The `--profile` refusal under the GCP store names the Google sign-in it uses instead.
+
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while
   it recorded its request object's `jti` on a second one, so as many concurrent logins as the
@@ -1036,20 +1061,6 @@
   behind them; the route needs no credential, and a `login_hint` per request slips its person
   bucket. The `jti` is now written in the provider's transaction, so a device login holds one
   connection, and a refused login leaves no `jti` behind.
-
-- `agent-secrets secret` no longer tells a person on a machine whose Application Default
-  Credentials are its own identity (a dev box's workload identity federation credential, a
-  service account key, the metadata server's identity) to run
-  `gcloud auth application-default login`, which replaces that identity for every program that
-  uses it. A refused GCP write names where its credentials came from and their `type`, and the
-  route that leaves the machine's identity alone: `gcloud auth login --no-activate`, then the
-  command again with `GOOGLE_APPLICATION_CREDENTIALS` naming the
-  `legacy_credentials/<your email>/adc.json` that login keeps. A load that finds no credentials
-  advises the same route, one that fails while `GOOGLE_APPLICATION_CREDENTIALS` is set names that
-  variable instead of advising a sign-in, and the `--profile` refusal under the GCP store no
-  longer advises one either. A command line `create` or `set` prints for running again (`pipe the
-  value in: … < FILE`) starts with that `GOOGLE_APPLICATION_CREDENTIALS=…` when it was set, so it
-  signs in with the same file.
 
 - A publish to an ad-hoc topic (`envoy_publish` to a `notifications.` topic no stream subject
   captures, such as `notifications.team.deploy-squad`) reaches its subscribers again, and is

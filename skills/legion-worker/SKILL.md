@@ -388,11 +388,13 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY>
 
 A push whose commits touch only `.legion/` (a handoff-only push) ends its head's commit message
 with `skip-checks: true` as the last line, preceded by two empty lines, so GitHub starts no
-workflow run for it and the daemon carries the code head's verdict to it. Every other push —
-code, red tests, `docs/solutions/`, retro's removal of `.legion/<KEY>/`, a forward merge, a
-rewrite — carries no such line. The daemon classifies a push by the paths its commits touch,
-never by the trailer: a wrong trailer stalls the issue and never passes it. Before you write one,
-read `skill://legion-worker/references/skip-checks-trailer.md`: the shape GitHub honours, the
+workflow run for it and the daemon carries the code head's verdict to it.
+Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
+Every other push —
+code, red tests, `docs/solutions/`, a forward merge, a rewrite — carries no such line. The daemon
+classifies a push by the paths its commits touch, never by the trailer: a wrong trailer stalls
+the issue and never passes it. Before you write one, read
+`skill://legion-worker/references/skip-checks-trailer.md`: the shape GitHub honours, the
 `describe` that writes it with trailers off, the bracket keywords banned with it, how a wrong
 trailer stalls the issue, and when a pull-request body edit does and does not start a run.
 
