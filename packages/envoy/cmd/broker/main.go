@@ -295,11 +295,19 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServiceAccounts: cfg.ServiceAccounts,
-		Minters: map[string]requests.Minter{
-			policy.KindGitHubApp:   secrets.GitHubApp{}.Mint,
-			policy.KindGoogleLogin: secrets.GoogleLogin{}.Mint,
-		},
+		Minters:         kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
+}
+
+// kindMinters is the broker's minter for each kind: the GitHub App minter for github-app secrets
+// and the Google login minter for google-login ones. Its arguments are the production minters in
+// newRequestMachine; a test passes ones aimed at its own endpoints, so wiring a kind to the wrong
+// minter fails it.
+func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) map[string]requests.Minter {
+	return map[string]requests.Minter{
+		policy.KindGitHubApp:   githubApp.Mint,
+		policy.KindGoogleLogin: googleLogin.Mint,
+	}
 }

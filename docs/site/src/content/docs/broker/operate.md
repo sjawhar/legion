@@ -278,7 +278,7 @@ those two with `AccessDeniedException`.
 | `show` | `secretmanager.secrets.get` and `secretmanager.versions.list`, `secretmanager.versions.get` (for its versions and whether `versions/latest` is `ENABLED`) |
 | `create` | `secretmanager.secrets.create` and `secretmanager.versions.add`. Automatic replication encrypts with the CMEK key through Secret Manager's own service agent, not the person's identity: that service agent (`service-<project number>@gcp-sa-secretmanager.iam.gserviceaccount.com`) needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key, granted once at setup, not per person |
 | `set` | `secretmanager.versions.add` |
-| `retag` | `secretmanager.secrets.get` and `secretmanager.secrets.update` (owner and tier annotations in one call, plus kind and max grant when the command sets them; or, for `none`, the annotations it removes, and nothing else) |
+| `retag` | `secretmanager.secrets.get` and `secretmanager.secrets.update`: owner and tier annotations in one call, plus `kind` and `mint-service-account` (the rollback guard) when the command sets a kind, `github-owners` when it names owners, and `max-grant` when it sets one; or, for `none`, the annotations it removes (`--kind none` removes `kind` and `mint-service-account` together), and nothing else |
 | `delete` | `secretmanager.secrets.update` (sets `expire_time` to 30 days out) |
 | `restore` | `secretmanager.secrets.update` (clears `expire_time`) |
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"strings"
 	"testing"
@@ -43,6 +44,14 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	stdout, stderr, code = runSecret("list")
 	if code != 0 || !strings.Contains(stdout, "KIND") || !strings.Contains(stdout, "MAX_GRANT") || !strings.Contains(stdout, "github-app") || !strings.Contains(stdout, "1h") {
 		t.Fatalf("list: exit %d stdout %q stderr %q; want kind and max-grant", code, stdout, stderr)
+	}
+	stdout, stderr, code = runSecret("list", "--json")
+	var listed []map[string]any
+	if code != 0 || json.Unmarshal([]byte(stdout), &listed) != nil || len(listed) != 1 {
+		t.Fatalf("list --json: exit %d stdout %q stderr %q; want one secret", code, stdout, stderr)
+	}
+	if got := listed[0]; got["kind"] != policy.KindGitHubApp || got["github_owners"] != "acme-org" || got["max_grant"] != "1h" {
+		t.Fatalf("list --json = %v; want kind github-app, github_owners acme-org and max_grant 1h", got)
 	}
 
 	for _, kind := range []string{policy.KindGoogleLogin, policy.KindGitHubApp} {

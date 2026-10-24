@@ -286,12 +286,17 @@ reason of at most 400 characters. The broker evaluates every name
   keeps the release until its `expires_at` rather than asking again for each use. A deleted kind
   secret stops releasing as any deleted secret does. A release GitHub or Google refuses, such as a
   Google login that needs a new sign-in, is refused `MINT_FAILED` with their reason, and the broker
-  logs it for its operator.
+  logs it for its operator. A kind retag after a grant (the kind removed, or changed to the other
+  kind) ends that grant at its next release (`GRANT_NOT_LIVE`, a `grant.revoked` audit row by
+  `broker:release-recheck`), so setting the kind back does not bring it back: the session asks
+  again. A kind secret the broker stops serving, such as one whose `github-owners` is removed or
+  malformed, stops releasing until the secret is served again.
 - A secret with `max-grant` needs `--ttl` no longer than that duration. A request with no `--ttl`,
   or a longer one, is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
   `max-grant` set or lowered later holds what came before it to the new bound: a live grant that
-  lasts longer releases nothing more (`GRANT_NOT_LIVE`), and a pending request that asked for longer
-  is no one's to approve (`NOT_APPROVER`), so its session cancels it and asks again within the bound.
+  lasts longer ends at its next release (`GRANT_NOT_LIVE`), so raising the bound again does not
+  bring it back, and a pending request that asked for longer is no one's to approve
+  (`NOT_APPROVER`), so its session cancels it and asks again within the bound.
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
   decide. A session has at most one pending request for each secret: an identical request from the

@@ -57,6 +57,13 @@ ls "$(gcloud info --format='value(config.paths.global_config_dir)')/legacy_crede
 me="$(gcloud info --format='value(config.paths.global_config_dir)')/legacy_credentials/<your email>/adc.json"
 ```
 
+When you have made your writes, remove that sign-in from the machine, so nothing else that runs as
+your user there can use it:
+
+```sh
+gcloud auth revoke '<your email>'
+```
+
 ## Create a secret
 
 ```console

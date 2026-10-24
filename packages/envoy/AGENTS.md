@@ -2383,7 +2383,8 @@ the alarm, and a failed reload keeps the last set; a reload cut short because `N
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
 SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub owners, is
 recorded on every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read
-back by `policy.ParseKindSource`), so a kind change ends a live grant. `policy.Kinds`, `ValidKind`,
+back by `policy.ParseKindSource`), so a kind change ends a live grant for good at its next release
+(`Machine.endGrant`). `policy.Kinds`, `ValidKind`,
 `ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant
 is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES`
 separates its entries, a form an AWS tag value and a Secret Manager annotation both hold; a comma
@@ -3173,7 +3174,8 @@ approve the secret, or once the new tags give its session the secret without ask
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
 let approve it), and that no granted name's `max-grant` is now shorter than the request's lifetime
-(`overMaxGrant`, refused `GRANT_NOT_LIVE`; `currentPolicyAdmits` refuses approving such a
+(`overMaxGrant`, which ends the grant for good, `GRANT_NOT_LIVE`, as a moved source does, through
+`Machine.endGrant`; `currentPolicyAdmits` refuses approving such a
 pending request `NOT_APPROVER`); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
 scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
 `GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
