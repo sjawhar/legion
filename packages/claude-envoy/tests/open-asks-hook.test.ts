@@ -5,7 +5,9 @@ import { join, resolve } from "node:path"
 
 const hookEntry = resolve(import.meta.dir, "..", "hooks", "session-hook.ts")
 
-/** Runs the hook as Claude Code does, with `env` as its whole environment. The session's cwd is
+/** Runs the hook as Claude Code does, with `env` as its whole environment beside `PATH` and Bun's
+ * transpiler cache turned off: that cache lives under HOME (`~/.bun` on Linux,
+ * `~/Library/Caches/bun` on macOS), and HOME is the test's scratch directory. The session's cwd is
  * the test's scratch HOME unless the input names one: the hook reads `<cwd>/.envoy/envoy.json`, so a
  * shared directory's file would become every test's checkout. */
 async function runHook(
@@ -13,7 +15,7 @@ async function runHook(
   env: Record<string, string> & { readonly HOME: string },
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> {
   const run = Bun.spawn(["bun", hookEntry, "open-asks"], {
-    env: { PATH: process.env["PATH"] ?? "", ...env },
+    env: { PATH: process.env["PATH"] ?? "", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0", ...env },
     stdin: new TextEncoder().encode(JSON.stringify({ cwd: env.HOME, ...input })),
     stdout: "pipe",
     stderr: "pipe",
@@ -456,10 +458,8 @@ test("writes no environment line anywhere when Claude Code names no env file", a
     expect(result.stdout).not.toContain("DISPATCH_HOST")
     expect(result.stdout).not.toContain("ENVOY_CONFIG_FILE")
     expect(await readFile(envFile, "utf8")).toBe("export FROM_ANOTHER_HOOK=1\n")
-    // Only the session record the hook keeps for its Claude process is written (beside the cache
-    // Bun itself keeps under HOME).
-    const written = (await readdir(scratch)).filter((entry) => entry !== ".bun").sort()
-    expect(written).toEqual(["plugin-data", "session-env.sh"])
+    // Only the session record the hook keeps for its Claude process is written.
+    expect((await readdir(scratch)).sort()).toEqual(["plugin-data", "session-env.sh"])
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
