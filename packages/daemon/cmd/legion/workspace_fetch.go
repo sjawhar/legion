@@ -28,16 +28,15 @@ var fetchClock workspace.Clock = workspace.WallClock{}
 
 // workspaceFetch fills the feed, the container's own directory on the issue's volume: from the
 // repository cache when one is named, presenting the token LEGION_REPOSITORY_CACHE_TOKEN_FILE
-// holds, then from GitHub for what it lacks; or from GitHub alone. Before replacing a foreign feed,
-// it dissociates an existing clone that still borrows that feed through alternates. The provisioning
-// token is read from LEGION_PROVISION_TOKEN_FILE again before every transfer from GitHub, as the file
-// stands then (the daemon keeps the Secret it is projected from fresh while the fetch runs), so a
-// long wait on the cache never leaves the delta an expired token. It reads --repo before anything
-// else, resolves git alone, and refuses before it ever touches the feed or its own TMPDIR, where the
-// one-shot credential goes — every check (--repo, --feed, --cache-url and its token, a readable
-// provisioning token, git on PATH) runs first, so a refusal here leaves neither behind. A transfer
-// that fails transiently is run again (workspace.Fetch), each retried failure one line on stdout,
-// and the last line says where the feed came from and the bytes each source brought.
+// holds, then from GitHub for what it lacks; or from GitHub alone. The provisioning token is read
+// from LEGION_PROVISION_TOKEN_FILE again before every transfer from GitHub, as the file stands then
+// (the daemon keeps the Secret it is projected from fresh while the fetch runs), so a long wait on
+// the cache never leaves the delta an expired token. It reads --repo before anything else, resolves
+// git alone, and refuses before it ever touches the feed or its own TMPDIR, where the one-shot
+// credential goes — every check (--repo, --feed, --cache-url and its token, a readable provisioning
+// token, git on PATH) runs first, so a refusal here leaves neither behind. A transfer that fails
+// transiently is run again (workspace.Fetch), each retried failure one line on stdout, and the last
+// line says where the feed came from and the bytes each source brought.
 func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
