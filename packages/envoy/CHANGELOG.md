@@ -103,7 +103,9 @@
   installation tokens for every installation of the GitHub App that is not suspended and is on an
   account the secret's `github-owners` tag lists (GitHub logins separated by spaces); a
   `github-app` secret without that tag is refused `github-owners-missing`, and one whose list
-  holds a comma `github-owners-malformed`, since anyone can install a public App. `google-login`
+  holds a comma, or an entry no GitHub login can be (not starting with a letter or digit, holding
+  anything but letters, digits and hyphens, or over 39 characters), `github-owners-malformed`,
+  since anyone can install a public App. `google-login`
   releases contain
   a Google access token. A kind secret holds its key or refresh
   token as a current value, which the broker never returns, and a mint GitHub or Google refuses

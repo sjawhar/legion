@@ -108,13 +108,17 @@ var ErrGitHubOwnersMissing = errors.New("github-owners names at least one GitHub
 // comma.
 var ErrGitHubOwnersComma = errors.New(`github-owners separates GitHub logins with spaces, not commas ("<login> <login>")`)
 
-// ErrGitHubOwnersLogin is a github-owners entry that is not a GitHub login: 1 to 39 letters and
-// digits, with single hyphens only between them.
-var ErrGitHubOwnersLogin = errors.New("github-owners names GitHub logins: 1 to 39 letters and digits, with single hyphens between them")
+// ErrGitHubOwnersLogin is a github-owners entry that cannot be a GitHub login: one that does not
+// start with a letter or digit, holds anything but letters, digits and hyphens, or is longer than
+// 39 characters.
+var ErrGitHubOwnersLogin = errors.New("github-owners names GitHub logins: up to 39 letters, digits and hyphens, starting with a letter or digit")
 
-// gitHubLogin is GitHub's login form, lowercased: letters and digits, with single hyphens between
-// them. A login is at most 39 characters (maxGitHubLogin), which the pattern does not check.
-var gitHubLogin = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+// gitHubLogin is what a GitHub login can be, lowercased: a letter or digit, then letters, digits
+// and hyphens. GitHub's sign-up rule today also refuses a trailing or doubled hyphen, but accounts
+// made under its older rules keep them (`x-` is an organization from 2011), so this refuses only
+// what no login can hold. A login is at most 39 characters (maxGitHubLogin), which the pattern does
+// not check.
+var gitHubLogin = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 const maxGitHubLogin = 39
 

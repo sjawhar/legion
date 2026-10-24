@@ -285,12 +285,14 @@ func TestAGitHubOwnersCommaIsRefused(t *testing.T) {
 	}
 }
 
-// TestAGitHubOwnerThatIsNoGitHubLoginIsRefused: each github-owners entry must be GitHub's login
-// form, 1 to 39 letters and digits with single hyphens between them, or the secret is refused
-// github-owners-malformed; the longest login and single inner hyphens are read.
+// TestAGitHubOwnerThatIsNoGitHubLoginIsRefused: each github-owners entry must be something a
+// GitHub login can be, up to 39 letters, digits and hyphens starting with a letter or digit, or the
+// secret is refused github-owners-malformed. Legacy logins with a trailing or doubled hyphen, which
+// GitHub still serves (`x-` is an organization from 2011), and the longest login are read; a tag
+// that names no entry at all is github-owners-missing.
 func TestAGitHubOwnerThatIsNoGitHubLoginIsRefused(t *testing.T) {
 	longest := strings.Repeat("a", 39)
-	for _, owners := range []string{"-ada", "ada-", "a--b", "ada_lovelace", "ada.org", "@ada", "ada/b", strings.Repeat("a", 40)} {
+	for _, owners := range []string{"-ada", "-x", "-", "ada_lovelace", "ada.org", "@ada", "ada/b", strings.Repeat("a", 40)} {
 		t.Run(owners, func(t *testing.T) {
 			logged := policytest.CaptureLog(t)
 			secret := kindSecret("APP_KEY", policy.KindGitHubApp, "value")
@@ -310,8 +312,23 @@ func TestAGitHubOwnerThatIsNoGitHubLoginIsRefused(t *testing.T) {
 			}
 		})
 	}
-	if got, err := policy.ParseGitHubOwners("A-b-C9 " + longest + " x"); err != nil || got != "a-b-c9 "+longest+" x" {
-		t.Fatalf("ParseGitHubOwners of valid logins = %q, %v; want %q", got, err, "a-b-c9 "+longest+" x")
+	for _, empty := range []string{"", " \t "} {
+		if _, err := policy.ParseGitHubOwners(empty); !errors.Is(err, policy.ErrGitHubOwnersMissing) {
+			t.Fatalf("ParseGitHubOwners(%q) = %v; want ErrGitHubOwnersMissing", empty, err)
+		}
+	}
+	want := "a--b a-b-c9 " + longest + " x-"
+	if got, err := policy.ParseGitHubOwners("A-b-C9 X- a--b " + longest); err != nil || got != want {
+		t.Fatalf("ParseGitHubOwners of valid and legacy logins = %q, %v; want %q", got, err, want)
+	}
+	secret := kindSecret("LEGACY_APP_KEY", policy.KindGitHubApp, "value")
+	secret.Tags[policy.TagGitHubOwners] = "x- acme-org"
+	set, err := policytest.Loader(secrets.NewLocal(secret)).Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := set.Secrets["LEGACY_APP_KEY"].GitHubOwners; got != "acme-org x-" {
+		t.Fatalf("LEGACY_APP_KEY GitHubOwners = %q, want %q: a trailing-hyphen login is served", got, "acme-org x-")
 	}
 }
 
