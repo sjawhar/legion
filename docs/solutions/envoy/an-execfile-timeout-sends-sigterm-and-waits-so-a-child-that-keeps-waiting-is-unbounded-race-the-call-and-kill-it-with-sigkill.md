@@ -76,7 +76,10 @@ async function tryExec(exec, file, args, cwd, limitMs) {
 
 export const defaultExec: ExecFn = (file, args, { cwd, signal }) => {
   const call = execFileAsync(file, args, { cwd, signal });
-  signal.addEventListener("abort", () => call.child.kill("SIGKILL"), { once: true });
+  // A listener added to a signal that has already aborted never fires, so kill at once then.
+  const kill = () => call.child.kill("SIGKILL");
+  if (signal.aborted) kill();
+  else signal.addEventListener("abort", kill, { once: true });
   return call;
 };
 ```
