@@ -68,13 +68,25 @@ func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.D
 // them, answers nothing: only a person's act does. A review (a person's answer to an approval
 // request) answers a wait on the design gate through its own artifact.approved or
 // artifact.changes_requested event (applyArtifact), which Dispatch appends after the answer: woken
-// by the answer, the root could resume before the review reached its gate.
+// by the answer, the root could resume before the review reached its gate. A person's answer or
+// resolution of a question on a tree Legion is not running goes to the controller
+// (relayParkedDecision).
 func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
-	if !fact.Actor.Person() {
+	if fact.Actor.Person() {
+		review := fact.Kind == "approval" && fact.State == "answered"
+		if err := e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, !review); err != nil {
+			return intake.Result{}, err
+		}
+	}
+	// An approval ask's answer arrives again as the document's review, which the gate relays.
+	if fact.Kind != "question" {
 		return intake.Result{}, nil
 	}
-	review := fact.Kind == "approval" && fact.State == "answered"
-	return intake.Result{}, e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, !review)
+	decision := record.DecisionAskResolved
+	if fact.State == "answered" {
+		decision = record.DecisionAskAnswered
+	}
+	return intake.Result{}, e.relayParkedDecision(ctx, tx, fact.Key, fact.Ask, fact.Actor, decision, itemRef(fact.Key, "ask", fact.Ask))
 }
 
 // dispatchAskReply applies a reply on an ask of the issue, or Dispatch's hand-back of an approval
@@ -83,15 +95,27 @@ func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.D
 // give. A person's reply always hands an open ask to the agent (Dispatch's askReplyTurn), so one
 // leaving it with the human is a person's own hand-back of an approval request, which answers
 // nothing. A session of the root's own tree handing an ask to the person starts the root's wait
-// (handedBack). A session's reply answers nothing, whatever turn it leaves.
+// (handedBack). A session's reply answers nothing, whatever turn it leaves. On a tree Legion is not
+// running, a person's reply that leaves the turn with the agent, or one under a closed ask (which
+// answers a wait as well), goes to the controller, and a session's agent-turn reply is logged
+// (relayParkedDecision).
 func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
 	switch {
 	case fact.Actor.Person() && fact.WaitingOn != "human":
-		return intake.Result{}, e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, fact.WaitingOn == "agent")
+		if err := e.answeredByPerson(ctx, tx, fact.Key, fact.Ask, fact.WaitingOn == "agent"); err != nil {
+			return intake.Result{}, err
+		}
 	case fact.Actor.Kind == "session" && fact.WaitingOn == "human":
 		return intake.Result{}, e.handedBack(ctx, tx, fact)
 	}
-	return intake.Result{}, nil
+	if fact.WaitingOn == "human" || fact.WaitingOn == "" && !fact.Actor.Person() {
+		return intake.Result{}, nil
+	}
+	ref := itemRef(fact.Key, "ask", fact.Ask)
+	if fact.Comment != "" {
+		ref = itemRef(fact.Key, "comment", fact.Comment)
+	}
+	return intake.Result{}, e.relayParkedDecision(ctx, tx, fact.Key, fact.Ask, fact.Actor, record.DecisionAskReply, ref)
 }
 
 // answeredByPerson records a person's act on ask, an ask of the root key, as the answer of the

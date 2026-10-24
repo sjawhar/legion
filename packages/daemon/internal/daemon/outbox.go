@@ -1192,14 +1192,15 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	// there, the gate opens at it; changes requested on it, the gate closes with the reason, which
 	// answers a wait the registration started before the request reached the root (Seed tells the
 	// architect only when that closes a gate a racing registration opened); otherwise a later
-	// version still moves the gate to it, closed.
+	// version still moves the gate to it, closed. A review names its reviewer, since the seed is not
+	// fenced on the tree's linger and its review may meet a parked tree.
 	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
 	changes, reason := approval.ChangesRequestedLatest()
 	switch {
 	case approval.ApprovedLatest() != 0:
-		fact.Kind = intake.DispatchArtifactApproved
+		fact.Kind, fact.Actor = intake.DispatchArtifactApproved, approval.LatestReviewer()
 	case changes >= payload.Version:
-		fact.Kind, fact.Reason, fact.Seed = intake.DispatchArtifactChangesRequested, reason, true
+		fact.Kind, fact.Reason, fact.Seed, fact.Actor = intake.DispatchArtifactChangesRequested, reason, true, approval.LatestReviewer()
 	case approval.LatestVersion <= payload.Version:
 		return nil
 	}

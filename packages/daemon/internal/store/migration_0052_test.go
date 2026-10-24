@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// 0052 adds parked_decisions: a root keeps one row per Dispatch reference, and the rows go with
-// the issue they name.
+// 0052 adds parked_decisions and readmitted_approvals: a root keeps one decision row per Dispatch
+// reference and one approval below its spec's latest version, and both go with the issue they name.
 func TestParkedDecisionsArriveWith0052AndGoWithTheirRoot(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -53,14 +53,30 @@ func TestParkedDecisionsArriveWith0052AndGoWithTheirRoot(t *testing.T) {
 		!strings.Contains(err.Error(), "foreign key") {
 		t.Fatalf("a decision on an unrecorded root = %v, want the foreign key to refuse it", err)
 	}
+	for _, refused := range []struct{ why, statement, error string }{
+		{"an approval at the latest version", `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 3, 3)`, "check constraint"},
+		{"an approval of version 0", `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 0, 3)`, "check constraint"},
+		{"an approval on an unrecorded root", `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-404', 2, 3)`, "foreign key"},
+	} {
+		if _, err := store.Pool().Exec(ctx, refused.statement); err == nil || !strings.Contains(err.Error(), refused.error) {
+			t.Fatalf("%s = %v, want %s to refuse it", refused.why, err, refused.error)
+		}
+	}
+	if _, err := store.Pool().Exec(ctx, `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 3, 4)`); err != nil {
+		t.Fatalf("keep an older approval: %v", err)
+	}
+	if _, err := store.Pool().Exec(ctx, `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 2, 4)`); err == nil ||
+		!strings.Contains(err.Error(), "duplicate key") {
+		t.Fatalf("a second approval for one root = %v, want the primary key to refuse it", err)
+	}
 	if _, err := store.Pool().Exec(ctx, `delete from issues where key = 'LEGION-210'`); err != nil {
 		t.Fatalf("delete the root: %v", err)
 	}
-	var kept int
-	if err := store.Pool().QueryRow(ctx, `select count(*) from parked_decisions`).Scan(&kept); err != nil {
-		t.Fatalf("count the kept decisions: %v", err)
+	var kept, approvals int
+	if err := store.Pool().QueryRow(ctx, `select (select count(*) from parked_decisions), (select count(*) from readmitted_approvals)`).Scan(&kept, &approvals); err != nil {
+		t.Fatalf("count the kept rows: %v", err)
 	}
-	if kept != 0 {
-		t.Fatalf("%d decisions kept after their root was deleted, want none", kept)
+	if kept != 0 || approvals != 0 {
+		t.Fatalf("%d decisions and %d approvals kept after their root was deleted, want none", kept, approvals)
 	}
 }

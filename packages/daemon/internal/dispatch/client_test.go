@@ -330,14 +330,15 @@ func TestPostMessageSendsBodyWithoutAnUnsupportedIdempotencyKey(t *testing.T) {
 	}
 }
 
-// The artifact read carries the approval Dispatch derives, and, while a request is open, the
-// request's id and whose turn it waits on.
+// The artifact read carries the approval Dispatch derives and who gave the review it shows, and,
+// while a request is open, the request's id and whose turn it waits on.
 func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assertBearer(t, r)
 		switch r.URL.Path {
 		case "/api/v1/artifacts/artifact-6":
-			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{"state": "approved", "latest_version": 3, "version": 3}})
+			writeJSON(t, w, map[string]any{"id": "artifact-6", "issue_key": "LEGION-6", "approval": map[string]any{"state": "approved", "latest_version": 3, "version": 3,
+				"by": map[string]any{"kind": "user", "id": "alice"}}})
 		case "/api/v1/artifacts/artifact-7":
 			writeJSON(t, w, map[string]any{"id": "artifact-7", "issue_key": "LEGION-7", "approval": map[string]any{
 				"state": "awaiting", "latest_version": 4, "version": 3, "ask_id": "ask-approval", "waiting_on": "agent"}})
@@ -352,15 +353,16 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read approval: %v", err)
 	}
-	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 {
-		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3", approval)
+	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 || approval.ApprovedLatest() != 3 ||
+		approval.By != (Actor{Kind: "user", ID: "alice"}) || approval.By.Name() != "user:alice" {
+		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3 by user:alice", approval)
 	}
 	awaiting, err := client.Approval(context.Background(), "artifact-7")
 	if err != nil {
 		t.Fatalf("read awaiting approval: %v", err)
 	}
-	if awaiting.State != "awaiting" || awaiting.AskID != "ask-approval" || awaiting.WaitingOn != "agent" || awaiting.ApprovedLatest() != 0 {
-		t.Fatalf("awaiting approval = %#v, want the open request ask-approval waiting on the agent", awaiting)
+	if awaiting.State != "awaiting" || awaiting.AskID != "ask-approval" || awaiting.WaitingOn != "agent" || awaiting.ApprovedLatest() != 0 || awaiting.By != (Actor{}) {
+		t.Fatalf("awaiting approval = %#v, want the open request ask-approval waiting on the agent, reviewed by nobody", awaiting)
 	}
 }
 

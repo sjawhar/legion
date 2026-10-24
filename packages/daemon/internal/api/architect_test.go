@@ -126,7 +126,7 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 		return approval, nil
 	}
 	if version, approved := r.approved[artifactID]; approved {
-		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version}, nil
+		return dispatch.Approval{IssueKey: issue, State: "approved", LatestVersion: version, Version: &version, By: dispatch.Actor{Kind: "user", ID: "alice"}}, nil
 	}
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
 }
@@ -854,7 +854,7 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, ReviewedBy: dispatch.Actor{Kind: "user", ID: "alice"}},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
@@ -873,9 +873,9 @@ func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) 
 	statuses.documents = map[string]string{changed: "LEGION-208", moved: "LEGION-208", superseded: "LEGION-208"}
 	reason := "name the rollback path"
 	statuses.approvals = map[string]dispatch.Approval{
-		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason},
+		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, By: dispatch.Actor{Kind: "user", ID: "bob"}},
 		moved:      {State: "awaiting", LatestVersion: 4, Version: new(3), AskID: "ask-approval", WaitingOn: "agent"},
-		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason},
+		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason, By: dispatch.Actor{Kind: "user", ID: "bob"}},
 	}
 	seedTree(t, h, "LEGION-208")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
@@ -887,7 +887,7 @@ func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) 
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason, ReviewedBy: dispatch.Actor{Kind: "user", ID: "bob"}},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true},
 		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4},
 	}

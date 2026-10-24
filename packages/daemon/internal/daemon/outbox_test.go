@@ -715,14 +715,15 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 	row := mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 3}, time.Now())
 	version := new(int)
 	*version = 3
-	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: version}}
+	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: version, By: dispatch.Actor{Kind: "user", ID: "alice"}}}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, handlers: []intake.Handler{handler}}
 
 	if err := runner.execute(context.Background(), row); err != nil {
 		t.Fatalf("execute gate seed: %v", err)
 	}
-	if got := handler.facts(); len(got) != 1 || got[0] != (intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 3}) {
-		t.Fatalf("gate facts = %#v, want approved artifact", got)
+	if got := handler.facts(); len(got) != 1 || got[0] != (intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 3,
+		Actor: dispatch.Actor{Kind: "user", ID: "alice"}}) {
+		t.Fatalf("gate facts = %#v, want approved artifact naming who approved it", got)
 	}
 
 	client.approvalErr = errors.New("Dispatch unavailable")
@@ -734,18 +735,23 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 // The seed reads the version Dispatch holds, which may be later than the one the architect
 // registered: a later version it did not see is still the current one, as the shipped daemon
 // raises the gate to Dispatch's latest version. Approved at that latest version, the gate opens
-// there; approved only at an earlier one, the gate moves to the latest version and stays closed.
+// there; approved only at an earlier one, the gate moves to the latest version and stays closed; a
+// changes request on it closes the gate with its reason. A review carries its reviewer, and a bare
+// version names nobody, since no person's review moved it.
 func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
-	two, one := 2, 1
+	two, one, reason := 2, 1, "name the rollback path"
+	bob := dispatch.Actor{Kind: "user", ID: "bob"}
 	for _, tc := range []struct {
 		name     string
 		approval dispatch.Approval
 		want     intake.DispatchArtifact
 	}{
-		{name: "approved at the later version", approval: dispatch.Approval{State: "approved", LatestVersion: 2, Version: &two},
-			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}},
-		{name: "approved at the registered version only", approval: dispatch.Approval{State: "stale", LatestVersion: 2, Version: &one},
+		{name: "approved at the later version", approval: dispatch.Approval{State: "approved", LatestVersion: 2, Version: &two, By: bob},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2, Actor: bob}},
+		{name: "approved at the registered version only", approval: dispatch.Approval{State: "stale", LatestVersion: 2, Version: &one, By: bob},
 			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 2}},
+		{name: "changes requested at the later version", approval: dispatch.Approval{State: "changes_requested", LatestVersion: 2, Version: &two, Reason: &reason, By: bob},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested, Version: 2, Reason: reason, Seed: true, Actor: bob}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)

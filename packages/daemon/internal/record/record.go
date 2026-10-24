@@ -550,6 +550,12 @@ type Store interface {
 	AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error
 	// TakeParkedDecisions deletes and returns every decision root keeps, newest first, ties by ref.
 	TakeParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error)
+	// KeepReadmittedApproval keeps, for root's next architect start, the spec version a person
+	// approved and the spec's latest version, which its re-admission found above the approved one
+	// before it cleared the old generation's gate; a later keep replaces it.
+	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
+	// TakeReadmittedApproval deletes and returns the pair root keeps, zeros when it keeps none.
+	TakeReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
 	// ClaimSession is the session claims records for token, "" and no error when the token holds
 	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
 	// reviewer's own review from another review-App session's by the Legion footer each carries
@@ -648,11 +654,12 @@ type Store interface {
 	// caller that then wakes the row's lane has its issue and kind.
 	ExpediteOutbox(ctx context.Context, tx pgx.Tx, row OutboxRow, now time.Time) error
 	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
-	// and a row the runner has leased included. A leased row may be mid-publish: the runner executes
-	// it from memory, and the notice executor publishes it only while OutboxLeased still finds it,
-	// so a dropped row is delivered only when the drop lands during its publish, a duplicate the
-	// fresh catch-up follows.
-	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
+	// and a row the runner has leased included, and returns each dropped row's non-empty
+	// CatchUp.Decided, oldest first, so the fresh catch-up names it again. A leased row may be
+	// mid-publish: the runner executes it from memory, and the notice executor publishes it only
+	// while OutboxLeased still finds it, so a dropped row is delivered only when the drop lands during
+	// its publish, a duplicate the fresh catch-up follows.
+	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) ([]string, error)
 	// DropStatusWrites deletes every Dispatch status write of issue the outbox still holds, a row
 	// the runner has leased included; one mid-attempt can still reach Dispatch, and its finish then
 	// finds nothing to delete.

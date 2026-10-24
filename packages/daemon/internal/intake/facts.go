@@ -123,10 +123,11 @@ const (
 	DispatchArtifactVersion          DispatchArtifactKind = "version"
 )
 
-// DispatchArtifact records one review or version event for a registered design document. Seed is
-// set on the gate seed's own read of Dispatch's approval (the daemon's seedGate) rather than on an
-// event: a changes request it reads closes the gate and answers a wait the registration started,
-// and tells the architect only when it closes a gate that was open, since otherwise the
+// DispatchArtifact records one review or version event for a registered design document, and the
+// event's actor: for a review, the person who reviewed. Seed is set on the gate seed's own read of
+// Dispatch's approval (the daemon's seedGate) rather than on an event, its Actor the reviewer that
+// read names: a changes request it reads closes the gate and answers a wait the registration
+// started, and tells the architect only when it closes a gate that was open, since otherwise the
 // registration, the event itself or the resume task already told it.
 type DispatchArtifact struct {
 	Key        string
@@ -135,6 +136,7 @@ type DispatchArtifact struct {
 	Version    int
 	Reason     string
 	Seed       bool
+	Actor      dispatch.Actor
 }
 
 func (DispatchArtifact) isFact() {}
@@ -165,15 +167,17 @@ type DispatchAskClosed struct {
 func (DispatchAskClosed) isFact() {}
 
 // DispatchAskReply is a comment on an ask, or Dispatch's ask.handed_back, with whose turn it
-// leaves and the actor who made it. WaitingOn is `agent` or `human` on an open ask (a hand-back
-// is `human`), and empty on a closed one. A person's reply that does not hand the ask back wakes a
-// root waiting on that ask, or an agent-turn one a root waiting on its design gate; a session of
-// the root's own tree handing an ask on an admitted root to the person starts a wait.
+// leaves, the actor who made it, and the comment's id (empty for a hand-back). WaitingOn is `agent`
+// or `human` on an open ask (a hand-back is `human`), and empty on a closed one. A person's reply
+// that does not hand the ask back wakes a root waiting on that ask, or an agent-turn one a root
+// waiting on its design gate; a session of the root's own tree handing an ask on an admitted root to
+// the person starts a wait.
 type DispatchAskReply struct {
 	Key       string
 	Ask       string
 	WaitingOn string
 	Actor     dispatch.Actor
+	Comment   string
 }
 
 func (DispatchAskReply) isFact() {}
@@ -507,9 +511,10 @@ func (SignOff) isFact() {}
 // of Dispatch's latest version (the read the gate seed makes), and 0 otherwise: the gate opens at
 // registration. ChangesRequestedVersion is the version of a changes request Dispatch showed on its
 // latest version, with its reason, and 0 otherwise: the root keeps its slot with its architect told.
-// RequestWaitsOnAgent says Dispatch showed the open approval request waiting on the agent (a reply
-// or a newer version since it was handed to the person): no wait starts, since the person is not
-// asked to act, and the architect's hand-back of the request starts it.
+// ReviewedBy is who gave the review either names (dispatch.Approval.LatestReviewer), zero with
+// neither. RequestWaitsOnAgent says Dispatch showed the open approval request waiting on the agent
+// (a reply or a newer version since it was handed to the person): no wait starts, since the person
+// is not asked to act, and the architect's hand-back of the request starts it.
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string
@@ -517,6 +522,7 @@ type GateRegistered struct {
 	ApprovedVersion         int
 	ChangesRequestedVersion int
 	ChangesReason           string
+	ReviewedBy              dispatch.Actor
 	RequestWaitsOnAgent     bool
 }
 

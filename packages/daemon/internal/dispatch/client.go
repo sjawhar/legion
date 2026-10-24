@@ -253,6 +253,9 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 		Version:       response.Approval.Version,
 		Reason:        response.Approval.Reason,
 	}
+	if response.Approval.By != nil {
+		approved.By = Actor(*response.Approval.By)
+	}
 	if response.Approval.State == "awaiting" {
 		approved.AskID, approved.WaitingOn = deref(response.Approval.AskID), response.Approval.WaitingOn
 	}
@@ -439,6 +442,7 @@ type approvalResponse struct {
 	Reason        *string `json:"reason"`
 	AskID         *string `json:"ask_id"`
 	WaitingOn     string  `json:"waiting_on"`
+	By            *actor  `json:"by"`
 }
 
 type actor struct {

@@ -6,6 +6,6 @@
   "dedupe_key": "dispatch-ask-resolved",
   "issued_at": 1790124395000,
   "payload_summary": "CAPTURE-4 ask resolved",
-  "payload": "{\"id\":35,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":10,\"type\":\"ask.resolved\",\"actor\":{\"kind\":\"session\",\"id\":\"session-architect\"},\"notify\":false,\"created_at\":\"2026-09-23T00:46:35Z\",\"payload\":{\"id\":\"6c83cb7f-8f4e-4820-9e05-7c94fa725007\",\"state\":\"resolved\"}}",
+  "payload": "{\"id\":35,\"issue_key\":\"CAPTURE-4\",\"artifact_id\":null,\"project\":\"CAPTURE\",\"seq\":10,\"type\":\"ask.resolved\",\"actor\":{\"kind\":\"session\",\"id\":\"session-architect\"},\"notify\":false,\"created_at\":\"2026-09-23T00:46:35Z\",\"payload\":{\"id\":\"6c83cb7f-8f4e-4820-9e05-7c94fa725007\",\"kind\":\"question\",\"state\":\"resolved\"}}",
   "trace_id": "dispatch-ask-resolved"
 }

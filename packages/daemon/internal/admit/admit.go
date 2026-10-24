@@ -699,6 +699,18 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 			return err
 		}
 	}
+	// The new generation's architect registers its spec again on a cleared gate; a person's
+	// approval of a version the spec has since moved past is kept for its start task
+	// (workflow.Engine.ParkedDecisionTask), which tells it to request approval of the latest.
+	gate, err = a.store.Gate(ctx, tx, stored.Key)
+	if err != nil {
+		return fmt.Errorf("read the gate of re-admitted %s: %w", stored.Key, err)
+	}
+	if gate != nil && gate.ApprovedVersion != nil && *gate.ApprovedVersion < gate.LatestVersion {
+		if err := a.store.KeepReadmittedApproval(ctx, tx, stored.Key, *gate.ApprovedVersion, gate.LatestVersion); err != nil {
+			return err
+		}
+	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
 	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
@@ -876,7 +888,12 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			if err := a.enqueue(ctx, tx, candidate.Key, record.IssueBranch{Generation: candidate.Generation}, now); err != nil {
 				return admitted, err
 			}
-			if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
+			task, err := a.engine.ParkedDecisionTask(ctx, tx, candidate)
+			if err != nil {
+				return admitted, fmt.Errorf("name the decisions on %s while nobody in its tree could hear them: %w", candidate.Key, err)
+			}
+			if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect,
+				Generation: candidate.Generation, Task: task}, now); err != nil {
 				return admitted, err
 			}
 			if err := a.startMidPhaseMembers(ctx, tx, candidate, append(issues, candidate), now); err != nil {

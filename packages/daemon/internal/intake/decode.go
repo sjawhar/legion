@@ -245,7 +245,8 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			kind = DispatchArtifactChangesRequested
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason,
+			Actor: dispatch.Actor(event.Actor)}, nil
 	case "artifact.version":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -262,7 +263,8 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if artifact.Version.Number <= 0 {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number,
+			Actor: dispatch.Actor(event.Actor)}, nil
 	case "ask.opened":
 		var ask struct {
 			ID     string `json:"id"`
@@ -314,6 +316,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		return DispatchAskReply{Key: event.IssueKey, Ask: ask.ID, WaitingOn: "human", Actor: dispatch.Actor(event.Actor)}, nil
 	case "comment.created":
 		var comment struct {
+			ID        string `json:"id"`
 			Ask       string `json:"ask_id"`
 			WaitingOn string `json:"ask_waiting_on"`
 		}
@@ -323,7 +326,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if comment.Ask == "" {
 			return nil, nil
 		}
-		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor)}, nil
+		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor), Comment: comment.ID}, nil
 	case "issue.claimed", "issue.released":
 		var claim struct {
 			Claim *struct {

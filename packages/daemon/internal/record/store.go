@@ -482,6 +482,26 @@ func (s *Postgres) TakeParkedDecisions(ctx context.Context, tx pgx.Tx, root stri
 	return decisions, nil
 }
 
+func (s *Postgres) KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error {
+	if _, err := tx.Exec(ctx, `insert into readmitted_approvals (root, approved_version, latest_version) values ($1, $2, $3)
+		on conflict (root) do update set approved_version = excluded.approved_version, latest_version = excluded.latest_version`,
+		root, approved, latest); err != nil {
+		return fmt.Errorf("keep the approval of %s at version %d below version %d: %w", root, approved, latest, err)
+	}
+	return nil
+}
+
+func (s *Postgres) TakeReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error) {
+	err = tx.QueryRow(ctx, `delete from readmitted_approvals where root = $1 returning approved_version, latest_version`, root).Scan(&approved, &latest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("take the approval kept for %s: %w", root, err)
+	}
+	return approved, latest, nil
+}
+
 func (s *Postgres) ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error) {
 	var session string
 	if err := tx.QueryRow(ctx, "select session from claims where token = $1", string(token)).Scan(&session); err != nil {
@@ -1060,11 +1080,26 @@ func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string
 	return nil
 }
 
-func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error {
-	if _, err := tx.Exec(ctx, "delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'", string(OutboxKindNotice), issue); err != nil {
-		return fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
+func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) ([]string, error) {
+	rows, err := tx.Query(ctx, `with dropped as (delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'
+		returning id, coalesce(payload->'catch_up'->>'decided', '') as decided)
+		select decided from dropped where decided <> '' order by id`, string(OutboxKindNotice), issue)
+	if err != nil {
+		return nil, fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
 	}
-	return nil
+	defer rows.Close()
+	var decided []string
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			return nil, fmt.Errorf("scan a dropped catch-up of %s: %w", issue, err)
+		}
+		decided = append(decided, text)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
+	}
+	return decided, nil
 }
 
 func (s *Postgres) OutboxLeased(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) (bool, error) {

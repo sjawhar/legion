@@ -40,14 +40,20 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
 	changesRequested := false
+	// Who reviewed, named on the notice the registration sends: no person under gates.design off,
+	// which opens the gate whatever Dispatch shows.
+	reviewer := fact.ReviewedBy.Name()
 	switch {
 	case e.cfg.DesignGate == config.DesignGateOff:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version)
+		reviewer = ""
 	case fact.ApprovedVersion >= fact.Version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion)
 	case fact.ChangesRequestedVersion >= fact.Version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateChangesRequested, fact.ChangesRequestedVersion)
 		changesRequested = true
+	default:
+		reviewer = ""
 	}
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
@@ -66,7 +72,8 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 			e.logOnCommit(ctx, "workflow: the registration read a changes request the architect was told of", "issue", issue.Key, "version", gate.LatestVersion)
 			return intake.Result{}, nil
 		}
-		return intake.Result{}, e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-changes-requested", Version: gate.LatestVersion, Reason: fact.ChangesReason})
+		return intake.Result{}, e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-changes-requested", Version: gate.LatestVersion, Reason: fact.ChangesReason,
+			Actor: reviewer, Ref: specRef(fact.Issue)})
 	case !classify.DesignGateOpen(gate) && fact.RequestWaitsOnAgent:
 		e.logOnCommit(ctx, "workflow: root keeps its admission slot, since its approval request waits on the agent", "issue", issue.Key, "version", gate.LatestVersion)
 		return intake.Result{}, e.answerRegisteredGate(ctx, tx, fact.Issue, gate.LatestVersion, "request_waits_on_agent")
@@ -77,7 +84,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err := e.answerRegisteredGate(ctx, tx, fact.Issue, gate.LatestVersion, "approved"); err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion}); err != nil {
+	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion, Actor: reviewer, Ref: specRef(fact.Issue)}); err != nil {
 		return intake.Result{}, err
 	}
 	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
@@ -177,14 +184,15 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 	// gate a racing registration opened: otherwise the registration, the live event or the resume
 	// task has told it already.
 	if fact.Kind == intake.DispatchArtifactChangesRequested && (!fact.Seed || wasOpen) {
-		if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
+		if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason,
+			Actor: fact.Actor.Name(), Ref: specRef(key)}); err != nil {
 			return err
 		}
 	}
 	if !wasOpen && isOpen {
-		opened := record.Notice{Kind: "design-approved", Version: fact.Version}
+		opened := record.Notice{Kind: "design-approved", Version: fact.Version, Actor: fact.Actor.Name(), Ref: specRef(key)}
 		if carried {
-			opened = record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Reason: fmt.Sprintf(
+			opened = record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Actor: fact.Actor.Name(), Ref: specRef(fact.Key), Reason: fmt.Sprintf(
 				"a human approved %s's spec document at version %d, which opens the gate %s carried; any READY it refused is released and any child waiting on it starts", fact.Key, fact.Version, key)}
 		}
 		if err := e.notice(ctx, tx, key, opened); err != nil {

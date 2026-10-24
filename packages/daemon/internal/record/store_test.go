@@ -1954,3 +1954,33 @@ func TestAParkedDecisionKeepsTheNewestPerRefAndIsTakenNewestFirst(t *testing.T) 
 		}
 	})
 }
+
+// A root keeps one approval below its spec's latest version for its next architect's start, the
+// newest kept replacing an older one, and the start takes it, leaving zeros for the one after.
+func TestAReadmittedApprovalIsKeptUntilTheStartTakesIt(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issueFixture("LEGION-211")))
+		approved, latest, err := records.TakeReadmittedApproval(ctx, tx, "LEGION-211")
+		must(t, err)
+		if approved != 0 || latest != 0 {
+			t.Fatalf("a take with nothing kept = %d, %d, want zeros", approved, latest)
+		}
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 2, 3))
+		must(t, records.KeepReadmittedApproval(ctx, tx, "LEGION-211", 3, 4))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		approved, latest, err := records.TakeReadmittedApproval(ctx, tx, "LEGION-211")
+		must(t, err)
+		if approved != 3 || latest != 4 {
+			t.Fatalf("taken = %d, %d, want the newest kept, 3 and 4", approved, latest)
+		}
+		again, _, err := records.TakeReadmittedApproval(ctx, tx, "LEGION-211")
+		must(t, err)
+		if again != 0 {
+			t.Fatalf("a second take = %d, want zero", again)
+		}
+	})
+}

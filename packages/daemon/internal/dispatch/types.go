@@ -131,6 +131,15 @@ type Actor struct {
 // Person says whether the actor is a person: only a person's act answers a root waiting on one.
 func (a Actor) Person() bool { return a.Kind == "user" }
 
+// Name is the actor as `<kind>:<id>`, the form a claim's holder takes and Legion's notices name a
+// decision's author in (record.Notice.Actor), or empty for no actor.
+func (a Actor) Name() string {
+	if a == (Actor{}) {
+		return ""
+	}
+	return a.Kind + ":" + a.ID
+}
+
 // Ask is the bounded portion of a Dispatch ask detail the daemon needs to catch up a suspended
 // architect after boot. WaitingOn is whose reply an open ask needs next, `human` or `agent`; Dispatch
 // leaves it empty on an answered or resolved ask. ClosedBy is who closed a closed ask: the person
@@ -150,7 +159,9 @@ type Ask struct {
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
 // the document (empty for a project document). While an approval request is open (State
-// `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`.
+// `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`. By is
+// who gave the review State shows (an approval or a changes request), zero when Dispatch names
+// nobody.
 type Approval struct {
 	IssueKey      string
 	State         string
@@ -159,6 +170,7 @@ type Approval struct {
 	Reason        *string
 	AskID         string
 	WaitingOn     string
+	By            Actor
 }
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
@@ -182,6 +194,16 @@ func (a Approval) ChangesRequestedLatest() (int, string) {
 		reason = *a.Reason
 	}
 	return *a.Version, reason
+}
+
+// LatestReviewer is who gave the review Dispatch shows on its latest version, an approval
+// (ApprovedLatest) or a changes request (ChangesRequestedLatest), and zero when the latest version
+// has neither.
+func (a Approval) LatestReviewer() Actor {
+	if changes, _ := a.ChangesRequestedLatest(); a.ApprovedLatest() == 0 && changes == 0 {
+		return Actor{}
+	}
+	return a.By
 }
 
 // Error is a non-success response from Dispatch. Code is empty only when the response did not

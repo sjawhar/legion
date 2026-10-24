@@ -224,13 +224,15 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A re-admitted root's architect registers its spec again, often at the same version: each
-	// generation's registration is its own fact. What this read found of the person's review travels
-	// with it, so a spec a person approved or asked changes of before the architect registered is
-	// never waited on: the root keeps its admission slot, planning or revising.
+	// generation's registration is its own fact. What this read found of the person's review, and
+	// who gave it, travels with it, so a spec a person approved or asked changes of before the
+	// architect registered is never waited on: the root keeps its admission slot, planning or
+	// revising.
 	changes, reason := approval.ChangesRequestedLatest()
 	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version),
 		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
-			ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent"},
+			ChangesRequestedVersion: changes, ChangesReason: reason, ReviewedBy: approval.LatestReviewer(),
+			RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent"},
 		GateRegisterResponse{})
 }
 

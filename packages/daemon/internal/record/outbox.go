@@ -218,12 +218,16 @@ type Notice struct {
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
 // (a catch-up notice), which is the architect's first instruction: admission launches it with no
-// task. It is the tree as the daemon records it then: the root's generation, the launch of the
-// architect's claim it was written for, whether a hand-over created the root at this generation
-// with its child's phase and pull request (HandedOver) and whether its old root's gate came with
-// them (Carried), the design gate policy and the root's gate, and every issue of the tree. A
-// handed-over root's workers already run their phases, so its architect decomposes nothing anew;
-// one that carried no gate registers its own spec.
+// task, or only with the decisions kept for it. It is the tree as the daemon records it then: the
+// root's generation, the launch of the architect's claim it was written for, whether a hand-over
+// created the root at this generation with its child's phase and pull request (HandedOver) and
+// whether its old root's gate came with them (Carried), the design gate policy and the root's
+// gate, and every issue of the tree. A handed-over root's workers already run their phases, so its
+// architect decomposes nothing anew; one that carried no gate registers its own spec. Decided names
+// what a person decided on the tree while nobody in it could hear it and the start did not name (a
+// decision made while the architect's claim had ended, before this relaunch), in the words of
+// workflow.Engine.ParkedDecisionTask, with what an earlier catch-up this ready drops undelivered
+// named; empty when there is none.
 type CatchUp struct {
 	Generation uint64         `json:"generation"`
 	Launch     uint64         `json:"launch"`
@@ -231,6 +235,7 @@ type CatchUp struct {
 	Carried    bool           `json:"carried,omitempty"`
 	Gate       CatchUpGate    `json:"gate"`
 	Issues     []CatchUpIssue `json:"issues"`
+	Decided    string         `json:"decided,omitempty"`
 }
 
 // CatchUpGate is the design gate as a catch-up states it: the project's policy (gates.design,
