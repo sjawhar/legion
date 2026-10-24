@@ -2,35 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-212",
-  "completed": "2026-10-24T21:52:00Z",
-  "round": 1,
-  "decision": "changes_requested",
+  "completed": "2026-10-24T22:12:00Z",
+  "round": 2,
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 1,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "docs/kubernetes.md:1984",
-      "description": "The new sentence says the daemon-launched controller's `GH_CONFIG_DIR` is \"the project's default owner's directory\". The runtime never derives it that way: the controller's launch spec carries no repository (internal/daemon/specs.go:86; controller_launch_test.go:77 asserts `launch.Repository.IsZero()`), so gitHubBundles passes owner \"\" to the credential function (internal/runtime/sandbox/relaunch.go:638), and appauth.GitHubCredential sets `bundle.Default = names[0]` over `slices.Sorted(maps.Keys(all))` — the alphabetically first owner of the project (internal/appauth/credential.go:52-59, comment at :26-29 \"the first owner, sorted\"). The same document already says so twice, at docs/kubernetes.md:3967 (\"`github-default`, the first owner\") and :4014 (\"`GH_CONFIG_DIR` its first owner's directory there\"), so this PR introduces a contradiction with the section its own pointer sends the reader to, in a change whose purpose is to stop the runbook stating a value no pod has. For a project with two owners (INFRA serves sjawhar/legion and theorem-labs/agent-infra) the project's default repository and the alphabetically first owner need not be the same. Fix: say \"its first owner's directory\" (matching :3967 and :4014), or drop the clause, which no acceptance criterion requires — AC1 asks only that the controller's difference in `LEGION_WORKSPACE` be stated."
-    },
-    {
       "severity": "minor",
-      "file": "pull request body, `Size:` line",
-      "description": "`**Size:** 4 files changed, +313/−13` is stale: GitHub reports 307 additions / 13 deletions at head 976dac1f (`gh api repos/sjawhar/legion/pulls/2152 --jq '.changed_files, .additions, .deletions'` → 4, 307, 13). Round 2's +11/−6 moved it. Non-blocking; correct it with the push that answers the finding above."
+      "file": "pull request body, `## Verification`",
+      "description": "No `E2E (implementer), round 3` block was added for the two sentences this round corrected: the body's implementer proofs name heads 698ba655be51 and 0c24884a4da7. Not a gate and not requested — the proof exists and is on GitHub, in the implementer's reply on thread PRRT_kwDORFy7ds6v770T (`go test -count=1 -v ./internal/appauth/ -run TestGitHubCredentialBundlesEveryOwnerOfTheProject`, owners {sjawhar, Acme} with an empty owner → Default = acme) and in `.legion/INFRA-212/implement.json` round 3, and the tester's `E2E (tester), round 3` drove both sentences independently at 5da59bcaa181. Recorded in the body's `Not proven / risk` so the merger quotes it; the implementer adds the block at its next body edit.",
+      "disposition": "recorded, not requested"
     }
   ],
-  "verifiedAtHead": "976dac1fe3325b734d8b7a035b642f7fae984fe4",
-  "ciRead": "Required set from the base branch's rulesets (branch protection declares none): lint, typecheck, test, pr-title. CI head = 0c24884a4da7 (newest `pull_request` run on legion/INFRA-212). At that commit: lint success, typecheck success, pr-title success, test in_progress; pi-legion success, changes success, the Envoy/Dispatch lanes skipped. `gh api repos/sjawhar/legion/compare/0c24884a...976dac1f` is `ahead` with only `.legion/INFRA-212/implement.json` and `.legion/INFRA-212/test.json`, so 0c24884a is the commit whose checks stand for the code. No required check is red; `test` had not settled when this round was decided, and a request for changes stands whatever CI says.",
-  "threads": "0 review threads on the pull request (gh api graphql reviewThreads → 0 nodes); no prior review submission. Nothing to adjudicate or accept this round.",
-  "thermonuclear": "Not run: the pull request's whole diff is docs/kubernetes.md plus the three `.legion/INFRA-212/` handoffs — no runtime code (the tester's agent_environment_doc_test.go was added and removed inside the branch, net zero). A docs-only diff gets no thermonuclear pair and no `Thermo` line.",
-  "evidenceVerified": [
-    "AC1: docs/kubernetes.md:1947-1985 states all eleven names with a value or \"the runtime sets it in no container\", writes <owner>/<repo>/<key-lower>/<generation> as patterns, says it describes an issue pod's role container, and states the controller's difference (the LEGION_WORKSPACE half is right; the GH_CONFIG_DIR half is the finding above).",
-    "Table values checked against the code, not the handoffs: POD_UID alone on each of the six role containers (testdata/golden/worker.json); launchEnvironment split (manifest.go:985-996) and launcherCommand's start command (launcher.go:401-426); podPath (manifest.go:917,1036-1043) with imagePath = /opt/legion/bin:… (names.go:87) equal to the image ENV (worker.Dockerfile:526); GH_CONFIG_DIR via ghAgentEnv (podkind.go:213) over the issue's repository's owner (relaunch.go:638, appauth/credential.go:25); StateDir = /var/run/legion/state (names.go:57, manifest.go:906); the three *_TOKEN_FILE pointers under generationDir (manifest.go:939-941, launcher.go:414); LEGION_WORKSPACE from workspace.Location (podkind.go:190); --stop-grace (launcher.go:403); LEGION_GRANT_FILE, LEGION_CREDENTIAL_HELPER, LEGION_ROOT_WORKSPACE and LEGION_TERMINATION_GRACE_SECONDS absent from internal/runtime/sandbox/ entirely.",
-    "The token sentence: kubernetes.go:1353,1355 refuse a kubernetes daemon with no envoy_token_file and no dispatch_url; stage3.go:98,559 refuse a configured dispatch_url with no dispatch_token_file. Both citations hold.",
-    "AC4: the six retired subsections open with their line (3224, 3669, 3727, 3823, 3849, 3862) and the five tables inside them carry the note (3291/3295, 3300/3304, 3776/3780, 3791/3795, 3868/3872); the network-shares table under Operator configuration (3608) carries none.",
-    "AC5: the runbook's third line and the retired section's opening no longer schedule the removal with packages/daemon; commit ed00df8b25, 2026-10-03, \"Legion runs on the Go daemon alone\", confirms the date.",
-    "AC6: every heading the added links target exists and the live duplicate precedes the retired one, so #configuration → :1169 and #contract-discipline → :1081, the Go daemon's; #anatomy-of-a-sandbox-pod :1798, #rbac-the-go-daemon-needs :3116, #operator-configuration :3345, #daemon-launched-controller :3919.",
-    "Both E2E lines are present in the PR body, each with surface, command, observation, head SHA and a negative control."
-  ]
+  "round1FindingsResolved": [
+    "Important, docs/kubernetes.md:1984 (thread PRRT_kwDORFy7ds6v770T): fixed in f661b25adcea. The clause now reads \"its `GH_CONFIG_DIR` is its bundle's first owner's directory, because its launch names no repository and the default is then the project's owners sorted and the first taken (`appauth.GitHubCredential`, `credential.go`)\" — which is what internal/appauth/credential.go:52-59 does (`bundle.Default = names[0]` over `slices.Sorted(maps.Keys(all))` on the `owner == \"\"` branch the controller's repository-less launch takes, relaunch.go:638) and what docs/kubernetes.md:3967 and :4014 already said. The implementer replied on the thread and resolved it as the pull request's author; I read the reply on GitHub.",
+    "The second clause ruled by Envoy at 21:45Z (no thread, since it arrived after round 1's submission): fixed in the same commit. docs/kubernetes.md:1956-1957 now reads \"one the role's own agent runs prints each of them the runtime sets, and exits 1 for the four it does not\", which matches the table's four never-set rows (:1970, :1972, :1974, :1977) and the spec's acceptance line that each such name exits 1. Verified against the table's rows, not against a phrasing, as I said I would."
+  ],
+  "verifiedAtHead": "51f4f982992956fe252e47087188d53ad006021e",
+  "codeHead": "f661b25adceae78a67642d8c00a5e1999c37a320",
+  "ciRead": "Required set from the base branch's rulesets (branch protection declares none): lint, typecheck, test, pr-title. CI head = f661b25adceae78a67642d8c00a5e1999c37a320, the newest `pull_request` run on legion/INFRA-212. At that commit all four are completed/success (test settled success at 22:11Z after two waits; lint, typecheck and pr-title earlier), with pi-legion and changes success and the Envoy/Dispatch lanes skipped. `gh api repos/sjawhar/legion/compare/f661b25a...51f4f982` is `ahead` with only `.legion/INFRA-212/implement.json` and `.legion/INFRA-212/test.json`, so those checks stand for the code under review. The branch head's handoff-only pushes carry `skip-checks: true` and start no run, as intended.",
+  "threads": "One thread on the pull request, PRRT_kwDORFy7ds6v770T (docs/kubernetes.md:1984), mine from round 1: answered by the implementer at 21:49Z naming f661b25adcea and resolved by it as the pull request's author. isResolved true, 0 unresolved, read in gh api graphql. No bot threads, so nothing to adjudicate or name as accepted.",
+  "thermonuclear": "Not run: the pull request's whole diff is docs/kubernetes.md plus the four `.legion/INFRA-212/` handoffs — no runtime code. A docs-only diff gets no thermonuclear pair and no `Thermo` line.",
+  "roundScope": "The diff c7bb2c3deca7..51f4f982 is docs/kubernetes.md (+8/-5, the two sentences at :1956-1957 and :1982-1985) plus implement.json and test.json. Nothing else of the head I verified at c7bb2c3d moved, so the eleven rows against their renderers, the two token-refusal citations, the six retired opening lines, the five noted tables with network-shares unnoted, the 2026-10-03 date against commit ed00df8b25 and the six anchor targets stand as verified there.",
+  "sizeLine": "Not a finding, on the architect's ruling of 21:57Z: every handoff push changes the number and retro's removal of .legion/INFRA-212/ changes it again, so the line can only ever name the head it was measured at, which it does (f661b25adcea)."
 }
