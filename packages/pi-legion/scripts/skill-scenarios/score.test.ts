@@ -612,6 +612,39 @@ run("askgate-on-22", triedFiles, [
     rebuttal: "I ran the read; it failed.",
   }),
 ]);
+// on, nochange-rebuttal: a compound first attempt AskGate could not read, then the rebuttal sent
+// the ask. No model read the first attempt, so it is no refusal of the ask.
+run("askgate-on-23", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n1", `${rebuttalFlag}; echo done`),
+  refused("call-n1", "AskGate did not run this call: it holds a `dispatch ask`."),
+  askGate("call-n1", { decision: "revise", outcome: "unreadable", verdictMode: "block" }),
+  noChangeCall("call-n2", rebuttalFlag),
+  opened("call-n2"),
+  askGate("call-n2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+// on, link: a compound first attempt AskGate could not read, then the ask went out on a verdict.
+run("askgate-on-24", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-l1", "; echo done"),
+  refused("call-l1", "AskGate did not run this call: it holds a `dispatch ask`."),
+  askGate("call-l1", { decision: "revise", outcome: "unreadable", verdictMode: "block" }),
+  noChangeCall("call-l2"),
+  opened("call-l2"),
+  askGate("call-l2", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
 // off, facts: the ask went out and the gate never ran.
 run("askgate-off-1", askgate("facts", anAsk), [
   ...header,
@@ -759,6 +792,6 @@ test("askgate off, facts: passes when the ask exists and the gate wrote nothing"
 
 test("askgate: another label and case pair is unscored, saying why", () => {
   expect(out).toContain("askgate-off-4\trig error: askgate scores off only with case facts");
-  expect(out).toContain("askgate\ton\t9/22\t");
+  expect(out).toContain("askgate\ton\t11/24\t");
   expect(out).toContain("askgate\toff\t1/3\t");
 });

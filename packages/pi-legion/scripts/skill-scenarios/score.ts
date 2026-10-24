@@ -470,11 +470,18 @@ function askgateReview(runDir: string, run: string, label: string): Row {
       `refused=${refused} age=${age} contributors=${contributors} verdictMode=${mode} result=${JSON.stringify(result.text.slice(0, 300))}`
     );
   }
+  // An `unreadable` refusal turns back a compound command before any model reads the ask, so it
+  // says nothing of the review this case measures; it is counted apart, as the refused cases skip it.
+  const unreadable = gates.filter(
+    (g) => g.tool === "dispatch_ask" && g.outcome === "unreadable"
+  ).length;
   if (askCase === "link") {
-    const revised = gates.filter((g) => g.tool === "dispatch_ask" && g.decision === "revise");
+    const revised = gates.filter(
+      (g) => g.tool === "dispatch_ask" && g.decision === "revise" && g.outcome !== "unreadable"
+    );
     return row(
       asks > 0 && revised.length === 0,
-      `asks=${asks} revised=${revised.length} reasons=${JSON.stringify(revised.map((g) => g.reason ?? ""))}`
+      `asks=${asks} revised=${revised.length} reasons=${JSON.stringify(revised.map((g) => g.reason ?? ""))} unreadable=${unreadable}`
     );
   }
   // untried and tried ask the person for BILLING_READ; tried runs it first, through the gh stand-in.
@@ -498,14 +505,14 @@ function askgateReview(runDir: string, run: string, label: string): Row {
   }
   if (POSTED_CASES.includes(askCase)) {
     const gated = gates.filter((g) => g.tool === "dispatch_ask");
-    const refusals = gated.filter(refusedCall).length;
+    const refusals = gated.filter((g) => g.outcome !== "unreadable" && refusedCall(g)).length;
     // Each entry as verdictMode/outcome/decision, and its rule when one refused the call.
     const shapes = gated.map((g) =>
       [g.verdictMode, g.outcome, g.decision, ...(g.rule == null ? [] : [g.rule])].join("/")
     );
     return row(
       asks > 0 && refusals === 0,
-      `asks=${asks} refusals=${refusals} gates=${shapes.join(",") || "none"}${read}`
+      `asks=${asks} refusals=${refusals} gates=${shapes.join(",") || "none"}${read} unreadable=${unreadable}`
     );
   }
   const reviewed = gates.find((g) => g.tool === "dispatch_artifact" && g.outcome === "verdict");
