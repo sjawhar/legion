@@ -51,7 +51,7 @@
 //                                          plan.md (the run directory table of judge.ts and score.ts)
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { Actor, Ask, AskOption } from "@legion/contracts";
+import { type Actor, ASK_QUESTION_MAX, type Ask, type AskOption } from "@legion/contracts";
 import { z } from "zod";
 import {
   answerAsk,
@@ -138,6 +138,17 @@ function byTime(a: bigint, b: bigint): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+/** A source question as an ask on the run's issue can hold it. The ask route refuses a question
+ * over ASK_QUESTION_MAX characters (UTF-16 units, as JavaScript counts them), but an ask block in a
+ * spec has no cap, so a source can hold a longer one. Such a question is cut at its last space
+ * before the cap and ends with "…"; any other question is posted unchanged. */
+export function seededQuestion(question: string): string {
+  if (question.length <= ASK_QUESTION_MAX) return question;
+  const room = question.slice(0, ASK_QUESTION_MAX - 1);
+  const space = room.lastIndexOf(" ");
+  return `${space > 0 ? room.slice(0, space + 1) : room}…`;
+}
+
 /** The entries of a source's messages.md, oldest first as the file holds them. */
 function sourceEntries(file: string): { kind: string; at: bigint; body: string }[] {
   const text = readFileSync(file, "utf8");
@@ -179,12 +190,16 @@ async function seedSpecIssue(file: string, source: string, spec?: string): Promi
     const answer = ask.answer;
     if (ask.kind !== "question" || ask.state !== "answered" || answer === null) continue;
     let opened: Ask | undefined;
+    if (seededQuestion(ask.question) !== ask.question)
+      console.log(
+        `seeded ask ${ask.id}: its ${ask.question.length}-character question is cut to Dispatch's ${ASK_QUESTION_MAX}-character cap`
+      );
     steps.push({
       at: time(ask.created_at, asksFile),
       write: async () => {
         opened = await createAsk(
           issue.key,
-          { question: ask.question, options: ask.options, multiple: ask.multiple },
+          { question: seededQuestion(ask.question), options: ask.options, multiple: ask.multiple },
           { as: "agent", actor: SEED_ASKER }
         );
         seeded.push(opened.id);

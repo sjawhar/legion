@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ASK_QUESTION_MAX } from "@legion/contracts";
 
 // e2e/api.ts, which seed.ts calls, reads its port when it loads: set it as rig.sh's seed_ts does,
 // then load seed.ts. PLAYWRIGHT_BASE_URL would point api.ts somewhere else.
@@ -401,6 +402,27 @@ describe("spec-writing", () => {
       dispatch.asks.map((a) => a.id)
     );
     expect(dispatch.asks).toHaveLength(1);
+  });
+
+  // Catches: a seeding that posts a source question longer than Dispatch's ask cap, which the ask
+  // route refuses (an ask block in a spec has no cap, so a source can hold one), and stops the run
+  // before its agent starts.
+  test("cuts a source question over Dispatch's ask cap at a word, and posts the rest unchanged", async () => {
+    const src = source();
+    const asks = JSON.parse(readFileSync(path.join(src, "asks.json"), "utf8"));
+    const long = `${"Which way? ".repeat(70)}Recommendation: the second way, since it costs less.`;
+    expect(long.length).toBeGreaterThan(ASK_QUESTION_MAX);
+    asks[0].question = long;
+    writeFileSync(path.join(src, "asks.json"), JSON.stringify(asks));
+    await seed.specWriting(path.join(freshDir("seed"), "fixture.json"), src);
+    const posted = dispatch.calls.find((call) => call.path.endsWith("/asks"))?.body?.question;
+    expect(typeof posted).toBe("string");
+    const question = posted as string;
+    expect(question.length).toBeLessThanOrEqual(ASK_QUESTION_MAX);
+    expect(question.endsWith("…")).toBe(true);
+    expect(long.startsWith(question.slice(0, -1))).toBe(true);
+    expect(question.slice(0, -1).endsWith(" ")).toBe(true);
+    expect(seed.seededQuestion("Short question?")).toBe("Short question?");
   });
 
   // Catches: a seeding that orders the input by a millisecond time, which ties every time of one
