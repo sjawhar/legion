@@ -416,9 +416,9 @@ func TestAFactOfAReplacedCheckChangesNothingOfItsSuccessor(t *testing.T) {
 	}
 }
 
-// The implementer's claim failing inside a look ends the look as a pending report would, and holds
-// nothing: a done issue has no phase to hold, and the next wake starts the claim again. Another
-// role's claim failing on the done issue changes nothing, as before.
+// The implementer's claim failing inside a look ends the look as a pending report would and tells
+// the architect immediately. It holds nothing: a done issue has no phase to hold, and the next wake
+// starts the claim again. Another role's claim failing on the done issue changes nothing, as before.
 func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
 	rig := childCheckRig(t, "")
 	rig.apply("tester-failed", intake.ClaimFailed{Issue: "LEGION-209", Role: claim.RoleTester})
@@ -437,10 +437,9 @@ func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
 	if err := rig.pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-209'").Scan(&childPhase); err != nil || childPhase != phase.Done {
 		t.Fatalf("the child's phase = %s, %v; want done, not held", childPhase, err)
 	}
-	for _, kind := range []record.NoticeKind{"held", "worker-died"} {
-		if containsNotice(noticeKinds(t, rig.pool, "LEGION-209"), kind) {
-			t.Fatalf("notices %v carry %s, want neither for a check look", noticeKinds(t, rig.pool, "LEGION-209"), kind)
-		}
+	notices := noticeKinds(t, rig.pool, "LEGION-209")
+	if containsNotice(notices, "held") || !containsNotice(notices, "worker-died") {
+		t.Fatalf("notices %v, want one worker-died and no held notice for a check look", notices)
 	}
 }
 

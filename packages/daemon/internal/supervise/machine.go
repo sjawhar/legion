@@ -131,7 +131,10 @@ type Claim struct {
 	Enrollment *Enrollment
 	State      ClaimState
 	Budgets    Budgets
-	Pending    *Delivery
+	// Failure is the reason a terminally failed claim could not continue. It is cleared before a
+	// retry and persisted so a daemon restart can report the same failure to the workflow.
+	Failure string
+	Pending *Delivery
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.
@@ -900,6 +903,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		m.claim.BootTokenHash = HashBootToken(token)
 
 		m.claim.State = StateLaunching
+		m.claim.Failure = ""
 		if err := m.persist(ctx); err != nil {
 			err = errors.Join(err, m.stopPrevious(ctx))
 			if ctx.Err() != nil {
@@ -936,7 +940,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		m.log.Warn("supervise: launch failed", "generation", m.claim.Generation, "error", err,
 			"launchFailures", m.claim.Budgets.LaunchFailures, "limit", m.deps.Limits.LaunchFailures)
 		if m.claim.Budgets.LaunchFailures >= m.deps.Limits.LaunchFailures {
-			return errors.Join(err, m.fail(ctx, "launch failures ran out"))
+			return errors.Join(err, m.fail(ctx, fmt.Sprintf("launch failures ran out: %v", err)))
 		}
 		charged = true
 	}
@@ -1056,7 +1060,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 		}
 	}
 	m.letGo()
-	m.claim.State = StateFailed
+	m.claim.State, m.claim.Failure = StateFailed, why
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
 		"promptRetires", m.claim.Budgets.PromptRetires)

@@ -40,10 +40,12 @@ type FetchRequest struct {
 	Token         func() (string, error)
 	CredentialDir string
 	Feed          string
-	Log           func(line string)
-	Clock         Clock
-	CacheURL      string
-	CacheToken    string
+	// Clone is the issue clone that shares Feed's volume. It is empty for a repository cache.
+	Clone      string
+	Log        func(line string)
+	Clock      Clock
+	CacheURL   string
+	CacheToken string
 }
 
 // CacheRepositoryHeader names, on every answer the repository cache gives a request its token
@@ -130,7 +132,9 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	defer func() {
 		_ = credential.remove()
 	}()
-	present, err := ownFeedRepository(feed, request.Repo, request.Clock.Now(), request.Log)
+	present, err := ownFeedRepository(feed, request.Repo, request.Clock.Now(), request.Log, func() error {
+		return dissociateClone(ctx, run, request.Clone, feed, request.Log)
+	})
 	if err != nil {
 		return FetchReport{}, err
 	}
@@ -154,7 +158,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	defer func() {
 		_ = os.RemoveAll(staging)
 	}()
-	transfer := feedTransfer{verb: "clone", argv: []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
+	transfer := feedTransfer{verb: "clone", argv: []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
 	if request.CacheURL != "" {
 		if err := waitForCache(ctx, request); err != nil {
 			return FetchReport{}, err
@@ -585,7 +589,7 @@ type feedTransfer struct {
 // its URL in the argv rather than read from the feed's configuration, pruned of those GitHub
 // deleted.
 func fetchInto(feed string, repo ghrepo.Repository) feedTransfer {
-	return feedTransfer{verb: "fetch", argv: []string{"git", "--git-dir=" + feed, "fetch", "--prune", "--quiet", GitHubURL(repo), "+refs/heads/*:refs/heads/*"}}
+	return feedTransfer{verb: "fetch", argv: []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "--git-dir=" + feed, "fetch", "--prune", "--quiet", GitHubURL(repo), "+refs/heads/*:refs/heads/*"}}
 }
 
 // stageBeside is the temporary sibling of feed a feed that lacks the repository is filled in. A
@@ -615,11 +619,9 @@ const cloneSuffix = ".clone-"
 
 // feedConfiguration is what the feed repository's own configuration sets: no automatic garbage
 // collection or maintenance, ever, and every fetch's objects kept as the pack they arrived in
-// (`fetch.unpackLimit=1`). The issue's clone keeps its objects in the feed
-// (objects/info/alternates), so an object a gc dropped from the feed — one reachable only from a
-// branch GitHub deleted and the fetch pruned — would be gone from the clone that still names it.
-// And the repository cache streams its clone's packs alone (FeedEntry), so a fetch that exploded a
-// small pack into loose objects would leave the history it brought out of every issue's feed.
+// (`fetch.unpackLimit=1`). The clone owns entries for its history, so this keeps feed refreshes
+// predictable and preserves the repository cache's pack-only stream; it is not the clone's only
+// copy of history.
 func feedConfiguration(ctx context.Context, run Runner, gitDir string) error {
 	for _, pair := range [][2]string{{"gc.auto", "0"}, {"maintenance.auto", "false"}, {"fetch.unpackLimit", "1"}} {
 		if _, err := FeedGit(ctx, run, gitDir, "config", pair[0], pair[1]); err != nil {

@@ -18,8 +18,9 @@ import (
 // any git there: a symlink at the repository's owner directory is removed (an earlier release's
 // agent could have pointed it anywhere), the stale locks a killed fetch left are removed
 // (RemoveStaleFeedLocks, which follows no link), and a repository foreignFeed refuses is removed
-// whole, logged naming why. It answers whether a repository Fetch may fetch into is left there.
-func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log func(string)) (bool, error) {
+// whole after beforeRemove preserves any history an old clone borrowed from it. It answers whether
+// a repository Fetch may fetch into is left there.
+func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log func(string), beforeRemove func() error) (bool, error) {
 	owner := filepath.Dir(gitDir)
 	if info, err := os.Lstat(owner); err == nil && info.Mode()&fs.ModeSymlink != 0 {
 		if err := os.Remove(owner); err != nil {
@@ -44,6 +45,11 @@ func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log
 	}
 	if why == "" {
 		return true, nil
+	}
+	if beforeRemove != nil {
+		if err := beforeRemove(); err != nil {
+			return false, fmt.Errorf("dissociate the clone before removing the feed's %s: %w", gitDir, err)
+		}
 	}
 	if err := os.RemoveAll(gitDir); err != nil {
 		return false, fmt.Errorf("remove the feed's %s, which %s: %w", gitDir, why, err)
@@ -101,25 +107,22 @@ func foreignFeed(gitDir string) (string, error) {
 	return feedConfigRefusal(string(config)), nil
 }
 
-// feedEntryRefusal is why name, a path under a feed repository, is not one Fetch's git writes there,
-// or "" when it is: the top level's HEAD, config, description, branches, hooks, info, objects, refs,
-// packed-refs and FETCH_HEAD; under hooks only git's samples, which git never runs; under info only
-// exclude and refs (the cache's repack runs update-server-info, which writes it, and no fetch reads
-// it); under objects/info only what git writes of its own (no alternates, which would have the
-// repository read another's objects); anything else under objects, and under refs and branches; and
-// the temporary file update-server-info writes info/refs or objects/info/packs through, which a
-// repack killed before its rename leaves and git never reads (serverInfoLeftover).
+// feedEntryRefusal is why name, a path under a feed repository, is not one Fetch or Git's own
+// maintenance writes there, or "" when it is. Git gc packs refs, expires reflogs, records failures
+// in gc.log, leaves gc.pid if it is killed, and updates commit-graph and server-info files. A feed
+// still rejects hooks other than Git's samples, configuration beyond feedConfigKeys, and object
+// alternates, because Fetch would execute or follow those under its provisioning credential.
 func feedEntryRefusal(name string, dir bool) string {
 	if !dir && serverInfoLeftover.MatchString(name) {
 		return ""
 	}
 	top, rest, nested := strings.Cut(name, "/")
 	switch top {
-	case "HEAD", "config", "description", "packed-refs", "FETCH_HEAD":
+	case "HEAD", "config", "description", "packed-refs", "FETCH_HEAD", "gc.log", "gc.pid":
 		if !nested && !dir {
 			return ""
 		}
-	case "branches", "refs":
+	case "branches", "logs", "refs":
 		return ""
 	case "hooks":
 		if !nested || (!dir && strings.HasSuffix(rest, ".sample") && !strings.Contains(rest, "/")) {

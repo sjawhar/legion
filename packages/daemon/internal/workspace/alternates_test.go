@@ -1,110 +1,209 @@
 package workspace
 
 import (
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// A shared clone whose objects live in a bare feed through objects/info/alternates (git clone
-// --shared, then jj git init --colocate) works for everything an issue does: jj reads the history,
-// a workspace is added at the default branch, a commit is made and pushed, a second provisioning
-// recovers the workspace from the pushed branch after the workspace directory is lost, and a fetch
-// into the feed is visible to jj. No pack is copied into the clone's own store. The clone checks
-// out the feed's HEAD, so jj's first snapshot of the clone's own workspace records no change: on a
-// --no-checkout clone it records every file deleted.
-func TestJJWorksOnACloneWhoseObjectsAreAnAlternate(t *testing.T) {
-	remote := seedRemote(t, t.TempDir(), "release/v7.1")
-	pushRemoteBranch(t, remote, "release/v7.1", "history.txt")
-	feed := filepath.Join(t.TempDir(), "feed", "acme", "widgets.git")
-	runSetup(t, t.TempDir(), "git", "clone", "--bare", "--quiet", remote, feed)
+// A clone from the feed keeps its own objects, so replacing a foreign feed cannot remove history
+// that its refs still need. The replacement path is the same one workspace-fetch takes before
+// workspace-init provisions and fetches the clone.
+func TestACloneSurvivesAForeignFeedReplacement(t *testing.T) {
+	run := newLocalRunner(t)
+	lost := pushRemoteBranch(t, run.remote, "history", "history.txt")
+	fetch := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, fetch)
+	if err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
+	request := provisionRequest(t)
+	request.Source = FromFeed(fetch.Feed)
+	working, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision from the feed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(working.Clone, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the clone's alternates = %v, want no borrowed history", err)
+	}
+	runSetup(t, fetch.Feed, "git", "--git-dir="+run.remote, "update-ref", "-d", "refs/heads/history")
+	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte(lost+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	replaced, err := Fetch(context.Background(), run, fetch)
+	if err != nil {
+		t.Fatalf("Fetch after the foreign feed: %v", err)
+	}
+	if !replaced.Cloned {
+		t.Fatal("Fetch kept a feed with grafts, want it replaced")
+	}
+	runSetup(t, working.Clone, "git", "-C", working.Clone, "fsck", "--connectivity-only", "--no-dangling")
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision after the feed replacement: %v", err)
+	}
+}
+
+// A clone made by the old shared-clone path can still exist when the feed is replaced. Provisioning
+// must identify the refs that lost their borrowed objects before Jujutsu reports a bare bad object.
+func TestProvisionNamesRefsThatLostBorrowedHistory(t *testing.T) {
+	run := newLocalRunner(t)
+	fetch := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, fetch)
+	if err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
+	request := provisionRequest(t)
+	request.Source = FromFeed(fetch.Feed)
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workspace.Clone), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, request.StateDir, "git", "clone", "--shared", "--quiet", first.Feed, workspace.Clone)
+	runSetup(t, workspace.Clone, "git", "remote", "set-url", "origin", GitHubURL(request.Repo))
+	runSetup(t, workspace.Clone, "jj", "git", "init", "--colocate")
+	lost := commitOnlyInFeed(t, first.Feed)
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "refs/jj/keep/lost-history", lost)
+	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte("foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), run, fetch); err != nil {
+		t.Fatalf("Fetch after the foreign feed: %v", err)
+	}
+	failed := exec.Command("git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
+	if output, err := failed.CombinedOutput(); err == nil {
+		t.Fatalf("test setup left the shared clone connected: %s", output)
+	}
+
+	_, err = Provision(context.Background(), run, request)
+	if err == nil {
+		t.Fatal("Provision succeeded with refs that lost borrowed history")
+	}
+	if !strings.Contains(err.Error(), "lost borrowed history") || !strings.Contains(err.Error(), "refs/jj/keep/lost-history") {
+		t.Fatalf("Provision = %v, want the lost ref and borrowed history", err)
+	}
+	if strings.Contains(err.Error(), "bad object") {
+		t.Fatalf("Provision = %v, want the named lost ref instead of git's bad object", err)
+	}
+}
+
+// A clone created before local feed clones replaced alternates must be dissociated before a foreign
+// feed is removed, preserving the objects its refs still need.
+func TestFetchDissociatesAnOldSharedCloneBeforeReplacingItsFeed(t *testing.T) {
+	run := newLocalRunner(t)
+	request := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
 	clone := filepath.Join(t.TempDir(), "repos", "github.com", "acme", "widgets")
-	runSetup(t, t.TempDir(), "git", "clone", "--shared", "--quiet", feed, clone)
-	runSetup(t, clone, "git", "remote", "set-url", "origin", remote)
-	runSetup(t, clone, "jj", "git", "init", "--colocate")
-	alternates, err := os.ReadFile(filepath.Join(clone, ".git", "objects", "info", "alternates"))
-	if err != nil || strings.TrimSpace(string(alternates)) != filepath.Join(feed, "objects") {
-		t.Fatalf("alternates = %q (%v), want the feed's objects", alternates, err)
-	}
-	runSetup(t, clone, "jj", "git", "fetch", "-R", clone)
-	if listed := strings.TrimSpace(runSetup(t, clone, "jj", "log", "-r", "release/v7.1@origin", "--no-graph", "-T", "commit_id", "-R", clone)); len(listed) != 40 {
-		t.Fatalf("jj cannot read the default branch through the alternate: %q", listed)
-	}
-	if diff := strings.TrimSpace(runSetup(t, clone, "jj", "diff", "--summary", "-r", "@", "-R", clone)); diff != "" {
-		t.Fatalf("jj's first snapshot of the shared clone's own workspace changed it:\n%s", diff)
-	}
-	working := filepath.Join(t.TempDir(), "workspaces", "widgets-42")
-	if err := os.MkdirAll(filepath.Dir(working), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(clone), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runSetup(t, clone, "jj", "workspace", "add", working, "--name", "widgets-42", "--revision", "release/v7.1@origin", "-R", clone)
-	if err := os.WriteFile(filepath.Join(working, "change.txt"), []byte("x\n"), 0o600); err != nil {
+	runSetup(t, t.TempDir(), "git", "clone", "--shared", "--quiet", first.Feed, clone)
+	lost := commitOnlyInFeed(t, first.Feed)
+	runSetup(t, clone, "git", "--git-dir="+filepath.Join(clone, ".git"), "update-ref", "refs/jj/keep/lost-history", lost)
+	request.Clone = clone
+	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte("foreign\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runSetup(t, working, "jj", "commit", "-m", "a change", "-R", working)
-	runSetup(t, working, "jj", "git", "push", "--named", "legion/WIDGETS-42=@-", "-R", working)
-	pushed := strings.TrimSpace(runSetup(t, working, "git", "--git-dir="+remote, "rev-parse", "refs/heads/legion/WIDGETS-42"))
-	if len(pushed) != 40 {
-		t.Fatalf("the push did not land: %q", pushed)
+
+	if _, err := Fetch(context.Background(), run, request); err != nil {
+		t.Fatalf("Fetch after the foreign feed: %v", err)
 	}
-	// The clone's own store holds no pack and none of the feed's objects, only what jj wrote
-	// itself (the new commit, its working-copy commits): history stayed in the feed.
-	assertHistoryOnlyInFeed(t, filepath.Join(clone, ".git"), feed)
-	// Lost workspace: the directory goes, the clone forgets it, a second add starts at the pushed branch.
-	if err := os.RemoveAll(working); err != nil {
+	if _, err := os.Stat(filepath.Join(clone, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clone alternates after dissociation = %v, want absent", err)
+	}
+	runSetup(t, clone, "git", "--git-dir="+filepath.Join(clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
+}
+
+// A previous Jujutsu import can retain a feed-only commit in its operation view after Git drops the
+// ref that first introduced it. Provisioning must name that lost operation history too.
+func TestProvisionNamesJujutsuOperationHistoryThatLostBorrowedObjects(t *testing.T) {
+	run := newLocalRunner(t)
+	fetch := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, fetch)
+	if err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
+	request := provisionRequest(t)
+	request.Source = FromFeed(fetch.Feed)
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
 		t.Fatal(err)
 	}
-	runSetup(t, clone, "jj", "workspace", "forget", "widgets-42", "-R", clone)
-	// jj leaves the colocated workspace's git worktree entry, locked; provisioning's re-add removes
-	// it first (createWorkspace), so the spike does what provisioning does.
-	if err := removeGitWorktree(clone, working); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workspace.Clone), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runSetup(t, clone, "jj", "git", "fetch", "-R", clone)
-	runSetup(t, clone, "jj", "workspace", "add", working, "--name", "widgets-42", "--revision", "legion/WIDGETS-42@origin", "-R", clone)
-	if parent := commitOf(t, working, "@-"); parent != pushed {
-		t.Fatalf("the recovered workspace's @- is %s, want the pushed %s", parent, pushed)
+	runSetup(t, request.StateDir, "git", "clone", "--shared", "--quiet", first.Feed, workspace.Clone)
+	runSetup(t, workspace.Clone, "git", "remote", "set-url", "origin", GitHubURL(request.Repo))
+	runSetup(t, workspace.Clone, "jj", "git", "init", "--colocate")
+	lost := commitOnlyInFeed(t, first.Feed)
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "refs/heads/lost-history", lost)
+	runSetup(t, workspace.Clone, "jj", "git", "import", "-R", workspace.Clone)
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "-d", "refs/heads/lost-history")
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "-d", "refs/jj/keep/"+lost)
+	if err := os.Remove(filepath.Join(workspace.Clone, ".git", "logs", "refs", "heads", "lost-history")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
 	}
-	// A fetch into the feed (what the pod's fetch container does on a relaunch) is visible to jj.
-	moved := pushRemoteBranch(t, remote, "release/v7.1", "moved.txt")
-	runSetup(t, feed, "git", "--git-dir="+feed, "fetch", "--quiet", "origin", "+refs/heads/*:refs/heads/*")
-	runSetup(t, clone, "jj", "git", "fetch", "-R", clone)
-	if head := commitOf(t, clone, "release/v7.1@origin"); head != moved {
-		t.Fatalf("after the feed fetch jj sees %s, want %s", head, moved)
+	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte("foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), run, fetch); err != nil {
+		t.Fatalf("Fetch after the foreign feed: %v", err)
+	}
+	if output, err := exec.Command("git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling").CombinedOutput(); err != nil {
+		t.Fatalf("Git reports missing history that only Jujutsu should name: %v\n%s", err, output)
+	}
+	view := exec.Command("jj", "log", "-r", "visible_heads()", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", workspace.Clone)
+	if output, err := view.CombinedOutput(); err == nil {
+		t.Fatalf("test setup left Jujutsu's operation view readable: %s", output)
+	}
+
+	_, err = Provision(context.Background(), failedFetchRunner{Runner: run}, request)
+	if err == nil {
+		t.Fatal("Provision succeeded with Jujutsu operation history that lost borrowed objects")
+	}
+	if !strings.Contains(err.Error(), "Jujutsu's operation view") || !strings.Contains(err.Error(), lost) {
+		t.Fatalf("Provision = %v, want the lost operation object %s", err, lost)
+	}
+	if strings.Contains(err.Error(), "bad object") {
+		t.Fatalf("Provision = %v, want the named lost operation object instead of git's bad object", err)
 	}
 }
 
-// assertHistoryOnlyInFeed fails unless the git directory gitDir holds no pack of its own and none
-// of the objects reachable in the bare feed as a loose object: the clone reads its history through
-// objects/info/alternates and copied nothing. The empty tree is passed over: jj writes it into
-// every store it opens, for its own working-copy commits.
-func assertHistoryOnlyInFeed(t *testing.T, gitDir, feed string) {
+// failedFetchRunner enters Provision's failed-fetch diagnosis path without changing the damaged
+// Jujutsu operation view the test constructed from a real shared clone.
+type failedFetchRunner struct{ Runner }
+
+func (r failedFetchRunner) Run(ctx context.Context, command Command) (Result, error) {
+	if commandWith(command.Argv, "jj", "git", "fetch") {
+		return Result{ExitCode: 1, Stderr: "the provision fetch failed"}, nil
+	}
+	return r.Runner.Run(ctx, command)
+}
+
+func commitOnlyInFeed(t *testing.T, feed string) string {
 	t.Helper()
-	counts := map[string]string{}
-	for _, line := range strings.Split(runSetup(t, gitDir, "git", "--git-dir="+gitDir, "count-objects", "-v"), "\n") {
-		if key, value, ok := strings.Cut(line, ": "); ok {
-			counts[key] = strings.TrimSpace(value)
-		}
+	tree := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main^{tree}"))
+	command := exec.Command("git", "--git-dir="+feed, "commit-tree", tree)
+	command.Stdin = strings.NewReader("lost borrowed history\n")
+	command.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Legion test",
+		"GIT_AUTHOR_EMAIL=legion-test@example.invalid",
+		"GIT_COMMITTER_NAME=Legion test",
+		"GIT_COMMITTER_EMAIL=legion-test@example.invalid",
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create feed-only commit: %v\n%s", err, output)
 	}
-	if counts["in-pack"] != "0" || counts["packs"] != "0" {
-		t.Fatalf("the clone's own store holds packs=%s in-pack=%s; history should stay in the feed", counts["packs"], counts["in-pack"])
-	}
-	history := strings.Fields(runSetup(t, feed, "git", "--git-dir="+feed, "rev-list", "--objects", "--no-object-names", "--all"))
-	if len(history) == 0 {
-		t.Fatal("the feed holds no history to compare the clone's store with")
-	}
-	for _, object := range history {
-		if object == emptyTree {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(gitDir, "objects", object[:2], object[2:])); err == nil {
-			t.Fatalf("the clone's own store holds %s, an object of the feed's history", object)
-		} else if !os.IsNotExist(err) {
-			t.Fatal(err)
-		}
-	}
+	return strings.TrimSpace(string(output))
 }
-
-// emptyTree is git's id of the tree with no entry.
-const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
