@@ -270,6 +270,51 @@ func TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused(t *testing.T
 	}
 }
 
+// TestACreateThatNamesNoneAsItsGitHubOwnersWritesNothing: on create, `--github-owners none` (in
+// any case) names no GitHub account. It is not the removal it is on retag, and the github-app
+// secret it would write has no github-owners tag. Such a create is refused with a usage error
+// before anything is written, on both stores, as a create without --github-owners is. Today it
+// writes the secret and its App key, then exits 1 when the broker refuses the secret
+// github-owners-missing.
+func TestACreateThatNamesNoneAsItsGitHubOwnersWritesNothing(t *testing.T) {
+	owners := []string{"none", "None", "NONE"}
+	t.Run("aws", func(t *testing.T) {
+		local := secrets.NewLocal()
+		startSecretBroker(t, servedBy(local))
+		useAWS(t, local, testAccount, adaSignIn)
+		for _, owner := range owners {
+			useStdin(t, "stored-value")
+			_, stderr, code := runSecret("create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", owner)
+			if code != exitUsageError {
+				t.Fatalf("create --github-owners %q: exit %d stderr %q; want a usage error", owner, code, stderr)
+			}
+			if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+				t.Fatalf("create --github-owners %q wrote NEW_KEY", owner)
+			}
+		}
+	})
+	t.Run("gcp", func(t *testing.T) {
+		fake := newFakeSecretManager()
+		startFakeSecretManager(t, fake)
+		useGCPIdentity(t, "authorized_user", "ada@example.com")
+		settings := gcpTestSettings()
+		startSecretBrokerWith(t, settings, gcpServedBy(fake, settings))
+		for _, owner := range owners {
+			useStdin(t, "stored-value")
+			_, stderr, code := runSecret("create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", owner)
+			if code != exitUsageError {
+				t.Fatalf("create --github-owners %q: exit %d stderr %q; want a usage error", owner, code, stderr)
+			}
+			fake.mu.Lock()
+			_, written := fake.secrets[testGCPPrefix+"new-key"]
+			fake.mu.Unlock()
+			if written {
+				t.Fatalf("create --github-owners %q wrote NEW_KEY", owner)
+			}
+		}
+	})
+}
+
 // countingTagWrites is a secrets.Local that counts DescribeSecret, TagResource and UntagResource
 // calls and can refuse UntagResource as IAM refuses it.
 type countingTagWrites struct {
