@@ -391,7 +391,7 @@ func machineLoginBody(t *testing.T, approver, service, loginHint string, now tim
 // TestAServiceLoginIsDecidedByAnyoneAndAPersonsByThemAlone pins the machine-login half of the
 // approver rule, which keys on the service the signed request names, never on the approver stored
 // beside it: a service's login is decided by any login but the sentinel and an empty one, whether
-// its record names anyone (every one Login opens now), the person an older daemon put in its
+// its record names anyone (every one a broker before token logins opened), the person an older daemon put in its
 // login_hint, or a person a broker from before this rule stored, and its chain verifies over
 // whichever login approved it; a person's machine login is decided by that person alone, and one
 // naming anyone, which an older binary could open, by no one, its chain verifying over none.

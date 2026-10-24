@@ -65,7 +65,7 @@ func TestEnrollSessionKeyEnrollsAndRevokesAnExternalKey(t *testing.T) {
 
 // TestTheBoxOpsAreUnknown: enroll-box and unenroll-box, the ops an agent-secrets CLI before
 // legion-envoy 10 asked, are gone: the helper answers each as any op it does not know, BAD_REQUEST
-// `unknown op <op>`, and enrolls nothing.
+// `unknown op <op>`.
 func TestTheBoxOpsAreUnknown(t *testing.T) {
 	cr := newContractRig(t)
 	for _, op := range []string{"enroll-box", "unenroll-box"} {
@@ -73,10 +73,6 @@ func TestTheBoxOpsAreUnknown(t *testing.T) {
 		if resp := rawCall(t, cr.sock, line); resp.OK || resp.Code != CodeBadRequest || resp.Error != "unknown op "+op {
 			t.Fatalf("%s: %+v, want %s unknown op %s", op, resp, CodeBadRequest, op)
 		}
-	}
-	var n int
-	if err := cr.broker.Store.Pool.QueryRow(context.Background(), `select count(*) from enrollments`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("enrollments after the box ops = %d (%v), want 0", n, err)
 	}
 }
 

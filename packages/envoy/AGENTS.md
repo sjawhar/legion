@@ -2982,7 +2982,7 @@ was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Servic
 keyed by exact subject, no wildcard) to the one service it logs in as; a subject not listed, or
 listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token
 `401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does
-not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `Login`
+not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `LoginDevice`
 shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no
 issuer `404 TOKEN_LOGIN_OFF`. `enroll.Service.IssueTokenLogin` writes the credential. Each subject
 holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial
@@ -3033,7 +3033,7 @@ lowercase login against it, with `service` the one the record's signed request o
 but `anyone` itself deciding a machine login whose request names a service, whatever its record
 stored (a broker before that rule stored the person its `login_hint` named), and an `agent_secret`
 record whose approver is `anyone`; no login deciding a person's machine login whose approver is
-`anyone` (one a binary from before `Login` refused that hint could have opened); and a decision
+`anyone` (one a binary from before the login refused that hint could have opened); and a decision
 recording the canonical login it returns. `record.ChainVerifier`
 (`chain.go`, built per record kind by `store.Store.ChainVerifier`, whose `Kind` also selects that
 rule, so a record of one kind never backs the other's credential) is

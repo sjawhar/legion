@@ -88,8 +88,8 @@ func TestEnrollHelperAsksForASessionKey(t *testing.T) {
 	}
 	for _, kind := range [][]string{{"--kind", "box"}, {"--kind=box"}} {
 		args := append(append([]string{"enroll", "--helper"}, kind...), "--runtime-id", "container-1", "--thumbprint", "tp-1")
-		if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, env, args...); exit != exitUsageError {
-			t.Fatalf("enroll %v = %d (stderr %q), want a usage error", kind, exit, stderr)
+		if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, env, args...); exit != exitUsageError || !strings.Contains(stderr, "-kind") {
+			t.Fatalf("enroll %v = %d (stderr %q), want a usage error naming the flag", kind, exit, stderr)
 		}
 	}
 	if ops := drainOps(reqs); len(ops) != 0 {

@@ -26,10 +26,6 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{
 		"runtime-id": true, "thumbprint": true, "session-id": true,
 	})
-	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
-		return exitUsageError
-	}
 	flags := newFlagSet("enroll", stderr)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
@@ -37,6 +33,10 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
+	}
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
+		return exitUsageError
 	}
 	if !*helperFlag {
 		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
