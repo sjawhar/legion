@@ -2331,7 +2331,7 @@ describe("envoy OMP extension", () => {
     const none = await bootAskNudge(envoyExtension, "ses_nudge_prompt_none", () => ({}));
     await none.userTurn();
     await none.stop();
-    expect(none.asked[0]?.prompt).toContain("There are no open asks");
+    expect(none.asked[0]?.prompt).toContain("You have no open asks in Dispatch.");
   });
 
   test("the ask the agent opens itself spends the check the period owed", async () => {

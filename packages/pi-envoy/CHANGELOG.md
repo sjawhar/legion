@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event
+  a human already said they will send and that is on its way: such a reply is an event, not an
+  open question. Its WAITING case covered any information from a human, so an agent waiting for
+  the go-ahead message its user had promised answered WAITING, and the `dispatch-ask-reminder`
+  steer then told it to open a Dispatch ask for that message. Something a human put off for later,
+  or promised and then did not send, still counts as WAITING. WAITING now excludes a wait the
+  session's listed asks cover, and PROCEEDING counts a wait any open ask covers, another session's
+  included. With no open asks of its own, the prompt says the session has none, where it said
+  Dispatch had none: when another session's open ask covered the wait, that line denied the ask
+  existed, the check answered WAITING, and the steer had the agent open a duplicate ask. The
+  one-word WAITING/PROCEEDING answer and its parse are unchanged.
+
 - The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
   client and sends the call without the pane. A tmux client waiting to connect to a tmux server too
   busy to accept caught the SIGTERM of the lookup's 5 s timeout and kept waiting, and the command
