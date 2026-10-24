@@ -2473,27 +2473,36 @@ that starts, costs its quota and answers nothing.
 `internal/runtime/sandbox/manifest.go`), so a role holds a Kubernetes credential only where its
 operator projects one through `runtime.kubernetes.pod.volumes`
 ([Configuration](#configuration)); the image carries the client and no credential for it
-([Worker image](#worker-image)). Two answers tell a role which deployment it is in, and they are
-the gate for everything below:
+([Worker image](#worker-image)). Three answers tell a role which deployment it is in, and they
+are the gate for everything below:
 
 ```sh
 kubectl auth can-i create jobs      # may this role start a workload at all
 kubectl auth can-i create services  # may it give one a name on the network
+kubectl auth can-i get services     # `kubectl apply` reads the live object before it creates one
 ```
 
-Neither answer is the one a role with no credential gets. The image ships no kubeconfig and sets
-no `KUBECONFIG`, so without a projected token `kubectl` builds no in-cluster configuration at
-all: it falls back to `localhost:8080` and **exits 1**, its last line `The connection to the
-server localhost:8080 was refused - did you specify the right host or port?` (measured from a
-role container with the in-cluster environment removed). That is as conclusive as `no` — nothing
-in this section applies, and a tool the work needs on the issue's own files arrives the way it
-already does, below. A plain `yes` to the first and `no` to the second is a deployment whose
-declarations are not applied yet: a workload can be started but never reached.
+The third is not a duplicate of the second. `kubectl apply` is client-side by default and reads
+the object it is about to create, so a role that may create a Service but not read one gets
+`Error from server (Forbidden): error when retrieving current configuration of: … cannot get
+resource "services"` and never reaches the create; `kubectl create` of the same file is refused
+on the create instead. Both verbs are needed for the step as written, which is why the gate asks
+for both.
 
-**Unless both commands answer a bare `yes`, submit nothing.** The sequence below is
+None of the three is the answer a role with no credential gets. The image ships no kubeconfig
+and sets no `KUBECONFIG`, so without a projected token `kubectl` builds no in-cluster
+configuration at all: it falls back to `localhost:8080` and **exits 1**, its last line `The
+connection to the server localhost:8080 was refused - did you specify the right host or port?`
+(measured from a role container with the in-cluster environment removed). That is as conclusive
+as `no` — nothing in this section applies, and a tool the work needs on the issue's own files
+arrives the way it already does, below. A `yes` to the first and a `no` to either of the others
+is a deployment whose declarations are not applied yet: a workload can be started but never
+reached.
+
+**Unless all three commands answer a bare `yes`, submit nothing.** The sequence below is
 unconditional and its only `kubectl delete job` is after the Service steps, which are refused
-`Forbidden` wherever the second answer is `no` — so a Job submitted on anything but two `yes`es
-is a four-processor workload nobody removes, sitting on the namespace's shared quota until its
+`Forbidden` wherever either Service answer is `no` — so a Job submitted on anything less is a
+four-processor workload nobody removes, sitting on the namespace's shared quota until its
 deadline runs out.
 
 The namespace is the role's own and is never written down: the projected credential names it in
@@ -2524,14 +2533,16 @@ it is marked where it stands:
   reachable. **This is the one rule admission does not enforce**: a workload without that label
   is admitted, started, charged against the shared quota, and reachable by nothing, because the
   ingress rule selects the label rather than the namespace. Nothing refuses it and nothing says
-  so; the symptom is the reachability check below never connecting and ending at its deadline,
-  which is what tells it apart from a database still starting up, and why that check is the step
-  after the wait rather than the last. A role that sees it compares the labels on its own pod
-  (`kubectl get pod -l job-name=<workload> -o jsonpath='{.items[0].metadata.labels}'`) with the
-  deployment's declaration — not the Service's endpoints, which this identity may not read
-  (`kubectl auth can-i get endpoints` answers `no`). The label's name is in that declaration,
-  with the compute class, the storage class and the namespace; a role reads it there rather than
-  here.
+  so; the symptom is the reachability check below ending at its deadline with `TimeoutError`
+  every try — *that* class, not a refusal, which is a workload still starting up, and the
+  distinction the paragraph under the sequence sets out. It is why the check is the step after
+  the wait rather than the last. A role that sees it compares the labels on **the workload's**
+  pod (`kubectl get pod -l job-name=<workload> -o jsonpath='{.items[0].metadata.labels}'`, which
+  is a pod of this namespace; a role may not read its own, in the namespace Legion's pods run
+  in) with the deployment's declaration — not the Service's endpoints, which this identity may
+  not read (`kubectl auth can-i get endpoints` answers `no`). The label's name is in that
+  declaration, with the compute class, the storage class and the namespace; a role reads it
+  there rather than here.
 
 Name the workload for the issue, as everything else on this cluster is named
 (`issue-legion-<project>-<issue key lowercased>`, `legion-<project>-<issue key lowercased>`
@@ -2645,9 +2656,27 @@ Read the first as starting up and the second as the label.
 
 Speaking the protocol is a client library onto the issue's own disk, the way every other tool
 that works from the checkout arrives (below), run from the checkout against that same address —
-never a binary installed into the pod. The last line asks only for Jobs and pods because this
-identity may not read Services either: `kubectl auth can-i get services` answers `no` wherever
-`create services` does.
+never a binary installed into the pod. The last line asks only for Jobs and pods because reading
+a Service needs `get services`, the gate's third answer; where that is `no`, as it is in this
+deployment today, the line is refused like the Service steps above it.
+
+**What of this has been run, and where.** This section is written partly from commands executed
+in the deployment it describes and partly from the declarations dispatch://INFRA-206 carries,
+and a reader is owed the boundary rather than a uniform voice:
+
+- *Executed from a role container here, at this change's head*: the three gate commands and the
+  whole grant matrix behind them (`create`/`delete jobs`, `get pods`, `pods/log` `yes`;
+  `patch`/`update jobs`, `get`/`list endpoints`, `get`/`create services`, `create pods` `no`);
+  the Job manifest above through the namespace's own admission, server-side with nothing
+  created, together with one deliberate breakage of each rule, each refused naming the rule; the
+  credential-less gate, with the in-cluster environment removed; and the reachability block, run
+  as published against a listener, against a port that refuses and then listens, and against an
+  address whose packets are dropped.
+- *Not executed anywhere yet*: creating the Job for real, the Service steps, the wait, the logs
+  and the delete. The Service steps are refused `Forbidden` in this deployment — on `get` before
+  the create is attempted — so the sequence has never run past its second line here. Those lines
+  are written from the declarations and wait on a person applying them; read them as a design
+  until a role has run them end to end and said so.
 
 What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
 which belongs to another namespace and to one node at a time, and a role may not run a command
