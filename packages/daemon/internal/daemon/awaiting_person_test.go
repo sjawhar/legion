@@ -83,13 +83,16 @@ func catchUpRoot(t *testing.T, waiting record.Awaiting, gate *record.DesignGate,
 
 // What a person did while the daemon was down answers a waiting root at boot, as its live event
 // would have: an approval or a changes request of the gate's version, a newer version whoever wrote
-// it, a person's answer or resolution of the ask, a person's reply in the ask's thread whatever its
-// state, and a person's reply handing the open approval request to the agent.
+// it (newer than the version waited on, even when a registration already recorded it on the gate
+// and its own event never arrived), a person's answer or resolution of the ask, a person's reply in
+// the ask's thread whatever its state, and a person's reply handing the open approval request to
+// the agent.
 func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
 	for _, tc := range []struct {
 		name     string
 		awaiting record.Awaiting
+		gate     *record.DesignGate
 		client   awaitingDispatch
 	}{
 		{name: "approved gate", awaiting: record.Awaiting{GateVersion: 3},
@@ -97,6 +100,9 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 		{name: "changes requested on the gate's version", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3)}}},
 		{name: "a newer version, whoever wrote it", awaiting: record.Awaiting{GateVersion: 3},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"}}},
+		{name: "a newer version a registration recorded on the gate", awaiting: record.Awaiting{GateVersion: 3},
+			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"}}},
 		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
@@ -111,8 +117,8 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: architectSession, LastReplyID: "reply-2", LastReplyBy: alice}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var waitGate *record.DesignGate
-			if tc.awaiting.GateVersion != 0 {
+			waitGate := tc.gate
+			if waitGate == nil && tc.awaiting.GateVersion != 0 {
 				waitGate = gate
 			}
 			got := catchUpRoot(t, tc.awaiting, waitGate, &tc.client)

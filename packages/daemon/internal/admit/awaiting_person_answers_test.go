@@ -207,6 +207,41 @@ func TestARegistrationWhoseRequestWaitsOnTheArchitectAnswersNothing(t *testing.T
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
 }
 
+// A registration of a version newer than the one the root waits on answers the wait whoever wrote
+// that version, as the live artifact.version would: Dispatch then waits on the agent, and the
+// version's own event may never reach the daemon, so nothing else would resume the root.
+func TestARegistrationOfANewerVersionAnswersTheWaitWhenItsEventIsLost(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	handBackOnAClosedGate(t, pool, admission)
+	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v5", intake.GateRegistered{
+		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, RequestWaitsOnAgent: true,
+	}, admission.engine, admission); err != nil {
+		t.Fatalf("register gate v5: %v", err)
+	}
+	got := issue(t, pool, "LEGION-ROOT")
+	if !got.Answered() || got.Awaiting.GateVersion != 5 {
+		t.Fatalf("root after registering v5 over a wait on v4 = %#v, want answered at version 5", got)
+	}
+}
+
+// A review of a version older than the one the root waits on, applied late, answers nothing: the
+// person has not reviewed the version the root waits on.
+func TestAnOlderReviewAppliedLateLeavesTheNewerWaitUnanswered(t *testing.T) {
+	for _, kind := range []intake.DispatchArtifactKind{intake.DispatchArtifactChangesRequested, intake.DispatchArtifactApproved} {
+		t.Run(string(kind), func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			handBackOnAClosedGate(t, pool, admission)
+			applyFact(t, pool, admission, "late-v3-review", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+				Kind: kind, Version: 3, Reason: "name the rollback path"})
+			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() {
+				t.Fatalf("root after a late v3 review over a wait on v4 = %#v, want it still waiting unanswered", got)
+			}
+		})
+	}
+}
+
 // The architect is told a changes request once, whichever of the live event, the registration's
 // read of Dispatch and the gate seed's read reaches the daemon first, and whichever of the others
 // follows: the gate records the request told, by version and reason, and the other reads find it
@@ -236,6 +271,11 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 		// resume task names the request: the seed's read is the only thing that can tell it.
 		{name: "only the seed carries it, on a root a child keeps in its slot", busy: true,
 			order:   []intake.Fact{intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4}, seeded},
+			reasons: []string{"name the rollback path"}},
+		// A registration whose read predates the review the live event told rebuilds the gate from
+		// Dispatch; it keeps the told record, so the seed's read of that review tells nothing.
+		{name: "the live event, then a registration whose read predates it, then the seed", busy: true,
+			order:   []intake.Fact{changes, intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4}, seeded},
 			reasons: []string{"name the rollback path"}},
 		{name: "a second review at the same version", order: []intake.Fact{changes, second},
 			reasons: []string{"name the rollback path", "and name who runs the restore"}},
