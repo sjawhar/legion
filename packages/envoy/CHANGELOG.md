@@ -1122,6 +1122,21 @@
   and a command printed for running again starts with `GOOGLE_APPLICATION_CREDENTIALS=…`, naming
   the file. The `--profile` refusal under the GCP store names the Google sign-in it uses instead.
 
+- With two `envoy-dispatch` processes on one database, a document whose room one process held
+  behind the durable head no longer answers every write with `503 DOC_SERVICE_UNAVAILABLE` for a
+  while, and a version named there no longer records text missing the other process's edit
+  (INFRA-218). A settlement the durable gate refused from such a room was retried on the same
+  room, which can never pass the gate, so its third refusal failed the room
+  (`document settlement failed 3 times`) and every transaction on the document was refused until
+  the eviction ran. The refusal now closes the room and settles it again from the reloaded one. A
+  named or snapshot version taken from a room behind the head rendered that room's text while
+  recording the stored head, so no later settlement versioned the other process's words, and it
+  listed the room's unstored browser edits, whose authors were listed again once the edit was
+  resent; it now renders the stored document and lists none of them. The settlement's close and
+  the stale-room evictor's both reserve the room they checked, so a write that would open between
+  the check and the close answers 503 and is retried on the reloaded room instead of being
+  forgotten with the closed one, and neither closes a room that replaced the one it checked.
+
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while
   it recorded its request object's `jti` on a second one, so as many concurrent logins as the

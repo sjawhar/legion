@@ -1390,7 +1390,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 // stands behind that head (captureLiveTextAndAuthors). It is read on the pool that owns loads
 // (LoadDocument), as a cold write's fork reads the stored document (coldFork), and the caller
 // holds the document's advisory lock, so no append lands between the head it compared against
-// and this read.
+// and this read. A load that fails does not fail the room, where coldFork's does: coldFork reads
+// the store in place of a room, so its failure is the document's, while here the room is sound
+// and only behind, and its settlement or the stale-room evictor reloads it. The version's
+// transaction answers ErrServiceUnavailable instead, and its caller retries.
 func (s *Service) storedTree(ctx context.Context, artifactID string) (*pmdoc.Node, error) {
 	loaded, err := s.persistence.LoadDocument(ctx, artifactID)
 	if err != nil {

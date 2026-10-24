@@ -863,13 +863,14 @@ func requireTheRoomClosed(t *testing.T, p *dispatchProcess, editor *docstest.Pee
 }
 
 // requireTheSecondEviction is what credits the close above to the window: editor.Ended says the
-// socket went, not who ended it, and both rows below have another path that ends it - the
-// settlement rescue's failRoomLocked for the room that owes one, an unload for either - so the
-// close is the window's only if the evictor closed that room a second time. The first eviction
-// is asserted in burstLeavingTheRoomBehind, so the count here is two. The line is written after
-// the room has closed, so it is waited for rather than counted the moment the socket went; ten
-// seconds is the budget the eviction's other waits in this file use, and it is spent only by a
-// row that is already failing.
+// socket went, not who ended it, and both rows below have another path that ends it - for the room
+// that owes a settlement, that settlement's own close of a room the durable gate finds behind the
+// head (reloadRoomBehindHead, docs/service.go), and an unload for either - so the close is the
+// window's only if the evictor closed that room a second time. The first eviction is asserted in
+// burstLeavingTheRoomBehind, so the count here is two. The line is written after the room has
+// closed, so it is waited for rather than counted the moment the socket went; ten seconds is the
+// budget the eviction's other waits in this file use, and it is spent only by a row that is
+// already failing.
 func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what string) {
 	t.Helper()
 	const budget = 10 * time.Second
@@ -883,7 +884,7 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 			t.Fatalf("%s: the evictor closed this room %d times, and the burst leaves it exactly two - the first write's and the refused notification's window - so something else wrote this document:\n%v",
 				what, evictions, p.logLines("closed a document room another process's write left behind", "room="+artifactID))
 		case time.Now().After(deadline):
-			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - the settlement rescue's failRoomLocked, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
+			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - the owed settlement's close of a room behind the head, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
 				what, evictions, budget,
 				p.logLines("closed a document room another process's write left behind", "room="+artifactID),
 				p.logLines("close a document room another process's write left behind", "room="+artifactID),
@@ -894,12 +895,23 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 	}
 }
 
+// owedSettlementDelay is process A's settle delay in the row below, which holds its owed
+// settlement past the window. That settlement is armed when A's reconnecting browser loads the
+// room, because the document owes one (onLoadDocument), and it is the other path that closes this
+// room: the durable gate refuses it from a room behind the head, and the refusal closes the room
+// at once (reloadRoomBehindHead, INFRA-218). At the default two seconds it fired 10-50 ms after the
+// window's own close, close enough on a loaded runner to come first, and its close is not the
+// evictor's, so the row failed on requireTheSecondEviction. Ten seconds keeps the settlement clear
+// of the window and of refusedWindowClosesWithin below, so the window is what closes the room
+// whenever the window works, and the settlement is what closes it only when it does not.
+const owedSettlementDelay = 10 * time.Second
+
 // refusedWindowClosesWithin bounds the row below between the two paths that could close its
 // room, since a bound above both would be green on either. The window's own re-examination
 // closes it a little under two seconds after the trailing write - what the write left of the
 // interval, plus the close - which was 1.9486 s in this row's green run here and 1.88 s when it
-// was built. The settlement rescue - three refusals two seconds apart, maxSettleFailures of
-// them, ending in failRoomLocked - took 6.018 s in the control run with the wake unwired.
+// was built. The owed settlement closes it at owedSettlementDelay after A's reconnect, which is
+// before the trailing write, so about ten seconds from that write.
 //
 // Both of those figures are taken from the trailing write; this budget is not counted from
 // there. It is spent by requireTheRoomClosed's own time.After, which starts when that helper is
@@ -908,20 +920,29 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 // only labels its log line. That origin is later than wrote by the trailing write's own
 // duration plus that one query, which is inside the 91-164 ms the helper logs for the whole
 // stretch from the first eviction, the write included. So in the terms the two figures above
-// use, the deadline falls at about 4.1 s: some 2.2 s past the window's close and some 1.9 s
-// short of the rescue. This row still goes red when the wake is gone instead of green on the
-// rescue's clock.
+// use, the deadline falls at about 4.1 s: some 2.2 s past the window's close and some 5.9 s
+// short of the settlement's. This row still goes red when the wake is gone instead of green on
+// the settlement's clock.
 const refusedWindowClosesWithin = 4 * time.Second
 
 // The deferred re-examination, in the branch where something else could also have rescued the
 // room. A notification the eviction interval refuses is remembered and re-examined when that
-// room's window ends; here the room also owes a settlement, so the durable gate would fail it in
-// about six seconds anyway - three refusals two seconds apart, maxSettleFailures of them, ending
-// in failRoomLocked. The window is the shorter of the two and is what closes it, which is why
-// this row is bounded below the rescue's own time (refusedWindowClosesWithin) and why the close
-// must be the evictor's second eviction of this room rather than any close at all.
+// room's window ends; here the room also owes a settlement, which the durable gate refuses from
+// a room behind the head, and that refusal closes the room too (reloadRoomBehindHead). A's settle
+// delay (owedSettlementDelay) puts that settlement well after the window, so the window is what
+// closes the room, which is why this row is bounded below the settlement's own time
+// (refusedWindowClosesWithin) and why the close must be the evictor's second eviction of this
+// room rather than any close at all.
 func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
-	pair := startPair(t, nil)
+	pair := newPair(t)
+	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, SettleDelay: owedSettlementDelay,
+	})
+	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+		NATSURL: pair.nats, SigningKey: multiprocessSigningKey,
+	})
+	pair.a.waitHealthy(t)
+	pair.b.waitHealthy(t)
 	project := uniqueProjectKey(t, "OWD")
 	pair.a.createProject(t, project, "Owes a settlement")
 	_, artifactID := pair.a.createIssueIn(t, project, "Written in a burst elsewhere", "before")
@@ -934,12 +955,13 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 }
 
 // The branch the deferred re-examination was built for, and the one nothing else covers: a room
-// no settlement of this process's will ever fail. A settlement is what rescued the room in the
-// row above - refused by the durable gate three times two seconds apart until failRoomLocked -
-// and a reader with the tab open who has typed nothing has no such rescuer, so the window's
-// re-examination is the only path that closes its room, and without it that reader holds text
-// the store replaced for as long as the tab stays open (roomIdleTimeout is how long a room stays
-// resident *after its last peer leaves*, which a room with a browser in it never reaches).
+// no settlement of this process's will ever close. A settlement is what could rescue the room in
+// the row above - refused by the durable gate from a room behind the head, it closes that room
+// (reloadRoomBehindHead) - and a reader with the tab open who has typed nothing has no such
+// rescuer, so the window's re-examination is the only path that closes its room, and without it
+// that reader holds text the store replaced for as long as the tab stays open (roomIdleTimeout is
+// how long a room stays resident *after its last peer leaves*, which a room with a browser in it
+// never reaches).
 //
 // How that room is made, and what the construction is and is not. The document is created and
 // written on B, and A only ever reads it, which removes the rescuer rather than the condition -

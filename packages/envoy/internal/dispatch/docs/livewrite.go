@@ -163,11 +163,21 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 }
 
 // openLiveWrite takes artifactID's writer slot for the transaction, first waiting for the
-// transaction holding it, if one does.
+// transaction holding it, if one does. A room a close has reserved because it stands behind the
+// durable head (reserveRoomCloseLocked) gives its slot to no one: a write admitted then would be
+// forgotten with the room's state, and the room that replaces it would load knowing nothing of the
+// write. The transaction does not wait for that close, whose persistence flush takes the
+// document's advisory lock (awaitRoomRecovery says why no transaction waits for such work): it
+// fails with ErrServiceUnavailable, as on a failed room, and its caller retries once the room has
+// reloaded.
 func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
 	for {
 		state := s.lockState(artifactID)
+		if state.reloading {
+			s.unlockState(artifactID, state)
+			return nil, fmt.Errorf("%w: document room %s is reloading", ErrServiceUnavailable, artifactID)
+		}
 		if state.liveWriter == nil {
 			state.liveWriter = write
 			state.roomGeneration++

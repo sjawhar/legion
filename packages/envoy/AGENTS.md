@@ -655,11 +655,20 @@ writes durable state for a document from a room that is not at the durable head:
 instance carries the version it holds the document through, and an append, a settlement, a fork
 of the live tree or a rebuild from a room behind the head is refused (`ErrRoomBehindHead`,
 `docs/pending_authors.go`), the live write taking the cold path instead. A settlement refused so
-closes the room at once rather than retrying on it (`reloadRoomBehindHead`), since no retry on
-that room can pass the gate and three would fail the room, refusing every transaction on the
-document until its eviction ran; the settlement re-arms on the reloaded room (INFRA-218). A named
-or snapshot version whose room is behind the head, read under the document's advisory lock, is
-rendered from the stored document instead (`storedTree`), and neither it nor a version over a
+closes the room rather than retrying on it (`reloadRoomBehindHead`), since no retry on that room
+can pass the gate and three would fail the room, refusing every transaction on the document until
+its eviction ran; the settlement re-arms on the reloaded room (INFRA-218). It leaves the room open
+while a write of this process is in flight on it (an open live write, which arms the settlement
+when it finishes, or an update its persistence has not stored, whose settlement is armed a settle
+delay later) and during a shutdown, which leaves the settlement to the next process. The
+stale-room evictor's close (`closeRoomBehindHead`) and this one both reserve the room under its
+state lock in the same hold that found no write in flight (`reserveRoomCloseLocked`): the
+reservation closes only the instance that was checked, never a room that replaced it, and until
+the close has forgotten the state the room's writer slot is refused, `503
+DOC_SERVICE_UNAVAILABLE` as on a failed room, rather than handed to a write the close would
+forget, whose commit would move the reloaded room's cursor past an update that room never took. A
+named or snapshot version whose room is behind the head, read under the document's advisory lock,
+is rendered from the stored document instead (`storedTree`), and neither it nor a version over a
 cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of those
 changes, and an append the gate refuses is credited again when its browser resends it.
 What is per-process is the room: while a room is resident in one process it receives none of the

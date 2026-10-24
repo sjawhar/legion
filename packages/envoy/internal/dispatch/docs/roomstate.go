@@ -82,6 +82,10 @@ type roomState struct {
 	closed     bool
 	failed     error
 	failedDone chan struct{}
+	// reloading marks a state whose room a close is about to retire because the room stands behind
+	// the durable head (reserveRoomCloseLocked): no transaction takes its writer slot from then on
+	// (openLiveWrite), and the close forgets the state with the room (evictRoom).
+	reloading bool
 	// released marks a state the service has forgotten (forgetLocked), so a lookup that found it
 	// before it went takes the document's current state instead.
 	released bool
@@ -273,6 +277,11 @@ func (s *Service) hasWriteInFlight(room string) bool {
 		return false
 	}
 	defer s.unlockState(room, state)
+	return state.writeInFlightLocked()
+}
+
+// writeInFlightLocked is hasWriteInFlight for a state its caller holds state.mu on.
+func (state *roomState) writeInFlightLocked() bool {
 	return state.liveWriter != nil || state.durableAppends.Load() > 0 || state.settling > 0
 }
 

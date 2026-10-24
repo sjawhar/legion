@@ -320,11 +320,19 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 		e.reachedVerdict(artifactID)
 		return false
 	}
-	// Evict is the service's own forced reload: it closes the room, flushing what the room still
-	// owes the store, and drops the resident state, so the next access loads the durable
-	// document. The room's browsers are closed with it and reconnect to the reloaded room.
-	if err := service.Evict(ctx, artifactID); err != nil {
+	// The close is the service's own forced reload: it closes the room, flushing what the room
+	// still owes the store, and drops the resident state, so the next access loads the durable
+	// document. The room's browsers are closed with it and reconnect to the reloaded room. It
+	// closes live, the instance read above, alone: a write that opened since the check above, or a
+	// room that replaced live (a settlement's own reload, reloadRoomBehindHead), is left as it is,
+	// and the room is armed again like any other attempt that got no answer.
+	closed, err := service.closeRoomBehindHead(artifactID, live)
+	if err != nil {
 		slog.Warn("dispatch: close a document room another process's write left behind", "room", artifactID, "error", err)
+		e.armRetry(artifactID)
+		return false
+	}
+	if !closed {
 		e.armRetry(artifactID)
 		return false
 	}
