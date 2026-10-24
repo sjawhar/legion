@@ -50,8 +50,13 @@
 # Docker assigns the containers' host ports, the listener and Dispatch bind ports
 # scripts/e2e/lib/rig.sh picks, and the kernel assigns each run's daemon stand-in its port.
 #
-# Operator input (no default in this repository):
-#   LEGION_E2E_MODEL_GATEWAY_URL  profile: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
+# Operator input (no default in this repository), for `profile`:
+#   LEGION_E2E_MODEL_ROUTE        gateway (the default) or key-file: how the agents reach Anthropic
+#   LEGION_E2E_MODEL_GATEWAY_URL  gateway: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
+#   LEGION_E2E_ANTHROPIC_KEY_FILE key-file: a 0600 file holding a plaintext Anthropic key
+#                                 (scripts/e2e/lib/install-key-file-model-route.sh); the key command
+#                                 that reads it lives in the label's profile directory, and removing
+#                                 that directory removes it
 # Optional:
 #   SKILL_SCENARIOS_WORK      work directory, outside any checkout (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
@@ -134,6 +139,39 @@ load_label() {
   profile=$(<"$P/profile")
 }
 
+# install_model_route CHECKOUT PROFILE DIR installs the model route of the profile whose HOME is
+# DIR/home, as LEGION_E2E_MODEL_ROUTE picks it, with the checkout's own installer:
+#   gateway (the default)  the Hawk model gateway LEGION_E2E_MODEL_GATEWAY_URL names
+#                          (scripts/e2e/lib/install-model-gateway.sh)
+#   key-file               the 0600 file LEGION_E2E_ANTHROPIC_KEY_FILE names, read fresh on every
+#                          call (scripts/e2e/lib/install-key-file-model-route.sh)
+# Each route writes its call record to DIR/key. The key-file route's key command names the key
+# file's path, so it goes to DIR/model-key, apart from the record: removing the profile (DIR), the
+# one way to rebuild a label, removes it, and a failed install removes it at once.
+install_model_route() {
+  local co=$1 profile=$2 dir=$3
+  case ${LEGION_E2E_MODEL_ROUTE:-gateway} in
+  gateway)
+    bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$dir/home" --dest "$dir/key" --cache-dir "$dir/cache"
+    ;;
+  key-file)
+    if [ -z "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ]; then
+      echo "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" >&2
+      return 1
+    fi
+    bash "$co/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$dir/home" --dest "$dir/key" \
+      --key-dir "$dir/model-key" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" || {
+      rm -rf "$dir/model-key"
+      return 1
+    }
+    ;;
+  *)
+    echo "LEGION_E2E_MODEL_ROUTE is '$LEGION_E2E_MODEL_ROUTE': it is gateway or key-file" >&2
+    return 1
+    ;;
+  esac
+}
+
 cmd_profile() {
   [ $# = 2 ] || fail "usage: rig.sh profile <label> <checkout>"
   local label=$1 P co profile=skills-$1
@@ -164,8 +202,8 @@ cmd_profile() {
     fail "install-plugin-profile.sh --package pi-envoy failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$P/home" --dest "$P/pi-legion" >>"$P/install.log" 2>&1 ||
     fail "install-plugin-profile.sh --package pi-legion failed; see $P/install.log"
-  bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --cache-dir "$P/cache" >>"$P/install.log" 2>&1 ||
-    fail "install-model-gateway.sh failed; see $P/install.log"
+  install_model_route "$co" "$profile" "$P" >>"$P/install.log" 2>&1 ||
+    fail "the model route (${LEGION_E2E_MODEL_ROUTE:-gateway}) could not be installed; see $P/install.log"
   cp "$co/.omp-pin" "$P/pin"
   touch "$P/ready"
   cat "$P/built-from"
