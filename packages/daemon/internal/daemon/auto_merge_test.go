@@ -577,6 +577,69 @@ func TestAREADYMergeFailureThatIsNoWaitSpendsNoWaitingNotice(t *testing.T) {
 	}
 }
 
+// The disagreement is no wait the architect is told of either. GitHub showing the pull request
+// closed, or at another head than the record awaits, is a wait (ghautomerge.Lagging) until it has
+// stood past ghautomerge.LagBound, so a row past mergeWaitWarn that meets one answers every other
+// term of the warn gate: the architect would be told the merge has not been withdrawn and the
+// daemon goes on submitting it, under a cause whose own words are that GitHub shows the pull
+// request closed, and would then be told the opposite within the bound, when the same
+// disagreement stalls and the row's merge-stalled says the daemon stopped submitting. That one
+// telling (readyMergeEnded) is the disagreement's, so the waiting notice stays unspent for the
+// genuine wait that follows. Here GitHub answers the row's read as a pull request closed just
+// now, then as one a required check holds back, and the architect is told once: of the wait.
+func TestAREADYMergeDisagreementSpendsNoWaitingNotice(t *testing.T) {
+	var mu sync.Mutex
+	disagreeing := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		closed := disagreeing
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if closed {
+			// A close GitHub made just now, whose webhook has not reached the record: a
+			// disagreement the next run reads again, far from the bound that stalls it.
+			_, _ = io.WriteString(w, pullJSON("CLOSED", "ready-head", "UNKNOWN"))
+			return
+		}
+		_, _ = io.WriteString(w, pullJSON("OPEN", "ready-head", "BLOCKED"))
+	}))
+	t.Cleanup(server.Close)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	now := time.Now().UTC()
+	// The submission was queued an hour and a minute ago, so every run of it has waited longer
+	// than mergeWaitWarn, while GitHub's own change to the pull request is seconds old.
+	queued := now.Add(-mergeWaitWarn - time.Minute)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head", Queued: queued}, now))
+	clock := now
+	runner := mergeRunner(pool, records, server.URL, quietLogger(), func() time.Time { return clock })
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the run GitHub answered as closed: %v", err)
+	}
+	assertMergeRows(t, pool, 1, "merge-waiting", 0)
+	nextAt, lastError, warned, _ := readyMergeState(t, pool)
+	if !nextAt.After(clock) || !strings.Contains(lastError, "CLOSED") || warned {
+		t.Fatalf("the ready_merge row runs again at %s with %q, warned %v; want it waiting for GitHub and the record to agree with its notice unspent", nextAt, lastError, warned)
+	}
+	// GitHub answers as the record has it again, a pull request a required check holds back: a
+	// wait, and the notice the disagreement must have left unspent is the one it carries.
+	mu.Lock()
+	disagreeing = false
+	mu.Unlock()
+	clock = clock.Add(time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the run GitHub left waiting: %v", err)
+	}
+	reasons := assertMergeRows(t, pool, 1, "merge-waiting", 1)
+	if !strings.Contains(reasons[0], "BLOCKED") || strings.Contains(reasons[0], "CLOSED") {
+		t.Fatalf("merge-waiting reason %q, want the wait's own answer as what GitHub last answered", reasons[0])
+	}
+	if _, _, warned, _ := readyMergeState(t, pool); !warned {
+		t.Fatal("the waiting row is not recorded as having told its architect, want the telling and its notice written together")
+	}
+}
+
 // A reopen at READY's head starts the wait over with the telling. The reopen's queue of the same
 // issue and head replaces the payload (record's readyMergeConflict), which clears
 // record.ReadyMerge.Warned, while leaving the row's created_at at the original queueing: a wait

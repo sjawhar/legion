@@ -148,9 +148,15 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 // and must spend neither the one notice nor render its own error as GitHub's last answer; the
 // genuine wait that follows is what the architect is to be told of. A cause that ends the row
 // (permanentRefusal) warns nobody either, since finishRefused tells the architect of that one
-// itself, and a stalled ghautomerge.Lagging is both a wait and such a cause. A reopen's queue that
-// took the row since starts it over unarmed, unwarned and freshly queued, and its own payload
-// stands: the replacement writes nothing then, and the notice rolls back with it.
+// itself, and a ghautomerge.Lagging carries no notice whether it is stalled or not: the notice's
+// premise is that nothing has gone wrong with the row, while GitHub and the record disagreeing is
+// the case where something has, and the row's own merge-stalled, which finishRefused sends once
+// that disagreement has stood past ghautomerge.LagBound, is the single telling for it. Warning on
+// the unstalled half would tell the architect the daemon goes on submitting a merge while quoting
+// a cause that says GitHub shows the pull request closed, and the bound would then contradict it
+// within the hour. A reopen's queue that took the row since starts it over unarmed, unwarned and
+// freshly queued, and its own payload stands: the replacement writes nothing then, and the notice
+// rolls back with it.
 func (r *outbox) rememberWait(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge, arm bool, cause error) error {
 	now := r.now().UTC()
 	// A row a daemon before record.ReadyMerge.Queued enqueued carries no queue time: its created_at
@@ -161,7 +167,9 @@ func (r *outbox) rememberWait(ctx context.Context, row record.OutboxRow, payload
 		queued = row.CreatedAt
 	}
 	waited := now.Sub(queued)
-	warn := !payload.Warned && errors.Is(cause, wait.ErrWaiting) && waited > mergeWaitWarn && !permanentRefusal(row, cause, now)
+	var lagging *ghautomerge.Lagging
+	warn := !payload.Warned && errors.Is(cause, wait.ErrWaiting) && !errors.As(cause, &lagging) &&
+		waited > mergeWaitWarn && !permanentRefusal(row, cause, now)
 	if !arm && !warn {
 		return nil
 	}
