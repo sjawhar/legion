@@ -12,7 +12,9 @@
 //     line, before or after a here-document opener)
 //     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
-//     `artifact` with a `--name` that ends in `.md`. The gate learns
+//     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
+//     document (`uploadMayBeDocument`): its dry run then decides, from the name and path it
+//     prints, and an upload that is no markdown document runs with no entry. The gate learns
 //     the exact arguments by running that command with `--dry-run` after the command name, in the
 //     call's working directory (then its `cd`, as the call will) and environment, its
 //     here-document still on stdin and without its `2>&1`, under a 10 s limit, and reviews the
@@ -129,10 +131,19 @@ const SCOPED_COMMANDS = [
 ] as const;
 const SPEC_ONLY_COMMAND = "issue";
 const SPEC_FLAGS = ["--spec", "--spec-file"];
-/** `dispatch artifact` is reviewed only as an upload of a markdown document: a `--name` ending in `.md`. */
+/**
+ * `dispatch artifact` is reviewed only as an upload of a markdown document. Dispatch stores an
+ * upload as one when the CLI sends it as text/markdown: inline text (`--content`, `--content-file`),
+ * whatever its name, or a `--path` file whose own name ends in `.md` or `.markdown`, since Bun takes
+ * a file's type from its path. The gate also reviews an upload whose `--name` ends in `.md`.
+ */
 const UPLOAD_COMMAND = "artifact";
-const UPLOAD_NAME_FLAG = "--name";
 const MARKDOWN_NAME = /\.md$/i;
+const MARKDOWN_PATH = /\.(md|markdown)$/i;
+/** The upload flags whose text is the document itself. */
+const INLINE_FLAGS = ["--content", "--content-file"];
+/** The upload flags that read the name or the path from a file, which only the dry run resolves. */
+const INDIRECT_FLAGS = ["--name-file", "--path-file"];
 /** Flags under which a `dispatch` command sends nothing. */
 const NO_SEND_FLAGS = ["--dry-run", "--help"];
 const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
@@ -552,21 +563,58 @@ type Word = { raw: string; value: string };
 
 /**
  * Whether `name` with `flags` is a write the gate reviews: a scoped command, with no flag under
- * which it sends nothing, an `issue` only with a spec, and an `artifact` only with a markdown name.
+ * which it sends nothing, an `issue` only with a spec, and an `artifact` unless its words show it
+ * is no markdown document (`uploadMayBeDocument`).
  */
 function reviewedWrite(name: string, flags: readonly Word[]): boolean {
   if (!(SCOPED_COMMANDS as readonly string[]).includes(name)) return false;
   if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) return false;
-  const flagName = (flag: Word) => flag.value.split("=", 1)[0];
   if (name === SPEC_ONLY_COMMAND) return flags.some((flag) => SPEC_FLAGS.includes(flagName(flag)));
-  if (name === UPLOAD_COMMAND) {
-    const at = flags.findIndex((flag) => flagName(flag) === UPLOAD_NAME_FLAG);
-    if (at === -1) return false;
-    const { value } = flags[at];
-    const named = value.includes("=") ? value.slice(value.indexOf("=") + 1) : flags[at + 1]?.value;
-    return named !== undefined && MARKDOWN_NAME.test(named);
-  }
+  if (name === UPLOAD_COMMAND) return uploadMayBeDocument(flags);
   return true;
+}
+
+const flagName = (flag: Word) => flag.value.split("=", 1)[0];
+
+/**
+ * Whether an upload's words leave it possibly a markdown document: inline text, a name or path read
+ * from a file, or a name or path that is not literal (an expansion, a glob), or that is markdown's.
+ * Only an upload whose literal name and literal path are both no markdown's is not one. An upload
+ * with no `--name` or no `--path` and no inline text is one the CLI refuses before it sends.
+ */
+function uploadMayBeDocument(flags: readonly Word[]): boolean {
+  if (flags.some((flag) => [...INLINE_FLAGS, ...INDIRECT_FLAGS].includes(flagName(flag))))
+    return true;
+  const valueOf = (name: string): { value: string; literal: boolean } | undefined => {
+    const at = flags.findIndex((flag) => flagName(flag) === name);
+    if (at === -1) return undefined;
+    const flag = flags[at];
+    const eq = flag.raw.indexOf("=");
+    const word =
+      eq === -1
+        ? flags[at + 1]
+        : { raw: flag.raw.slice(eq + 1), value: flag.value.slice(flag.value.indexOf("=") + 1) };
+    if (word === undefined) return undefined;
+    return { value: word.value, literal: scanWord(word.raw, 0).unread.length === 0 };
+  };
+  const named = valueOf("--name");
+  const file = valueOf("--path");
+  if (named === undefined || file === undefined) return false;
+  return (
+    !named.literal ||
+    !file.literal ||
+    MARKDOWN_NAME.test(named.value) ||
+    MARKDOWN_PATH.test(file.value)
+  );
+}
+
+/** Whether an upload's arguments, as its dry run prints them, make a markdown document. */
+function uploadIsDocument(args: Input): boolean {
+  return (
+    typeof args.content === "string" ||
+    (typeof args.name === "string" && MARKDOWN_NAME.test(args.name)) ||
+    (typeof args.path === "string" && MARKDOWN_PATH.test(args.path))
+  );
 }
 
 /** A head's words as bash splits them at unquoted blanks, each as written and with its quotes
@@ -1663,8 +1711,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
     };
 
-    /** A scoped command's arguments as the CLI's own --dry-run prints them, or why there are none. */
-    type DryRun = { args: Input } | { failure: string } | { cause: "abandoned" | "shutdown" };
+    /**
+     * A scoped command's arguments as the CLI's own --dry-run prints them, or why there are none,
+     * or `unscoped`: an upload whose resolved name and path make no markdown document.
+     */
+    type DryRun =
+      | { args: Input }
+      | { failure: string }
+      | { cause: "abandoned" | "shutdown" }
+      | { unscoped: true };
     const readArgs = async (
       scoped: ScopedCommand,
       input: Input,
@@ -1733,6 +1788,14 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       if (args === undefined) {
         const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
         return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
+      }
+      if (scoped.upload) {
+        // The name and the path as the CLI sends them: Dispatch trims the name it stores.
+        const resolved = {
+          ...args,
+          ...(typeof args.name === "string" ? { name: args.name.trim() } : {}),
+        };
+        if (!uploadIsDocument(resolved)) return { unscoped: true };
       }
       // An upload given with `--path` prints the path, not the text: the gate reads the file and adds
       // its text as `content`, so the model sees one shape for both forms of the upload.
@@ -1811,6 +1874,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               revised = { ...event.input, command: scoped.command };
             base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
             const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
+            // An upload its dry run shows is no markdown document passes as an unscoped call does,
+            // with no entry; an override flag on it is still removed, since the CLI would refuse it.
+            if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
             if ("cause" in run) decision = givenUp(mode, run.cause);
             // The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
             else if ("failure" in run) decision = pass("error", { reason: run.failure });

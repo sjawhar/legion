@@ -213,12 +213,17 @@ call judges the write against the rules in `extensions/askgate/rules.md` and ans
 - `dispatch ask`, `dispatch message`, `dispatch edit-ask`, `dispatch comment`, `dispatch doc-edit`
   and `dispatch request-approval`
 - `dispatch issue` with `--spec` or `--spec-file`
-- `dispatch artifact` with a `--name` that ends in `.md`: an upload of a markdown document
+- `dispatch artifact` when it uploads a markdown document: inline text (`--content`,
+  `--content-file`), a `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that
+  ends in `.md`
 
-The gate reads the arguments from the command's own `--dry-run`. For an upload given with `--path`,
-the gate reads that file and reviews its text, as for `--content-file`. The gate judges an upload
-against content failure 10 alone: a plan or a report is long by nature. An upload of any other
-file is not reviewed. A `task` subagent is not reviewed.
+The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name or
+path from a file (`--name-file`, `--path-file`) is decided from the name and path the dry run
+prints. An upload whose name or path holds an expansion (`"$NAME"`) is refused, as any write the
+gate cannot read is. For an upload given with `--path`, the gate reads that file from the directory
+the `dispatch` command resolves it in and reviews its text, as for `--content-file`. The gate
+judges an upload against content failure 10 alone: a plan or a report is long by nature. An upload
+of any other file is not reviewed. A `task` subagent is not reviewed.
 
 **The switch.** AskGate runs in each session that has Dispatch on, unless the session's envoy.json
 turns it off. Write this top-level section beside `dispatch`:

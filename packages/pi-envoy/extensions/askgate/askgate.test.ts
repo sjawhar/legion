@@ -1810,6 +1810,69 @@ console.log(JSON.stringify(args, null, 2));
       expect(result?.block).toBe(true);
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
     });
+    // What Dispatch stores as a markdown document: an upload of inline text (`--content`,
+    // `--content-file`), whatever its name, or a `--path` file the CLI sends as text/markdown (its
+    // name ends in .md or .markdown); and the gate also reviews any upload whose name ends in .md.
+    fs.writeFileSync(path.join(work, "notes.txt"), "The person said: ship it on Friday.\n");
+    fs.writeFileSync(path.join(work, "name-md.txt"), "brief.md\n");
+    fs.writeFileSync(path.join(work, "name-png.txt"), "shot.png\n");
+    test("(i) a --name-file whose name ends in .md is reviewed, decided from the name its dry run prints", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u12",
+        "dispatch artifact --issue DSP-1 --name-file name-md.txt --path notes.txt"
+      );
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(uploadRule);
+      expect(g.calls[0].user).toContain(JSON.stringify("The person said: ship it on Friday.\n"));
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
+    });
+    test("(j) a --name-file whose name is shot.png, uploading shot.png, stays unreviewed and unrecorded", async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      expect(
+        await g.bash(
+          "u13",
+          "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png"
+        )
+      ).toBeUndefined();
+      expect(g.dryRuns).toHaveLength(1);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries).toHaveLength(0);
+    });
+    test("(k) an expansion in --name or --path is refused as unreadable, in every mode", async () => {
+      const expanded = [
+        'dispatch artifact --issue DSP-1 --name "$NAME" --path shot.png',
+        "dispatch artifact --issue DSP-1 --name $NAME --path shot.png",
+        'dispatch artifact --issue DSP-1 --name shot.png --path "$F"',
+        "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png | cat",
+      ];
+      for (const mode of ["warn", "block"]) {
+        const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+        for (const [index, command] of expanded.entries()) {
+          const result = await g.bash(`x${index}`, command);
+          expect(result?.block).toBe(true);
+          expect(result?.reason).toContain("Nothing in the call ran");
+        }
+        expect(g.dryRuns).toHaveLength(0);
+        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
+          Array(expanded.length).fill(["dispatch_artifact", "unreadable"])
+        );
+      }
+    });
+    test("(l) inline text is a markdown document whatever its name, and so is a --path file named .md", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u14",
+        "dispatch artifact --issue DSP-1 --name shot.png --content-file notes.txt"
+      );
+      await g.bash("u15", "dispatch artifact --issue DSP-1 --name notes --path brief.md");
+      expect(g.calls).toHaveLength(2);
+      for (const call of g.calls) expect(call.user).toContain(uploadRule);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([
+        ["dispatch_artifact", "verdict"],
+        ["dispatch_artifact", "verdict"],
+      ]);
+    });
     test("other writes keep the full rules and do not get the upload instruction", async () => {
       const g = bind({ env: STUB, cwd: work });
       await g.bash("u8", ASK);

@@ -11,11 +11,13 @@
   (`block` when there is none). The gate asks the `askgate` model role, else the `default` role,
   and refuses the write when neither is set. A switch that does not parse, and a gate that does
   not load, are said at session start.
-- AskGate reviews an upload of a markdown document (`dispatch artifact` with a `--name` that ends
-  in `.md`) against its rule on the person's words alone, in both upload forms: for `--path` it
-  reads the file, after the command's own `cd`. Its rules now also send back a fact the reader
-  does not need and text longer than its decision needs, and a claim about what the person said
-  is sourced only by a link to where they wrote it.
+- AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
+  `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
+  its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
+  from the dry run, and one that holds an expansion is refused. For `--path` it reads the file from
+  the directory the `dispatch` command resolves it in. Its rules now also send back a fact the
+  reader does not need and text longer than its decision needs, and a claim about what the person
+  said is sourced only by a link to where they wrote it.
 
 ### Fixed
 
