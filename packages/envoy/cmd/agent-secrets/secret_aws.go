@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
@@ -215,9 +217,25 @@ func (b *awsBackend) currentTags(ctx context.Context, slug string) (heldTags, er
 	return heldTags{tags: secrets.TagMap(held.Tags)}, nil
 }
 
-// setTags writes tags in one TagResource, which keeps every tag it does not name. It takes no
-// condition on held: TagResource has none (conditionalTagWrites).
-func (b *awsBackend) setTags(ctx context.Context, slug string, _ heldTags, tags map[string]string) error {
+// setTags writes tags in one TagResource, which keeps every tag it does not name. TagResource takes
+// no condition on held, so the write checks its own race afterwards (raceCheck).
+func (b *awsBackend) setTags(ctx context.Context, slug string, held heldTags, tags map[string]string) error {
+	if err := b.tag(ctx, slug, tags); err != nil {
+		return err
+	}
+	return b.raceCheck(ctx, slug, held)
+}
+
+// removeTags removes keys in one UntagResource, which takes no condition on held either, and checks
+// its own race afterwards (raceCheck).
+func (b *awsBackend) removeTags(ctx context.Context, slug string, held heldTags, keys []string) error {
+	if err := b.untag(ctx, slug, keys); err != nil {
+		return err
+	}
+	return b.raceCheck(ctx, slug, held)
+}
+
+func (b *awsBackend) tag(ctx context.Context, slug string, tags map[string]string) error {
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(b.id(slug)),
 		Tags:     secrets.TagList(tags),
@@ -225,8 +243,7 @@ func (b *awsBackend) setTags(ctx context.Context, slug string, _ heldTags, tags 
 	return err
 }
 
-// removeTags removes keys in one UntagResource, with no condition on held either.
-func (b *awsBackend) removeTags(ctx context.Context, slug string, _ heldTags, keys []string) error {
+func (b *awsBackend) untag(ctx context.Context, slug string, keys []string) error {
 	_, err := b.sm.UntagResource(ctx, &secretsmanager.UntagResourceInput{
 		SecretId: aws.String(b.id(slug)),
 		TagKeys:  keys,
@@ -234,9 +251,41 @@ func (b *awsBackend) removeTags(ctx context.Context, slug string, _ heldTags, ke
 	return err
 }
 
-// conditionalTagWrites is false: no Secrets Manager tag call takes a condition on the tags it
-// changes, so retag reads them back after its write (raceAfterRetag).
-func (b *awsBackend) conditionalTagWrites() bool { return false }
+// raceCheck is how a tag write on AWS, whose tag calls take no condition, keeps the github-owners
+// rule when another writer retags the same secret between the write's read (held) and the write
+// itself: it reads the tags back, and when the kind and github-owners there are a pair the broker
+// refuses (policy.GitHubOwnersFor), it restores held's tags and answers errTagsChanged wrapping
+// errTagsRestored, naming what it found. A retag on AWS is therefore safe only with one writer at
+// a time: the restore takes back the other writer's change too. It answers nil when the pair is
+// one the broker serves.
+func (b *awsBackend) raceCheck(ctx context.Context, slug string, held heldTags) error {
+	now, err := b.currentTags(ctx, slug)
+	if err != nil {
+		return fmt.Errorf("the retag was written, but reading its tags back failed, so whether another write left it a kind without the GitHub owners it needs is unknown: %w", err)
+	}
+	kind, owners := now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners]
+	if _, err := policy.GitHubOwnersFor(kind, owners); err == nil {
+		return nil
+	}
+	raced := fmt.Errorf("%w, leaving kind %q with github-owners %q, which the broker refuses; a retag on AWS is safe only with one writer at a time", errTagsChanged, kind, owners)
+	var extra []string
+	for key := range now.tags {
+		if _, ok := held.tags[key]; !ok {
+			extra = append(extra, key)
+		}
+	}
+	slices.Sort(extra)
+	if len(held.tags) > 0 {
+		err = b.tag(ctx, slug, held.tags)
+	}
+	if err == nil && len(extra) > 0 {
+		err = b.untag(ctx, slug, extra)
+	}
+	if err != nil {
+		return fmt.Errorf("%w; restoring the tags this retag read failed: %w; set them again once the other writer is done", raced, err)
+	}
+	return fmt.Errorf("%w: %w", raced, errTagsRestored)
+}
 
 func (b *awsBackend) delete(ctx context.Context, slug string) (*time.Time, error) {
 	out, err := b.sm.DeleteSecret(ctx, &secretsmanager.DeleteSecretInput{

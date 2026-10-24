@@ -411,7 +411,7 @@ func kindTaggedSecret(name string) secrets.LocalSecret {
 // UntagResource and nothing else, so IAM refusing it leaves every tag as it was, and a retag that
 // both removes and sets tags is refused before any read or write, since it would take two calls.
 // Each retag reads the secret's tags once, to build the tags it will leave and check them, and a
-// write that lands reads them once more, to find a concurrent writer's (raceAfterRetag).
+// write that lands reads them once more, to find a concurrent writer's (awsBackend.raceCheck).
 func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
 	startSecretBroker(t, servedBy(local))

@@ -579,43 +579,37 @@ func (b *gcpBackend) currentTags(ctx context.Context, slug string) (heldTags, er
 // since held was read refuses it with FAILED_PRECONDITION (errTagsChanged), naming the change,
 // rather than being merged into annotations no one checked.
 func (b *gcpBackend) setTags(ctx context.Context, slug string, held heldTags, tags map[string]string) error {
-	annotations := maps.Clone(held.tags)
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	maps.Copy(annotations, tags)
-	return b.updateAnnotations(ctx, slug, held.etag, annotations)
+	return b.updateAnnotations(ctx, slug, held, func(annotations map[string]string) { maps.Copy(annotations, tags) })
 }
 
 func (b *gcpBackend) removeTags(ctx context.Context, slug string, held heldTags, keys []string) error {
+	return b.updateAnnotations(ctx, slug, held, func(annotations map[string]string) {
+		for _, key := range keys {
+			delete(annotations, key)
+		}
+	})
+}
+
+// updateAnnotations sends held's annotations, as change leaves a copy of them, with held's etag.
+func (b *gcpBackend) updateAnnotations(ctx context.Context, slug string, held heldTags, change func(map[string]string)) error {
 	annotations := maps.Clone(held.tags)
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	for _, key := range keys {
-		delete(annotations, key)
-	}
-	return b.updateAnnotations(ctx, slug, held.etag, annotations)
-}
-
-func (b *gcpBackend) updateAnnotations(ctx context.Context, slug, etag string, annotations map[string]string) error {
+	change(annotations)
 	_, err := b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
 		Secret: &secretmanagerpb.Secret{
 			Name:        b.id(slug),
 			Annotations: annotations,
-			Etag:        etag,
+			Etag:        held.etag,
 		},
 		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"annotations"}},
 	})
 	if status.Code(err) == codes.FailedPrecondition {
-		return fmt.Errorf("%w: %w", errTagsChanged, err)
+		return fmt.Errorf("%w, so the store refused this write: %w", errTagsChanged, err)
 	}
 	return err
 }
-
-// conditionalTagWrites is true: every annotation write sends the etag of the read it was checked
-// against.
-func (b *gcpBackend) conditionalTagWrites() bool { return true }
 
 func (b *gcpBackend) delete(ctx context.Context, slug string) (*time.Time, error) {
 	expire := time.Now().UTC().Add(time.Duration(recoveryWindowDays) * 24 * time.Hour)

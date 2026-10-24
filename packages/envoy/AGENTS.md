@@ -2608,9 +2608,11 @@ them the tags the secret will hold once the write lands (`after`), and applies t
 rule to those once (`checkGitHubOwnersFor`), as create applies it to its flags, so neither writes a
 `github-app` secret without owners. Each writes against that read: GCP sends the held annotations,
 changed, with the held etag, so a concurrent writer's change refuses the write
-(`errTagsChanged`); AWS's tag calls take no condition, so `raceAfterRetag` reads the tags back and,
-when another writer left a kind/owners pair the broker refuses, restores the tags it read and exits
-1 naming the race. A retag on AWS is safe only with one writer at a time.
+(`errTagsChanged`); AWS's tag calls take no condition, so its `setTags` and `removeTags` read the
+tags back (`awsBackend.raceCheck`) and, when another writer left a kind/owners pair the broker
+refuses, restore the tags read and answer `errTagsChanged` too, and the retag exits 1 naming the
+race. A retag on AWS is safe only with one writer at a time. The retag form lives in
+`secret_retag.go`.
 One that sets tags sends owner and tier in one `TagResource`, plus `kind`
 (with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM
 condition on the request's tags sees them;

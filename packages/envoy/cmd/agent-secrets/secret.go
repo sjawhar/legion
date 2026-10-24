@@ -15,7 +15,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"maps"
 	"net/netip"
 	"net/url"
 	"os"
@@ -363,18 +362,6 @@ func orDash(s string) string {
 	return s
 }
 
-// heldTags is a secret's tags as one read of the store held them: AWS tags or Secret Manager
-// annotations, and, on GCP, that read's etag ("" on AWS), which a tag write sends so it lands only
-// on the tags it was checked against.
-type heldTags struct {
-	tags map[string]string
-	etag string
-}
-
-// errTagsChanged is a tag write the store refused because another write changed the secret after
-// the read the write was made against (GCP: an etag that no longer matches). Nothing was written.
-var errTagsChanged = errors.New("another write changed the secret after this retag read it, so the store refused this write")
-
 // secretBackend is the per-store backend the secret forms call: AWS Secrets Manager
 // (secrets.StoreAWS, or "" from a broker that predates the `store` setting) or GCP Secret
 // Manager (secrets.StoreGCP), chosen from the broker's GET /v1/settings `store` field. Every
@@ -408,15 +395,11 @@ type secretBackend interface {
 	currentTags(ctx context.Context, slug string) (heldTags, error)
 	// setTags writes tags onto the secret in one call and leaves every other tag as it is.
 	// removeTags removes keys from it in one call and leaves every other tag as it is. Each writes
-	// against held: GCP sends held's annotations, changed, with held's etag, so a write another
-	// writer made since held was read refuses this one (errTagsChanged). AWS's tag calls take no
-	// condition (conditionalTagWrites).
+	// against held, and answers errTagsChanged when another write raced it: GCP sends held's
+	// annotations, changed, with held's etag, which a raced write fails; AWS's tag calls take no
+	// condition, so its write reads the tags back and restores held's (awsBackend.raceCheck).
 	setTags(ctx context.Context, slug string, held heldTags, tags map[string]string) error
 	removeTags(ctx context.Context, slug string, held heldTags, keys []string) error
-	// conditionalTagWrites reports whether setTags and removeTags refuse a write once the tags
-	// changed since held was read: GCP's do; AWS's cannot, so retag reads the tags back after its
-	// write instead (raceAfterRetag).
-	conditionalTagWrites() bool
 	// delete schedules the secret's deletion and answers the moment it happens (AWS:
 	// DeleteSecret's own recovery window end; GCP: the expire_time it sets), nil only on error.
 	delete(ctx context.Context, slug string) (deletion *time.Time, err error)
@@ -820,183 +803,6 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "set a new value of %s\n", name)
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
-}
-
-// ---------------------------------------------------------------------------
-// retag
-// ---------------------------------------------------------------------------
-
-// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners or max grant, in one cloud
-// write. A retag that names none (--kind none, --github-owners none, --max-grant none) removes
-// those tags and does nothing else; --kind none also removes the rollback guard written with the
-// kind. Any other retag sets tags. A retag that does both is refused before anything is read or
-// written: AWS removes tags only with UntagResource, so it would be two calls, and a refused second
-// call would leave it half applied.
-//
-// Either kind of retag reads the tags the secret holds, builds from them the tags it will hold once
-// the write lands (after), and checks the github-owners rule against those once
-// (checkGitHubOwnersFor), so neither leaves a github-app secret without GitHub owners, nor names
-// owners for a kind that does not read them.
-//
-// A retag that sets tags always sends owner and tier, re-sending the one not named as the secret
-// holds it: on AWS, the deployment repository's IAM policy that lets a person tag their own secret
-// conditions on both request tags, so a request carrying one fails. GCP has no equivalent
-// condition (annotations are not IAM-conditionable the way AWS tags are): anyone with
-// secretmanager.secrets.update on the namespace can retag any secret under it, shared ones
-// included; sending both tags there is for API symmetry with AWS, not an enforced shared-secret
-// protection.
-func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
-	const form = "secret retag"
-	flagArgs, positional := splitArgs(args, secretFlagValues)
-	flags, profile := secretFlags(form, stderr)
-	newOwner := flags.String("owner", "", "the new owner: me (your email, from your AWS or Google sign-in) or shared")
-	newTier := flags.String("tier", "", "the new tier: agent or human")
-	newKind := flags.String("kind", "", "github-app, google-login or none")
-	newGitHubOwners := flags.String("github-owners", "", `the GitHub accounts a github-app secret mints for, separated by spaces ("<login> <login>"), or none`)
-	newMaxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows, or none")
-	if err := flags.Parse(flagArgs); err != nil {
-		return exitUsage(err)
-	}
-	name, slug, err := secretName(positional)
-	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newMaxGrant == "" {
-		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --max-grant or a combination is required")}
-	}
-	if err == nil {
-		err = checkOwnerTier(*newOwner, *newTier)
-	}
-	if err == nil {
-		err = checkKind(*newKind)
-	}
-	if err == nil {
-		*newGitHubOwners, err = checkGitHubOwners(*newGitHubOwners, true)
-	}
-	if err == nil {
-		err = checkMaxGrant(*newMaxGrant, true)
-	}
-	var remove []string
-	if *newKind == tagNone {
-		// The rollback guard goes with the kind: a stored secret is safe on every broker.
-		remove = append(remove, policy.TagKind, policy.TagRollbackGuard)
-	}
-	if *newGitHubOwners == tagNone {
-		remove = append(remove, policy.TagGitHubOwners)
-	}
-	if *newMaxGrant == tagNone {
-		remove = append(remove, policy.TagMaxGrant)
-	}
-	set := optionalTags(*newKind, *newGitHubOwners, *newMaxGrant)
-	if err == nil && len(remove) > 0 && (*newOwner != "" || *newTier != "" || len(set) > 0) {
-		err = usageErr{errors.New("none removes a tag in a retag of its own: run the removal and the other changes as two retags")}
-	}
-	if err != nil {
-		return secretFail(stderr, form, err)
-	}
-	s, email, err := connectWriter(context.Background(), *profile)
-	if err != nil {
-		return secretFail(stderr, form, err)
-	}
-	defer s.Close()
-	held, err := s.backend.currentTags(s.ctx, slug)
-	if err != nil {
-		return secretFail(stderr, form, err)
-	}
-	// after is the secret's tags once this retag lands: the tags held, less those it removes, with
-	// those it sets.
-	after := maps.Clone(held.tags)
-	if after == nil {
-		after = map[string]string{}
-	}
-	for _, key := range remove {
-		delete(after, key)
-	}
-	maps.Copy(after, set)
-	if *newOwner != "" {
-		if after[policy.TagOwner], err = ownerTag(*newOwner, email); err != nil {
-			return secretFail(stderr, form, err)
-		}
-	}
-	if *newTier != "" {
-		after[policy.TagTier] = *newTier
-	}
-	named := *newGitHubOwners != "" && *newGitHubOwners != tagNone
-	if err := checkGitHubOwnersFor(after[policy.TagKind], after[policy.TagGitHubOwners], named); err != nil {
-		return secretFail(stderr, form, err)
-	}
-	if len(remove) > 0 {
-		if err := s.backend.removeTags(s.ctx, slug, held, remove); err != nil {
-			return secretFail(stderr, form, err)
-		}
-		if raceAfterRetag(s, stdout, stderr, form, name, slug, held) {
-			return 1
-		}
-		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
-		return rereadAfter(s, stdout, stderr, form, name, true, nil)
-	}
-	owner, tier := after[policy.TagOwner], after[policy.TagTier]
-	if owner == "" || tier == "" {
-		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
-	}
-	set[policy.TagOwner], set[policy.TagTier] = owner, tier
-	if err := s.backend.setTags(s.ctx, slug, held, set); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
-		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
-		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
-		// so a deployment instead grants that permission at all only to administrators for the
-		// secrets it protects this way.
-		if s.backend.isAccessDenied(err) && (held.tags[policy.TagOwner] == policy.OwnerShared || owner == policy.OwnerShared) {
-			fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, sharedRetagRefused)
-		}
-		return 1
-	}
-	if raceAfterRetag(s, stdout, stderr, form, name, slug, held) {
-		return 1
-	}
-	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
-	return rereadAfter(s, stdout, stderr, form, name, true, nil)
-}
-
-// raceAfterRetag is how a retag on a store without conditional tag writes (AWS: TagResource and
-// UntagResource take no condition) keeps the github-owners rule when another writer retags the same
-// secret between this retag's read and its write: it reads the tags back, and when the kind and
-// github-owners there are a pair the broker refuses (policy.GitHubOwnersFor), it restores the tags
-// this retag read (held), asks the broker to reread them, prints the race and answers true, for
-// the retag to exit 1. It answers false when the pair is one the broker serves, and at once on a
-// store whose writes are conditional (GCP's etag refuses such a write instead, errTagsChanged). A
-// retag on AWS is therefore safe only with one writer at a time: the restore takes back the other
-// writer's change too.
-func raceAfterRetag(s *secretSession, stdout, stderr io.Writer, form, name, slug string, held heldTags) bool {
-	if s.backend.conditionalTagWrites() {
-		return false
-	}
-	now, err := s.backend.currentTags(s.ctx, slug)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: the retag of %s was written, but reading its tags back failed, so whether another write left it a kind without the GitHub owners it needs is unknown: %v\n", form, name, err)
-		return true
-	}
-	if _, err := policy.GitHubOwnersFor(now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners]); err == nil {
-		return false
-	}
-	fmt.Fprintf(stderr, "agent-secrets %s: another write retagged %s while this retag ran, leaving kind %q with github-owners %q, which the broker refuses; a retag on AWS is safe only with one writer at a time\n", form, name, now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners])
-	var extra []string
-	for key := range now.tags {
-		if _, ok := held.tags[key]; !ok {
-			extra = append(extra, key)
-		}
-	}
-	slices.Sort(extra)
-	if len(held.tags) > 0 {
-		err = s.backend.setTags(s.ctx, slug, now, held.tags)
-	}
-	if err == nil && len(extra) > 0 {
-		err = s.backend.removeTags(s.ctx, slug, now, extra)
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: restoring the tags this retag read failed: %v; set them again once the other writer is done\n", form, err)
-		return true
-	}
-	fmt.Fprintf(stderr, "agent-secrets %s: %s's tags are restored to what this retag read; run the retag again once the other writer is done\n", form, name)
-	rereadAfter(s, stdout, stderr, form, name, true, nil)
-	return true
 }
 
 // ---------------------------------------------------------------------------

@@ -71,7 +71,7 @@ func TestAConcurrentRetagNeverLeavesAGitHubAppSecretWithoutOwners(t *testing.T) 
 		}
 		useAWS(t, writes, testAccount, adaSignIn)
 		_, stderr, code := runSecret("retag", "APP_KEY", "--github-owners", "none")
-		if code != 1 || !strings.Contains(stderr, "another write retagged APP_KEY") || !strings.Contains(stderr, "one writer at a time") || !strings.Contains(stderr, "restored") {
+		if code != 1 || !strings.Contains(stderr, "another write changed the secret after this retag read it") || !strings.Contains(stderr, "one writer at a time") || !strings.Contains(stderr, "restored") {
 			t.Fatalf("racing retag: exit %d stderr %q; want 1 naming the race and the restore", code, stderr)
 		}
 		tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags)
