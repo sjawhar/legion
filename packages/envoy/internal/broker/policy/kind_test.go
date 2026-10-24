@@ -286,13 +286,21 @@ func TestAGitHubOwnersCommaIsRefused(t *testing.T) {
 }
 
 // TestAGitHubOwnerThatIsNoGitHubLoginIsRefused: each github-owners entry must be something a
-// GitHub login can be, up to 39 letters, digits and hyphens starting with a letter or digit, or the
-// secret is refused github-owners-malformed. Legacy logins with a trailing or doubled hyphen, which
-// GitHub still serves (`x-` is an organization from 2011), and the longest login are read; a tag
-// that names no entry at all is github-owners-missing.
+// GitHub login can be, up to 39 ASCII letters, digits and hyphens starting with a letter or digit,
+// judged as written, or the secret is refused github-owners-malformed. The word none, in any case,
+// is agent-secrets' removal and never a login. A non-ASCII letter that Unicode lowercases onto an
+// ASCII one (U+212A KELVIN SIGN, U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE) is refused rather
+// than read as that ASCII letter. Legacy logins with a trailing or doubled hyphen, which GitHub
+// still serves (`x-` is an organization from 2011), and the longest login are read; a tag that
+// names no entry at all is github-owners-missing.
 func TestAGitHubOwnerThatIsNoGitHubLoginIsRefused(t *testing.T) {
 	longest := strings.Repeat("a", 39)
-	for _, owners := range []string{"-ada", "-x", "-", "ada_lovelace", "ada.org", "@ada", "ada/b", strings.Repeat("a", 40)} {
+	for _, owners := range []string{
+		"-ada", "-x", "-", "ada_lovelace", "ada.org", "@ada", "ada/b", strings.Repeat("a", 40),
+		"none", "None", "NONE",
+		"\u212Aelvin-org", "acme-\u212A",
+		"\u0130stanbul", "b\u0130t",
+	} {
 		t.Run(owners, func(t *testing.T) {
 			logged := policytest.CaptureLog(t)
 			secret := kindSecret("APP_KEY", policy.KindGitHubApp, "value")

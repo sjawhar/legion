@@ -109,35 +109,45 @@ var ErrGitHubOwnersMissing = errors.New("github-owners names at least one GitHub
 var ErrGitHubOwnersComma = errors.New(`github-owners separates GitHub logins with spaces, not commas ("<login> <login>")`)
 
 // ErrGitHubOwnersLogin is a github-owners entry that cannot be a GitHub login: one that does not
-// start with a letter or digit, holds anything but letters, digits and hyphens, or is longer than
-// 39 characters.
-var ErrGitHubOwnersLogin = errors.New("github-owners names GitHub logins: up to 39 letters, digits and hyphens, starting with a letter or digit")
+// start with an ASCII letter or digit, holds anything but ASCII letters, digits and hyphens, is
+// longer than 39 characters, or is the word none.
+var ErrGitHubOwnersLogin = errors.New("github-owners names GitHub logins: up to 39 ASCII letters, digits and hyphens, starting with a letter or digit")
 
-// gitHubLogin is what a GitHub login can be, lowercased: a letter or digit, then letters, digits
-// and hyphens. GitHub's sign-up rule today also refuses a trailing or doubled hyphen, but accounts
-// made under its older rules keep them (`x-` is an organization from 2011), so this refuses only
-// what no login can hold. A login is at most 39 characters (maxGitHubLogin), which the pattern does
-// not check.
-var gitHubLogin = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+// gitHubLogin is what a GitHub login can be: an ASCII letter or digit, then ASCII letters, digits
+// and hyphens. It is matched against the entry as written, before it is lowercased, since Unicode
+// lowercasing maps some non-ASCII letters onto ASCII ones (U+212A KELVIN SIGN to `k`, U+0130 to
+// `i` with a combining dot). GitHub's sign-up rule today also refuses a trailing or doubled hyphen,
+// but accounts made under its older rules keep them (`x-` is an organization from 2011), so this
+// refuses only what no login can hold. A login is at most 39 characters (maxGitHubLogin), which
+// the pattern does not check.
+var gitHubLogin = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 
 const maxGitHubLogin = 39
 
+// gitHubOwnersNone is the word `agent-secrets secret retag --github-owners none` takes to remove
+// the tag. It is never a login the tag names: an entry that reads `none` in any case was written
+// by hand, and is refused rather than read as an account.
+const gitHubOwnersNone = "none"
+
 // ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by white space,
 // compared without regard to case. It refuses a comma anywhere (ErrGitHubOwnersComma), an entry that
-// is not a GitHub login (ErrGitHubOwnersLogin) and a list that names no account
-// (ErrGitHubOwnersMissing). It answers them lowercased, sorted and joined by single spaces, so a
-// Secret holding them stays comparable, two spellings of one list are one policy, and the value is
-// one that both stores hold: an AWS tag value and a Secret Manager annotation both take a space,
+// is not a GitHub login or that is the word none (ErrGitHubOwnersLogin), and a list that names no
+// account (ErrGitHubOwnersMissing). It answers them lowercased, sorted and joined by single spaces,
+// so a Secret holding them stays comparable, two spellings of one list are one policy, and the value
+// is one that both stores hold: an AWS tag value and a Secret Manager annotation both take a space,
 // which a GitHub login never holds.
 func ParseGitHubOwners(raw string) (string, error) {
 	if strings.Contains(raw, ",") {
 		return "", ErrGitHubOwnersComma
 	}
 	var owners []string
-	for _, owner := range strings.Fields(raw) {
-		owner = strings.ToLower(owner)
-		if len(owner) > maxGitHubLogin || !gitHubLogin.MatchString(owner) {
-			return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, owner)
+	for _, entry := range strings.Fields(raw) {
+		if len(entry) > maxGitHubLogin || !gitHubLogin.MatchString(entry) {
+			return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, entry)
+		}
+		owner := strings.ToLower(entry)
+		if owner == gitHubOwnersNone {
+			return "", fmt.Errorf("%w, not %q: none removes the tag through agent-secrets and names no account", ErrGitHubOwnersLogin, entry)
 		}
 		if !slices.Contains(owners, owner) {
 			owners = append(owners, owner)
