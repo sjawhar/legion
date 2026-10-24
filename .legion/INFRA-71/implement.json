@@ -2,56 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T17:20:00Z",
-  "round": "the reviewer's four, all in or about the evidence passage, plus the two stale lines of the pull request body; nothing else touched",
+  "completed": "2026-10-24T17:55:00Z",
+  "round": "the tester's one failure: a wait answering about the previous run's terminating pod; fixed with a per-run name, which also closes the cross-role collision banked on dispatch://INFRA-215",
   "proof": [
     {
-      "criterion": "Finding 1 — the published `kubectl wait --for=condition=Ready pod -l job-name=<workload>` cannot be followed where the sequence puts it: the Job's pod does not exist the instant the apply returns, so it exits 1 at once.",
-      "surface": "The live cluster from this role container: the failing line reproduced, then the corrected pair driven twice against real Jobs built from the section's own manifest — once with no pause after the apply, once with the pause the Service steps would insert.",
-      "command": "kubectl wait --for=condition=Ready pod -l job-name=<nothing> --timeout=30s ; kubectl wait --for=create pod -l job-name=<nothing> --timeout=15s ; then for each of two Jobs: kubectl apply -f ; kubectl wait --for=create pod -l job-name=… --timeout=120s ; kubectl wait --for=condition=Ready pod -l job-name=… --timeout=300s ; kubectl logs --tail=1 ; kubectl delete job",
-      "observed": "Against a selector matching nothing the old line exits **1** immediately with `error: no matching resources found`, while `--for=create` polls and ends `timed out waiting for the condition` at its own timeout. The corrected pair, run A with **no pause** after the apply: create met at **1 s**, Ready met at **87 s** (a cold machine), both exit 0. Run B with a **10 s pause**: create met at 10 s, Ready at 10 s (the machine was warm), both exit 0, log line `database system is ready to accept connections`. The section publishes both waits now, and the evidence passage records that the single wait it published before exited 1 at once.",
-      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
-      "negativeControl": "The no-pause run is the control for the fix: a wait that only works where the gap is wide would pass run B and fail run A, so the two were driven in that order and the first was the one with nothing between the apply and the wait. The failing line is kept as a measurement rather than a memory: it is reproduced at this head, not quoted from the review."
+      "criterion": "The tester's failure — following the section's own advice twice makes both waits answer about the previous run's dying pod, because a pod keeps its `job-name` label while it terminates. The role is told its workload is Ready when it is not, and the section then sends it to the one failure that announces nothing.",
+      "surface": "The live cluster from this role container: the defect reproduced with the published fixed name before changing anything.",
+      "command": "apply the section's Job under a fixed name ; wait create and Ready ; kubectl delete job ; apply the same manifest again at once ; kubectl get pod -l job-name=… ; both waits again",
+      "observed": "After the second apply the selector matched **two** pods, the new one `Pending` and the old one `Terminating`. `kubectl wait --for=create` returned **0 after 1 s naming the previous run's pod** (`…-qlhqg`, the one just deleted). The Ready wait ran 32 s and ended `pod/…-mmh4l condition met` *and* `Error from server (NotFound): pods \"…-qlhqg\" not found`, exit 1 — one answer about each pod. That is the tester's finding, measured independently before the fix rather than taken from the report.",
+      "headSha": "35faab4eeace3d7c9906085e7bb9d3c68980b8e1",
+      "negativeControl": "The reproduction is itself the control for the fix below: the same two commands, in the same shape, against a name that is fresh each run cannot match a terminating pod, because that pod never carried the label."
     },
     {
-      "criterion": "Finding 2 — the passage claimed a deliberate breakage of each rule was refused naming the rule, while the last rule is the reachability label, which the same section states in bold that admission does not enforce.",
-      "surface": "The section read against itself, and against the breakages actually measured.",
-      "command": "the bullet re-read beside the label bullet and beside the eight breakages of earlier rounds (deadlines, ttl, CPU, identity, runtime class, compute class, volume kind)",
-      "observed": "It reads `one deliberate breakage of each **enforced** rule, each refused naming the rule — the reachability label has no breakage to record, since admission does not check it, which is the whole of why that bullet is marked`. The two passages now say one thing, and the measurements match the claim exactly: every rule with a refusal has one recorded, and the rule without a refusal is named as such.",
-      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
-      "negativeControl": "The missing breakage is the control: there is no measurement for the label because there is nothing to measure, which is why the old sentence could not have been true of it. A reader who believed it would skip the one check this section exists to teach."
+      "criterion": "The remedy: a name unique per run and per role, built once and substituted into both manifests, so every selector, the Service, its owner reference and the address carry it.",
+      "surface": "The live cluster, driving the published sequence in each shape the architect named, with the waits bounded at five seconds so a run that passes because the corpse had already gone is distinguishable from one that passes because the name is fresh.",
+      "command": "three re-run shapes back to back (apply, waits, delete, apply again at once); the shape where the delete is issued while the pod is still Running and the next run starts at once; and the paused shape, a ten-second gap where the Service steps would sit",
+      "observed": "Every shape: exactly **one** pod matched the selector, `--for=create` exited 0 within its five seconds naming that pod, and the Ready wait exited 0 naming the **same** pod — never a second one, never a `NotFound`. Re-runs 1 to 3: pods `pq8qj`, `xjqcj`, `r9cb8`, each its own run's. Delete-while-Running: the next run answered on `nk8hf`, its own, one second after its apply. Paused shape: create and Ready both 0, one pod, and the workload's own log line read (`database system is ready to accept connections`). Two names generated from the published line in the same second differ (`a7f4c5` / `f7aec2`).",
+      "headSha": "35faab4eeace3d7c9906085e7bb9d3c68980b8e1",
+      "negativeControl": "The five-second bound is the control the architect asked for: with the old fixed name the create wait also returned inside one second, but on the corpse — so speed alone proves nothing and the check is *which pod was named*, which is why every run above records the pod's own suffix on both waits. Housekeeping: every Job carried a fifteen-minute deadline and a five-minute cleanup window, was named for this issue, and was deleted by hand; the final listing shows nothing of mine."
     },
     {
-      "criterion": "Finding 3 — the passage recorded the Job half being run here without saying that two of this deployment's three gate answers are `no` and that the section's only bolded rule therefore said to submit nothing, and it called that run a transcript of lines one of which had failed.",
-      "surface": "The passage itself, and the bounds the run actually carried.",
-      "command": "the gate's three answers re-measured ; the Job manifests used for the two runs read back for their deadline, ttl and name ; kubectl get jobs,pods after the deletes",
-      "observed": "The gate answers `yes`, `no`, `no` here. The passage now carries a bullet of its own — *Submitted deliberately against the gate's own rule* — saying the run was made anyway to measure the half no Service gates, naming what bounded it (a fifteen-minute deadline and a five-minute cleanup window rather than admission's twelve and twenty-four hours, a name of its own, a delete by hand, and the last line showing nothing left) and saying it is not an exception anyone inherits. The transcript claim is fixed by finding 1 rather than argued: the first bullet records the two waits with their measurements and the failure of the single one, so what is called a transcript is a transcript of the lines as they now stand.",
-      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
-      "negativeControl": "Every bound the bullet claims is checkable by a reader against the manifest the section publishes: the deadline and ttl it names are smaller than the rules above allow, and `kubectl get jobs,pods` after each delete shows nothing of the run — which is the same command the sequence ends with."
-    },
-    {
-      "criterion": "Finding 4 — what has never run is the reachability check against a workload reachable by its Service name, not 'against a real workload', which the bullet above records being done.",
-      "surface": "The two bullets read against each other.",
-      "command": "the passage re-read: the executed bullet's reachability measurements beside the unexecuted bullet's claim",
-      "observed": "The unexecuted bullet reads `the reachability check against a workload reachable **by its Service name**`, which is the thing no run has reached, and no longer contradicts the bullet above it recording the block run against a listener, a refusing port and a dropped address.",
-      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
-      "negativeControl": "The contradiction is the control: before this change the two bullets could both be read as describing the same check, one as done and one as never run, which is exactly the kind of statement this passage exists to prevent."
+      "criterion": "The rename must reach every place the name appears, since a Service whose selector does not follow it points at nothing — and that failure reads exactly like the missing reachability label, the one cause this section says announces nothing.",
+      "surface": "The published text itself, read as the sequence substitutes it.",
+      "command": "the section's two manifests and its sh block extracted and expanded as the sequence expands them (`sed \"s|<workload>|$workload|g\"`), then the Job applied from that expansion in every run above",
+      "observed": "Every `<workload>` occurrence is inside the two manifests — the Job's `metadata.name`, the Service's `metadata.name`, its `ownerReferences` entry and its `selector: {job-name: …}` — so one substitution with `g` carries them all, and the sequence's own lines use `\"$workload\"` for both waits, the logs, the delete and the address the reachability check builds. The runs above were applied from exactly that expansion, so the Job half is proven under the new naming rather than under a hand-written name. The label bullet's diagnostic command uses `\"$workload\"` too.",
+      "headSha": "35faab4eeace3d7c9906085e7bb9d3c68980b8e1",
+      "negativeControl": "The dangerous half-rename is the one the architect named: a Service selector left behind would produce a Service with no endpoints, whose symptom is the reachability check timing out — identical to the missing label. It cannot occur here because the Service carries no literal name at all: every occurrence is the same placeholder the one substitution fills."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md: the sequence's wait pair, and the evidence passage's three bullets.",
-    "The pull request body (not the tree): the `Change` bullet now says three commands and why the third exists, and `Proven by` names this round's real run rather than a dry run."
+    "docs/kubernetes.md: the naming paragraph (now a name per run, with the re-run measurement in it), the sequence's name line and every step that uses it, the Job manifest's comment, and the label bullet's diagnostic command."
   ],
   "trickyParts": [
-    "A wait that polls for the pod's existence would pass any test run with a pause between the apply and the wait, so the fix is measured with nothing between them first and with a pause second. The warm-machine run reaching Ready in 10 s is not evidence about the fix; the cold one at 87 s is the shape a reader will meet."
+    "The name must be unique per run *and* per role of one issue, and two role containers can generate one in the same second, so the suffix is six random characters from `python3 -c 'import secrets; print(secrets.token_hex(3))'` rather than a timestamp. The section already uses `python3` for the reachability check, so nothing new is required of the image."
   ],
   "deviations": [
-    "Nothing beyond the reviewer's four and the two stale body lines was touched. The two risks the reviewer left unrequested are the architect's, on dispatch://INFRA-215."
+    "The naming clause changed, which is the thing the architect asked to be told about: a per-run name closes the cross-role collision he holds on dispatch://INFRA-215 as well as this defect, so that item is paid for here and he can retire it. He is told by Envoy.",
+    "Neither of the other two remedies was taken: `--for=delete` before the apply fixes the re-run case while making the collision case worse (a role would wait on another role's live workload), and selecting by the uid the sequence already reads is precise but adds a step to a sequence a reader follows by hand."
   ],
   "openQuestions": [
-    "Specification acceptance 1 to 4 remain the live proof after a person applies dispatch://INFRA-206: the Service steps are refused here on the read, so nothing has yet given a workload of this namespace a name on the network."
+    "Specification acceptance 1 to 4 remain the live proof after a person applies dispatch://INFRA-206: the Service steps are refused here on the read, so no workload of this namespace has a name on the network yet."
   ],
   "discoveredComplexity": [
-    "Three of this round's four were in the passage written to make the section's account of its own evidence trustworthy, and two of them were understatements or elisions rather than false claims about the cluster. The passage is the most load-bearing prose in the section and has needed the most correction, which is itself the argument for having it."
+    "The old race was lost two times in four at a five-second bound, by the tester's count — which is how a line gets written, run once, seen to work, and shipped. Every wait in this section is now judged by which pod it named rather than by its exit status."
   ]
 }
