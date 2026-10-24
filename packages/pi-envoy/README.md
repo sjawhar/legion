@@ -203,3 +203,45 @@ EOF
 Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
 architect's role topic; Dispatch is for durable questions to the human and the shared
 document, not for coordination between roles.
+
+## AskGate
+
+AskGate reviews each Dispatch write of a session's main agent before the write posts. One model
+call judges the write against the rules in `extensions/askgate/rules.md` and answers `allow` or
+`revise`. A `revise` answer carries the reason and the fix. The gate reviews these calls:
+
+- `dispatch ask`, `dispatch message`, `dispatch edit-ask`, `dispatch comment`, `dispatch doc-edit`
+  and `dispatch request-approval`
+- `dispatch issue` with `--spec` or `--spec-file`
+
+The gate reads the arguments from the command's own `--dry-run`. A `task` subagent is not
+reviewed.
+
+**The switch.** AskGate runs in each session that has Dispatch on, unless the session's envoy.json
+turns it off. Write this top-level section beside `dispatch`:
+
+```json
+{ "askgate": { "enabled": false } }
+```
+
+No section, or `enabled: true`, keeps it on. A checkout's `.envoy/envoy.json` cannot set it. A
+section that does not parse keeps AskGate on, and the start notice names the file.
+
+**The modes.** In `block` mode a write that the gate sends back does not post. In `warn` mode the
+write posts, and the reason comes back to the agent as context. `OMP_ASKGATE=warn` or
+`OMP_ASKGATE=block` sets the mode. AskGate ignores any other value, `off` included, and the first
+review shows one notice that names `askgate.enabled` as the switch. With no such variable, the
+session's latest `experiments` entry decides: its `askgate_block` arm off is `warn`. Every other
+session uses `block`.
+
+**The model.** The gate asks the session's `askgate` model role (`modelRoles.askgate`). When that
+role is not set, it asks the `default` role. A model that answers with an error passes the request
+to the next model of that role's `retry.fallbackChains` chain, on the same provider. When neither
+role resolves, the gate refuses the write in both modes and names the two roles. A session whose
+main model is on another provider than the gate's model is not reviewed: its transcript stays on
+that provider.
+
+`OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit (90 s, less than the host's limit for one
+`tool_call` handler). `OMP_ASKGATE_DUMP` names a file that gets each review's two prompts. Every
+review writes one `advisor-gate` entry into the session's transcript, and
+`scripts/askgate-report.ts` reports what those entries sent back and what they cost.

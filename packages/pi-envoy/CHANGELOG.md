@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- AskGate reviews each Dispatch write of a session's main agent before the write posts, and sends
+  back a write that breaks its rules with the reason and the fix. It runs in each session with
+  Dispatch on. `{"askgate":{"enabled":false}}` in the session's envoy.json turns it off.
+  `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry does
+  (`block` when there is none). The gate asks the `askgate` model role, else the `default` role,
+  and refuses the write when neither is set. A switch that does not parse, and a gate that does
+  not load, are said at session start.
+
 ### Fixed
 
 - The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event

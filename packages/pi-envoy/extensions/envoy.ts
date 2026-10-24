@@ -45,6 +45,7 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
+import { askgateSetting } from "@legion/envoy-client/envoy-config";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
@@ -120,6 +121,8 @@ import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
+import { registerAskGate } from "./askgate/askgate";
+import type { Pi as AskGatePi } from "./askgate/askgate-core";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -487,6 +490,30 @@ export default function envoyExtension(pi: PiApi): void {
   // interface's `claim` and `subscribe` refuse naming why (`requireInbound`).
   const inbound = envoy.enabled && !("off" in envoy.inbound);
   const startNotice = atStart.notice ?? "";
+  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts. It runs in a session
+  // with Dispatch on at load, unless the session's envoy.json turns it off (`askgate.enabled`,
+  // read once, here). The gate loads Oh My Pi's modules before it binds, so its handlers register
+  // after this factory returns; the runner reads an event's handlers when the event fires, so they
+  // still fire. A switch that cannot be read, and a gate that did not load, are said at every
+  // session start, since with no gate the writes post unreviewed.
+  const askgateNotices: string[] = [];
+  let askgateLoad: Promise<void> = Promise.resolve();
+  if (atStart.dispatch.enabled && CONFIG_FILE.path !== null) {
+    const setting = askgateSetting(CONFIG_FILE.path);
+    if (setting.error !== null) askgateNotices.push(setting.error);
+    if (setting.enabled) {
+      // The host's `pi.on` takes every event name; `PiApi` types only the events this entry uses,
+      // and the gate also listens for `tool_execution_end`.
+      const host = pi as unknown as AskGatePi;
+      askgateLoad = registerAskGate(host, { configFile: CONFIG_FILE.path, logger }).catch(
+        (error: unknown) => {
+          const notice = `AskGate did not load, so Dispatch writes post unreviewed: ${messageFor(error)}`;
+          logger.warn(notice);
+          askgateNotices.push(notice);
+        }
+      );
+    }
+  }
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
@@ -2323,6 +2350,8 @@ export default function envoyExtension(pi: PiApi): void {
     restoreLocalSessionState(context);
     lastHeard = context.sessionManager.getSessionId();
     if (startNotice !== "") context.ui.notify(`envoy: ${startNotice}`, "warning");
+    await askgateLoad;
+    for (const notice of askgateNotices) context.ui.notify(`envoy: ${notice}`, "warning");
     if (!inbound) return;
     let established = false;
     const establish = async (): Promise<void> => {
