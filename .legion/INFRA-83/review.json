@@ -2,41 +2,58 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-83",
-  "completed": "2026-10-24T16:45:00Z",
-  "decision": "approved",
+  "completed": "2026-10-24T20:35:00Z",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "round": 6,
-  "kind": "confirmation after a conflict-forced merge, not a new round",
-  "keyFindings": [],
+  "important": 2,
+  "minor": 1,
+  "round": 9,
+  "kind": "full round: the second forward merge changed the fingerprint, so the head is judged as new work",
   "fingerprint": {
-    "rule": "skill://legion-worker/references/conflicts-and-rewrites.md fixes the reviewer's two heads as the commit_id of its last submitted review and the new head.",
-    "mine": "The commit_id of my last submitted review is a8bcd063e0938f0e013a46e3a83888be57d93796 (review 5630424319, APPROVED, read back from gh api --paginate repos/sjawhar/legion/pulls/2121/reviews). I computed both sides myself with the committed command, after jj git fetch, with the base read as a jj string literal from gh pr view: d44468557cc8781a9be26578d588ae0d62e45204413ff40f2a5da963e2ec5f47 at a8bcd063e0938f0e013a46e3a83888be57d93796 and the same at c8376d4fdf516144f47d347e0fdec76774758e74. Equal, and my last review was an approval, so this is a confirmation: no thermonuclear pass, no thread pass.",
-    "independence": "The implementer's own rebase comment on the pull request (6386360747) records a8bcd063 -> 9e3da16e at the same hash on both sides. I reproduced it rather than carried it; the architect's and the tester's four-head measurement likewise reproduces but did not decide this, since none of their heads is my commit_id."
+    "mine": "Computed at both of my own heads with the committed command, after a fetch, with the base read as a jj string literal: d44468557cc8781a9be26578d588ae0d62e45204413ff40f2a5da963e2ec5f47 at my last submitted review's commit_id 917c49e9b648d01b8ede252b96226b8b21c95bd2, and 4ff80e50d373d34218afd9cfbf5366aff9f8a6d9a3b2e5d627a4d8ae699dadf0 at the head. Different, so this is a new round, thermonuclear again, and not a confirmation."
   },
-  "whatAConfirmationDoesNotCover": {
-    "judgement": "Agreed with the architect, and recorded here so it is a rule rather than one round's care: an unchanged fingerprint does not entail that this branch's deletions survived the merge, and the two must be checked separately. The fingerprint is the branch's diff against its own fork point. A merge that keeps both sides re-adds a paragraph this branch deleted, and since the re-added text is also on the new fork point, the branch's diff against it carries no deletion line for that paragraph either way. The diff is identical whether the deletion survived or not, so the check is structurally blind to exactly the regression this pull request suffered at round three, when the forward merge at 9dae22b7 put back the paragraph defining the pull request body's CI line and the fingerprint said nothing.",
-    "soIRanIt": "The deletion-survival check at this head, by hand and not from the tester's handoff: grep over skills/, packages/claude-envoy/legion/, packages/daemon/internal/prompts/ and packages/pi-legion/scripts/ for the CI-line reference in every spelling returns nothing; the retired phrases (READY_CHECKS_NOT_GREEN, 'no check is required on', 'refused at READY') survive only inside prompts_test.go's own retired list; packages/daemon/internal/api/ready.go imports none of classify, ghrepo or requiredchecks; headCheckResults and READY_CHECKS_NOT_GREEN are absent from packages/daemon/internal/api entirely; and bun test src/skills-guard.test.ts in packages/pi-legion gives 10 pass, 0 fail, 22 expect() calls, which is the guard that holds the deletion in both roots. No conflict marker survives in the tree."
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "the pull request body, Proven by line",
+      "description": "It reads 'plus this round's local checks at the forward-merge head 9dae22b7'. 9dae22b7 is round two's forward merge, from 2026-10-23; this round's is b2350b438c51d67f4d1f5583ddce602ad50851ea, from 2026-10-24, and the body's own E2E (tester) line names that one. So the field a human reads first states that this round's checks ran at a head two rounds old. skills/legion-worker/references/pr-body.md makes the brief the human's and a stale line a finding against the implementer rather than a line a later role rewrites, and a claim about which head was checked is exactly the class this pull request deletes. Name this round's merge, or drop the clause."
+    },
+    {
+      "severity": "important",
+      "file": ".legion/INFRA-83/test.json, the sweep proof's surface and command",
+      "description": "The proof's surface reads 'the staged skills, bundle, prompts and docs/solutions read for new text'; its command greps 'over skills, the bundle and the prompts'. docs/solutions is named in the surface and absent from the command, so the corpus was not read. The gap is not hypothetical: the merge added five docs/solutions files, and one of them - docs/solutions/legion/the-pull-request-body-is-shared-state-read-it-back-before-you-claim-you-changed-it-INFRA-149.md, status active, module legion-worker - names the deleted CI line twice. I read all five myself: only that one mentions it, and under the architect's round-four rule (an instruction to write the line gets a supersede note, a dated narration keeps its text) it narrates - the mentions are an example inside a lesson about partly-true claims and a record of what happened on sjawhar/legion#2143 - so the corpus is clean and that file rightly keeps its text. What is not clean is a proof whose surface names a corpus its command never touched: it cannot be re-derived by the reader it exists for, which is this issue's own subject. Make the claim match the command, or run the read."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-worker/references/skip-checks-trailer.md:11-13 against :29",
+      "description": "The file a worker is sent to before it writes the trailer states the path rule unconditionally under '## The shape GitHub honours', and INFRA-149's correcting sentence - that retro's push never carries the line whatever paths it touches - sits sixteen lines later under '## Every other push carries no such line', a heading a retro worker whose push is .legion/-only has every reason to skip. In the four texts main pinned the two sit adjacent. Mitigated, since skills/legion-retro/SKILL.md and prompts/roles/implementer.md both state it and retro runs as the implementer role, so I rate it minor; the fix is one pointer clause in the first section and never a second copy, since the pin asserts exactly one occurrence per file."
+    }
+  ],
+  "whatIVerifiedMyself": [
+    "The merge b2350b438c51d67f4d1f5583ddce602ad50851ea touches nine files. Main's pinned sentence appears exactly once in each of the five texts the guard names. Diffing this branch's copies of main's own four against main@origin leaves only this branch's own edits: legion-retro/SKILL.md's 'GitHub will not merge' rewrite, go/worker-common.md's conditioned clause, roles/implementer.md's deleted CI-line sentence, and legion-worker/SKILL.md's moved paragraph. None of main's text is altered; the fifth path is added.",
+    "Deletion survival after the merge, the check an unchanged fingerprint cannot make and this one could not either: zero hits for the CI-line reference in any spelling across skills/, packages/claude-envoy/legion/, packages/daemon/internal/prompts/ and packages/pi-legion/scripts/; the retired phrases survive only inside prompts_test.go's own list; packages/daemon/internal/api/ready.go references none of classify, requiredchecks, headCheckResults or READY_CHECKS_NOT_GREEN; no conflict marker anywhere; the claude-envoy mirror has no content difference from skills/.",
+    "This issue's conditioned clause survived the merge wherever it belongs - the reference, its mirror and go/worker-common.md - and the absolute form it replaced is gone from the whole tree.",
+    "The guards run here: bun test src/skills-guard.test.ts in packages/pi-legion is 11 pass, 0 fail, 23 expect() calls, one more test than before the merge, and go test ./internal/prompts/... is ok.",
+    "I read the required checks of the code commit on GitHub myself before deciding, as my part says, and I carry no verdict or run id forward as a record of what the head holds now: the required set is lint, typecheck, test and pr-title with no branch-protection checks, every required name's newest run at the code commit had completed and succeeded when I read it, nothing at that commit was failed, cancelled or timed out, the one lane still running was the non-required dispatch check, and the compare from the code commit to the pull request's head returned handoffsOnly true over two files. That is what I observed, not a state another step should trust; whoever needs the head's condition reads it then."
+  ],
+  "thermonuclear": {
+    "head": "15fa7f34990cc14742b73c0c6918bf8589cfdc70",
+    "deepReview": "First invocation completed and returned no report at all - its body was the string 'see message' in place of one, which is the Oh My Pi defect the architect flagged. Re-run once at the same head: CHANGES at 15fa7f34, with a three-way reconstruction of every merged file against both parents. Its Medium is the docs/solutions corpus, carried above as the proof-surface finding rather than as a demand on that file; its Lows are the section split carried above, the stale Proven by line carried above, required_checks.go:69's comment and the guard's re- lookbehind, both already on the fast-follow line.",
+    "codeQuality": "CHANGES at 15fa7f34, body returned in full on the first invocation. Its blocking pair are the test-suite sentence in the trailer reference's prose and three stranded line wraps the merge left; I judge both wording rather than correctness and keep them on the fast-follow line, with one caveat carried there. Its reading of the pin matches mine: keep the five-path list, normalise whitespace so a reflow cannot turn it red.",
+    "perHalf": "Both halves reported after the re-run, and both returned CHANGES with a verdict line. Nothing of this round rests on a half that answered with a promise."
   },
-  "theMerge": {
-    "commit": "9e3da16e9c33eeec9a972ec6e8033e5d827f74e2",
-    "read": "One file, packages/pi-legion/CHANGELOG.md, one conflict, at the head of the same ### Changed list both sides added to. The resolution keeps this branch's bullet whole - the READY entry with its rollback paragraph - and main's bullets whole beneath it, neither reworded: the dispatch-ask bullet and the implementer-pushes-without-waiting bullet are present as written. jj diff -r 9e3da16e --summary lists that one file and nothing else, so the merge changed no other path."
-  },
-  "infra149": {
-    "measurement": "Re-run at the head I judge rather than taken from the architect: main@origin's skills/legion-worker/SKILL.md still carries the pre-INFRA-149 skip-checks paragraph at :388-406, and neither it nor AGENTS.md on main contains the string INFRA-149. So INFRA-149 has not landed, there is no canonical sentence for this merge to have dropped, and nothing was invented to satisfy the instruction.",
-    "hazardAhead": "Whichever of the two lands second must carry that sentence into wherever the other left the text. For this branch that is skills/legion-worker/references/skip-checks-trailer.md, which is where 5ca8c34f moved the paragraph; a merge that keeps both sides whole will not put it there by itself, because the text it would keep is the SKILL.md copy this branch emptied."
-  },
-  "noPairRan": "A confirmation runs no thermonuclear pass by the rule, so none ran, and that is the whole reason none ran. An earlier draft of this file added that the cross-model reviewer was unavailable and that a later round would inherit the gap; the architect corrected it while I was writing, and the correction is the record: credit returned to the Codex subscription at 16:35Z and openai-codex/gpt-6-astra answers again, so a round after this one runs its pair cross-model as usual. The per-token agents astra-api and gpt-api remain empty and still fail. No subagent of mine was running when the credit was out - this confirmation ran none at all - so nothing of mine is stalled on that refusal.",
-  "ci": {
-    "codeHead": "9e3da16e9c33eeec9a972ec6e8033e5d827f74e2",
-    "prHeadConfirmed": "c8376d4fdf516144f47d347e0fdec76774758e74 at the read; the approval names the head my own handoff push makes, read from read_record after it lands.",
-    "required": ["lint", "typecheck", "test", "pr-title"],
-    "observed": "Newest run of each required name at the code head: lint 120918161133, typecheck 120918160947, test 120918161171, pr-title 120918467623, all completed success. Grouping every check-run by name and taking the newest leaves no failure, cancellation or timeout there. The non-required Legion Envoy and Contracts lane was in_progress and decides nothing. The compare from the code head to the pull request's head, run with the command this branch itself writes into merge-gate.md, is {\"files\":2,\"handoffsOnly\":true}, status ahead.",
-    "requiredSetRead": "gh api --paginate repos/sjawhar/legion/rules/branches/main -> lint typecheck test pr-title; branch protection carries no required check",
-    "shasFetchedBack": "gh api repos/sjawhar/legion/commits/<sha> --jq .sha echoed back 9e3da16e9c33eeec9a972ec6e8033e5d827f74e2 and c8376d4fdf516144f47d347e0fdec76774758e74; a8bcd063e0938f0e013a46e3a83888be57d93796 came from the reviews read, not from memory."
-  },
+  "fastFollow": [
+    "skills/legion-worker/references/skip-checks-trailer.md:30-31 explains the pin's test to a worker reading a prompt mid-task, and its 'the four other texts that state it' is a hand-maintained count no test holds. The half that earns its place is the instruction not to reword or rewrap the sentence; the count and the test's name belong in the test's own comment, which already carries them.",
+    "The merge spliced three paragraphs without re-reading them, leaving stranded fragments at skills/legion-worker/SKILL.md:393, skills/legion-worker/references/skip-checks-trailer.md:32 and AGENTS.md:276. Reflowing the first two is blocked today by the pin matching a literal single-spaced string, which is the caveat below.",
+    "packages/pi-legion/src/skills-guard.test.ts:246 counts the pinned sentence as a literal string, so every pinned file must keep a 186-character line unwrapped and a reflow turns the lane red with found: 0 and no hint why. Normalising whitespace before the count removes the coupling and keeps the invariant. The failure direction is safe - a false red, not a silent pass - which is why it is a fast-follow and not a finding.",
+    "Widening that guard's roots to docs/solutions is the instrument that would have caught this round's corpus question at the merge rather than at review.",
+    "packages/daemon/internal/daemon/required_checks.go:69 still calls requiredchecks.Required 'the reader READY uses', which this branch's own rewrite of that package's doc contradicts; classify.Judge lost its last caller outside its package; readyChecks reads no check; rememberWait keeps a positional bool its callee can derive; the compare command is hand-maintained in two files; the CI-line guard's negation lookbehind does not compose with its own re- prefix."
+  ],
   "threads": {
-    "note": "A confirmation makes no thread pass. The eleven threads of rounds one to five were all answered by the implementer and by me and resolved by it as the pull request's author before my approval at a8bcd063; no bot has opened a thread on #2121."
+    "onGitHub": 11,
+    "resolved": 11,
+    "answeredByMe": 11,
+    "botThreadsAdjudicated": 0,
+    "note": "Counted at the forge. All eleven are from earlier rounds, each carrying the implementer's disposition and mine, resolved by it as the pull request's author. No bot has opened a thread on #2121. This round's findings open new ones."
   }
 }
