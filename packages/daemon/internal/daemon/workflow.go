@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -576,8 +578,15 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d", root.issue.Key, root.issue.Generation, approved),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactApproved, Version: approved})
 	}
-	if changes, reason := approval.ChangesRequestedLatest(); changes >= root.issue.Awaiting.GateVersion {
-		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d", root.issue.Key, root.issue.Generation, changes),
+	if changes, reason := approval.ChangesRequestedLatest(); changes >= root.issue.Awaiting.GateVersion &&
+		!classify.DesignGateChangesTold(*root.gate, changes, reason) {
+		// Dispatch's read names no review id. A changes request the gate records as told is the one
+		// that answered an earlier wait (a plain reply can hand the request back without reopening
+		// it), so it answers nothing now. Another at the same version, in a later wait of the same
+		// generation, is a new act of a person; its reason is in the event id, so it is not dropped
+		// as already processed, and a redelivery of the same review stays one event.
+		review := sha256.Sum256([]byte(reason))
+		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d:%x", root.issue.Key, root.issue.Generation, changes, review[:8]),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactChangesRequested, Version: changes, Reason: reason})
 	}
 	if approval.State != "awaiting" || approval.WaitingOn != "agent" || approval.AskID == "" {

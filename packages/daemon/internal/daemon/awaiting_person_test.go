@@ -104,6 +104,9 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 		{name: "a newer version a registration recorded on the gate", awaiting: record.Awaiting{GateVersion: 3},
 			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"}}},
+		{name: "a second changes request at the version an earlier one answered", awaiting: record.Awaiting{GateVersion: 3},
+			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: new(3), ToldChangesReason: "name the rollback path"},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("and name who runs the restore")}}},
 		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: alice}}}},
@@ -134,9 +137,11 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 // handing the turn to the agent, and an approval request a session's reply moved to the agent.
 func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
+	told := 3
 	for _, tc := range []struct {
 		name     string
 		awaiting record.Awaiting
+		gate     *record.DesignGate
 		client   awaitingDispatch
 	}{
 		{name: "an ask still waiting on the person", awaiting: record.Awaiting{Ask: "ask-root"},
@@ -150,10 +155,13 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: architectSession}}}},
+		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3},
+			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path"},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("name the rollback path")}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var waitGate *record.DesignGate
-			if tc.awaiting.GateVersion != 0 {
+			waitGate := tc.gate
+			if waitGate == nil && tc.awaiting.GateVersion != 0 {
 				waitGate = gate
 			}
 			got := catchUpRoot(t, tc.awaiting, waitGate, &tc.client)
