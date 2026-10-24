@@ -2,58 +2,65 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T07:45:00Z",
-  "round": "the reviewer's first round on the new scope: three blocking and four minor, all fixed in one commit; three threads declined as moot, their files no longer on this branch",
+  "completed": "2026-10-24T08:40:00Z",
+  "round": "the reviewer's eight items and nothing else, on the architect's instruction that the section is frozen after them",
   "proof": [
     {
-      "criterion": "Blocking 1 — the deployment's cluster namespace was written out in a shell command in `.legion/INFRA-71/plan.json:100`, on a branch of a public repository, which the architect's standing rule and AGENTS.md's public-repository paragraph both forbid.",
-      "surface": "The branch's own tracked tree, swept file by file, and the file itself.",
-      "command": "jj file list | xargs grep -InE for the namespace in a Kubernetes context (`-n <ns>`, `namespace: <ns>`, `namespaces/<ns>`, `<ns> namespace`, `namespace <ns>`) and grep -Il -F for the compute class, the scratch storage class and the admission policy's name ; .github/scripts/check-private-names.sh ; python3 -c json.load on the edited handoff",
-      "observed": "The field now carries the sentence alone and says in place that it was redacted and why. Across all 4734 tracked files there is no hit for the namespace in any Kubernetes context, and none at all for the compute class, the scratch storage class or the policy name. The handoff still parses as JSON, and the repository's own private-name check passes — which proves nothing here and is recorded as passing for that reason.",
-      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
-      "negativeControl": "The exposure, recorded rather than purged, on the architect's ruling: the literal stood in `.legion/INFRA-71/plan.json:100` from the plan handoff's push (commit 761e24ff, 2026-10-24 05:23Z) until this commit, about two hours, and the blob stays reachable through pull request #2092 because the pushed commit is not rewritten — a force push would cost the reviewer's approval by SHA and the daemon's recorded heads and would not unpublish it. Retro removes `.legion/` from the head that merges, so main never carries it. Nothing in the repository could have caught it: `check-private-names.sh` knows the deployment repository, the company and their hosts, not a namespace, and the tester's own private-name proof greps the five non-handoff paths by construction."
+      "criterion": "The two required: the section's diagnostic for the one failure that announces nothing used a verb this identity may not use, and the collision clause said a second apply could patch another role's Job.",
+      "surface": "The live cluster from this role container, through the credential its deployment projects — `kubectl auth can-i` against the API server, not a reading of any policy.",
+      "command": "kubectl auth can-i get endpoints ; list endpoints ; patch jobs ; update jobs ; get services ; create jobs ; delete jobs ; get pods ; get pods/log",
+      "observed": "`get endpoints` no, `list endpoints` no, `patch jobs` no, `update jobs` no, `get services` no; `create jobs` yes, `delete jobs` yes, `get pods` yes, `get pods/log` yes. So the endpoints command is gone from the label bullet, which now compares the labels on the role's own pod with the deployment's declaration and names the refusal in place; and the naming paragraph says taking a name in use does not overwrite that workload, because the apply is refused, while the wait, the reachability check and the delete all still act on the other role's workload — which is the part that costs.",
+      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
+      "negativeControl": "The grants are measured as a matrix rather than one at a time, so the section's remaining commands are checked as well as the removed ones: every command the sequence still names is in the `yes` set above, and every one in the `no` set is gone from it."
     },
     {
-      "criterion": "Blocking 2 — the step that demonstrated reaching the workload ran `psql`, which no role container has, in a section that forbids both ways of getting one.",
-      "surface": "This role container, running the section's own published check, and the image itself.",
-      "command": "which psql ; the `python3 - <<'PY'` block extracted verbatim from the published sh block and run against a port that listens and one that does not",
-      "observed": "`which psql` finds nothing. The published snippet prints `answered` for `kubernetes.default.svc:443` and fails `TimeoutError: timed out` for `kubernetes.default.svc:5432` after its ten seconds — both outcomes a role will meet, and the timeout is also the symptom the missing reachability label produces. The section now says in as many words that the role container has no client for any of these servers, that `exec` into the workload's pod is closed and that installing one in its own pod is the withheld `operator-setup` row, so speaking a server's protocol means a client library onto the issue's own disk, the way every other tool that works from the checkout arrives.",
-      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
-      "negativeControl": "The two routes the section forbids are not quietly reintroduced: nothing in the sequence runs `kubectl exec` or installs into the pod, and the check is a connection rather than a query, which is the most the image can honestly do. A real query would need a client the image does not carry; it is named as the issue's own disk rather than written as an unexecuted command."
+      "criterion": "The gate quoted an output nobody got, and decided without instructing — so a role could read two answers, submit the Job anyway, and leave a four-processor workload on the shared quota until its deadline.",
+      "surface": "This role container with its in-cluster configuration taken away, which is the shape a credential-less role runs in.",
+      "command": "env -u KUBERNETES_SERVICE_HOST -u KUBERNETES_SERVICE_PORT -u KUBERNETES_SERVICE_PORT_HTTPS kubectl auth can-i create jobs ; the status captured directly rather than through a pipeline",
+      "observed": "Exit **1**, last line `The connection to the server localhost:8080 was refused - did you specify the right host or port?`. The section quotes that and nothing else; the earlier `exit 0` and the two strings it quoted are gone. And the gate now instructs: **unless both commands answer a bare `yes`, submit nothing**, with the reason in place — the sequence is unconditional, its only `kubectl delete job` is after the Service steps, and those are refused `Forbidden` wherever the second answer is `no`. The trailing pre-apply paragraph is removed, as that makes it unnecessary.",
+      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
+      "negativeControl": "The previous text's `exit 0` came from a pipeline reporting `head`'s status rather than `kubectl`'s — the reviewer's own error, carried into the section and now corrected at its source. Running it the same wrong way still prints 0, which is why the measurement is written with the status captured directly."
     },
     {
-      "criterion": "Blocking 3 — nothing told a role to name its workload for its issue, in a namespace every project's agents share under one identity, so two roles following the section collide and the documented delete takes the other's running workload.",
-      "surface": "The section's text and its manifest, driven against live admission under the issue-scoped name.",
-      "command": "the manifest extracted from the section with `<workload>` filled as the new paragraph tells a role to fill it, through kubectl apply --dry-run=server",
-      "observed": "`job.batch/infra-71-postgres created (server dry run)` — the name the section now prescribes is admitted. The paragraph sits before the manifest, names the convention (`<issue key lowercased>-<what it is>`) beside the two issue-scoped names this runbook already uses, and spells out what the obvious name costs: the second apply patches or fails on immutable fields, the wait selects the other role's pod by label, and the delete takes its database and Service away mid-test.",
-      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
-      "negativeControl": "The collision is not hypothetical and is written as the sequence's own outcome rather than as advice: every step that names the workload selects by name or by `job-name` label, neither of which distinguishes two roles' workloads, which is why the name is the only place it can be fixed."
+      "criterion": "The reachability check ran once, the instant `kubectl wait` returned, and the only reading offered was for a timeout — so the normal first outcome, a refused connection while the database initialises, was handed the one wrong answer in the section.",
+      "surface": "The published `python3` block, extracted from the section and run as published, against all three shapes a role can meet.",
+      "command": "the block run against a port that listens; against a port that refuses for six seconds and then listens; and against an address whose packets are dropped, with its deadline cut to twelve seconds so the case ends",
+      "observed": "A listening port prints `answered` at once. A port that refuses and then listens prints `answered`, the loop riding out the refusals — which is the readiness race, since the pod carries no readiness probe and `condition=Ready` means only that the container started. A dropped address prints `never answered: TimeoutError: timed out` and exits 1. The paragraph now names the two failures apart: refused in the first seconds is reachable and not listening yet; timed out every try to the deadline is unreachable, which is the missing label.",
+      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
+      "negativeControl": "The third shape is the control for the second: both are failures of the same call, and only the exception type tells them apart, which is why the section reports the exception's name rather than saying `failed`. The loop is a minute at 5 s per connect and 2 s between tries, inside the `kubectl wait --timeout=300s` above it."
     },
     {
-      "criterion": "The four minor findings, taken in the same pass: the gate's `no` branch is not what a credential-less role sees; the promise that every mistake is refused naming its rule is untrue of the reachability label; the manifests carry a password into a public repository's checkout; the last line asks for Services before the grant exists.",
-      "surface": "The section's text against this cluster and this image, and the reviewer's own measurement of the credential-less case.",
-      "command": "the section re-read against the measurements: kubectl auth can-i create jobs|services here ; the label bullet against the eight breakages already measured ; the sequence's first line ; kubectl apply of the Service pre-apply",
-      "observed": "The gate paragraph now says a role with no credential gets neither answer — no kubeconfig and no `KUBECONFIG`, so `kubectl` builds no in-cluster configuration, falls back to `localhost:8080`, prints the connection refusal and the `doesn't have a resource type 'jobs'` warning, and may still exit 0 — and that anything other than a bare `yes` is to be read as not having it. The promise is qualified where it is made, and the label bullet opens by saying this is the one rule admission does not enforce, naming the symptom (the reachability check timing out against a Service that has endpoints) and the check (the pod's own labels against the declaration). The sequence opens `cd \"${TMPDIR:-/tmp}\"` with its reason, and ends `kubectl get jobs,pods`, with a clause saying the Service steps are refused `Forbidden` before the apply and that the refusal is the deployment's state rather than a fault in the manifest.",
-      "headSha": "63a5ab96903a68505eb288ad63a223398f13c7e1",
-      "negativeControl": "The label claim is checked by what the measurements do *not* contain: eight breakages here and nineteen in the tester's round cover every rule in the list and none covers a missing label, because there is no refusal to measure — which is exactly the reviewer's finding, and is why the bullet now carries a symptom instead of a promise."
+      "criterion": "The two minor claims: the bullets' preamble promised the namespace enforces each of them four lines above the bullet that says it does not, and the Services line reasoned from RBAC rather than from a measurement.",
+      "surface": "The section's text against the measured grant matrix.",
+      "command": "the preamble and the closing line re-read against kubectl auth can-i get services / delete jobs / patch jobs",
+      "observed": "The preamble reads `Every one but the last is enforced by the namespace's admission rather than by anyone's good behaviour; the last is enforced by nothing, which is why it is marked where it stands.` The closing line says the last command asks only for Jobs and pods because this identity may not read Services either — `get services` answers `no` wherever `create services` does — rather than claiming reading needs the same grant as creating, which this identity disproves: `delete jobs` yes while `patch jobs` no.",
+      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
+      "negativeControl": "The section's own manifest, extracted and filled as a role fills it, is still accepted by live admission at this head (`job.batch/infra-71-postgres created (server dry run)`), so none of this round's wording changes moved the thing the rules describe."
+    },
+    {
+      "criterion": "The reviewer's new finding, in the test handoff rather than in the guidance: five proofs recorded a headSha no commit has, and the swept diff was called five files where it is nine.",
+      "surface": "The committed `.legion/INFRA-71/test.json`, and GitHub's own commit lookup.",
+      "command": "gh api repos/sjawhar/legion/commits/63a5ab96903a68505eb288ad63a223398f13c7e1 ; the file edited and re-parsed as JSON",
+      "observed": "All five `headSha` values now read `63a5ab96903a68505eb288ad63a223398f13c7e1`, which GitHub resolves to itself; the bad value `63a5ab96903a95996e30bae1d0d8a7f2b15f5af5` answered 422. The surface line reads nine files, with a parenthesis in place saying it said five and that the four `.legion/` handoffs were what it left out — one of which is where the private name was, so the sweep's own count mattered. Corrected openly on the architect's instruction, not quietly; the tester is told by Envoy that its handoff changed under it, and nothing else of that file is touched.",
+      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
+      "negativeControl": "This is the same defect this tree caught in itself two rounds ago — a proof naming a commit nobody has — so it is checked the same way: every `headSha` in both handoffs is 40 hex and resolves on GitHub, and the one that did not is named here rather than silently replaced."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md: the gate's third answer, the qualified promise, the label bullet with its symptom and check, the naming paragraph, the sequence written outside the checkout, the reachability check in place of `psql` with the paragraph explaining it, and the pre-apply clause on the Service steps.",
-    ".legion/INFRA-71/plan.json: the departure's `spec` field redacted to its sentence."
+    "docs/kubernetes.md: the gate's measured output and its instruction to submit nothing without two `yes`es; the bullets' preamble; the label bullet's diagnostic; the naming paragraph's collision; the looping reachability check and the paragraph separating refusal from timeout; the closing line on Services; the trailing pre-apply paragraph removed.",
+    ".legion/INFRA-71/test.json: five `headSha` values corrected to the commit that exists, and the swept diff's file count corrected from five to nine, each saying so in place."
   ],
   "trickyParts": [
-    "The namespace is a common English word, so sweeping for it needs a Kubernetes context (`-n <ns>`, `namespace: <ns>`, `namespaces/<ns>`, `<ns> namespace`) rather than the bare string, which matches 896 files in a tree this size. The other three declaration names are distinctive and were swept bare.",
-    "The only honest demonstration this image can give is that the address answers. That is less than the section promised and more than it could deliver: the client that would run a query is not in the image and may not be installed in the pod, so the section names where a client comes from instead of writing a command nobody can run."
+    "The readiness race is invisible to every check that is not a loop: `kubectl wait --for=condition=Ready` is satisfied by a container that has started, and a database's listener comes up later, so a single connect attempt reports a failure that means nothing. The exception type is the only signal that separates it from unreachability, which is why the published block prints it."
   ],
   "deviations": [
-    "The three threads from the superseded scope are declined rather than fixed: their files are off this branch. The guard's open finding travels to dispatch://INFRA-199 with its commits, which stay in this branch's history."
+    "Nothing beyond the reviewer's eight items was touched, on the architect's instruction that the section is frozen after this round."
   ],
   "openQuestions": [
-    "Specification acceptance 1, 2, 3 and 4 still wait on a person applying dispatch://INFRA-206; the Service half of the sequence is refused `Forbidden` here and is recorded as refused rather than simulated.",
-    "The redacted blob stays reachable through this pull request until retro takes `.legion/` off the merging head. That is the architect's ruling and the controller is told; a rewrite was refused for what it would cost."
+    "Specification acceptance 1, 2, 3 and 4 wait on a person applying dispatch://INFRA-206. The Service half of the sequence is refused `Forbidden` here and recorded as refused, never simulated; the reachability check's positive path against a real workload is part of that live proof.",
+    "The private name exposed in `.legion/INFRA-71/plan.json:100` between 761e24ff and 63a5ab96 remains reachable through this pull request's history by the architect's ruling; retro takes `.legion/` off the merging head."
   ],
   "discoveredComplexity": [
-    "A document whose steps are run finds its own defects: the deadline rule last round, and this round the fact that the one tool the demonstration reached for is not in the image the document is written for. Neither was visible by reading."
+    "Three of this round's eight were claims about what the cluster would refuse, written without asking it. The matrix of `kubectl auth can-i` answers costs seconds and decides all of them, which is now how every command in the section is justified."
   ]
 }
