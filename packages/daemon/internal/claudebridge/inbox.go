@@ -112,7 +112,8 @@ func serveInbox(conn net.Conn, events chan<- event, stop <-chan struct{}, logger
 	}
 }
 
-// close stops accepting, ends every client and removes the socket's directory.
+// close stops accepting, waits for every client, which closing stop ends, and removes the socket's
+// directory.
 func (in *inbox) close() {
 	_ = in.listener.Close()
 	in.wg.Wait()
