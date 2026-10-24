@@ -43,11 +43,12 @@
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
 // that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
-// the person's AWS sign-in against an AWS broker, or their Application Default Credentials
-// against a GCP one, and need no session identity at all. The machine and grant forms act
-// under this machine's login: the helper signs each call with its launcher credential (sign-launcher)
-// for a process it can show is outside every registered session's process tree, the operator's
-// own shell, and only for the broker's four operator routes.
+// the person's AWS sign-in against an AWS broker, or their Google sign-in (their Application
+// Default Credentials, or their gcloud login) against a GCP one, and need no session identity at
+// all. The machine and grant forms act under this machine's login: the helper signs each call
+// with its launcher credential (sign-launcher) for a process it can show is outside every
+// registered session's process tree, the operator's own shell, and only for the broker's four
+// operator routes.
 package main
 
 import (

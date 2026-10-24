@@ -2434,24 +2434,48 @@ name lowercased; create and retag refuse it before writing unless it matches the
 rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
 (`google.FindDefaultCredentials`: the file `GOOGLE_APPLICATION_CREDENTIALS` names whenever it is
 set, else `~/.config/gcloud/application_default_credentials.json` whatever `CLOUDSDK_CONFIG` says,
-else the metadata server; a load that fails while `GOOGLE_APPLICATION_CREDENTIALS` is set names
-that variable and advises no sign-in, since no other file is read while it is set, and one that
-fails while it is unset advises the refusal's route below, `gcpPersonRoute`) and calls
-Secret Manager itself under `cloud.google.com/go/secretmanager`, so IAM in that project decides
-what the person may read or write. GCP's requireAccount is a no-op, unlike AWS's: every call
-already names `projects/<project number>/...` explicitly, so a wrong-project identity gets a real
-refusal from the API itself rather than silently reading another project's secrets - the hazard
-AWS's `ListSecrets` (which takes no project parameter) has and GCP's calls do not.
-A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
-service account key file, a workload identity federation credential (a dev box's own), a workforce
-identity federation sign-in, or a GCE/GKE metadata-server identity (GKE Workload Identity's too),
-whose ADC carries no JSON at all - (`gcpBackend.requireWriteSignIn`). The refusal names what it
-found (`gcpCredsFound`) and `gcpPersonRoute`, the route that leaves the machine's identity alone:
-`gcloud auth login --no-activate` (which writes `legacy_credentials/<email>/adc.json` and keeps the
-active gcloud account), then the command again with `GOOGLE_APPLICATION_CREDENTIALS` naming that
-file, never `gcloud auth application-default login`, which replaces a machine's own ADC for every
-program that uses it. `--owner me` is the Google userinfo endpoint's `email` for the signed-in
-Application Default Credentials, lowercased.
+else the metadata server) and calls Secret Manager itself under `cloud.google.com/go/secretmanager`,
+so IAM in that project decides what the person may read or write. A load that fails while
+`GOOGLE_APPLICATION_CREDENTIALS` is set names that variable and advises no sign-in, since no other
+file is read while it is set; one that fails while it is unset signs every form, a read included,
+in with the person's gcloud login instead (`gcloudLogin`). GCP's requireAccount is a no-op, unlike
+AWS's: every call already names `projects/<project number>/...` explicitly, so a wrong-project
+identity gets a real refusal from the API itself rather than silently reading another project's
+secrets - the hazard AWS's `ListSecrets` (which takes no project parameter) has and GCP's calls do
+not. A write runs only under a person's own Google Account sign-in (`gcpBackend.requireWriteSignIn`,
+reached only through `connectWriter`): ADC of type `authorized_user` write as they are; under any
+other ADC - a service account key file, a workload identity federation credential (a dev box's
+own), a workforce identity federation sign-in, or a GCE/GKE metadata-server identity (GKE Workload
+Identity's too), whose ADC carries no JSON at all - it signs the backend in with the person's
+gcloud login, redialing Secret Manager under it (`signIn`) and leaving the machine's ADC as they
+are, unless `GOOGLE_APPLICATION_CREDENTIALS` named them, a choice it refuses rather than overrides.
+Reads under a machine's ADC run under it. `gcloudLogin` borrows the login through gcloud's own
+interface, never its credential files: the first `gcloud` on PATH (`exec.LookPath`) lists its
+logins (`gcloud auth list --format=json`); a person's is an account named by a plain email the
+broker accepts as a person owner (`personAccount`: `policy.ValidPersonOwner`), never a
+`.gserviceaccount.com` one or a workload or workforce identity federation login, which gcloud
+names by a `principal://` identifier; it takes the one `CLOUDSDK_CORE_ACCOUNT` names when that is
+one of them, else the only one, refusing none (naming `gcloud auth login`) or several (naming
+each, and `CLOUDSDK_CORE_ACCOUNT`). Its tokens are `gcloudTokenArgs`,
+`gcloud auth print-access-token --format=value[private](token) --impersonate-service-account=
+--access-token-file= --credential-file-override= <account>`, behind `oauth2.ReuseTokenSource`, each
+taken to last `gcloudTokenLife` (5 minutes: gcloud prints no expiry, and refreshes a token within
+300 s of its expiry before printing it). gcloud prints a command's output through its logger, whose
+file handler keeps a copy in `logs/` under gcloud's configuration directory, so the `private`
+format attribute writes the token to the console stream alone, and every gcloud run has
+`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1` and `CLOUDSDK_CORE_DISABLE_PROMPTS=1`. The empty flags
+clear impersonation, an access token file and a credential file override, whichever of the
+environment and the configuration file sets them (a flag outranks both, and an empty value turns
+the property off), and `gcloudEnv` drops `gcloudIdentityOverrides` (`CLOUDSDK_AUTH_ACCESS_TOKEN`,
+which gcloud reads directly, and the three properties' variables); a write still refuses a token
+whose userinfo `email` is not the chosen account, compared case-insensitively. gcloud reads
+`/dev/null`, never the CLI's standard input (a secret's value), and no error carries its token. A
+refusal names what it found (`gcpCredsFound`: the credentials' `type` or the metadata server,
+never a file path) and never advises `gcloud auth application-default login`, which replaces a
+machine's own ADC for every program that uses it. `--owner me` is the Google userinfo endpoint's
+`email` for the sign-in the write runs under, lowercased. A command a form prints for running
+again starts with `GOOGLE_APPLICATION_CREDENTIALS=…` when that was set, and with
+`CLOUDSDK_CORE_ACCOUNT=…` when it chose the gcloud login (`signInPrefix`).
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
@@ -2572,9 +2596,9 @@ that date never waits past the purge (`earliestPurge` is the one place `DeletedD
 GCP's deletion moment is `expire_time` itself, the exact purge moment, so `show` and `list` print
 only it, with no separate earliest-purge line. The forms' unit tests run in-process against
 `secrets.Local` and a fake STS and broker (`secret_test.go`) for AWS, and against a fake Secret
-Manager gRPC server and fake Application Default Credentials (`secret_gcp_test.go`) for GCP; AWS's
-`secret_e2e_test.go` runs create, delete, restore and retag against `brokertest.NewRig`'s real
-broker.
+Manager gRPC server, fake Application Default Credentials and a stub `gcloud` alone on `PATH`
+(`secret_gcp_test.go`) for GCP; AWS's `secret_e2e_test.go` runs create, delete, restore and retag
+against `brokertest.NewRig`'s real broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
