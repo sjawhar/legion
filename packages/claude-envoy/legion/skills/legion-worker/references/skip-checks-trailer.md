@@ -10,7 +10,9 @@ sjawhar/legion.
 
 A push whose commits touch only `.legion/` (a handoff-only push) ends its head's commit message
 with `skip-checks: true` as the last line, preceded by two empty lines, so GitHub starts no
-workflow run for it and the daemon carries the code head's verdict to it. GitHub honours the
+workflow run for it and the daemon carries the code head's verdict to it — except retro's push,
+which never carries the line whatever paths it touches, for the reason the next section gives.
+GitHub honours the
 trailer only in that shape — the last line, after two empty lines; one empty line is not enough,
 and GitHub then starts every workflow as if the line were not there (a planner's handoff push did
 exactly that in the first live run of this rule). jj keeps the two lines as written, where
