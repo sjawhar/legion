@@ -24,7 +24,7 @@
 # toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
 # TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget,
 # jq, openssh-client (ssh-keygen), util-linux (flock), postgresql-client (psql), redis-tools
-# (redis-cli), sqlite3, netcat-openbsd (nc), dnsutils (dig) and chromium (the browser Oh My Pi
+# (redis-cli), sqlite3, netcat-openbsd (nc), bind9-dnsutils (dig) and chromium (the browser Oh My Pi
 # finds on PATH); and a generic toolchain for the repositories the workers work, specific to none
 # of them: uv and uvx, Node LTS with npm and corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
 # each of these on PATH at /usr/local/bin or /usr/bin; and the license of every third-party piece of
@@ -414,7 +414,7 @@ COPY --from=toolchain /opt/language-servers/node_modules/pyright/LICENSE.txt /in
 COPY --from=toolchain /opt/language-servers/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq, openssh-client, util-linux, postgresql-client, redis-tools, sqlite3, netcat-openbsd and dnsutils of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq, openssh-client, util-linux, postgresql-client, redis-tools, sqlite3, netcat-openbsd and bind9-dnsutils of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
@@ -453,7 +453,7 @@ ARG PI_CODEGRAPH_VERSION
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
 # chromium, python3, curl, wget, jq, openssh-client (for ssh-keygen), util-linux (for flock),
 # postgresql-client (for psql), redis-tools (for redis-cli), sqlite3, netcat-openbsd (for nc) and
-# dnsutils (for dig): what the capability check's browser, eval-python and toolchain rows look for
+# bind9-dnsutils (for dig): what the capability check's browser, eval-python and toolchain rows look for
 # (packages/daemon/internal/capabilities/image.go) — the last five join flock in the toolchain row —
 # trixie's since the suite is the apt pin (the note above the ARGs); chromium brings its library
 # closure as its Depends (a font with it: fontconfig-config requires one, fonts-dejavu-core first),
@@ -497,14 +497,18 @@ ARG PI_CODEGRAPH_VERSION
 # `nc` is not a file of the package: it ships /usr/bin/nc.openbsd, and the `nc` name comes from the
 # alternatives system, whose script runs as root during this build — so the checks below ask for
 # `nc`, never `nc.openbsd`.
-# dnsutils (dig): a role whose connection to a service name fails cannot otherwise tell "the name
-# does not resolve" from "the packets are dropped".
+# bind9-dnsutils (dig): a role whose connection to a service name fails cannot otherwise tell "the
+# name does not resolve" from "the packets are dropped". The package is named rather than the
+# virtual `dnsutils`, which trixie has no candidate for: apt resolves it to this single provider
+# today, and a second provider the day one appears would fail the build on a name that was never
+# the package — and the notices sentence above points at /usr/share/doc/<package>/copyright, which
+# this image has for bind9-dnsutils and not for dnsutils.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl dnsutils git jq netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
+RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl git jq netcat-openbsd openssh-client postgresql-client python3 redis-tools socat sqlite3 util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
     && chmod u-s /usr/lib/openssh/ssh-keysign \
     && chmod g-s /usr/bin/ssh-agent \

@@ -108,8 +108,9 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   no other way to open one), `nc` (from `netcat-openbsd`, for the reachability check a role would
   otherwise write as an inline Python loop: the package ships `/usr/bin/nc.openbsd` and the `nc`
   name comes from the alternatives system rather than being a file of the package, so every gate
-  asks for `nc` and never `nc.openbsd`), `dig` (from `dnsutils`: how a role whose connection to a
-  service name fails tells "the name does not resolve" from "the packets are dropped"),
+  asks for `nc` and never `nc.openbsd`), `dig` (from `bind9-dnsutils`, the package trixie's virtual
+  `dnsutils` resolves to: how a role whose connection to a service name fails tells "the name does
+  not resolve" from "the packets are dropped"),
   and `chromium` for the browser tools, installed without its Recommends (no
   setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
   its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
@@ -168,7 +169,7 @@ four priced options and their verdicts:
 
 | option | the measurement | verdict |
 | :--- | :--- | :--- |
-| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment | **chosen** |
+| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment | **chosen** |
 | a per-issue install onto the issue's disk | the issue's disk is 49 GiB with 2.5 GiB used, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client** by the `apt-get` refusal above, and still right for a language's own package set — which is the runner row below |
 | a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
 | extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected**: it is the withheld `operator-setup` capability under any reading (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200), and it is fragile for exactly the client this change exists for |
