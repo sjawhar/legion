@@ -335,9 +335,7 @@ func TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused(t *testing.T
 // TestACreateThatNamesNoneAsItsGitHubOwnersWritesNothing: on create, `--github-owners none` (in
 // any case) names no GitHub account. It is not the removal it is on retag, and the github-app
 // secret it would write has no github-owners tag. Such a create is refused with a usage error
-// before anything is written, on both stores, as a create without --github-owners is. Today it
-// writes the secret and its App key, then exits 1 when the broker refuses the secret
-// github-owners-missing.
+// before anything is written, on both stores, as a create without --github-owners is.
 func TestACreateThatNamesNoneAsItsGitHubOwnersWritesNothing(t *testing.T) {
 	owners := []string{"none", "None", "NONE"}
 	t.Run("aws", func(t *testing.T) {

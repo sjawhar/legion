@@ -9,9 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -22,7 +20,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 
-	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
@@ -120,15 +117,6 @@ func checkSettingsKeyARN(settings Settings) error {
 	return nil
 }
 
-// awsTags is tags as Secrets Manager's tag list, in key order: the inverse of secrets.TagMap.
-func awsTags(tags map[string]string) []smtypes.Tag {
-	list := make([]smtypes.Tag, 0, len(tags))
-	for _, key := range slices.Sorted(maps.Keys(tags)) {
-		list = append(list, smtypes.Tag{Key: aws.String(key), Value: aws.String(tags[key])})
-	}
-	return list
-}
-
 // isAccessDenied reports whether err is AWS's AccessDeniedException, which the SDK answers as a
 // generic API error: secretsmanager's types declare no type for it.
 func isAccessDenied(err error) bool {
@@ -177,15 +165,12 @@ func (b *awsBackend) list(ctx context.Context) ([]secretView, error) {
 			if !strings.HasPrefix(id, b.settings.SecretsPrefix) {
 				continue // the name filter matched more than the namespace
 			}
-			tags := secrets.TagMap(e.Tags)
 			views = append(views, secretView{
 				Name: b.displayName(id), SecretName: id,
-				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-				Kind: tags[policy.TagKind], GitHubOwners: tags[policy.TagGitHubOwners], MaxGrant: tags[policy.TagMaxGrant],
 				HasValue: secrets.HasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
 				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
-			})
+			}.withTags(secrets.TagMap(e.Tags)))
 		}
 	}
 	return views, nil
@@ -196,16 +181,13 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	if err != nil {
 		return secretView{}, err
 	}
-	tags := secrets.TagMap(out.Tags)
 	return secretView{
 		Name: b.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
-		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-		Kind: tags[policy.TagKind], GitHubOwners: tags[policy.TagGitHubOwners], MaxGrant: tags[policy.TagMaxGrant],
 		HasValue: secrets.HasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
 		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
 		Versions: out.VersionIdsToStages,
-	}, nil
+	}.withTags(secrets.TagMap(out.Tags)), nil
 }
 
 func (b *awsBackend) create(ctx context.Context, slug string, tags map[string]string, value string) error {
@@ -213,7 +195,7 @@ func (b *awsBackend) create(ctx context.Context, slug string, tags map[string]st
 		Name:         aws.String(b.id(slug)),
 		KmsKeyId:     aws.String(b.settings.KMSKeyARN),
 		SecretString: aws.String(value),
-		Tags:         awsTags(tags),
+		Tags:         secrets.TagList(tags),
 	})
 	return err
 }
@@ -238,7 +220,7 @@ func (b *awsBackend) currentTags(ctx context.Context, slug string) (heldTags, er
 func (b *awsBackend) setTags(ctx context.Context, slug string, _ heldTags, tags map[string]string) error {
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(b.id(slug)),
-		Tags:     awsTags(tags),
+		Tags:     secrets.TagList(tags),
 	})
 	return err
 }

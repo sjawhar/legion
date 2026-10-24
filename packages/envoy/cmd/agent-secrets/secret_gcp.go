@@ -39,7 +39,6 @@ import (
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
@@ -248,10 +247,8 @@ func (b *gcpBackend) viewOf(ctx context.Context, secret *secretmanagerpb.Secret)
 	}
 	view := secretView{
 		Name: b.displayName(secret.GetName()), SecretName: secret.GetName(),
-		Owner: secret.GetAnnotations()[policy.TagOwner], Tier: secret.GetAnnotations()[policy.TagTier],
-		Kind: secret.GetAnnotations()[policy.TagKind], GitHubOwners: secret.GetAnnotations()[policy.TagGitHubOwners], MaxGrant: secret.GetAnnotations()[policy.TagMaxGrant],
 		HasValue: hasValue,
-	}
+	}.withTags(secret.GetAnnotations())
 	if t := secret.GetCreateTime(); t != nil {
 		created := t.AsTime()
 		view.Created = &created
@@ -324,7 +321,6 @@ func (b *gcpBackend) show(ctx context.Context, slug string) (secretView, error) 
 }
 
 func (b *gcpBackend) create(ctx context.Context, slug string, tags map[string]string, value string) error {
-	annotations := maps.Clone(tags)
 	secret, err := b.client.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
 		Parent:   b.parent(),
 		SecretId: b.secretID(slug),
@@ -338,7 +334,7 @@ func (b *gcpBackend) create(ctx context.Context, slug string, tags map[string]st
 					},
 				},
 			},
-			Annotations: annotations,
+			Annotations: tags,
 		},
 	})
 	if err != nil {

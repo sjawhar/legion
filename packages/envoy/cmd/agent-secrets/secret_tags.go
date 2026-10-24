@@ -28,8 +28,9 @@ func checkOwnerTier(owner, tier string) error {
 	return nil
 }
 
-// tagNone is the value of --kind, --github-owners and --max-grant that removes the tag.
-const tagNone = "none"
+// tagNone is the value of --kind, --github-owners and --max-grant that removes the tag, the one the
+// broker refuses as a github-owners login (policy.TagRemoved).
+const tagNone = policy.TagRemoved
 
 // checkKind is --kind's rule: a kind the broker mints (policy.ValidKind), or none.
 func checkKind(kind string) error {

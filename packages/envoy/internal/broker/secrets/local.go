@@ -248,13 +248,7 @@ func (s LocalSecret) kmsKeyID() *string {
 	return aws.String(s.KmsKeyID)
 }
 
-func (s LocalSecret) awsTags() []types.Tag {
-	tags := make([]types.Tag, 0, len(s.Tags))
-	for k, v := range s.Tags {
-		tags = append(tags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-	return tags
-}
+func (s LocalSecret) awsTags() []types.Tag { return TagList(s.Tags) }
 
 // localVersion is the version id of the one version a secret holding a value has.
 const localVersion = "local-current"

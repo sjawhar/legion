@@ -52,9 +52,14 @@ const (
 	// (ParseGitHubOwners). A github-app secret without it is refused, since a public App can be
 	// installed by any account, and an installation on an account it does not list gets no token.
 	TagGitHubOwners = "github-owners"
-	// KindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
+	// kindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
 	// are frozen into a request, so changing or clearing the kind ends every live grant.
-	KindSourcePrefix = "mint:"
+	kindSourcePrefix = "mint:"
+	// TagRemoved is the value of `agent-secrets secret retag --kind`, `--github-owners` and
+	// `--max-grant` that removes the tag. It is never a login a github-owners tag names: an entry
+	// that reads `none` in any case was written by hand, and is refused rather than read as an
+	// account (ParseGitHubOwners).
+	TagRemoved = "none"
 	// TagRollbackGuard and RollbackGuardValue are the tag `agent-secrets secret` writes beside every
 	// kind, and the value it writes. This broker never reads the tag. Brokers from
 	// legion-envoy-v13.19.0 to the release before kinds read it as the service account a secret
@@ -124,11 +129,6 @@ var gitHubLogin = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 
 const maxGitHubLogin = 39
 
-// gitHubOwnersNone is the word `agent-secrets secret retag --github-owners none` takes to remove
-// the tag. It is never a login the tag names: an entry that reads `none` in any case was written
-// by hand, and is refused rather than read as an account.
-const gitHubOwnersNone = "none"
-
 // ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by white space,
 // compared without regard to case. It refuses a comma anywhere (ErrGitHubOwnersComma), an entry that
 // is not a GitHub login or that is the word none (ErrGitHubOwnersLogin), and a list that names no
@@ -146,18 +146,16 @@ func ParseGitHubOwners(raw string) (string, error) {
 			return "", fmt.Errorf("%w, not %q", ErrGitHubOwnersLogin, entry)
 		}
 		owner := strings.ToLower(entry)
-		if owner == gitHubOwnersNone {
+		if owner == TagRemoved {
 			return "", fmt.Errorf("%w, not %q: none removes the tag through agent-secrets and names no account", ErrGitHubOwnersLogin, entry)
 		}
-		if !slices.Contains(owners, owner) {
-			owners = append(owners, owner)
-		}
+		owners = append(owners, owner)
 	}
 	if len(owners) == 0 {
 		return "", ErrGitHubOwnersMissing
 	}
 	slices.Sort(owners)
-	return strings.Join(owners, " "), nil
+	return strings.Join(slices.Compact(owners), " "), nil
 }
 
 // KindNeedsGitHubOwners reports whether a secret of kind must carry a github-owners tag naming at
@@ -178,20 +176,20 @@ func GitHubOwnersFor(kind, raw string) (string, error) {
 }
 
 // KindSource is the Source of a kind secret: its kind frozen beside the store's own source.
-// A store's source never starts with KindSourcePrefix (an AWS source starts with "arn:", a
+// A store's source never starts with kindSourcePrefix (an AWS source starts with "arn:", a
 // Secret Manager one with "projects/").
 func KindSource(kind, storeSource string) string {
-	return KindSourcePrefix + kind + ":" + storeSource
+	return kindSourcePrefix + kind + ":" + storeSource
 }
 
-// ErrKindSourceMalformed is a source that opens with KindSourcePrefix but names no kind or no
+// ErrKindSourceMalformed is a source that opens with kindSourcePrefix but names no kind or no
 // store source, which no KindSource built.
 var ErrKindSourceMalformed = errors.New("a minted source names no kind or no store source")
 
 // ParseKindSource splits a source KindSource built into its kind and store source. minted is false
 // for a stored secret's source, which it answers whole as storeSource.
 func ParseKindSource(source string) (kind, storeSource string, minted bool, err error) {
-	rest, minted := strings.CutPrefix(source, KindSourcePrefix)
+	rest, minted := strings.CutPrefix(source, kindSourcePrefix)
 	if !minted {
 		return "", source, false, nil
 	}

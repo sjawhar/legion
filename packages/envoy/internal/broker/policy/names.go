@@ -32,9 +32,6 @@ func NameToSlug(name string) (string, error) {
 	return slugOf(name), nil
 }
 
-// ValidName reports whether name is of the form a session asks for a secret by.
-func ValidName(name string) bool { return namePattern.MatchString(name) }
-
 // slugOf is the slug of name, a Name a load produced and so already of namePattern's form.
 func slugOf(name string) string {
 	return strings.ReplaceAll(strings.ToLower(name), "_", "-")

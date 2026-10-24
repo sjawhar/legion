@@ -325,8 +325,10 @@ func TestAGitHubOwnerThatIsNoGitHubLoginIsRefused(t *testing.T) {
 			t.Fatalf("ParseGitHubOwners(%q) = %v; want ErrGitHubOwnersMissing", empty, err)
 		}
 	}
-	want := "a--b a-b-c9 " + longest + " x-"
-	if got, err := policy.ParseGitHubOwners("A-b-C9 X- a--b " + longest); err != nil || got != want {
+	// GitHub still serves accounts whose login an older sign-up rule let end in a hyphen: the
+	// organization x-, created in 2011, and the users y- and z-.
+	want := "a--b a-b-c9 " + longest + " x- y- z-"
+	if got, err := policy.ParseGitHubOwners("A-b-C9 X- Y- z- a--b " + longest); err != nil || got != want {
 		t.Fatalf("ParseGitHubOwners of valid and legacy logins = %q, %v; want %q", got, err, want)
 	}
 	secret := kindSecret("LEGACY_APP_KEY", policy.KindGitHubApp, "value")

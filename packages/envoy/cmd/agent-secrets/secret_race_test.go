@@ -64,7 +64,7 @@ func TestAConcurrentRetagNeverLeavesAGitHubAppSecretWithoutOwners(t *testing.T) 
 		writes := &racingTagWrites{Local: local}
 		writes.race = func() {
 			if _, err := local.TagResource(context.Background(), &secretsmanager.TagResourceInput{
-				SecretId: aws.String(policytest.ID("APP_KEY")), Tags: awsTags(map[string]string{policy.TagKind: policy.KindGitHubApp}),
+				SecretId: aws.String(policytest.ID("APP_KEY")), Tags: secrets.TagList(map[string]string{policy.TagKind: policy.KindGitHubApp}),
 			}); err != nil {
 				t.Errorf("the other writer's retag: %v", err)
 			}

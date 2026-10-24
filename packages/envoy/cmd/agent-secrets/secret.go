@@ -595,6 +595,13 @@ type secretView struct {
 	Versions map[string][]string `json:"versions,omitempty"`
 }
 
+// withTags is v with the fields a secret's tags (AWS tags, or Secret Manager annotations) give.
+func (v secretView) withTags(tags map[string]string) secretView {
+	v.Owner, v.Tier = tags[policy.TagOwner], tags[policy.TagTier]
+	v.Kind, v.GitHubOwners, v.MaxGrant = tags[policy.TagKind], tags[policy.TagGitHubOwners], tags[policy.TagMaxGrant]
+	return v
+}
+
 // writeIndentedJSON writes v as indented JSON.
 func writeIndentedJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)

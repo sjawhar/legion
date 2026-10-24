@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -98,10 +99,7 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		}
 		// An account with neither a login nor a slug names nothing github-owners can list, so the
 		// owners filter leaves it out like any unlisted account.
-		owner := installation.Account.Login
-		if owner == "" {
-			owner = installation.Account.Slug
-		}
+		owner := cmp.Or(installation.Account.Login, installation.Account.Slug)
 		if !slices.Contains(req.GitHubOwners, strings.ToLower(owner)) {
 			continue
 		}
@@ -125,23 +123,13 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	return string(encoded), nil
 }
 
+// validGitHubAppID reports whether id is a non-empty run of ASCII digits.
 func validGitHubAppID(id string) bool {
-	if id == "" {
-		return false
-	}
-	for _, character := range id {
-		if character < '0' || character > '9' {
-			return false
-		}
-	}
-	return true
+	return id != "" && !strings.ContainsFunc(id, func(r rune) bool { return r < '0' || r > '9' })
 }
 
 func (m GitHubApp) base() string {
-	if base := strings.TrimSuffix(m.Base, "/"); base != "" {
-		return base
-	}
-	return githubAPIBase
+	return cmp.Or(strings.TrimSuffix(m.Base, "/"), githubAPIBase)
 }
 
 // githubRequest is a call to GitHub's App API, authenticated as the App.

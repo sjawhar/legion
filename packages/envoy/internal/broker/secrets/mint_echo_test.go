@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
-	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 )
 
 // googleCanary is the refresh token a Google login fixture stores, which no error may quote.
@@ -50,7 +49,9 @@ func echoStatusLine(t *testing.T, echo func(*http.Request) string) string {
 }
 
 // appJWT is the App JWT a GitHub request carries.
-func appJWT(r *http.Request) string { return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") }
+func appJWT(r *http.Request) string {
+	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
 
 // refreshToken is the refresh token a Google token request carries.
 func refreshToken(r *http.Request) string {
@@ -65,7 +66,10 @@ func refreshToken(r *http.Request) string {
 // Google's error_subtype, never gets it into the minter's error, which the broker logs and answers
 // the session with. Each answer still names its class.
 func TestAMintErrorNeverQuotesWhatTheUpstreamEchoes(t *testing.T) {
-	key, _ := githubapptest.Key(t)
+	key, err := testAppKey()
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := githubAppValue(t, "123456", key)
 	var jwt string
 	recordJWT := func(r *http.Request) string { jwt = appJWT(r); return jwt }

@@ -2,11 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +10,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 )
 
 // TestEachKindReachesItsOwnMinter: the broker's minters send a github-app secret's value to the
@@ -21,10 +18,7 @@ import (
 // endpoint of its own, so wiring a kind to the other kind's minter, which would refuse the value,
 // fails here.
 func TestEachKindReachesItsOwnMinter(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, pemText := githubapptest.Key(t)
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
@@ -43,10 +37,7 @@ func TestEachKindReachesItsOwnMinter(t *testing.T) {
 	defer google.Close()
 	minters := kindMinters(secrets.GitHubApp{Base: github.URL, HTTP: github.Client()}, secrets.GoogleLogin{TokenURL: google.URL, HTTP: google.Client()})
 
-	app, err := json.Marshal(map[string]string{
-		"app_id":      "123456",
-		"private_key": string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
-	})
+	app, err := json.Marshal(map[string]string{"app_id": "123456", "private_key": pemText})
 	if err != nil {
 		t.Fatal(err)
 	}

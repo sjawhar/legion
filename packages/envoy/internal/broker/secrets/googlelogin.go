@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -63,10 +64,7 @@ func (m GoogleLogin) Mint(ctx context.Context, req MintRequest) (string, error) 
 	if secret.Type != "authorized_user" || secret.ClientID == "" || secret.ClientSecret == "" || secret.RefreshToken == "" {
 		return "", fmt.Errorf("%w: Google login secret must be an authorized_user credential", ErrMintStoredValue)
 	}
-	endpoint := m.TokenURL
-	if endpoint == "" {
-		endpoint = googleTokenURL
-	}
+	endpoint := cmp.Or(m.TokenURL, googleTokenURL)
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {secret.RefreshToken},

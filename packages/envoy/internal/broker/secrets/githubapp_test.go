@@ -17,11 +17,16 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
+
+// testAppKey is the one App key every test in this package signs with: generating a 2048-bit key
+// costs more than any of these tests does.
+var testAppKey = sync.OnceValues(func() (*rsa.PrivateKey, error) { return rsa.GenerateKey(rand.Reader, 2048) })
 
 type mintedInstallation struct {
 	InstallationID int64     `json:"installation_id"`
@@ -95,7 +100,7 @@ func verifyAppJWT(t *testing.T, authorization string, public *rsa.PublicKey, app
 }
 
 func TestGitHubAppMintSignsJWTAndFollowsPagination(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +159,7 @@ func TestGitHubAppMintSignsJWTAndFollowsPagination(t *testing.T) {
 }
 
 func TestGitHubAppMintRefusesAppWithoutInstallations(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +181,7 @@ func TestGitHubAppMintRefusesAppWithoutInstallations(t *testing.T) {
 // App is suspended on, so Mint leaves that owner out rather than failing every other owner, and
 // an App suspended everywhere has no installation to mint for.
 func TestGitHubAppMintSkipsSuspendedInstallations(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +244,7 @@ func TestGitHubAppMintSkipsSuspendedInstallations(t *testing.T) {
 }
 
 func TestGitHubAppMintNeverLeaksKeyOnFailure(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +272,7 @@ func TestGitHubAppMintRejectsCorruptKeyWithoutLeakingIt(t *testing.T) {
 }
 
 func TestGitHubAppMintAcceptsPKCS8Key(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +304,7 @@ func TestGitHubAppMintAcceptsPKCS8Key(t *testing.T) {
 // TestGitHubAppMintNamesTheClassOfEachFailure: every failure wraps the class the broker's log
 // names, so an operator can tell a bad stored key from GitHub refusing from GitHub being down.
 func TestGitHubAppMintNamesTheClassOfEachFailure(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +339,7 @@ func TestGitHubAppMintNamesTheClassOfEachFailure(t *testing.T) {
 // TestGitHubAppMintRefusesAnAnswerPastItsCap: an upstream answer is read to 1 MiB and no further,
 // so a GitHub that streams without end costs the broker a bounded read.
 func TestGitHubAppMintRefusesAnAnswerPastItsCap(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +359,7 @@ func TestGitHubAppMintRefusesAnAnswerPastItsCap(t *testing.T) {
 // lists, matched without regard to case, and leaves out every other installation without a
 // request for it. An App installed only on accounts the list does not name mints nothing.
 func TestGitHubAppMintLeavesOutAnAccountItsOwnersDoNotList(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +416,7 @@ func TestGitHubAppMintLeavesOutAnAccountItsOwnersDoNotList(t *testing.T) {
 // unlisted installation, and the listed owners still mint: one outsider's malformed installation
 // never fails the whole release.
 func TestGitHubAppMintSkipsAnInstallationThatNamesNoAccount(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +458,7 @@ func TestGitHubAppMintSkipsAnInstallationThatNamesNoAccount(t *testing.T) {
 // zero or negative names no installation a token can be asked for, so it is left out, and the
 // listed owner's valid installation still mints: no token request is sent for installation 0.
 func TestGitHubAppMintSkipsAnInstallationWithNoID(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
 	}
