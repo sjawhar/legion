@@ -8,6 +8,7 @@ import (
 	"crypto/ecdsa"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,10 +275,9 @@ func TestAnAccountTakenOffTheListLosesItsCredential(t *testing.T) {
 func TestAServiceDeviceCodeLoginIsRefused(t *testing.T) {
 	ts := newTestServer(t)
 	for _, hint := range []string{"", testApprover} {
-		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, hint, "cluster.example", "legion-daemon")})
-		if status != http.StatusBadRequest || decode[wireError](t, body).Code != "SERVICE_LOGS_IN_WITH_TOKEN" {
-			t.Fatalf("a service's device-code login (login_hint %q) = %d %s, want 400 SERVICE_LOGS_IN_WITH_TOKEN", hint, status, body)
+		status, body := ts.deviceLogin(t, newSigningKey(t), hint, "cluster.example", "legion-daemon")
+		if desc, _ := body["error_description"].(string); status != http.StatusBadRequest || !strings.HasPrefix(desc, "SERVICE_LOGS_IN_WITH_TOKEN: ") {
+			t.Fatalf("a service's device-code login (login_hint %q) = %d %v, want 400 SERVICE_LOGS_IN_WITH_TOKEN", hint, status, body)
 		}
 	}
 	if got := ts.column(t, `select count(*)::text from credential_requests`); !slices.Equal(got, []string{"0"}) {
