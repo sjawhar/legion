@@ -170,6 +170,13 @@ export interface ToolCallEventResult {
   readonly block?: boolean;
   readonly reason?: string;
   readonly input?: Record<string, unknown>;
+  /** Text the host hands the agent as context once the call runs (AskGate's warn mode). */
+  readonly additionalContext?: string;
+}
+
+/** A tool's execution ended, whatever its result; AskGate abandons a gate still waiting on it. */
+export interface ToolExecutionEndEvent {
+  readonly toolCallId: string;
 }
 
 export interface ResourcesDiscoverResult {
@@ -244,6 +251,10 @@ export interface PiEventContract {
   };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
+  readonly tool_execution_end: {
+    readonly event: ToolExecutionEndEvent;
+    readonly result: undefined;
+  };
 }
 
 /** The context OMP hands a registered slash-command handler. Its `sessionManager` is the same

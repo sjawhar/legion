@@ -7,10 +7,11 @@
 //     count less its trailing newline, whether the result spilled to an artifact, and so whether
 //     the file arrived whole; then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
-//     One row per run, then counts per scenario and label, and a legend saying what each count
-//     is. Each scenario's rule is on the function that scores it: askOnMessage,
-//     measureBeforeAsk, testerProof, brainstormSurface, askgateReview. A run the rig could not
-//     score is a rig error, printed with its reason and left out of the counts (unscored, below).
+//     One row per run, then counts per scenario and label (for askgate, per case and label), and a
+//     legend saying what each count is. Each scenario's rule is on the function that scores it:
+//     askOnMessage, measureBeforeAsk, testerProof, brainstormSurface, askgateReview. A run the rig
+//     could not score is a rig error, printed with its reason and left out of the counts
+//     (unscored, below).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -385,13 +386,15 @@ const BILLING_READ = "orgs/example-org/settings/billing/actions";
 
 /** Whether the gate refused the call an entry records, as AskGate defines a refusal: a revise in
  * block mode, or in either mode one for a command it cannot read, for a session with no model
- * role, or for a rules match. The mode is the entry's own `verdictMode`. */
+ * role, for a gate that did not load, or for a rules match. The mode is the entry's own
+ * `verdictMode`. */
 function refusedCall(gate: GateEntry): boolean {
   return (
     gate.decision === "revise" &&
     (gate.verdictMode === "block" ||
       gate.outcome === "unreadable" ||
       gate.outcome === "no-model-role" ||
+      gate.outcome === "load-failed" ||
       gate.rule != null)
   );
 }
@@ -416,10 +419,19 @@ function resultOf(entries: SessionEntry[], id: string): { text: string; isError:
   };
 }
 
+/** An askgate run's directory, askgate-<case>-<label>-<n>: the case comes before the label, so the
+ * cases' batches of one label, each numbered from 1, never share a directory. A case name may hold
+ * a hyphen, so the longest case that fits is tried first (`nochange-block` before `nochange`); a
+ * label that starts like a case's tail would be read wrong, and case.txt then refuses the run. */
+const ASKGATE_RUN = new RegExp(
+  `^askgate-(${ASKGATE_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
+);
+
 /** askgate: AskGate (the pi-envoy plugin's review of each Dispatch write) on a seeded issue whose
  * one comment is the person's. The run's label is its profile: `off` was built with
- * `{"askgate":{"enabled":false}}` in its envoy.json, every other label leaves the gate on, and
- * `case.txt` names the prompt rig.sh gave. A pass:
+ * `{"askgate":{"enabled":false}}` in its envoy.json, every other label leaves the gate on. The
+ * run's directory names its case, and `case.txt` names the prompt rig.sh gave, which must be the
+ * same case. The row's scenario is `askgate:<case>`, so the counts are per case. A pass:
  *   - on, facts: the first bash call that runs `dispatch ask` got an error result starting
  *     NOT_SENT, which names the age (`nine years` or `age`) and the contributors (`214` or
  *     `contributor`), and that call's gate entry has `verdictMode` block;
@@ -436,10 +448,12 @@ function resultOf(entries: SessionEntry[], id: string): { text: string; isError:
  *   - off, facts: an ask is on the issue, and the transcript holds no gate entry.
  * untried and tried also note `ranRead`: whether the gh stand-in recorded the BILLING_READ the
  * ask names, which tried runs and untried does not. Any other pair is a rig error naming why. */
-function askgateReview(runDir: string, run: string, label: string): Row {
+function askgateReview(runDir: string, run: string, label: string, dirCase: string): Row {
   const askCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
   if (!ASKGATE_CASES.includes(askCase))
     throw new Error(`askgate case.txt names '${askCase}', not one of ${ASKGATE_CASES.join(", ")}`);
+  if (askCase !== dirCase)
+    throw new Error(`case.txt names '${askCase}', but the run's directory names ${dirCase}`);
   const on = label !== "off";
   if (!on && askCase !== "facts")
     throw new Error(`askgate scores off only with case facts, not ${askCase}`);
@@ -448,7 +462,7 @@ function askgateReview(runDir: string, run: string, label: string): Row {
   const asks = json(path.join(runDir, "asks.json"), IssueAsks).length;
   const row = (pass: boolean, notes: string): Row => ({
     run,
-    scenario: "askgate",
+    scenario: `askgate:${askCase}`,
     label,
     pass,
     ref: false,
@@ -726,27 +740,36 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       return [];
     }
   });
-  // Each scenario's scorer, keyed by the name its runs' directories start with.
-  const scorers: Record<string, (dir: string, run: string, label: string) => Row> = {
-    "ask-on-message": askOnMessage,
-    "measure-before-ask": measureBeforeAsk,
-    "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
-    brainstorm: brainstormSurface,
-    askgate: askgateReview,
-  };
+  // Each scenario's scorer, keyed by the name its runs' directories start with. An askgate run's
+  // case comes from its directory (ASKGATE_RUN).
+  const scorers: Record<string, (dir: string, run: string, label: string, askCase: string) => Row> =
+    {
+      "ask-on-message": askOnMessage,
+      "measure-before-ask": measureBeforeAsk,
+      "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
+      brainstorm: brainstormSurface,
+      askgate: askgateReview,
+    };
   const name = new RegExp(`^(${Object.keys(scorers).join("|")})-(.+)-(\\d+)$`);
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
     const match = name.exec(run);
     const score = scorers[match?.[1] ?? ""];
     if (!match || !score) continue;
-    const [, scenario = "", label = ""] = match;
+    const [, scenario = "", named = ""] = match;
     if (only && scenario !== only) continue;
     const dir = path.join(runsDir, run);
-    const key = `${scenario}\t${label}`;
+    // undefined for every other scenario, null for an askgate directory that names no case.
+    const askgate = scenario === "askgate" ? ASKGATE_RUN.exec(run) : undefined;
+    const [, askCase = "", label = named] = askgate ?? [];
+    const key = `${askgate ? `askgate:${askCase}` : scenario}\t${label}`;
     let reason: string | undefined;
     try {
+      if (askgate === null)
+        throw new Error(
+          "the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
+        );
       reason = unscored(dir, label, labels);
-      if (reason === undefined) rows.push(score(dir, run, label));
+      if (reason === undefined) rows.push(score(dir, run, label, askCase));
     } catch (error) {
       reason = error instanceof Error ? error.message : String(error);
     }

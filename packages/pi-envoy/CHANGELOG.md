@@ -10,12 +10,16 @@
   `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry does
   (`block` when there is none). The gate asks the `askgate` model role, else the `default` role,
   and refuses the write when neither is set. A switch that does not parse, and a gate that does
-  not load, are said at session start.
-- AskGate reviews an upload of a markdown document (`dispatch artifact` with a `--name` that ends
-  in `.md`) against its rule on the person's words alone, in both upload forms: for `--path` it
-  reads the file, after the command's own `cd`. Its rules now also send back a fact the reader
-  does not need and text longer than its decision needs, and a claim about what the person said
-  is sourced only by a link to where they wrote it.
+  not load, are said at session start. A gate that does not load (a host module, an
+  `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler time limit too short for a
+  verdict) refuses each write it would review, in both modes, naming the error and the switch.
+- AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
+  `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
+  its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
+  from the dry run, and one that holds an expansion is refused. For `--path` it reads the file from
+  the directory the `dispatch` command resolves it in. Its rules now also send back a fact the
+  reader does not need and text longer than its decision needs, and a claim about what the person
+  said is sourced only by a link to where they wrote it.
 - AskGate's rules check: a second model call judges only the new asks a Dispatch write opens
   against two rules. A new ask is a `dispatch ask`, an ask block that a `doc-edit` inserts or a
   block that it retypes into an ask, and an ask block in an issue spec or in a markdown upload. One

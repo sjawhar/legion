@@ -21,6 +21,7 @@ import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { dispatchServerUrls } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { sessionDispatchSettings } from "@legion/envoy-client/session-settings";
+import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { RetryFallbackResolutionContext } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -30,11 +31,15 @@ import {
   type Completion,
   createAskGate,
   GATE_EFFORT,
+  type GateCtx,
   type GateModel,
   type GateRole,
+  loadFailureGate,
   type Message,
   type Pi,
   spawnDryRun,
+  type ToolCallEvent,
+  type ToolCallResult,
   type Usage,
 } from "./askgate-core";
 import type { DispatchSession } from "./rules-check";
@@ -88,11 +93,41 @@ function appendDump(p: string, text: string): void {
   }
 }
 
+type ToolCallHandler = (event: ToolCallEvent, ctx: GateCtx) => Promise<ToolCallResult>;
+
 /**
- * Loads the Oh My Pi modules the gate needs, then binds it to `pi`. Rejects when a module does not
- * load; the caller reports that, since a gate that never binds lets every write out unreviewed.
+ * Registers AskGate's one `tool_call` handler on `pi` now, synchronously, so no call can pass
+ * between the load of Oh My Pi's modules and the gate's binding, and starts that load. Each call
+ * waits for the load. Loaded, the handler runs the core's own; not loaded, it refuses each write
+ * the gate would review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
+ * The returned promise settles with the load and rejects with its error, for the caller's notice.
  */
-export async function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> {
+export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
+  const loading = loadAskGate(pi, host);
+  // A rejection is handled here and by the caller's notice; never an unhandled one.
+  const gate: Promise<ToolCallHandler> = loading.then(
+    (handler) => handler,
+    (error: unknown) => {
+      const refuse = loadFailureGate(
+        error,
+        { env: process.env, configFile: host.configFile.path },
+        pi
+      );
+      return async (event, ctx) => refuse(event, ctx);
+    }
+  );
+  // The host's context carries every member GateCtx reads; PiApi types only those the Envoy entry
+  // reads, so the handler takes it as the core's type.
+  pi.on("tool_call", async (event, ctx) => (await gate)(event, ctx as unknown as GateCtx));
+  return loading.then(() => undefined);
+}
+
+/**
+ * Loads the Oh My Pi modules the gate needs, then binds the core to `pi` with its `tool_call`
+ * handler kept back, which it returns: every other event, and `appendEntry`, reach the real `pi`.
+ * Rejects when a module does not load or the core refuses to bind.
+ */
+async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandler> {
   // String-literal imports: the host's loader resolves only these (see the head of this file).
   const [
     { completeSimple, retryTransientCompletion },
@@ -238,6 +273,17 @@ export async function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> 
         };
   };
 
+  // The core binds to a `pi` that keeps its tool_call handler, which the one registered above
+  // runs, and passes every other event, and appendEntry, to the real `pi`. The core names its
+  // events as strings, each one in PiEventContract, and types its handlers' events itself.
+  let handler: ToolCallHandler | undefined;
+  const wrapped: Pi = {
+    on: (event, listener) => {
+      if (event === "tool_call") handler = listener as unknown as ToolCallHandler;
+      else pi.on(event as keyof PiEventContract, listener as unknown as () => Promise<void>);
+    },
+    appendEntry: (customType, data) => pi.appendEntry(customType, data),
+  };
   createAskGate({
     env: process.env,
     home: os.homedir(),
@@ -263,5 +309,7 @@ export async function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> 
       return buildSessionContext([...sessionManager.getEntries()], sessionManager.getLeafId())
         .messages as unknown as readonly Message[];
     },
-  })(pi);
+  })(wrapped);
+  if (handler === undefined) throw new Error("AskGate's core registered no tool_call handler");
+  return handler;
 }

@@ -214,12 +214,17 @@ these calls:
 - `dispatch ask`, `dispatch message`, `dispatch edit-ask`, `dispatch comment`, `dispatch doc-edit`
   and `dispatch request-approval`
 - `dispatch issue` with `--spec` or `--spec-file`
-- `dispatch artifact` with a `--name` that ends in `.md`: an upload of a markdown document
+- `dispatch artifact` when it uploads a markdown document: inline text (`--content`,
+  `--content-file`), a `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that
+  ends in `.md`
 
-The gate reads the arguments from the command's own `--dry-run`. For an upload given with `--path`,
-the gate reads that file and reviews its text, as for `--content-file`. The gate judges an upload
-against content failure 10 alone: a plan or a report is long by nature. An upload of any other
-file is not reviewed. A `task` subagent is not reviewed.
+The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name or
+path from a file (`--name-file`, `--path-file`) is decided from the name and path the dry run
+prints. An upload whose name or path holds an expansion (`"$NAME"`) is refused, as any write the
+gate cannot read is. For an upload given with `--path`, the gate reads that file from the directory
+the `dispatch` command resolves it in and reviews its text, as for `--content-file`. The gate
+judges an upload against content failure 10 alone: a plan or a report is long by nature. An upload
+of any other file is not reviewed. A `task` subagent is not reviewed.
 
 **The switch.** AskGate runs in each session that has Dispatch on, unless the session's envoy.json
 turns it off. Write this top-level section beside `dispatch`:
@@ -302,7 +307,7 @@ such target. A call that opens a new ask adds the fields of the rules check:
 
 `decision` is `revise` on a rules refusal in `warn` mode too. The gate refused a call exactly when
 `decision` is `revise` and one of these is true: `verdictMode` is `block`, `outcome` is
-`unreadable` or `no-model-role`, or `rule` is set. To find the refusals that the agent overrode,
+`unreadable`, `no-model-role` or `load-failed`, or `rule` is set. To find the refusals that the agent overrode,
 join each rules refusal to the next entry with the same `target`. The agent overrode the refusal
 when that entry's `outcome` is `rebuttal` or `breaker`. `scripts/askgate-report.ts` reports what
 the entries sent back and what they cost, the outcomes and errors of the rules check, and the

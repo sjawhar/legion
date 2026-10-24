@@ -8,12 +8,15 @@
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
 //   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`: the
-//     head rules of the plugin that ships the CLI, copied, with the program taken by a literal
-//     path to `dispatch` as well as by name, plus AskGate's two harmless wrappers, one leading
-//     `cd <path> &&` with a path the shell does not expand and one trailing `2>&1`)
+//     head rules of `@legion/pi-shared/shell-command`, kept here on purpose with AskGate's own
+//     additions: the program taken by a literal path to `dispatch` as well as by name, and two
+//     harmless wrappers, one leading `cd <path> &&` with a path the shell does not expand and one
+//     `2>&1` at the end of its first line, before or after a here-document opener)
 //     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
-//     `artifact` with a `--name` that ends in `.md`. The gate learns
+//     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
+//     document (`uploadMayBeDocument`): its dry run then decides, from the name and path it
+//     prints, and an upload that is no markdown document runs with no entry. The gate learns
 //     the exact arguments by running that command with `--dry-run` after the command name, in the
 //     call's working directory (then its `cd`, as the call will) and environment, its
 //     here-document still on stdin and without its `2>&1`, under a 10 s limit, and reviews the
@@ -21,9 +24,11 @@
 //     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
 //     reviewed. An upload given with `--path` prints the path, not the text: the gate reads that
-//     file (`readFile`) and adds its text as `content`, so both forms reach the model alike, cut to
-//     the same 64 KB. A relative path resolves in the directory the command runs in; after its own
-//     `cd`, bash names that directory (the `cd`, then `pwd`, run as the dry run runs). A file the
+//     file (`readFile`) and adds its text as `content`, so both forms reach the model alike. The
+//     arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of it.
+//     A relative path resolves where the CLI resolves it, against its
+//     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
+//     it (the `cd`, then `pwd -P`, run as the dry run runs). A file the
 //     gate cannot read is `error`, and the call runs. An upload is judged against failure 10 alone
 //     (askgate-upload.md), since a plan or a report is long by nature.
 //   - A `bash` call that holds a scoped `dispatch` write those rules cannot read — joined to
@@ -58,7 +63,9 @@
 //
 // Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
 // tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
-// handler entry. A ceiling that leaves under 10 s binds nothing and logs why.
+// handler entry. A ceiling that leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no
+// positive integer, throw when the gate binds: the entry then refuses each write the gate would
+// review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
 //
 // Per gated call, in order:
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
@@ -170,10 +177,19 @@ const SCOPED_COMMANDS = [
 ] as const;
 const SPEC_ONLY_COMMAND = "issue";
 const SPEC_FLAGS = ["--spec", "--spec-file"];
-/** `dispatch artifact` is reviewed only as an upload of a markdown document: a `--name` ending in `.md`. */
+/**
+ * `dispatch artifact` is reviewed only as an upload of a markdown document. Dispatch stores an
+ * upload as one when the CLI sends it as text/markdown: inline text (`--content`, `--content-file`),
+ * whatever its name, or a `--path` file whose own name ends in `.md` or `.markdown`, since Bun takes
+ * a file's type from its path. The gate also reviews an upload whose `--name` ends in `.md`.
+ */
 const UPLOAD_COMMAND = "artifact";
-const UPLOAD_NAME_FLAG = "--name";
 const MARKDOWN_NAME = /\.md$/i;
+const MARKDOWN_PATH = /\.(md|markdown)$/i;
+/** The upload flags whose text is the document itself. */
+const INLINE_FLAGS = ["--content", "--content-file"];
+/** The upload flags that read the name or the path from a file, which only the dry run resolves. */
+const INDIRECT_FLAGS = ["--name-file", "--path-file"];
 /** Flags under which a `dispatch` command sends nothing. */
 const NO_SEND_FLAGS = ["--dry-run", "--help"];
 const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
@@ -246,9 +262,9 @@ export interface GateEntry {
   toolCallId: string;
   /**
    * `revise`: the gate did not pass the call as sent (a revise verdict, or in block mode a call given up
-   * without a verdict, or in any mode a command it cannot read or a new ask a rule matched). A call was
-   * refused exactly when this is `revise` and `verdictMode` is `block`, or `outcome` is `unreadable` or
-   * `no-model-role`, or `rule` is set.
+   * without a verdict, or in any mode a command it cannot read, a gate that did not load, or a new
+   * ask a rule matched). A call was refused exactly when this is `revise` and `verdictMode` is
+   * `block`, or `outcome` is `unreadable`, `no-model-role` or `load-failed`, or `rule` is set.
    */
   decision: "allow" | "revise";
   outcome:
@@ -263,7 +279,8 @@ export interface GateEntry {
     | "skipped"
     | "abandoned"
     | "shutdown"
-    | "unreadable";
+    | "unreadable"
+    | "load-failed";
   verdictMode: Mode;
   reason?: string;
   rebuttal?: string;
@@ -278,6 +295,11 @@ export interface GateEntry {
   target?: string;
   /** Bytes of every prompt sent: the charter call's and, for a call that opens a new ask, the rules call's. */
   promptBytes?: number;
+  /**
+   * On every entry that asked the model: the call's arguments exactly as the model saw them (JSON,
+   * an upload's document text as `content`), cut at GATE_ARGS_MAX_BYTES as the request cut them.
+   */
+  reviewedText?: string;
   /** `provider/id` that answered (or, with no answer, the last one asked), on every entry that reached the model call. */
   model?: string;
   /** Each model of the chain that answered with an error before `model` was asked, with that error. */
@@ -367,11 +389,11 @@ export interface Pi {
   on(event: string, handler: (event: never, ctx: never) => unknown): void;
   appendEntry(customType: string, data?: unknown): void;
 }
-type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
-type ToolCallResult =
+export type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
+export type ToolCallResult =
   | { block?: boolean; reason?: string; input?: Input; additionalContext?: string }
   | undefined;
-type GateCtx = {
+export type GateCtx = {
   agent: { kind: string };
   hasUI: boolean;
   ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
@@ -424,17 +446,21 @@ export function scopedDevice(toolName: string, input: Input): boolean {
   );
 }
 
-// Where a `dispatch` command's own text ends: `headLine`, `headScan` and their helpers below are the
-// rules @sjawhar/pi-envoy applies (`packages/pi-shared/src/shell-command.ts` in sjawhar/legion),
-// copied because this extension cannot import the plugin; keep the two in step. A conservative
-// character scan, not a shell parser: whatever it cannot reason about is no `dispatch` command.
-// Whitespace is bash's blanks, space and tab, never JavaScript's `\s`, which also takes a no-break
-// space that bash reads as part of a word.
+// Where a `dispatch` command's own text ends: `headLine`, `headScan` and their helpers below start
+// from the rules `@legion/pi-shared/shell-command` applies (`dispatchCommandHead` there, which the
+// Envoy entry uses to tell a dispatch-only call), and differ from them on purpose: the gate also
+// reads a literal path to `dispatch` and the two wrappers below, and must read exactly the text
+// the command sends, while the plugin's rule only has to tell a dispatch-only call from work. So
+// the two are separate, and a change to one is checked against the other. A conservative character
+// scan, not a shell parser: whatever it cannot reason about is no `dispatch` command. Whitespace is
+// bash's blanks, space and tab, never JavaScript's `\s`, which also takes a no-break space that
+// bash reads as part of a word.
 
 /** The one here-document a command's first line may end with, opened with a quoted delimiter so
  * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
- * which bash strips leading tabs from the delimiter line. */
-const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'[ \t]*$/;
+ * which bash strips leading tabs from the delimiter line. The fourth is a `2>&1` after the opener,
+ * which bash applies to the command as it would before it. */
+const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'([ \t]+2>&1)?[ \t]*$/d;
 
 /** A line of nothing but blanks, which bash runs as no command. */
 const BLANK_LINE = /^[ \t]*$/;
@@ -450,8 +476,11 @@ const REFUSED_DOUBLE_QUOTED = "$`\\";
 
 /** A command's first line, without its here-document opener and its blanks, and where that text
  * starts in the command, when the command is that one line, optionally fed one quoted
- * here-document on stdin; undefined for any other command. */
-function headLine(command: string): { text: string; at: number } | undefined {
+ * here-document on stdin; undefined for any other command. `stderr` is where a `2>&1` after the
+ * opener starts and ends in the command. */
+function headLine(
+  command: string
+): { text: string; at: number; stderr?: [number, number] } | undefined {
   if (hasControlCharacter(command)) return undefined;
   // Blank lines before the head and after the command's last line run as no command, so they are
   // dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
@@ -462,7 +491,9 @@ function headLine(command: string): { text: string; at: number } | undefined {
   if (first === -1) return undefined;
   const last = all.findLastIndex((line) => !BLANK_LINE.test(line));
   const lines = all.slice(first, last + 1);
+  const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
   let head = lines[0] ?? "";
+  let stderr: [number, number] | undefined;
   if (lines.length > 1) {
     const opening = HEREDOC_OPENING.exec(head);
     if (opening === null) return undefined;
@@ -475,10 +506,15 @@ function headLine(command: string): { text: string; at: number } | undefined {
     // the last line: anything after it would run as a command.
     if (end !== lines.length - 1) return undefined;
     head = opening[1] ?? "";
+    const redirect = opening.indices?.[4];
+    if (redirect) stderr = [lineAt + redirect[0], lineAt + redirect[1]];
   }
-  const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
   const leading = /^[ \t]*/.exec(head)?.[0].length ?? 0;
-  return { text: head.replace(/^[ \t]+|[ \t]+$/g, ""), at: lineAt + leading };
+  return {
+    text: head.replace(/^[ \t]+|[ \t]+$/g, ""),
+    at: lineAt + leading,
+    ...(stderr ? { stderr } : {}),
+  };
 }
 
 // AskGate's own additions to those rules: the program may be a literal path to `dispatch` as well
@@ -537,17 +573,19 @@ function cdPathEnd(text: string, from: number): number | undefined {
     : undefined;
 }
 
-/** A trailing `2>&1` after the `dispatch` command, with the blanks before it. */
+/** A `2>&1` after the `dispatch` command's words, with the blanks before it. */
 const STDERR_TO_STDOUT = /[ \t]+2>&1$/;
 
 /** A `dispatch` command in a `bash` command, bare or in the two wrappers above: its head, where the
- * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run) and where the
- * trailing `2>&1` ends (to leave it out of the dry-run, whose stdout must be the CLI's JSON). */
+ * head starts, where a leading `cd` path ends (to silence `cd` in the dry-run), where the head's
+ * line ends, past a trailing `2>&1`, and where a `2>&1` after a here-document opener lies (both
+ * `2>&1` forms are left out of the dry-run, whose stdout must be the CLI's JSON). */
 interface DispatchHead {
   head: string;
   at: number;
   cdEnd?: number;
   end: number;
+  stderr?: [number, number];
 }
 
 function dispatchCommandHead(command: string): DispatchHead | undefined {
@@ -578,7 +616,13 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   )
     return undefined;
   const at = line.at + offset;
-  return { head, at, ...(cdEnd === undefined ? {} : { cdEnd }), end: at + text.length };
+  return {
+    head,
+    at,
+    ...(cdEnd === undefined ? {} : { cdEnd }),
+    end: at + text.length,
+    ...(line.stderr ? { stderr: line.stderr } : {}),
+  };
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter
@@ -615,21 +659,58 @@ type Word = { raw: string; value: string };
 
 /**
  * Whether `name` with `flags` is a write the gate reviews: a scoped command, with no flag under
- * which it sends nothing, an `issue` only with a spec, and an `artifact` only with a markdown name.
+ * which it sends nothing, an `issue` only with a spec, and an `artifact` unless its words show it
+ * is no markdown document (`uploadMayBeDocument`).
  */
 function reviewedWrite(name: string, flags: readonly Word[]): boolean {
   if (!(SCOPED_COMMANDS as readonly string[]).includes(name)) return false;
   if (flags.some((flag) => NO_SEND_FLAGS.includes(flag.value))) return false;
-  const flagName = (flag: Word) => flag.value.split("=", 1)[0];
   if (name === SPEC_ONLY_COMMAND) return flags.some((flag) => SPEC_FLAGS.includes(flagName(flag)));
-  if (name === UPLOAD_COMMAND) {
-    const at = flags.findIndex((flag) => flagName(flag) === UPLOAD_NAME_FLAG);
-    if (at === -1) return false;
-    const { value } = flags[at];
-    const named = value.includes("=") ? value.slice(value.indexOf("=") + 1) : flags[at + 1]?.value;
-    return named !== undefined && MARKDOWN_NAME.test(named);
-  }
+  if (name === UPLOAD_COMMAND) return uploadMayBeDocument(flags);
   return true;
+}
+
+const flagName = (flag: Word) => flag.value.split("=", 1)[0];
+
+/**
+ * Whether an upload's words leave it possibly a markdown document: inline text, a name or path read
+ * from a file, or a name or path that is not literal (an expansion, a glob), or that is markdown's.
+ * Only an upload whose literal name and literal path are both no markdown's is not one. An upload
+ * with no `--name` or no `--path` and no inline text is one the CLI refuses before it sends.
+ */
+function uploadMayBeDocument(flags: readonly Word[]): boolean {
+  if (flags.some((flag) => [...INLINE_FLAGS, ...INDIRECT_FLAGS].includes(flagName(flag))))
+    return true;
+  const flagValue = (name: string): { value: string; literal: boolean } | undefined => {
+    const at = flags.findIndex((flag) => flagName(flag) === name);
+    if (at === -1) return undefined;
+    const flag = flags[at];
+    const eq = flag.raw.indexOf("=");
+    const word =
+      eq === -1
+        ? flags[at + 1]
+        : { raw: flag.raw.slice(eq + 1), value: flag.value.slice(flag.value.indexOf("=") + 1) };
+    if (word === undefined) return undefined;
+    return { value: word.value, literal: scanWord(word.raw, 0).unread.length === 0 };
+  };
+  const named = flagValue("--name");
+  const file = flagValue("--path");
+  if (named === undefined || file === undefined) return false;
+  return (
+    !named.literal ||
+    !file.literal ||
+    MARKDOWN_NAME.test(named.value) ||
+    MARKDOWN_PATH.test(file.value)
+  );
+}
+
+/** Whether an upload's arguments, as its dry run prints them, make a markdown document. */
+function uploadIsDocument(args: Input): boolean {
+  return (
+    typeof args.content === "string" ||
+    (typeof args.name === "string" && MARKDOWN_NAME.test(args.name)) ||
+    (typeof args.path === "string" && MARKDOWN_PATH.test(args.path))
+  );
 }
 
 /** A head's words as bash splits them at unquoted blanks, each as written and with its quotes
@@ -655,20 +736,24 @@ function headWords(head: string): Word[] {
 }
 
 /** A scoped `dispatch` command: the tool it calls, the text to run (an override flag removed),
- * the same text with `--dry-run` after the command name, and the override's line. */
+ * the same text with `--dry-run` after the command name, the override's line, and whether a flag
+ * names a file the gate reads (a `--<field>-file` other than `-`, the here-document, or an
+ * upload's `--path`). */
 export interface ScopedCommand {
   tool: string;
   label: string;
   command: string;
   dryRunScript: string;
   rebuttal?: string;
+  readsFile: boolean;
   /** A `dispatch artifact` upload of a markdown document, reviewed against failure 10 alone. */
   upload?: true;
   /**
-   * The command's own leading `cd` and then `pwd`: run where the dry run runs, it prints the
-   * directory the command reaches, against which an upload's relative `path` resolves.
+   * The command's own leading `cd`, if any, then `pwd -P`: run where the dry run runs, it prints
+   * the physical directory the command reaches, the CLI's `process.cwd()`, against which an
+   * upload's relative `path` resolves.
    */
-  cdScript?: string;
+  dirScript: string;
 }
 
 /** The `bash` command as a scoped `dispatch` call, or undefined for any other command. */
@@ -676,7 +761,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
-  const { head, at, cdEnd, end } = found;
+  const { head, at, cdEnd, end, stderr } = found;
   const [program, name, ...flags] = headWords(head);
   if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
   // An override is `--advisor-rebuttal <line>` or `--advisor-rebuttal=<line>`; a value that starts
@@ -701,20 +786,35 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
   }
   // The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
   // silenced (bash prints the directory when CDPATH found it), so it runs where the command will;
-  // it drops the `2>&1`, so the CLI's JSON is all its stdout holds.
+  // it drops the `2>&1`, before or after a here-document opener, so the CLI's JSON is all its
+  // stdout holds.
   const before =
     cdEnd === undefined
       ? command.slice(0, at)
       : `${command.slice(0, cdEnd)} >/dev/null${command.slice(cdEnd, at)}`;
+  const after =
+    stderr === undefined
+      ? command.slice(end)
+      : `${command.slice(end, stderr[0])}${command.slice(stderr[1])}`;
   const rest = kept.map((word) => word.raw);
+  const upload = name.value === UPLOAD_COMMAND;
+  const readsFile = kept.some(({ value }, index) => {
+    const eq = value.indexOf("=");
+    const flag = eq === -1 ? value : value.slice(0, eq);
+    const file = eq === -1 ? kept[index + 1]?.value : value.slice(eq + 1);
+    const named =
+      (flag.startsWith("--") && flag.endsWith("-file")) || (upload && flag === "--path");
+    return named && file !== undefined && file !== "-";
+  });
   return {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
     command: `${command.slice(0, at)}${[program.raw, name.raw, ...rest].join(" ")}${command.slice(at + head.length)}`,
-    dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...rest].join(" ")}${command.slice(end)}`,
+    dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...rest].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
-    ...(name.value === UPLOAD_COMMAND ? { upload: true as const } : {}),
-    ...(cdEnd === undefined ? {} : { cdScript: `${command.slice(0, cdEnd)} >/dev/null && pwd` }),
+    readsFile,
+    ...(upload ? { upload: true as const } : {}),
+    dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
   };
 }
 
@@ -739,7 +839,100 @@ const COMMAND_PREFIXES: ReadonlySet<string> = new Set([
   "env",
   "timeout",
 ]);
+/** The prefixes that are programs of their own, also called by a path (`/usr/bin/env`). */
+const PROGRAM_PREFIXES: Record<string, true> = { env: true, nohup: true, timeout: true };
+/**
+ * How a prefix that runs the command after it reads its own options, as its parser (getopt, or
+ * bash's for a builtin) reads them: up to `--`, which it consumes, or the first word that is no
+ * option. `values` are the short options that take a value (the rest of the word, else the next
+ * word) and `longValues` the long ones (after `=`, else the next word). An option in `runsNothing`
+ * makes the prefix run nothing (`command -v` only prints), `split` names the options whose value
+ * holds the command's own words (`env -S`), `dash` lets a lone `-` be an option (`env -`, as
+ * `env -i`), and `operands` counts the words after the options that are not the command
+ * (`timeout`'s duration). Every other word that starts with `-` there is an option with no value.
+ */
+interface PrefixOptions {
+  values?: string;
+  longValues?: readonly string[];
+  runsNothing?: string;
+  split?: readonly string[];
+  dash?: true;
+  operands?: number;
+}
+const PREFIX_OPTIONS: Record<string, PrefixOptions> = {
+  command: { runsNothing: "vV" },
+  exec: { values: "a" },
+  nohup: {},
+  time: {},
+  env: {
+    values: "uCSa",
+    longValues: ["--unset", "--chdir", "--split-string", "--argv0"],
+    split: ["-S", "--split-string"],
+    dash: true,
+  },
+  timeout: { values: "sk", longValues: ["--signal", "--kill-after"], operands: 1 },
+};
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Where the command a simple command runs starts, past its assignments and prefixes and each
+ * prefix's options; undefined when a prefix runs nothing. `words` comes back with the words an
+ * `env -S` value splits into put where the command starts.
+ */
+function commandStart(segment: readonly Word[]): { words: Word[]; at: number } | undefined {
+  let words = [...segment];
+  let at = 0;
+  while (at < words.length) {
+    const prefix = words[at];
+    if (ASSIGNMENT.test(prefix.raw)) {
+      at++;
+      continue;
+    }
+    const base = prefix.value.split("/").at(-1) ?? "";
+    const name = COMMAND_PREFIXES.has(prefix.value)
+      ? prefix.value
+      : Object.hasOwn(PROGRAM_PREFIXES, base)
+        ? base
+        : undefined;
+    if (name === undefined) break;
+    at++;
+    if (!Object.hasOwn(PREFIX_OPTIONS, name)) continue;
+    const options = PREFIX_OPTIONS[name];
+    const split: Word[] = [];
+    while (at < words.length) {
+      const word = words[at].value;
+      if (word === "--") {
+        at++;
+        break;
+      }
+      if (!word.startsWith("-") || (word === "-" && !options.dash)) break;
+      at++;
+      let flag = word;
+      let value: string | undefined;
+      if (word.startsWith("--")) {
+        const eq = word.indexOf("=");
+        if (eq !== -1) {
+          flag = word.slice(0, eq);
+          value = word.slice(eq + 1);
+        } else if (options.longValues?.includes(word)) value = words[at++]?.value;
+      } else {
+        for (let index = 1; index < word.length; index++) {
+          const char = word[index];
+          if (options.runsNothing?.includes(char)) return undefined;
+          if (!options.values?.includes(char)) continue;
+          flag = `-${char}`;
+          value = index + 1 < word.length ? word.slice(index + 1) : words[at++]?.value;
+          break;
+        }
+      }
+      if (value !== undefined && options.split?.includes(flag))
+        split.push(...commandWords(value).flat());
+    }
+    at += options.operands ?? 0;
+    words = [...words.slice(0, at), ...split, ...words.slice(at)];
+  }
+  return { words, at };
+}
 
 /** An open subshell, or an open command substitution with the command and word it sits in, which
  * go on at its end. */
@@ -898,27 +1091,20 @@ export interface UnreadableCommand {
 
 /**
  * A scoped `dispatch` write anywhere in a `bash` command, found at a command's position (after any
- * assignments and prefixes such as `env` or `timeout 30`), or a scoped subcommand run by a program
- * an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may be `dispatch`. One
- * carrying `--dry-run` or `--help`, or a `dispatch issue` without `--spec`/`--spec-file`, sends
- * nothing for review and is not one. Only for a command `scopedCommand` could not read.
+ * assignments and prefixes such as `env -u HOME --` or `timeout -s KILL 30`, each prefix's options
+ * and its `--` read as its own parser reads them: `commandStart`), or a scoped subcommand run by a
+ * program an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may be
+ * `dispatch`. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
+ * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
+ * `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
   // A write names `dispatch`, or reaches it through an expansion.
   if (typeof command !== "string" || !/dispatch|[$`]/.test(command)) return undefined;
-  for (const words of commandWords(command)) {
-    let at = 0;
-    while (at < words.length) {
-      const prefix = words[at];
-      if (ASSIGNMENT.test(prefix.raw)) at++;
-      else if (COMMAND_PREFIXES.has(prefix.value)) {
-        at++;
-        if (prefix.value === "env" || prefix.value === "timeout")
-          while (words[at]?.value.startsWith("-")) at++;
-        if (prefix.value === "timeout") at++;
-      } else break;
-    }
-    const [program, name, ...flags] = words.slice(at);
+  for (const segment of commandWords(command)) {
+    const start = commandStart(segment);
+    if (start === undefined) continue;
+    const [program, name, ...flags] = start.words.slice(start.at);
     if (program === undefined || name === undefined || !reviewedWrite(name.value, flags)) continue;
     const named = program.value.split("/").at(-1) === "dispatch";
     const unread = [...new Set(scanWord(program.raw, 0).unread)];
@@ -1145,14 +1331,15 @@ class Breaker {
 }
 
 /**
- * The gate's user message: the agent's system prompt and transcript as escaped data, then the call.
- * An upload of a markdown document carries askgate-upload.md, which limits the review to failure 10.
+ * The gate's user message: the agent's system prompt and transcript as escaped data, then the call,
+ * its arguments as `renderArgs` rendered them. An upload of a markdown document carries
+ * askgate-upload.md, which limits the review to failure 10.
  */
 function renderRequest(
   primarySystemPrompt: string,
   transcript: string,
   tool: string,
-  input: Input,
+  args: string,
   priorReasons: readonly string[],
   upload: boolean
 ): string {
@@ -1167,7 +1354,7 @@ function renderRequest(
     primarySystemPrompt: escapeXml(primarySystemPrompt),
     transcript,
     tool,
-    args: renderArgs(input),
+    args,
     uploadRule: upload ? `${uploadRule.trim()}\n` : "",
     priorReasons: prior,
   });
@@ -1180,9 +1367,9 @@ const SECOND_REVISE =
 /**
  * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
  * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
- * again with".
+ * again with"; `note` follows either refusal.
  */
-type Override = { name: string; how: string; what: string; again: string };
+type Override = { name: string; how: string; what: string; again: string; note?: string };
 const DEVICE_OVERRIDE: Override = {
   name: REBUTTAL_KEY,
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
@@ -1195,8 +1382,14 @@ const COMMAND_OVERRIDE: Override = {
   what: "flag",
   again: `\`${REBUTTAL_FLAG} '<one line>'\``,
 };
+/** Oh My Pi runs the tool_call hooks of a whole batch before any call of it, so the dry run reads a
+ * named file before a sibling call of the same batch changes it. */
+const FILE_OVERRIDE: Override = {
+  ...COMMAND_OVERRIDE,
+  note: "AskGate read the file this command names before any other call in the same batch ran, so a change made to it in that batch was not reviewed. Change a file in one step, then send the command in the next.",
+};
 const renderRevise = (reason: string, second: boolean, override: Override) =>
-  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
+  `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${override.note ? `\n${override.note}` : ""}${second ? `\n${SECOND_REVISE}` : ""}`;
 /** The refusal block mode returns for a call given up without a verdict, by cause. */
 const NO_VERDICT_REFUSAL: Record<"abandoned" | "shutdown", string> = {
   abandoned:
@@ -1229,7 +1422,53 @@ function renderUnreadable({ label, program }: UnreadableCommand): string {
       : program.namesDispatch
         ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
         : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`;
-  return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too) and before one trailing \`2>&1\`.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+  return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too) and with one \`2>&1\` at the end of its first line, before or after a here-document opener.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+}
+
+/**
+ * The gate of a session where AskGate did not load: a host module that did not import, an
+ * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a verdict.
+ * Only `askgate.enabled: false` turns AskGate off, so a load failure is no off switch: each call of
+ * the main agent the gate would review (`scopedCommand`, `unreadableDispatchWrite`, `scopedDevice`,
+ * an upload counted as the gate counts it) is refused in both modes, naming the error and the
+ * switch, and recorded as `load-failed`. Every other call runs.
+ */
+export function loadFailureGate(
+  error: unknown,
+  deps: Pick<Deps, "env" | "configFile">,
+  pi: Pick<Pi, "appendEntry">
+): (event: ToolCallEvent, ctx: GateCtx) => ToolCallResult {
+  const message = messageOf(error);
+  const reason = `AskGate did not send this call: it reviews each Dispatch write before it posts, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
+  const envMode = parseMode(deps.env.OMP_ASKGATE);
+  return (event, ctx) => {
+    if (ctx.agent.kind !== "main") return undefined;
+    let found: { tool: string; path: string } | undefined;
+    if (event.toolName === "bash") {
+      const write =
+        scopedCommand(event.input.command) ?? unreadableDispatchWrite(event.input.command);
+      if (write !== undefined) found = { tool: write.tool, path: write.label };
+    } else if (scopedDevice(event.toolName, event.input))
+      found = { tool: event.toolName, path: `xd://${event.toolName}` };
+    if (found === undefined) return undefined;
+    try {
+      pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+        advisor: "AskGate",
+        ...found,
+        toolCallId: event.toolCallId,
+        decision: "revise",
+        outcome: "load-failed",
+        verdictMode: envMode ?? sessionMode(ctx.sessionManager.getEntries()),
+        reason: message,
+        latencyMs: 0,
+        revisesForKey: 0,
+        argsDigest: "",
+      } satisfies GateEntry);
+    } catch {
+      // The entry is best effort; the call is refused either way.
+    }
+    return { block: true, reason };
+  };
 }
 
 export function createAskGate(deps: Deps): (pi: Pi) => void {
@@ -1242,15 +1481,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       rawMode === undefined || envMode !== undefined
         ? undefined
         : `AskGate: OMP_ASKGATE is ${JSON.stringify(rawMode)}, which is not a mode, so AskGate ignores it and stays on. OMP_ASKGATE takes warn or block. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
+    // Both checks throw before any handler binds, so the entry turns them into its load-failure
+    // refusal (`loadFailureGate`): a gate that cannot review is never an off switch.
     const timeoutMs = parseTimeout(deps.env.OMP_ASKGATE_TIMEOUT_MS);
     const ceiling = deps.handlerCeilingMs();
-    if (ceiling - CEILING_MARGIN_MS < MIN_DEADLINE_MS) {
-      // A deadline this short would time out nearly every verdict; the runner would refuse a longer one.
-      deps.logger.warn(
-        `AskGate not bound: extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`
+    // A deadline this short would time out nearly every verdict; the runner would refuse a longer one.
+    if (ceiling - CEILING_MARGIN_MS < MIN_DEADLINE_MS)
+      throw new Error(
+        `extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`
       );
-      return;
-    }
     // The system role holds only the gate's own text and its rules; the agent's system prompt and
     // transcript are data about the agent under review, escaped into the user message.
     const system = `${systemTemplate.trim()}\n\n${rules.trim()}`;
@@ -1516,7 +1755,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       rebuttal: string | undefined,
       override: Override,
       stop: Stop,
-      directory: string,
+      directory: () => Promise<string | undefined>,
       upload = false
     ): Promise<Decision> => {
       if (rebuttal !== undefined) {
@@ -1560,6 +1799,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           primarySystemPrompt: ctx.getSystemPrompt().join("\n\n"),
           transcript: renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
         });
+      // The arguments as the model sees them, cut at GATE_ARGS_MAX_BYTES, also go in the entry, so a
+      // later read of the review has the text the model judged, not the command or a mutable file.
+      const args = renderArgs(event.input);
       const call = { toolCallId: event.toolCallId, stop };
       // The charter call starts first (its request is rendered and sent before this returns); a call
       // that opens a new ask also gets the rules call, beside it on the same chain, deadline and stop.
@@ -1575,7 +1817,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               primarySystemPrompt,
               transcript,
               base.path,
-              event.input,
+              args,
               breaker.charterReasons(key),
               upload
             );
@@ -1604,6 +1846,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const called: Partial<GateEntry> = {
         ...charter.called,
         deadlineMs,
+        reviewedText: args,
         // Both calls' prompts and spend are the gated call's own.
         promptBytes: (charter.called.promptBytes ?? 0) + (ruled?.promptBytes ?? 0),
         ...(addUsage(charter.called.usage, ruled?.usage) ?? {}),
@@ -1745,10 +1988,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
 
     /**
-     * A scoped command's arguments as the CLI's own --dry-run prints them, and the directory it runs
-     * in, or why there are none.
+     * A scoped command's arguments as the CLI's own --dry-run prints them, with the directory it
+     * runs in, or why there are none, or `unscoped`: an upload whose resolved name and path make no
+     * markdown document. `directory` runs the command's own `cd` and `pwd -P` once, when a read first
+     * needs it, and gives undefined when bash could not say.
      */
-    type DryRun = { args: Input; directory: string } | { failure: string } | { cause: Cause };
+    type DryRun =
+      | { args: Input; directory: () => Promise<string | undefined> }
+      | { failure: string }
+      | { cause: Cause }
+      | { unscoped: true };
     const readArgs = async (
       scoped: ScopedCommand,
       input: Input,
@@ -1776,10 +2025,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         return stop.cause === undefined ? { run } : { cause: stop.cause };
       };
       /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
-      const stdoutOf = async (
-        script: string,
-        what: string
-      ): Promise<{ stdout: string; stderr: string } | { failure: string } | { cause: Cause }> => {
+      type Ran = { stdout: string; stderr: string } | { failure: string } | { cause: Cause };
+      const stdoutOf = async (script: string, what: string): Promise<Ran> => {
         const ran = await runScript(script);
         if ("cause" in ran) return ran;
         const { run } = ran;
@@ -1804,22 +2051,44 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
         return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
       }
-      // Where the command runs: its own directory, or, after a leading `cd`, the one bash reaches
-      // (CDPATH included), which the gate asks bash for rather than guessing it. The rules check
-      // reads a document as the Dispatch configuration of that directory names it, and an upload's
-      // relative `--path` resolves there. Only those two reads need it, so only they pay for the run.
-      let directory = cwd;
-      const reads = scoped.upload === true || scoped.tool === "dispatch_doc_edit";
-      if (scoped.cdScript !== undefined && reads) {
-        const reached = await stdoutOf(scoped.cdScript, `${scoped.label}'s cd`);
-        if (!("stdout" in reached)) return reached;
-        directory = reached.stdout.trim();
+      if (scoped.upload) {
+        // The name and the path as the CLI sends them: Dispatch trims the name it stores.
+        const resolved = {
+          ...args,
+          ...(typeof args.name === "string" ? { name: args.name.trim() } : {}),
+        };
+        if (!uploadIsDocument(resolved)) return { unscoped: true };
       }
+      // Where the command runs is the CLI's process.cwd(): the physical directory after the
+      // command's own `cd`, which bash resolves (CDPATH and symlinks included), so the gate asks bash
+      // for it rather than guessing. An upload's relative `--path` resolves there, and the rules
+      // check reads a document as that directory's Dispatch configuration names it; the script runs
+      // once, and only for a read that needs it.
+      let reached: Promise<Ran> | undefined;
+      const reach = () => {
+        reached ??= stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
+        return reached;
+      };
+      // `pwd` ends its line with a newline; nothing else is trimmed, since a directory's name may end
+      // in a blank.
+      const withoutNewline = (stdout: string) =>
+        stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout;
+      const directory = async () => {
+        const ran = await reach();
+        return "stdout" in ran ? withoutNewline(ran.stdout) : undefined;
+      };
       // An upload given with `--path` prints the path, not the text: the gate reads the file and adds
       // its text as `content`, so the model sees one shape for both forms of the upload.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
         return { args, directory };
-      const file = path.resolve(directory, args.path);
+      // A relative path resolves where the CLI runs, against its process.cwd(): the directory above.
+      let base = cwd;
+      if (!path.isAbsolute(args.path)) {
+        const ran = await reach();
+        if (!("stdout" in ran)) return ran;
+        base = withoutNewline(ran.stdout);
+      }
+      const file = path.resolve(base, args.path);
       let content: string | undefined;
       try {
         content = deps.readFile(file);
@@ -1886,6 +2155,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             const stop = openStop(event.toolCallId);
             try {
               const run = await readArgs(scoped, event.input, ctx, stop);
+              // An upload its dry run shows is no markdown document passes as an unscoped call does,
+              // with no entry; an override flag on it is still removed, since the CLI would refuse it.
+              if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
               if ("cause" in run)
                 decision =
                   run.cause === "timeout"
@@ -1908,7 +2180,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                   base,
                   key,
                   scoped.rebuttal,
-                  COMMAND_OVERRIDE,
+                  scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
                   stop,
                   run.directory,
                   scoped.upload === true
@@ -1942,7 +2214,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               rebuttal,
               DEVICE_OVERRIDE,
               stop,
-              ctx.cwd
+              async () => ctx.cwd
             );
           } finally {
             stop.close();

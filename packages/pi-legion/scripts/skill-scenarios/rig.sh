@@ -51,9 +51,11 @@
 #                   run a gh read the agent did not run) and `tried` (that ask, after the agent ran
 #                   the read and got the gh stand-in's error). SKILL_SCENARIOS_ASKGATE_MODE, warn or
 #                   block, is the agent's OMP_ASKGATE; unset, the agent gets none and AskGate runs in
-#                   block mode. Each run writes the case to <run>/case.txt and a set mode to
-#                   <run>/mode.txt (run_askgate). Scored by askgateReview, which reads the mode from
-#                   AskGate's own record of each call: `facts` and `upload` pass only in block mode.
+#                   block mode. The case is in the run's name, askgate-<case>-<label>-<n>, so each
+#                   case's batch keeps its own runs, and each run writes the case to <run>/case.txt
+#                   and a set mode to <run>/mode.txt (run_askgate). Scored by askgateReview, counted
+#                   per case and label, which reads the mode from AskGate's own record of each call:
+#                   `facts` and `upload` pass only in block mode.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
 # whose skills state it. So every comparison carries an ablate label: a checkout of the head with
@@ -89,9 +91,9 @@
 #     copied from the label's, with `env -i` and only the variables its pane file names (base_env).
 #     An agent that writes to its HOME (`mise use -g`, say) changes nothing for another run.
 #   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
-#     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n>. The pane shows nothing: omp's
-#     output goes to <work>/runs/<run>/out.txt, and the transcript, which grows as the agent works,
-#     to the .jsonl under <work>/runs/<run>/sessions.
+#     server (<work>/tmux.sock), <run> being <scenario>-<label>-<n> (askgate-<case>-<label>-<n> for
+#     askgate). The pane shows nothing: omp's output goes to <work>/runs/<run>/out.txt, and the
+#     transcript, which grows as the agent works, to the .jsonl under <work>/runs/<run>/sessions.
 #   - `gh` and `bun` stand-ins are first on its PATH (standins): no run reaches GitHub, and a bun
 #     it reaches through PATH is the bun this script runs on, recorded. A bun named by its path or
 #     run through `mise exec` bypasses the stand-in and goes unrecorded. Every container and tmux
@@ -469,13 +471,14 @@ services_down() {
   rm -f "$services_env" "$S/up"
 }
 
-# seed_dispatch SCENARIO seeds the run's own issue and the owner's message with `seed.ts SCENARIO`
-# and sets the caller's issue and message, which its prompt names.
+# seed_dispatch SCENARIO seeds the run's own issue, and the owner's message when the scenario has
+# one, with `seed.ts SCENARIO`, and sets the caller's issue and message (empty when the fixture
+# names none), which its prompt names.
 seed_dispatch() {
   (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "$1" "$R/fixture.json") \
     >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   issue=$(jq -r .issue "$R/fixture.json")
-  message=$(jq -r .message "$R/fixture.json")
+  message=$(jq -r '.message // empty' "$R/fixture.json")
 }
 
 # dispatch_session NAME [CAPTURE [VAR=VALUE...]] runs $R/prompt.txt as a plain session outside
@@ -534,6 +537,7 @@ run_askgate() {
   ref=$(jq -r .comment_ref "$R/fixture.json")
   ask="Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as $ref asks? I recommend keeping it at 02:00 as it is."
   billing='gh api orgs/example-org/settings/billing/actions'
+  # shellcheck disable=SC2016 # each prompt is literal text; its Markdown backticks expand nothing
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
   link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Move the nightly export to 04:00 UTC, as %s asks? I recommend moving it." Options: "Move it to 04:00", "Keep it at 02:00".\n' "$issue" "$ref" ;;
@@ -791,7 +795,18 @@ cmd_run() {
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
   [[ $index =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "run index '$index' or batch start '$start' is not a number"
   [ -f "$services_env" ] || fail "a run needs its batch's services: run \`rig.sh batch $scenario 1 $2\`"
-  name=$scenario-${P##*/}-$n
+  # An askgate run's name carries its case, so the batches of the cases, each numbered from 1,
+  # never remove each other's runs.
+  if [ "$scenario" = askgate ]; then
+    case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried)
+      name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n
+      ;;
+    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
+    esac
+  else
+    name=$scenario-${P##*/}-$n
+  fi
   R=$work/runs/$name
   evidence=$R
   on_exit stop_run

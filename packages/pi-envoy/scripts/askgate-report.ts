@@ -5,7 +5,10 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** One advisor-gate entry, with the write's text joined from its tool call. */
+/**
+ * One advisor-gate entry, with the write's text: the arguments the model reviewed (`reviewedText`),
+ * or, for an entry written before the gate recorded them, the text of its tool call.
+ */
 export interface GateRecord {
   session: string;
   timestamp: string;
@@ -32,6 +35,9 @@ export interface GateRecord {
   ruleModel: string | null;
   /** The call's breaker target, as `dispatch_ask issue=ACME-1`. */
   target: string | null;
+  /** `reviewed`: the text the model judged. `command`: the tool call's own text, which for a
+   *  file-backed write names the file and not its content. */
+  textSource: "reviewed" | "command";
 }
 
 export interface ToolShare {
@@ -143,6 +149,7 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
     const data = isObject(entry.data) ? entry.data : {};
     const usage = isObject(data.usage) ? data.usage : {};
     const reason = data.deliveredReason ?? data.reason;
+    const reviewed = typeof data.reviewedText === "string" ? data.reviewedText : null;
     records.push({
       session,
       timestamp: str(entry.timestamp),
@@ -154,7 +161,8 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
       reason: strOrNull(reason),
       latencyMs: num(data.latencyMs),
       cost: num(usage.cost),
-      text: null,
+      text: reviewed,
+      textSource: reviewed === null ? "command" : "reviewed",
       rule: strOrNull(data.rule),
       ruleOutcome: strOrNull(data.ruleOutcome),
       ruleError: strOrNull(data.ruleError),
@@ -166,7 +174,8 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
     });
   }
   // The call comes before its entry, but the join waits for the whole file.
-  for (const record of records) record.text = calls.get(record.toolCallId) ?? null;
+  for (const record of records)
+    if (record.textSource === "command") record.text = calls.get(record.toolCallId) ?? null;
   return records;
 }
 
@@ -197,17 +206,19 @@ export function isReview(record: GateRecord): boolean {
   return record.outcome === "verdict";
 }
 
+/** The gate did not pass the write as sent: a revise, a refusal, or a gate that did not load. */
 export function isSentBack(record: GateRecord): boolean {
-  return record.decision === "revise";
+  return record.decision === "revise" || record.outcome === "load-failed";
 }
 
-/** A refused call: AskGate did not send it. A rules refusal is one in warn mode too. */
+/** A write that did not post: refused in block mode, or refused in every mode (a rules refusal is one in warn mode too). */
 export function isRefusal(record: GateRecord): boolean {
   return (
-    record.decision === "revise" &&
+    isSentBack(record) &&
     (record.verdictMode === "block" ||
       record.outcome === "unreadable" ||
       record.outcome === "no-model-role" ||
+      record.outcome === "load-failed" ||
       record.rule !== null)
   );
 }
@@ -424,6 +435,7 @@ export function sampleLine(record: GateRecord): string {
     verdictMode: record.verdictMode,
     rule: record.rule,
     reason: record.reason,
+    textSource: record.textSource,
     text: record.text,
   });
 }

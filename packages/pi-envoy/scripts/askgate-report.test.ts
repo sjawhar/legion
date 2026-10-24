@@ -7,9 +7,11 @@ import {
   formatReport,
   type GateRecord,
   isRefusal,
+  isSentBack,
   parseArgs,
   parseSessionText,
   readSessions,
+  sampleLine,
   sampleSentBack,
 } from "./askgate-report";
 
@@ -26,6 +28,7 @@ interface EntryInput {
   delivered?: string;
   /** Fields of the rules check and the target, written into the entry as given. */
   fields?: Record<string, unknown>;
+  reviewed?: string;
 }
 
 function gate(e: EntryInput): string {
@@ -48,6 +51,7 @@ function gate(e: EntryInput): string {
   if (e.reason !== undefined) data.reason = e.reason;
   if (e.delivered !== undefined) data.deliveredReason = e.delivered;
   Object.assign(data, e.fields);
+  if (e.reviewed !== undefined) data.reviewedText = e.reviewed;
   return JSON.stringify({
     type: "custom",
     customType: "advisor-gate",
@@ -284,6 +288,24 @@ describe("parseSessionText", () => {
     const b1 = parseSessionText(sessionB, "s").find((r) => r.toolCallId === "b1");
     expect(b1?.text).toBe(JSON.stringify({ issue: "ACME-3", body: "hello" }));
   });
+
+  test("an entry's reviewedText is the sample's text; an older entry's falls back to the command, marked so", () => {
+    const reviewed = JSON.stringify({ issue: "ACME-1", content: "# The brief\n" }, null, 2);
+    const text = [
+      call("r1", "bash", { command: "dispatch artifact --issue ACME-1 --name b.md --path b.md" }),
+      gate({ id: "r1", decision: "revise", reviewed }),
+      call("r2", "bash", { command: "dispatch ask --issue ACME-2 --question q" }),
+      gate({ id: "r2", decision: "revise" }),
+    ].join("\n");
+    const [r1, r2] = parseSessionText(text, "s");
+    expect(r1).toMatchObject({ text: reviewed, textSource: "reviewed" });
+    expect(r2).toMatchObject({
+      text: "dispatch ask --issue ACME-2 --question q",
+      textSource: "command",
+    });
+    expect(JSON.parse(sampleLine(r1 as GateRecord)).textSource).toBe("reviewed");
+    expect(JSON.parse(sampleLine(r2 as GateRecord)).textSource).toBe("command");
+  });
 });
 
 describe("readSessions and computeStats", () => {
@@ -509,6 +531,17 @@ describe("parseArgs", () => {
   });
 });
 
+describe("isSentBack and isRefusal", () => {
+  test("a gate that did not load sent the write back and refused it, in warn mode too", () => {
+    const [record] = parseSessionText(
+      gate({ id: "lf", outcome: "load-failed", decision: "revise", mode: "warn" }),
+      "s"
+    );
+    expect(record && isSentBack(record)).toBe(true);
+    expect(record && isRefusal(record)).toBe(true);
+  });
+});
+
 describe("CLI", () => {
   test("prints the report and writes sample.jsonl", async () => {
     const out = join(dir, "out", "nested");
@@ -549,6 +582,7 @@ describe("CLI", () => {
           "rule",
           "session",
           "text",
+          "textSource",
           "timestamp",
           "tool",
           "toolCallId",

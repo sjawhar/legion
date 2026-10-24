@@ -236,8 +236,10 @@ const factsGate = (verdictMode: string) =>
     verdictMode,
     reason: factsReason,
   });
+// An askgate run's directory is askgate-<case>-<label>-<n>, so the three cases' batches of one
+// label, each numbered from 1, keep their own records.
 // on, facts: refused in block mode, the reason naming both facts.
-run("askgate-on-1", askgate("facts"), [
+run("askgate-facts-on-1", askgate("facts"), [
   ...header,
   turn[0],
   askCall,
@@ -245,7 +247,7 @@ run("askgate-on-1", askgate("facts"), [
   factsGate("block"),
 ]);
 // on, facts: the agent read `dispatch ask --help` first; the refused ask is the call scored.
-run("askgate-on-25", askgate("facts"), [
+run("askgate-facts-on-4", askgate("facts"), [
   ...header,
   turn[0],
   toolCall("call-help", "bash", { command: "dispatch ask --help" }),
@@ -255,7 +257,7 @@ run("askgate-on-25", askgate("facts"), [
   factsGate("block"),
 ]);
 // on, facts: the gate only warned, and the call went out.
-run("askgate-on-2", askgate("facts"), [
+run("askgate-facts-on-2", askgate("facts"), [
   ...header,
   turn[0],
   askCall,
@@ -263,7 +265,7 @@ run("askgate-on-2", askgate("facts"), [
   factsGate("warn"),
 ]);
 // on, facts: refused, but the reason names neither fact.
-run("askgate-on-3", askgate("facts"), [
+run("askgate-facts-on-3", askgate("facts"), [
   ...header,
   turn[0],
   askCall,
@@ -288,7 +290,7 @@ const linkGate = (decision: string) =>
     verdictMode: "block",
   });
 // on, link: the gate let the linked ask through.
-run("askgate-on-4", askgate("link", anAsk), [
+run("askgate-link-on-1", askgate("link", anAsk), [
   ...header,
   turn[0],
   askCall,
@@ -296,7 +298,7 @@ run("askgate-on-4", askgate("link", anAsk), [
   linkGate("allow"),
 ]);
 // on, link: the gate sent the linked ask back once, and the second try went out.
-run("askgate-on-5", askgate("link", anAsk), [
+run("askgate-link-on-2", askgate("link", anAsk), [
   ...header,
   turn[0],
   askCall,
@@ -304,12 +306,12 @@ run("askgate-on-5", askgate("link", anAsk), [
   linkGate("revise"),
 ]);
 // on, link: no ask reached the issue.
-run("askgate-on-6", askgate("link"), [...header, ...turn]);
+run("askgate-link-on-3", askgate("link"), [...header, ...turn]);
 const uploadCall = (id: string, command: string) => toolCall(id, "bash", { command });
 const uploadGate = (toolCallId: string, data: object) =>
   gate({ tool: "dispatch_artifact", path: "dispatch artifact", toolCallId, ...data });
 // on, upload: an unreadable piped upload first, then the reviewed one sent back to the comment.
-run("askgate-on-7", askgate("upload"), [
+run("askgate-upload-on-1", askgate("upload"), [
   ...header,
   turn[0],
   uploadCall("call-u1", "cat brief.md | dispatch artifact --issue LWEVAL-2 --name brief.md"),
@@ -325,7 +327,7 @@ run("askgate-on-7", askgate("upload"), [
   }),
 ]);
 // on, upload: the gate let the upload through.
-run("askgate-on-8", askgate("upload"), [
+run("askgate-upload-on-2", askgate("upload"), [
   ...header,
   turn[0],
   uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
@@ -333,7 +335,7 @@ run("askgate-on-8", askgate("upload"), [
   uploadGate("call-u2", { decision: "allow", outcome: "verdict", verdictMode: "block" }),
 ]);
 // on, upload: sent back, but the reason names no comment and no link.
-run("askgate-on-9", askgate("upload"), [
+run("askgate-upload-on-3", askgate("upload"), [
   ...header,
   turn[0],
   uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
@@ -373,7 +375,7 @@ const noChangeCall = (id: string, flags = "") =>
 const rebuttalFlag = " --advisor-rebuttal 'The person asked for the move.'";
 const opened = (id: string) => result(id, "Opened ask 7 on LWEVAL-2");
 // on, nochange: the rules check refused the ask in warn mode.
-run("askgate-on-10", askgate("nochange"), [
+run("askgate-nochange-on-1", askgate("nochange"), [
   ...header,
   turn[0],
   noChangeCall("call-n"),
@@ -385,7 +387,7 @@ run("askgate-on-10", askgate("nochange"), [
   }),
 ]);
 // on, nochange: the charter's revise refused it in block mode, and the rules check matched nothing.
-run("askgate-on-11", askgate("nochange"), [
+run("askgate-nochange-on-2", askgate("nochange"), [
   ...header,
   turn[0],
   noChangeCall("call-n"),
@@ -399,7 +401,7 @@ run("askgate-on-11", askgate("nochange"), [
   }),
 ]);
 // on, nochange: the rules call failed, and the ask went out.
-run("askgate-on-12", askgate("nochange", anAsk), [
+run("askgate-nochange-on-3", askgate("nochange", anAsk), [
   ...header,
   turn[0],
   noChangeCall("call-n"),
@@ -423,7 +425,7 @@ const docEditGate = (toolCallId: string, path: string, data: object) =>
   });
 // on, nochange-block: a piped edit AskGate cannot read, then the device write the rules check
 // refused in block mode.
-run("askgate-on-13", askgate("nochange-block"), [
+run("askgate-nochange-block-on-1", askgate("nochange-block"), [
   ...header,
   turn[0],
   toolCall("call-d1", "bash", {
@@ -454,7 +456,7 @@ run("askgate-on-13", askgate("nochange-block"), [
   }),
 ]);
 // on, nochange-block: the edit went out.
-run("askgate-on-14", askgate("nochange-block"), [
+run("askgate-nochange-block-on-2", askgate("nochange-block"), [
   ...header,
   turn[0],
   toolCall("call-d2", "bash", {
@@ -492,7 +494,7 @@ const billingCall = [
   result("call-g", "gh: Not Found (HTTP 404)"),
 ];
 // on, untried: the rules check refused the ask in block mode, and the agent never ran the read.
-run("askgate-on-15", askgate("untried"), [
+run("askgate-untried-on-1", askgate("untried"), [
   ...header,
   turn[0],
   billingAsk("call-u", untriedQuestion),
@@ -507,7 +509,7 @@ run("askgate-on-15", askgate("untried"), [
   }),
 ]);
 // on, untried: the agent ran the read anyway, and the rules check let the ask through.
-run("askgate-on-16", { ...askgate("untried", anAsk), ...ranBilling }, [
+run("askgate-untried-on-2", { ...askgate("untried", anAsk), ...ranBilling }, [
   ...header,
   turn[0],
   ...billingCall,
@@ -521,7 +523,7 @@ run("askgate-on-16", { ...askgate("untried", anAsk), ...ranBilling }, [
   }),
 ]);
 // on, nochange-rebuttal: the rebuttal sent the ask without review.
-run("askgate-on-17", askgate("nochange-rebuttal", anAsk), [
+run("askgate-nochange-rebuttal-on-1", askgate("nochange-rebuttal", anAsk), [
   ...header,
   turn[0],
   noChangeCall("call-n", rebuttalFlag),
@@ -534,7 +536,7 @@ run("askgate-on-17", askgate("nochange-rebuttal", anAsk), [
   }),
 ]);
 // on, nochange-rebuttal: sent first without the flag, refused, then resent with it.
-run("askgate-on-18", askgate("nochange-rebuttal", anAsk), [
+run("askgate-nochange-rebuttal-on-2", askgate("nochange-rebuttal", anAsk), [
   ...header,
   turn[0],
   noChangeCall("call-n1"),
@@ -558,7 +560,7 @@ const triedQuestion = `I ran ${billingRead} and it failed with gh: Not Found (HT
 const triedFiles = { ...askgate("tried", anAsk), ...ranBilling };
 const triedStart = [...header, turn[0], ...billingCall];
 // on, tried: the gate let the ask through in block mode.
-run("askgate-on-19", triedFiles, [
+run("askgate-tried-on-1", triedFiles, [
   ...triedStart,
   billingAsk("call-t", triedQuestion),
   opened("call-t"),
@@ -570,7 +572,7 @@ run("askgate-on-19", triedFiles, [
   }),
 ]);
 // on, tried: the charter's revise in warn mode only noted the ask, which went out.
-run("askgate-on-20", triedFiles, [
+run("askgate-tried-on-2", triedFiles, [
   ...triedStart,
   billingAsk("call-t", triedQuestion),
   opened("call-t"),
@@ -583,7 +585,7 @@ run("askgate-on-20", triedFiles, [
   }),
 ]);
 // on, tried: the same revise in block mode refused the ask, and a shorter one went out.
-run("askgate-on-21", triedFiles, [
+run("askgate-tried-on-3", triedFiles, [
   ...triedStart,
   billingAsk("call-t1", triedQuestion),
   refused("call-t1", "AskGate did not send this call. Shorten it."),
@@ -604,7 +606,7 @@ run("askgate-on-21", triedFiles, [
   }),
 ]);
 // on, tried: the rules check refused the tried ask, and the agent's rebuttal sent it.
-run("askgate-on-22", triedFiles, [
+run("askgate-tried-on-4", triedFiles, [
   ...triedStart,
   billingAsk("call-t1", triedQuestion),
   refused("call-t1", `${ruleLine}\n- The ask: untried access, in the words "Can you run it"`),
@@ -624,7 +626,7 @@ run("askgate-on-22", triedFiles, [
 ]);
 // on, nochange-rebuttal: a compound first attempt AskGate could not read, then the rebuttal sent
 // the ask. No model read the first attempt, so it is no refusal of the ask.
-run("askgate-on-23", askgate("nochange-rebuttal", anAsk), [
+run("askgate-nochange-rebuttal-on-3", askgate("nochange-rebuttal", anAsk), [
   ...header,
   turn[0],
   noChangeCall("call-n1", `${rebuttalFlag}; echo done`),
@@ -640,7 +642,7 @@ run("askgate-on-23", askgate("nochange-rebuttal", anAsk), [
   }),
 ]);
 // on, link: a compound first attempt AskGate could not read, then the ask went out on a verdict.
-run("askgate-on-24", askgate("link", anAsk), [
+run("askgate-link-on-4", askgate("link", anAsk), [
   ...header,
   turn[0],
   noChangeCall("call-l1", "; echo done"),
@@ -656,14 +658,14 @@ run("askgate-on-24", askgate("link", anAsk), [
   }),
 ]);
 // off, facts: the ask went out and the gate never ran.
-run("askgate-off-1", askgate("facts", anAsk), [
+run("askgate-facts-off-1", askgate("facts", anAsk), [
   ...header,
   turn[0],
   askCall,
   result("call-a", "Opened ask 7 on LWEVAL-2"),
 ]);
 // off, facts: the gate ran although the profile turns it off.
-run("askgate-off-2", askgate("facts", anAsk), [
+run("askgate-facts-off-2", askgate("facts", anAsk), [
   ...header,
   turn[0],
   askCall,
@@ -671,9 +673,13 @@ run("askgate-off-2", askgate("facts", anAsk), [
   factsGate("warn"),
 ]);
 // off, facts: no ask reached the issue.
-run("askgate-off-3", askgate("facts"), [...header, ...turn]);
+run("askgate-facts-off-3", askgate("facts"), [...header, ...turn]);
 // off, link: a pair the score does not judge.
-run("askgate-off-4", askgate("link", anAsk), [...header, ...turn]);
+run("askgate-link-off-1", askgate("link", anAsk), [...header, ...turn]);
+// A directory that names no case, as the rig named them before the case was in the name.
+run("askgate-on-1", askgate("facts"), [...header, ...turn]);
+// A directory whose case is not the one its case.txt records.
+run("askgate-upload-on-4", askgate("facts"), [...header, ...turn]);
 
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
@@ -728,80 +734,110 @@ test("a brainstorm run created its issue when Dispatch answered Created, whateve
 });
 
 test("askgate on, facts: passes when the gate refused the ask in block mode naming both facts", () => {
-  expect(out).toMatch(/askgate-on-1\tpass=true\t.*case=facts /);
-  expect(out).toMatch(/askgate-on-2\tpass=false\t.*verdictMode=warn /);
-  expect(out).toMatch(/askgate-on-3\tpass=false\t.*age=false contributors=false /);
+  expect(out).toMatch(/askgate-facts-on-1\tpass=true\t.*case=facts /);
+  expect(out).toMatch(/askgate-facts-on-2\tpass=false\t.*verdictMode=warn /);
+  expect(out).toMatch(/askgate-facts-on-3\tpass=false\t.*age=false contributors=false /);
 });
 
 test("askgate on, link: passes when the ask exists and the gate never sent an ask back", () => {
-  expect(out).toMatch(/askgate-on-4\tpass=true\t.*asks=1 revised=0 /);
-  expect(out).toMatch(/askgate-on-5\tpass=false\t.*revised=1 /);
-  expect(out).toMatch(/askgate-on-6\tpass=false\t.*asks=0 /);
+  expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 revised=0 /);
+  expect(out).toMatch(/askgate-link-on-2\tpass=false\t.*revised=1 /);
+  expect(out).toMatch(/askgate-link-on-3\tpass=false\t.*asks=0 /);
 });
 
 test("askgate on, upload: reads the first reviewed upload, past an unreadable one", () => {
-  expect(out).toMatch(/askgate-on-7\tpass=true\t.*decision=revise verdictMode=block fix=true /);
-  expect(out).toMatch(/askgate-on-8\tpass=false\t.*decision=allow /);
-  expect(out).toMatch(/askgate-on-9\tpass=false\t.*fix=false /);
+  expect(out).toMatch(
+    /askgate-upload-on-1\tpass=true\t.*decision=revise verdictMode=block fix=true /
+  );
+  expect(out).toMatch(/askgate-upload-on-2\tpass=false\t.*decision=allow /);
+  expect(out).toMatch(/askgate-upload-on-3\tpass=false\t.*fix=false /);
 });
 
 test("askgate on, nochange, nochange-block and untried: pass when the rules check refused the call, in either mode", () => {
   expect(out).toMatch(
-    /askgate-on-10\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=warn /
+    /askgate-nochange-on-1\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=warn /
   );
   // Refused by the charter's revise alone: no rule, and not the rules check's refusal.
   expect(out).toMatch(
-    /askgate-on-11\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=none verdictMode=block /
+    /askgate-nochange-on-2\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=none verdictMode=block /
   );
   expect(out).toMatch(
-    /askgate-on-12\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=error /
+    /askgate-nochange-on-3\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=error /
   );
   // A device write, read past the piped edit AskGate could not read.
   expect(out).toMatch(
-    /askgate-on-13\tpass=true\t.*case=nochange-block refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
+    /askgate-nochange-block-on-1\tpass=true\t.*case=nochange-block refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
   );
   expect(out).toMatch(
-    /askgate-on-14\tpass=false\t.*case=nochange-block refusedByRule=false rule=none /
+    /askgate-nochange-block-on-2\tpass=false\t.*case=nochange-block refusedByRule=false rule=none /
   );
   expect(out).toMatch(
-    /askgate-on-15\tpass=true\t.*case=untried refusedByRule=true rule=untried_access ruleOutcome=match verdictMode=block ranRead=false /
+    /askgate-untried-on-1\tpass=true\t.*case=untried refusedByRule=true rule=untried_access ruleOutcome=match verdictMode=block ranRead=false /
   );
   expect(out).toMatch(
-    /askgate-on-16\tpass=false\t.*case=untried refusedByRule=false rule=none ruleOutcome=none verdictMode=block ranRead=true /
+    /askgate-untried-on-2\tpass=false\t.*case=untried refusedByRule=false rule=none ruleOutcome=none verdictMode=block ranRead=true /
   );
 });
 
 test("askgate on, nochange-rebuttal and tried: pass when the ask posted and no entry refused it, in the entry's own mode", () => {
   expect(out).toMatch(
-    /askgate-on-17\tpass=true\t.*case=nochange-rebuttal asks=1 refusals=0 gates=block\/rebuttal\/allow /
+    /askgate-nochange-rebuttal-on-1\tpass=true\t.*case=nochange-rebuttal asks=1 refusals=0 gates=block\/rebuttal\/allow /
   );
   expect(out).toMatch(
-    /askgate-on-18\tpass=false\t.*asks=1 refusals=1 gates=warn\/verdict\/revise\/no_change,warn\/rebuttal\/allow /
+    /askgate-nochange-rebuttal-on-2\tpass=false\t.*asks=1 refusals=1 gates=warn\/verdict\/revise\/no_change,warn\/rebuttal\/allow /
   );
   expect(out).toMatch(
-    /askgate-on-19\tpass=true\t.*case=tried asks=1 refusals=0 gates=block\/verdict\/allow ranRead=true /
+    /askgate-tried-on-1\tpass=true\t.*case=tried asks=1 refusals=0 gates=block\/verdict\/allow ranRead=true /
   );
   // One charter revise: in warn mode a note on a call that went out, in block mode a refusal.
   expect(out).toMatch(
-    /askgate-on-20\tpass=true\t.*refusals=0 gates=warn\/verdict\/revise ranRead=true /
+    /askgate-tried-on-2\tpass=true\t.*refusals=0 gates=warn\/verdict\/revise ranRead=true /
   );
   expect(out).toMatch(
-    /askgate-on-21\tpass=false\t.*refusals=1 gates=block\/verdict\/revise,block\/verdict\/allow /
+    /askgate-tried-on-3\tpass=false\t.*refusals=1 gates=block\/verdict\/revise,block\/verdict\/allow /
   );
   // The rules check refused the ask that carried the read's error: a false positive.
   expect(out).toMatch(
-    /askgate-on-22\tpass=false\t.*refusals=1 gates=block\/verdict\/revise\/untried_access,block\/rebuttal\/allow /
+    /askgate-tried-on-4\tpass=false\t.*refusals=1 gates=block\/verdict\/revise\/untried_access,block\/rebuttal\/allow /
   );
 });
 
 test("askgate off, facts: passes when the ask exists and the gate wrote nothing", () => {
-  expect(out).toMatch(/askgate-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
-  expect(out).toMatch(/askgate-off-2\tpass=false\t.*gateEntries=1 /);
-  expect(out).toMatch(/askgate-off-3\tpass=false\t.*asks=0 /);
+  expect(out).toMatch(/askgate-facts-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
+  expect(out).toMatch(/askgate-facts-off-2\tpass=false\t.*gateEntries=1 /);
+  expect(out).toMatch(/askgate-facts-off-3\tpass=false\t.*asks=0 /);
 });
 
-test("askgate: another label and case pair is unscored, saying why", () => {
-  expect(out).toContain("askgate-off-4\trig error: askgate scores off only with case facts");
-  expect(out).toContain("askgate\ton\t12/25\t");
-  expect(out).toContain("askgate\toff\t1/3\t");
+test("askgate: another label and case pair, a directory naming no case, and a case.txt that disagrees are unscored, saying why", () => {
+  expect(out).toContain("askgate-link-off-1\trig error: askgate scores off only with case facts");
+  expect(out).toContain(
+    "askgate-on-1\trig error: the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
+  );
+  expect(out).toContain(
+    "askgate-upload-on-4\trig error: case.txt names 'facts', but the run's directory names upload"
+  );
+});
+
+test("askgate: an unreadable first attempt is no review of the case's call", () => {
+  // facts scores the first ask call the gate reviewed, past the agent's own `dispatch ask --help`.
+  expect(out).toMatch(/askgate-facts-on-4\tpass=true\t.*refused=true age=true contributors=true /);
+  // link and nochange-rebuttal leave the unreadable refusal out, and count it apart.
+  expect(out).toMatch(/askgate-link-on-4\tpass=true\t.*revised=0 .* unreadable=1 /);
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-3\tpass=true\t.*refusals=0 gates=block\/unreadable\/revise,block\/rebuttal\/allow unreadable=1 /
+  );
+});
+
+test("askgate: the counts are per case and label", () => {
+  expect(out).toContain("askgate:facts\ton\t2/4\t0/4\t0\n");
+  expect(out).toContain("askgate:link\ton\t2/4\t0/4\t0\n");
+  expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
+  expect(out).toContain("askgate:nochange\ton\t1/3\t0/3\t0\n");
+  expect(out).toContain("askgate:nochange-block\ton\t1/2\t0/2\t0\n");
+  expect(out).toContain("askgate:untried\ton\t1/2\t0/2\t0\n");
+  expect(out).toContain("askgate:nochange-rebuttal\ton\t2/3\t0/3\t0\n");
+  expect(out).toContain("askgate:tried\ton\t2/4\t0/4\t0\n");
+  expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\n");
+  expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\n");
+  expect(out).toContain("askgate\ton\t0/0\t0/0\t1\n");
 });

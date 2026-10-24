@@ -25,7 +25,7 @@
 //                                          one capture call shape
 //   seed.ts askgate <file>                 one run's own issue, with an empty spec and one comment
 //                                          by the person alice; writes {issue, comment,
-//                                          comment_ref, message} to <file>, `message` the comment id
+//                                          comment_ref} to <file>
 //   seed.ts capture-askgate <file> <run dir>
 //                                          the asks and documents on the issue <file> names, as
 //                                          score.ts's askgateReview reads them (asks.json,
@@ -53,7 +53,6 @@ const AskgateFixture = z.object({
   issue: z.string(),
   comment: z.string(),
   comment_ref: z.string(),
-  message: z.string(),
 });
 /** The most events one `GET /api/v1/issues/{key}/events` page holds. */
 const EVENT_PAGE = 200;
@@ -239,7 +238,6 @@ if (command === "project") {
     issue: issue.key,
     comment: comment.id,
     comment_ref: `dispatch://${issue.key}/comment/${comment.id}`,
-    message: comment.id,
   };
   writeFileSync(file, `${JSON.stringify(fixture)}\n`);
   console.log(`seeded ${issue.key} with comment ${comment.id}`);

@@ -170,15 +170,20 @@ README's "AskGate" section says what it reviews, the switch, the modes, the mode
 check and the record. `envoy.ts` reads the switch at load (`askgateSetting` in
 `@legion/envoy-client/envoy-config`, the top-level `askgate` section of the session's envoy.json)
 and calls `registerAskGate` only with Dispatch on and the switch not off. `registerAskGate`
-(`askgate.ts`) loads Oh My Pi's own modules through string-literal `import()`, declared in
-`../pi-shared/src/omp-host.d.ts`, then binds the core, so its handlers register after the factory
-returns. The runner reads an event's handlers when the event fires, so they still fire.
-`session_start` waits for that load and shows a load failure or a switch that does not parse as a
-notice. `askgate-core.ts` holds the gate and takes the host through its dependencies, so
+(`askgate.ts`) registers the gate's one `tool_call` handler at once, in the factory, after
+`envoy.ts`'s own, and starts the load of Oh My Pi's own modules through string-literal `import()`,
+declared in `../pi-shared/src/omp-host.d.ts`. Each call waits for the load. Once the modules load,
+the core binds to a `pi` that keeps its `tool_call` handler, which the registered one runs, and
+passes every other event to the real `pi`, so no call passes between the load and the binding. A
+load that fails (a module, an `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler
+ceiling too short for a verdict) is no off switch: `loadFailureGate` refuses each write the gate
+would review, in both modes, naming the error and `askgate.enabled`, and records a `load-failed`
+entry. `session_start` waits for the load and shows a load failure or a switch that does not parse
+as a notice. `askgate-core.ts` holds the gate and takes the host through its dependencies, so
 `askgate.test.ts` drives it with fakes. Beside it, `new-asks.ts` finds the new asks a call opens,
 and reads markdown as the Dispatch server does. `rules-check.ts` runs the rules check through the
 model walk and the Dispatch client that the core passes in, so it never imports `askgate-core.ts`.
-`text.ts` is the leaf that holds the text helpers both checks share. The model walk (`askModel` in
+`text.ts` is the leaf that holds the text helpers both checks share. The model walk (`walk` in
 `createAskGate`) is the one path either check takes to the model. `rules.md`, `askgate-system.md`,
 `askgate-request.md` and `askgate-upload.md` (the instruction an upload of a markdown document
 gets: failure 10 alone) are the charter check's prompts, and `rule-check-system.md`,

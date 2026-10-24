@@ -101,8 +101,11 @@ export interface RulesCheckCall {
   tool: string;
   /** The arguments as the dry run printed them, or the device's own. */
   input: Readonly<Record<string, unknown>>;
-  /** Where the command runs after its own `cd`; the session's directory for a device call. */
-  directory: string;
+  /**
+   * Where the command runs after its own `cd`, the session's directory for a device call: asked
+   * only when a document is read, and undefined when bash could not say.
+   */
+  directory: () => Promise<string | undefined>;
   /** The rules call's system role: its frame and the two rules. */
   system: string;
   /**
@@ -168,6 +171,8 @@ export interface RuleOverride {
   again: string;
   /** What that addition is called, which the gate removes before sending. */
   what: string;
+  /** A line the refusal ends its override with, as the charter's revise does (a file read before its batch ran). */
+  note?: string;
 }
 
 /**
@@ -187,6 +192,7 @@ export function renderRuleRefusal(
     delivered,
     ...[...new Set(rules)].map((rule) => `For "${RULES[rule].label}": ${RULES[rule].fix}`),
     `If the person is needed anyway, send the call again with ${override.again}, naming which of the person's authority, taste or risk appetite it needs. An override is always sent and recorded, and the ${override.what} is removed before sending.`,
+    ...(override.note ? [override.note] : []),
     ...(second ? [secondRevise] : []),
   ].join("\n");
 }
@@ -309,8 +315,6 @@ async function readDocument(
   deps: RulesCheckDeps,
   call: RulesCheckCall
 ): Promise<DocumentBlocks | "not-found" | "failed"> {
-  const session = deps.dispatchClient(call.directory, call.signal);
-  if (session === undefined) return "failed";
   const { issue, project, ref } = call.input;
   // An upload names its document by `--name`; every other call by the document argument doc-edit takes.
   const named = call.toolName === "dispatch_artifact" ? call.input.name : call.input.artifact;
@@ -321,14 +325,19 @@ async function readDocument(
     ...(typeof named === "string" ? { artifact: named } : {}),
   };
   try {
+    const directory = await call.directory();
+    if (directory === undefined) return "failed";
+    const session = deps.dispatchClient(directory, call.signal);
+    if (session === undefined) return "failed";
     return await readDocumentBlocks(session.client, target, {
-      cwd: call.directory,
+      cwd: directory,
       env: deps.env,
       serverUrls: session.serverUrls,
     });
   } catch {
-    // A refused reference, a server that did not answer, a document that changed as it was read: the
-    // asks are judged without it.
+    // A directory bash could not name, a configuration that does not read, a refused reference, a
+    // server that did not answer, a document that changed as it was read: the asks are judged
+    // without it.
     return "failed";
   }
 }

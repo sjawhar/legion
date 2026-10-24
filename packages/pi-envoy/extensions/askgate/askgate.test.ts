@@ -444,6 +444,26 @@ describe("verdicts", () => {
     expect(g.entries[1].argsDigest).toBe(e.argsDigest);
     expect(g.entries[2].argsDigest).not.toBe(e.argsDigest);
   });
+  test("an entry that asked the model records reviewedText: the arguments the model saw, cut as they were", async () => {
+    const g = bind({ complete: async () => ({ text: REVISE }) });
+    await g.device("t1", "dispatch_comment", COMMENT);
+    const reviewed = JSON.stringify(COMMENT, null, 2);
+    expect(g.entries[0].reviewedText).toBe(reviewed);
+    expect(g.calls[0].user).toContain(reviewed);
+    // A body past 64 KiB is cut in the request and in the record alike.
+    const long = { issue: "X-1", body: "b".repeat(70 * 1024) };
+    await g.device("t2", "dispatch_comment", long);
+    const cut = g.entries[1].reviewedText ?? "";
+    expect(bytes(cut)).toBeLessThanOrEqual(64 * 1024);
+    expect(cut).toContain("[elided");
+    expect(g.calls[1].user).toContain(cut);
+  });
+  test("an entry that never asked the model records no reviewedText", async () => {
+    const g = bind({ roles: {} });
+    await g.device("t1", "dispatch_comment", COMMENT);
+    expect(g.entries[0].outcome).toBe("no-model-role");
+    expect(g.entries[0].reviewedText).toBeUndefined();
+  });
   test("no dump without OMP_ASKGATE_DUMP", async () => {
     const g = bind();
     await g.device("t1", "dispatch_comment", COMMENT);
@@ -866,11 +886,8 @@ describe("deadline and abandonment", () => {
     await short.device("t1", "dispatch_comment", COMMENT);
     expect(short.entries[0].deadlineMs).toBe(50);
   });
-  test("a ceiling that leaves no room for a verdict binds nothing, and says why", () => {
-    const g = bind({ ceiling: 8_000 });
-    expect(g.handlers.size).toBe(0);
-    expect(g.warnings).toHaveLength(1);
-    expect(g.warnings[0]).toContain("8000");
+  test("a ceiling that leaves no room for a verdict throws when the gate binds, saying why", () => {
+    expect(() => bind({ ceiling: 8_000 })).toThrow(/8000 ms/);
   });
   test("a call abandoned by its tool (a user abort, or the runner's ceiling) cancels the model call and never counts toward the halt", async () => {
     const signals: AbortSignal[] = [];
@@ -1183,6 +1200,45 @@ console.log(JSON.stringify(args, null, 2));
         ["dispatch_doc_edit", "unreadable", "revise"],
       ]);
       expect(g.notices).toHaveLength(0);
+    }
+  });
+  test("a scoped write after a prefix's options or its -- terminator is refused, in every mode", async () => {
+    const prefixed = [
+      "command -- dispatch ask --issue X-1 --question q",
+      "command -p -- dispatch ask --issue X-1 --question q",
+      "command -p dispatch ask --issue X-1 --question q",
+      "exec -- dispatch ask --issue X-1 --question q",
+      "(exec -a name dispatch ask --issue X-1 --question q)",
+      "nohup -- dispatch ask --issue X-1 --question q",
+      "env -- dispatch ask --issue X-1 --question q",
+      "env -u HOME dispatch ask --issue X-1 --question q",
+      "env -C /tmp -- FOO=1 dispatch ask --issue X-1 --question q",
+      "timeout -- 30 dispatch ask --issue X-1 --question q",
+      "timeout -s KILL 30 dispatch ask --issue X-1 --question q",
+      "timeout -k 5 --signal=TERM 30 dispatch ask --issue X-1 --question q",
+      "time -p -- dispatch ask --issue X-1 --question q",
+      "timeout 30 env -- command -- dispatch ask --issue X-1 --question q",
+      "/usr/bin/env -- dispatch ask --issue X-1 --question q",
+    ];
+    for (const command of prefixed)
+      expect(unreadableDispatchWrite(command)).toEqual({
+        tool: "dispatch_ask",
+        label: "dispatch ask",
+      });
+    // `command -v` prints where a program is and runs nothing.
+    expect(unreadableDispatchWrite("command -v dispatch ask --issue X-1")).toBeUndefined();
+    for (const mode of ["warn", "block"]) {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+      for (const [index, command] of prefixed.entries()) {
+        const result = await g.bash(`p${index}`, command);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("Nothing in the call ran");
+      }
+      expect(g.dryRuns).toHaveLength(0);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
+        Array(prefixed.length).fill(["dispatch_ask", "unreadable"])
+      );
     }
   });
   test("a compound command whose dispatch sends nothing, or names dispatch only as text, is not refused", async () => {
@@ -1519,6 +1575,12 @@ console.log(JSON.stringify(args, null, 2));
           `cd sub && dispatch ask --issue X-1 --question-file - 2>&1 <<'EOF'\n${QUESTION}EOF`
         )
       ).toBeUndefined();
+      expect(
+        await g.bash(
+          "after",
+          `dispatch ask --issue X-1 --question-file - <<'EOF' 2>&1\n${QUESTION}EOF`
+        )
+      ).toBeUndefined();
       expect(g.dryRuns).toEqual([
         {
           script:
@@ -1542,13 +1604,23 @@ console.log(JSON.stringify(args, null, 2));
           cwd: work,
           timeoutMs: 10_000,
         },
+        {
+          script: `dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`,
+          cwd: work,
+          timeoutMs: 10_000,
+        },
       ]);
-      // Four charter calls, and the rules call the one `dispatch ask` among them opens.
-      expect(g.calls).toHaveLength(5);
-      expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
-      expect(g.calls[1].user).toContain('"body": "Body from the inner directory."');
-      expect(g.calls[2].user).toContain('"body": "Looks right."');
-      expect(g.calls[3].user).toContain(
+      // Five charter calls, and the rules call each of the two `dispatch ask`s among them opens.
+      expect(g.calls.filter(isRules)).toHaveLength(2);
+      const charter = g.calls.filter(isCharter);
+      expect(charter).toHaveLength(5);
+      expect(charter[0].user).toContain('"body": "Body from the working directory."');
+      expect(charter[1].user).toContain('"body": "Body from the inner directory."');
+      expect(charter[2].user).toContain('"body": "Looks right."');
+      expect(charter[3].user).toContain(
+        JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2)
+      );
+      expect(charter[4].user).toContain(
         JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2)
       );
       expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual([
@@ -1556,7 +1628,48 @@ console.log(JSON.stringify(args, null, 2));
         ["dispatch_message", "verdict", "allow"],
         ["dispatch_comment", "verdict", "allow"],
         ["dispatch_ask", "verdict", "allow"],
+        ["dispatch_ask", "verdict", "allow"],
       ]);
+    }
+    // Ten real dry runs, each a bun process: past bun's 5 s default on a loaded host.
+  }, 30_000);
+  test("a 2>&1 after the here-document opener runs as written and is left out of the dry-run; no other redirect is read there", () => {
+    const after = core.scopedCommand(
+      "dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF"
+    );
+    expect(after?.command).toBe("dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF");
+    expect(after?.dryRunScript).toBe(
+      "dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nhi\nEOF"
+    );
+    expect(
+      core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' 2>/dev/null\nhi\nEOF")
+    ).toBeUndefined();
+    expect(
+      core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' | tail\nhi\nEOF")
+    ).toBeUndefined();
+  });
+  test("a revise of a command that names a file says the file was read before the rest of its batch ran", async () => {
+    const NOTE =
+      "AskGate read the file this command names before any other call in the same batch ran";
+    fs.writeFileSync(path.join(work, "note.txt"), "Body.");
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      complete: async () => ({ text: REVISE }),
+    });
+    for (const command of [
+      "dispatch message --issue X-1 --body-file note.txt",
+      "dispatch message --issue X-2 --body-file=note.txt",
+      // The gate reads an upload's --path itself, the same way.
+      "dispatch artifact --issue X-5 --name note.md --path note.txt",
+    ]) {
+      expect((await g.bash(command, command))?.reason).toContain(NOTE);
+    }
+    for (const command of [
+      "dispatch comment --issue X-3 --body hi",
+      `dispatch ask --issue X-4 --question-file - <<'EOF'\n${QUESTION}EOF`,
+    ]) {
+      expect((await g.bash(command, command))?.reason).not.toContain(NOTE);
     }
   });
   test("a cd that CDPATH resolves prints nothing into the dry-run's JSON", async () => {
@@ -1672,9 +1785,49 @@ console.log(JSON.stringify(args, null, 2));
       );
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the copy in docs)\n`));
-      // The directory comes from the command's own cd and then pwd, run as the dry run runs.
-      expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd");
+      // The directory comes from the command's own cd and then pwd -P, run as the dry run runs.
+      expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd -P");
       expect(g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === 10_000)).toBe(true);
+    });
+    // The CLI resolves --path against its process.cwd(), the physical directory, so `..` from a
+    // symlinked directory leaves the link's target, not the link.
+    const real = path.join(work, "real");
+    fs.mkdirSync(path.join(real, "inner"), { recursive: true });
+    fs.writeFileSync(path.join(real, "brief.md"), `${BRIEF}(the copy beside the link's target)\n`);
+    fs.symlinkSync(path.join(real, "inner"), path.join(work, "link"));
+    test("(f) after a cd into a symlinked directory, ../ is read from the link target's parent, as the CLI reads it", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u9",
+        "cd link && dispatch artifact --issue DSP-1 --name brief.md --path ../brief.md"
+      );
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(
+        JSON.stringify(`${BRIEF}(the copy beside the link's target)\n`)
+      );
+    });
+    test("(g) a call whose own directory is a symlink reads ../ from the link target's parent too", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash("u10", "dispatch artifact --issue DSP-1 --name brief.md --path ../brief.md", {
+        cwd: "link",
+      });
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(
+        JSON.stringify(`${BRIEF}(the copy beside the link's target)\n`)
+      );
+    });
+    test("(h) a directory whose name ends in a space keeps that space", async () => {
+      fs.mkdirSync(path.join(work, "spaced "), { recursive: true });
+      fs.writeFileSync(path.join(work, "spaced ", "brief.md"), `${BRIEF}(the spaced copy)\n`);
+      fs.mkdirSync(path.join(work, "spaced"), { recursive: true });
+      fs.writeFileSync(path.join(work, "spaced", "brief.md"), `${BRIEF}(the unspaced copy)\n`);
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u11",
+        "cd 'spaced ' && dispatch artifact --issue DSP-1 --name brief.md --path brief.md"
+      );
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the spaced copy)\n`));
     });
     test("(d) a --path the gate cannot read records error and the call runs", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
@@ -1711,6 +1864,69 @@ console.log(JSON.stringify(args, null, 2));
       );
       expect(result?.block).toBe(true);
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
+    });
+    // What Dispatch stores as a markdown document: an upload of inline text (`--content`,
+    // `--content-file`), whatever its name, or a `--path` file the CLI sends as text/markdown (its
+    // name ends in .md or .markdown); and the gate also reviews any upload whose name ends in .md.
+    fs.writeFileSync(path.join(work, "notes.txt"), "The person said: ship it on Friday.\n");
+    fs.writeFileSync(path.join(work, "name-md.txt"), "brief.md\n");
+    fs.writeFileSync(path.join(work, "name-png.txt"), "shot.png\n");
+    test("(i) a --name-file whose name ends in .md is reviewed, decided from the name its dry run prints", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u12",
+        "dispatch artifact --issue DSP-1 --name-file name-md.txt --path notes.txt"
+      );
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(uploadRule);
+      expect(g.calls[0].user).toContain(JSON.stringify("The person said: ship it on Friday.\n"));
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
+    });
+    test("(j) a --name-file whose name is shot.png, uploading shot.png, stays unreviewed and unrecorded", async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      expect(
+        await g.bash(
+          "u13",
+          "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png"
+        )
+      ).toBeUndefined();
+      expect(g.dryRuns).toHaveLength(1);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries).toHaveLength(0);
+    });
+    test("(k) an expansion in --name or --path is refused as unreadable, in every mode", async () => {
+      const expanded = [
+        'dispatch artifact --issue DSP-1 --name "$NAME" --path shot.png',
+        "dispatch artifact --issue DSP-1 --name $NAME --path shot.png",
+        'dispatch artifact --issue DSP-1 --name shot.png --path "$F"',
+        "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png | cat",
+      ];
+      for (const mode of ["warn", "block"]) {
+        const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+        for (const [index, command] of expanded.entries()) {
+          const result = await g.bash(`x${index}`, command);
+          expect(result?.block).toBe(true);
+          expect(result?.reason).toContain("Nothing in the call ran");
+        }
+        expect(g.dryRuns).toHaveLength(0);
+        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
+          Array(expanded.length).fill(["dispatch_artifact", "unreadable"])
+        );
+      }
+    });
+    test("(l) inline text is a markdown document whatever its name, and so is a --path file named .md", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u14",
+        "dispatch artifact --issue DSP-1 --name shot.png --content-file notes.txt"
+      );
+      await g.bash("u15", "dispatch artifact --issue DSP-1 --name notes --path brief.md");
+      expect(g.calls).toHaveLength(2);
+      for (const call of g.calls) expect(call.user).toContain(uploadRule);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([
+        ["dispatch_artifact", "verdict"],
+        ["dispatch_artifact", "verdict"],
+      ]);
     });
     test("other writes keep the full rules and do not get the upload instruction", async () => {
       const g = bind({ env: STUB, cwd: work });
@@ -1942,8 +2158,10 @@ describe("askgate.ts, the entry", () => {
   mock.module("@oh-my-pi/pi-coding-agent/config/settings", () => ({
     settings: { getModelRole: (role: string) => modelRoles[role] },
   }));
+  /** extensionHandlers.toolCallTimeoutMs as the stubbed settings answer it. */
+  let toolCallCeilingMs = 120_000;
   mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({
-    cfgExtensionHandlersToolCallTimeoutMs: { get: () => 120_000 },
+    cfgExtensionHandlersToolCallTimeoutMs: { get: () => toolCallCeilingMs },
   }));
   mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner", () => ({
     EXTENSION_HANDLER_TIMEOUT_MS: 30_000,
@@ -2083,6 +2301,121 @@ describe("askgate.ts, the entry", () => {
     expect(result?.block).toBe(true);
     expect(completions).toHaveLength(0);
     expect(entries).toMatchObject([{ outcome: "no-model-role" }]);
+  });
+
+  /** Calls the entry's registration without awaiting it: what the factory does. */
+  async function registerOnly(env: Record<string, string> = {}) {
+    delete process.env.OMP_ASKGATE;
+    Object.assign(process.env, env);
+    const { registerAskGate } = await import("./askgate");
+    const handlers = new Map<string, Handler>();
+    const entries: GateEntry[] = [];
+    const loaded = registerAskGate(
+      {
+        on: (event: string, handler: Handler) => handlers.set(event, handler),
+        appendEntry: (_: string, data: GateEntry) => entries.push(data),
+      } as never,
+      { configFile: { path: CONFIG_FILE, error: null }, logger: { warn: () => {} } }
+    );
+    // Registered before the load settles, so no call can pass between the load and the binding.
+    const atOnce = [...handlers.keys()];
+    return { loaded, handlers, entries, atOnce };
+  }
+  const mainCtx = (kind = "main") => ({
+    agent: { kind },
+    hasUI: false,
+    ui: { notify: () => {} },
+    getSystemPrompt: () => ["PRIMARY"],
+    models: { resolve: (spec: string) => (spec === "@askgate" ? MODEL : undefined) },
+    model: MODEL,
+    modelRegistry: { resolver: () => "resolved-key" },
+    sessionManager: {
+      getEntries: () => [experimentsEntry(false)],
+      getLeafId: () => null,
+      getSessionId: () => "sess-e",
+    },
+    cwd: "/work",
+  });
+  test("the entry registers its tool_call handler at once, and a call made before the load settles waits for it and is reviewed", async () => {
+    const { loaded, handlers, entries, atOnce } = await registerOnly();
+    expect(atOnce).toEqual(["tool_call"]);
+    const result = await handlers.get("tool_call")?.(
+      { type: "tool_call", toolName: "dispatch_comment", toolCallId: "t1", input: COMMENT },
+      mainCtx()
+    );
+    await loaded;
+    expect(result).toBeUndefined();
+    expect(completions).toHaveLength(1);
+    expect(entries).toMatchObject([{ outcome: "verdict", decision: "allow" }]);
+    // The core's other handlers reach the host's own `on` once it loads.
+    expect([...handlers.keys()]).toEqual(
+      expect.arrayContaining(["tool_call", "session_switch", "tool_execution_end", "agent_end"])
+    );
+  });
+  test("a gate that does not load refuses each write it would review, in both modes, naming the error and the switch", async () => {
+    for (const mode of ["warn", "block"]) {
+      const { loaded, handlers, entries } = await registerOnly({
+        OMP_ASKGATE: mode,
+        OMP_ASKGATE_TIMEOUT_MS: "soon",
+      });
+      expect(loaded).rejects.toThrow(
+        'OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"'
+      );
+      const gate = handlers.get("tool_call");
+      const bash = (command: string, kind = "main") =>
+        gate?.(
+          { type: "tool_call", toolName: "bash", toolCallId: command, input: { command } },
+          mainCtx(kind)
+        );
+      for (const command of [
+        "dispatch ask --issue X-1 --question 'Ship it?'",
+        "dispatch comment --issue X-1 --body b | cat",
+        "dispatch artifact --issue X-1 --name-file n.txt --path p.txt",
+      ]) {
+        const result = await bash(command);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain(
+          'OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"'
+        );
+        expect(result?.reason).toContain(`set askgate.enabled to false in ${CONFIG_FILE}`);
+      }
+      const device = await gate?.(
+        { type: "tool_call", toolName: "dispatch_comment", toolCallId: "d1", input: COMMENT },
+        mainCtx()
+      );
+      expect(device?.block).toBe(true);
+      // Not a write it reviews, a subagent's write, and an upload that is no markdown document pass.
+      expect(await bash("ls -la")).toBeUndefined();
+      expect(await bash("dispatch read --issue X-1")).toBeUndefined();
+      expect(await bash("dispatch ask --issue X-1 --question q", "sub")).toBeUndefined();
+      expect(
+        await bash("dispatch artifact --issue X-1 --name shot.png --path shot.png")
+      ).toBeUndefined();
+      expect(completions).toHaveLength(0);
+      expect(entries.map((e) => [e.tool, e.outcome, e.decision, e.verdictMode])).toEqual([
+        ["dispatch_ask", "load-failed", "revise", mode],
+        ["dispatch_comment", "load-failed", "revise", mode],
+        ["dispatch_artifact", "load-failed", "revise", mode],
+        ["dispatch_comment", "load-failed", "revise", mode],
+      ]);
+      expect(entries[0].reason).toContain("OMP_ASKGATE_TIMEOUT_MS");
+    }
+  });
+  test("a handler ceiling too short for a verdict is a load failure too: the write is refused, naming why", async () => {
+    toolCallCeilingMs = 8_000;
+    try {
+      const { loaded, handlers, entries } = await registerOnly();
+      expect(loaded).rejects.toThrow("8000 ms");
+      const result = await handlers.get("tool_call")?.(
+        { type: "tool_call", toolName: "dispatch_comment", toolCallId: "c1", input: COMMENT },
+        mainCtx()
+      );
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("extensionHandlers.toolCallTimeoutMs is 8000 ms");
+      expect(entries).toMatchObject([{ outcome: "load-failed", decision: "revise" }]);
+    } finally {
+      toolCallCeilingMs = 120_000;
+    }
   });
 
   test("the completion runs at high effort with prompt caching off, and its usage is recorded", async () => {
