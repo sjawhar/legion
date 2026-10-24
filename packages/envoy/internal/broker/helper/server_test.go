@@ -107,14 +107,13 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 				sess.peer.Close()
 			}
 		}
-		// Registry.Save holds saveMu for its whole WriteFile+Rename. Taking it here — and
-		// never releasing it — blocks any Save already in flight (or about to start: a
-		// retire() that removed its session above before this sweep ever saw it, or an
-		// enrollLoop between setEnrolled and its own save() a few lines later) until that
-		// write finishes, before the context is canceled and TempDir's own cleanup can run. A
-		// later Save() attempt simply blocks forever on this held lock, harmlessly, until the
-		// test binary itself exits — nothing else in this test needs the registry again.
-		r.srv.Registry.saveMu.Lock()
+		// Close lets a Save already in flight finish and makes every later one (a retire() that
+		// removed its session above before this sweep saw it, or an enrollLoop between
+		// setEnrolled and its own save()) write nothing, before the context is canceled and
+		// TempDir's own cleanup can run. The Broker's Close does the same for its machine file,
+		// which an approved login's poll may still be saving.
+		r.srv.Registry.Close()
+		r.srv.Broker.Close()
 		cancel()
 		// Serve's own ctx.Done() watcher goroutine closes (and so unlinks) the unix socket
 		// asynchronously; wait for Serve itself to return — which only happens after that
@@ -558,12 +557,13 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 		}
 	}
 	// srv2 isn't fenced by startRig's own t.Cleanup (it's a second, manually-constructed
-	// server); apply the same fence directly here. Registry.Save holds saveMu for its whole
-	// WriteFile+Rename, so taking it here — and never releasing it — blocks any of srv2's own
-	// Save calls (still possibly in flight or not yet started, e.g. an enrollLoop between
-	// setEnrolled and its own save() a few lines later) until they finish, before this test
-	// returns and t.TempDir() removes the state directory those writes go into.
-	srv2.Registry.saveMu.Lock()
+	// server); apply the same fence directly here. Close waits for any of srv2's own Save calls
+	// in flight and makes every later one (not yet started, e.g. an enrollLoop between
+	// setEnrolled and its own save() a few lines later) write nothing, before this test returns
+	// and t.TempDir() removes the state directory those writes go into. The Broker's Close does
+	// the same for its machine file.
+	srv2.Registry.Close()
+	srv2.Broker.Close()
 }
 
 // TestRecoverRevokesThePriorEnrollmentBeforeReenrolling is the regression for the Important
@@ -664,7 +664,8 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 			sess.peer.Close()
 		}
 	}
-	srv2.Registry.saveMu.Lock()
+	srv2.Registry.Close()
+	srv2.Broker.Close()
 }
 
 // TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff is the regression for
@@ -790,7 +791,8 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	srv2.Registry.saveMu.Lock()
+	srv2.Registry.Close()
+	srv2.Broker.Close()
 }
 
 func TestRecoverDropsDeadRecords(t *testing.T) {
