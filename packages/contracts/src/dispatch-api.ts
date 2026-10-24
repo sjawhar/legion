@@ -308,6 +308,18 @@ export interface IssueRouteReach {
   readonly route_holder: string | null;
 }
 
+/**
+ * What both claim routes answer: the issue, flat, with whether the Legion daemon owns its
+ * status. `legion_managed_status` is true when the issue carries the `legion` label in any case,
+ * or sits under an issue that does; on such an issue only the Legion daemon writes the status,
+ * and a status anyone else sets is undone. It is resolved on read from the issue's labels and
+ * its parents', stored nowhere, and never on an event payload, which is why it is not a field of
+ * `Issue`.
+ */
+export interface ClaimedIssue extends Issue {
+  readonly legion_managed_status: boolean;
+}
+
 export interface IssueSummary
   extends Pick<
       Issue,

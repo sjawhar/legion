@@ -9,6 +9,7 @@ import type {
   AskRead,
   AskUrgency,
   BlockPath,
+  ClaimedIssue,
   Comment,
   CommentRead,
   CreateArtifactInput,
@@ -2981,7 +2982,7 @@ export async function executeDispatchTool(
     case "dispatch_claim": {
       const issueKey = issue();
       const release = optionalBoolean(args, "release") ?? false;
-      let after: Issue;
+      let after: ClaimedIssue;
       try {
         after = release
           ? await client.releaseIssueClaim(issueKey, { actor })
@@ -2992,20 +2993,27 @@ export async function executeDispatchTool(
         throw refusalWithCode(error);
       }
       const held = after.claim;
+      // On an issue Legion runs, only its daemon writes the status: a status this session sets
+      // is undone, so the result says who owns it rather than asking for a move.
+      const legionManaged = after.legion_managed_status;
       // A release answers with the claim cleared or it does not answer at all: the server
       // refuses a release the caller may not make (409 ISSUE_CLAIMED, naming the live holder),
       // and loads the issue inside the releasing transaction. So there is no "released but
       // still claimed" state to render here.
       let text: string;
       if (release) {
-        text = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} — move it yourself if that is no longer where the work is.`;
+        text = legionManaged
+          ? `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status}; Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone.`
+          : `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} — move it yourself if that is no longer where the work is.`;
       } else {
         if (held === null) {
           // A successful claim always answers with the claim in place; anything else is a
           // server that no longer matches this contract, worth saying rather than papering over.
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+        text = legionManaged
+          ? `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone. Release the claim when you stop.`
+          : `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,

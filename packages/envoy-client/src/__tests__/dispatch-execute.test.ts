@@ -1886,6 +1886,7 @@ describe("executeDispatchTool", () => {
         key: "DSP-1",
         status: "todo",
         claim: method === "POST" ? claim : null,
+        legion_managed_status: false,
       });
     };
     const run = (args: Record<string, unknown>) =>
@@ -1917,6 +1918,48 @@ describe("executeDispatchTool", () => {
     expect(calls[1]?.pathname).toBe("/api/v1/issues/DSP-1/claim");
     expect(released.text).toContain("DSP-1: claim released");
     expect(released.details).toMatchObject({ issue: "DSP-1", claim: null });
+  });
+
+  test("dispatch_claim on an issue Legion runs tells nobody to move its status", async () => {
+    const claim = {
+      actor: { kind: "session", id: "session-one" },
+      at: "2026-09-24T06:00:00Z",
+    };
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+        legion_managed_status: true,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    // The Legion daemon owns the status of an issue it runs: a status this session writes is
+    // undone, so neither answer may send it to issue-update.
+    const claimed = await run({ issue: "DSP-1" });
+    expect(claimed.text).toContain(
+      "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
+    );
+    expect(claimed.text).not.toContain("issue-update");
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(released.text).toContain(
+      "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
+    );
+    expect(released.text).not.toContain("issue-update");
   });
 
   test("a refused dispatch_claim reaches the caller with the code it must act on", async () => {

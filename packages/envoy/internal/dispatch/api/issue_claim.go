@@ -299,11 +299,62 @@ type claimChange struct {
 	changed   bool
 }
 
-// claimApplied is the outcome of one locked attempt: the issue as it stands and the event to
-// publish, which is the zero event when nothing was written.
+// legionLabel is the label that hands an issue's status to the Legion daemon. The daemon holds
+// its own copy of the spelling (packages/daemon/internal/dispatch/types.go, LegionLabel): the two
+// are separate constants in separate Go modules that have to be changed together, not one shared
+// value. packages/envoy otherwise knows nothing about Legion, so this is the one Legion-specific
+// rule Dispatch itself carries.
+const legionLabel = "legion"
+
+// legionManagedStatusSQL answers whether the Legion daemon owns the status of the issue keyed by
+// $1: whether that issue, or any issue on its parent chain, carries the legion label. Labels keep
+// the case they were typed in and are only de-duplicated case-insensitively, so `Legion` is a real
+// stored value and the match is on lower(label). The walk starts at the issue itself, so one query
+// answers both its own labels and its ancestors', and is bounded by parentDepthCap like every
+// other issue walk, so it terminates even if a raced reparent ever commits a cycle; a chain deeper
+// than the cap answers false, which no caller ever sees because loadIssue refuses such a chain
+// before this runs.
+var legionManagedStatusSQL = `
+	with recursive chain as (
+		select i.key, i.parent_key, i.labels, 0 as depth
+		from issues i where i.key = $1
+		union
+		select p.key, p.parent_key, p.labels, c.depth + 1
+		from issues p join chain c on p.key = c.parent_key
+		where c.depth < ` + parentDepthCapSQL + `
+	)
+	select exists (
+		select 1 from chain c, unnest(c.labels) as label where lower(label) = '` + legionLabel + `'
+	)`
+
+// legionManagedStatus runs legionManagedStatusSQL inside the caller's transaction, so the answer
+// is the one the issue's row lock already holds still.
+func legionManagedStatus(ctx context.Context, tx pgx.Tx, key string) (bool, error) {
+	var managed bool
+	if err := tx.QueryRow(ctx, legionManagedStatusSQL, key).Scan(&managed); err != nil {
+		return false, fmt.Errorf("resolve whether Legion manages the status of %s: %w", key, err)
+	}
+	return managed, nil
+}
+
+// claimApplied is the outcome of one locked attempt: the issue as it stands, whether the Legion
+// daemon owns its status, and the event to publish, which is the zero event when nothing was
+// written.
 type claimApplied struct {
-	issue model.Issue
-	event model.Event
+	issue               model.Issue
+	legionManagedStatus bool
+	event               model.Event
+}
+
+// claimAnswer is what both claim routes write: the issue, flat, with whether the Legion daemon
+// owns its status beside it. The field is resolved on read from the issue's labels and its
+// parents', stored nowhere, and never part of an event payload, which is why it sits beside
+// Issue in the response rather than in it — model.Issue is embedded in model.IssueEventPayload,
+// the payload of every issue.* event. The JSON stays flat because a caller merges the body
+// straight into the issue it already holds.
+type claimAnswer struct {
+	model.Issue
+	LegionManagedStatus bool `json:"legion_managed_status"`
 }
 
 // claimWrite is the locked half of every claim write - resolveThenLock's `write` - and the
@@ -338,10 +389,14 @@ func (s *server) claimWrite(
 		return claimApplied{}, err
 	}
 	if !change.changed {
+		managed, err := legionManagedStatus(ctx, tx, key)
+		if err != nil {
+			return claimApplied{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return claimApplied{}, err
 		}
-		return claimApplied{issue: before}, nil
+		return claimApplied{issue: before, legionManagedStatus: managed}, nil
 	}
 	if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
 		return claimApplied{}, err
@@ -355,10 +410,14 @@ func (s *server) claimWrite(
 	if err != nil {
 		return claimApplied{}, err
 	}
+	managed, err := legionManagedStatus(ctx, tx, key)
+	if err != nil {
+		return claimApplied{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return claimApplied{}, err
 	}
-	return claimApplied{issue: after, event: event}, nil
+	return claimApplied{issue: after, legionManagedStatus: managed, event: event}, nil
 }
 
 // errClaimContended is what the bounded cycle answers with when the holder changed under
@@ -400,7 +459,7 @@ func (s *server) claimCycle(
 	if applied.event.ID != 0 {
 		s.publish(applied.event)
 	}
-	WriteJSON(w, http.StatusOK, applied.issue)
+	WriteJSON(w, http.StatusOK, claimAnswer{Issue: applied.issue, LegionManagedStatus: applied.legionManagedStatus})
 }
 
 // claimIssue is POST /api/v1/issues/{key}/claim: this session (or human) takes the issue.

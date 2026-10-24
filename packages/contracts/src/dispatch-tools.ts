@@ -491,8 +491,9 @@ export const dispatchToolSpecs = [
       "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " +
       "the issue and decide again. A claim whose session is no longer running may be " +
       "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
-      "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
-      "dispatch issue-update when you start. A claim is released by its holder or any human, and by " +
+      "issue's status — claiming moves nothing, and the result names who moves the status: you, with " +
+      "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " +
+      "else is undone. A claim is released by its holder or any human, and by " +
       "any agent once the holder's session is no longer running. " +
       ISSUE_REFERENCE,
     arguments: (z) => ({

@@ -377,6 +377,100 @@ func TestClaimAndStatusMoveIndependently(t *testing.T) {
 	}
 }
 
+// claimLabelledIssueKey seeds one issue with the given labels under the given parent (empty for
+// none), for the tests over who owns an issue's status.
+func claimLabelledIssueKey(t *testing.T, handler http.Handler, title string, labels []string, parent string) string {
+	t.Helper()
+	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice")
+	if project.Code != http.StatusCreated && project.Code != http.StatusConflict {
+		t.Fatalf("create project: status=%d body=%s", project.Code, project.Body.String())
+	}
+	body := map[string]any{"project": "TEST", "title": title}
+	if labels != nil {
+		body["labels"] = labels
+	}
+	if parent != "" {
+		body["parent"] = parent
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue %s: status=%d body=%s", title, created.Code, created.Body.String())
+	}
+	return decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created).Key
+}
+
+// legionManagedAnswer is the one field both claim routes add beside the issue.
+type legionManagedAnswer struct {
+	LegionManagedStatus bool `json:"legion_managed_status"`
+}
+
+// TestClaimAnswersWhoOwnsTheIssuesStatus covers the answer a session acts on: on an issue Legion
+// runs only its daemon writes the status, so both routes have to say so — on the issue's own
+// label whatever case it was typed in, and on a child that carries no label of its own.
+func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
+	live := &liveRegistry{}
+	live.set("session-one")
+	handler, _ := claimHandler(t, live)
+
+	lowercase := claimLabelledIssueKey(t, handler, "Rotate the staging certificates", []string{"legion"}, "")
+	uppercase := claimLabelledIssueKey(t, handler, "Back up the metrics volume", []string{"Legion"}, "")
+	parent := claimLabelledIssueKey(t, handler, "Split the billing worker", []string{"legion"}, "")
+	child := claimLabelledIssueKey(t, handler, "Draft an invoice renderer", nil, parent)
+	plain := claimLabelledIssueKey(t, handler, "Tidy the onboarding checklist", []string{"infra"}, "")
+
+	for _, want := range []struct {
+		name    string
+		key     string
+		managed bool
+	}{
+		{"the legion label", lowercase, true},
+		{"the label as Legion", uppercase, true},
+		{"a child under a labelled parent", child, true},
+		{"no such label on it or above it", plain, false},
+	} {
+		t.Run(want.name, func(t *testing.T) {
+			claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+want.key+"/claim", map[string]any{
+				"actor": claimActorBody("session-one", "Implementer"),
+			})
+			if claimed.Code != http.StatusOK {
+				t.Fatalf("claim: status=%d body=%s", claimed.Code, claimed.Body.String())
+			}
+			if got := decodeBody[legionManagedAnswer](t, claimed).LegionManagedStatus; got != want.managed {
+				t.Fatalf("claim legion_managed_status=%v, want %v", got, want.managed)
+			}
+			// The issue is still the body's own shape: the dashboard merges it into its cache.
+			if got := decodeBody[claimedIssue](t, claimed); got.Claim == nil {
+				t.Fatalf("the claim answer must still carry the issue it wrote: %s", claimed.Body.String())
+			}
+
+			released := bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+want.key+"/claim", map[string]any{
+				"actor": claimActorBody("session-one", "Implementer"),
+			})
+			if released.Code != http.StatusOK {
+				t.Fatalf("release: status=%d body=%s", released.Code, released.Body.String())
+			}
+			if got := decodeBody[legionManagedAnswer](t, released).LegionManagedStatus; got != want.managed {
+				t.Fatalf("release legion_managed_status=%v, want %v", got, want.managed)
+			}
+			// A release of an issue nobody holds writes nothing and answers the issue as it
+			// stands: that short-circuit has to answer who owns the status just the same.
+			again := bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+want.key+"/claim", map[string]any{
+				"actor": claimActorBody("session-one", "Implementer"),
+			})
+			if again.Code != http.StatusOK {
+				t.Fatalf("release an unclaimed issue: status=%d body=%s", again.Code, again.Body.String())
+			}
+			if got := decodeBody[legionManagedAnswer](t, again).LegionManagedStatus; got != want.managed {
+				t.Fatalf("second release legion_managed_status=%v, want %v", got, want.managed)
+			}
+		})
+	}
+}
+
 // releasedHolder is the session named by the newest issue.released event: the contract makes
 // previous_claim required on a release (IssueReleasedEventPayload) and the dashboard reads it
 // without a guard, so every release shape has to carry it.
