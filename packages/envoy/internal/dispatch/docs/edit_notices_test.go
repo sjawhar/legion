@@ -162,9 +162,9 @@ func TestEditNoticeAnAgentsSettledEditOpensNone(t *testing.T) {
 	}
 }
 
-// A named version, which already wakes the document's watchers itself, opens no quiet window, even
-// when a person names it over their own browser edit.
-func TestEditNoticeANamedVersionOpensNone(t *testing.T) {
+// A named version a person names over their own browser edit opens the notice window, since the
+// version lists that person. A named version that lists no person opens none.
+func TestEditNoticeANamedVersionByAPersonOverTheirOwnEditOpensTheWindow(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
@@ -177,8 +177,85 @@ func TestEditNoticeANamedVersionOpensNone(t *testing.T) {
 	if latest := latestVersionNumber(t, service, artifactID); latest != before+1 {
 		t.Fatalf("the named version is %d, want %d", latest, before+1)
 	}
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("a person's named version over their own edit opened no notice")
+	}
+	if !slices.Equal(row.editors, []string{alice.ID}) {
+		t.Fatalf("notice editors %v, want alice alone", row.editors)
+	}
+}
+
+// A named version by an agent, with no person's credit pending, opens no window.
+func TestEditNoticeAnAgentOnlyNamedVersionOpensNone(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
+		{Op: "replace", Find: "First.", With: "First, by the agent."},
+	}, session, nil); err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	commitNamedVersion(t, service, artifactID, session)
 	if _, open := readEditNotice(t, service, artifactID); open {
-		t.Fatal("a named version opened an edit notice, want none")
+		t.Fatal("an agent-only named version opened an edit notice, want none")
+	}
+}
+
+// A person's browser edit that an agent's named version captures, before the settlement writes
+// its own version, still opens the edit notice: every version write that carries a person opens or
+// extends the window (writeVersionTx), so the settlement is not the only path.
+func TestEditNoticeAnAgentsNamedVersionThatCapturesAPersonsEditOpensTheWindow(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, edited."))
+	waitForLandedAppends(t, service, artifactID)
+	before := latestVersionNumber(t, service, artifactID)
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	commitNamedVersion(t, service, artifactID, session)
+	named := latestVersionNumber(t, service, artifactID)
+	if named != before+1 {
+		t.Fatalf("named version = %d, want %d", named, before+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, alice) {
+		t.Fatalf("the named version lists %+v, want alice among them", authors)
+	}
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the named version that captured alice's edit opened no edit notice")
+	}
+	if row.from != named-1 || row.to != named || !slices.Equal(row.editors, []string{alice.ID}) || row.lastEditor != alice {
+		t.Fatalf("notice = from %d to %d editors %v last %+v, want from %d to %d naming alice alone", row.from, row.to, row.editors, row.lastEditor, named-1, named)
+	}
+}
+
+// A snapshot version that carries a person's edit opens the same window.
+func TestEditNoticeASnapshotVersionThatCapturesAPersonsEditOpensTheWindow(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, edited."))
+	waitForLandedAppends(t, service, artifactID)
+	before := latestVersionNumber(t, service, artifactID)
+	snapshotAndCommitVersion(t, service, artifactID, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	snapshot := latestVersionNumber(t, service, artifactID)
+	if snapshot != before+1 {
+		t.Fatalf("snapshot version = %d, want %d", snapshot, before+1)
+	}
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the snapshot version that captured alice's edit opened no edit notice")
+	}
+	if row.from != snapshot-1 || row.to != snapshot || !slices.Equal(row.editors, []string{alice.ID}) {
+		t.Fatalf("notice = from %d to %d editors %v, want from %d to %d naming alice", row.from, row.to, row.editors, snapshot-1, snapshot)
 	}
 }
 
