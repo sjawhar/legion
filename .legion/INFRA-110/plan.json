@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-110",
+  "completed": "2026-10-24T08:52:00Z",
+  "plan": "dispatch://INFRA-110/artifact/plan-md (plan.md v1) is the whole plan; this handoff records its checks.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's own contract here - the commit/push procedure (handoff-only pushes carry the skip-checks trailer, this change's push does not, since it carries code), the pull request body template and what a proof is (skill://legion-worker/references/pr-body.md), review threads, and the merge gate. The plan's evidence section is written to that definition of a proof.",
+      "ce-simplify-code: the simplify pass over the new check script and its test harness once they work, before the implementer completes - two new shell/python files whose first draft will carry duplication between the four file reads and the four cross-reference assertions.",
+      "dispatch-first + dispatch: any write to Dispatch from the implement phase (a comment or message on INFRA-110) goes through them; the plan itself is already posted as plan.md."
+    ],
+    "test": [
+      "legion-worker: the tester drives the application rather than re-running CI, records its own proof array and verdict, and reads CI for everything static (lint, types, unit suites). Here the application is the check script and its companion test: skill://legion-worker/references/pr-body.md defines the proof entries the test handoff must carry.",
+      "dispatch-first + dispatch: only if the tester posts a finding on INFRA-110; it never writes the issue's lifecycle status."
+    ],
+    "review": [
+      "legion-worker: the reviewer's round order (read the code commit's checks on GitHub, push the handoff, review the head that push made, then complete), one disposition reply per thread (skill://legion-worker/references/review-threads.md) and the approval the merge gate needs (skill://legion-worker/references/merge-gate.md).",
+      "dispatch-first + dispatch: any comment or message the reviewer posts on INFRA-110."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: acceptance #2's comment edits put the other constant's name, and the number 32,000 in prose, into the very files the check scans, so a whole-file matcher or a fail-on-many-matches rule would be failed by the tree this issue ships (embed.go:40-44 already spells 4,000 in its comment).",
+        "answer": "Decision D1/D2 in plan.md: the two matchers are anchored to the declaration line only (^\\s*export\\s+const\\s+DISPATCH_BODY_MAX\\s*=\\s*(\\d+)\\s*;\\s*(//.*)?$ and ^\\s*maxInputChars\\s*=\\s*(\\d+)\\s*(//.*)?$), and companion-test case 4 is a fixture whose comments name the other constant and another number, which must still pass."
+      },
+      {
+        "finding": "F2: 'never exceeds what the embedder reads whole' states no predicate and compares UTF-16 units against runes; equal-is-allowed is unstated.",
+        "answer": "D1: fail iff DISPATCH_BODY_MAX > maxInputChars; equal and below pass, justified in the script header by rune count never exceeding UTF-16 length. Test cases 1 (below), 2 (equal) and 3 (one over) pin all three."
+      },
+      {
+        "finding": "F3: an ask's embedded text is question + answer text (migration 0076, embedqueue/queue.go:726-731) and the answer has no cap on the write path, so ask embeddings can already be cut silently; the invariant this issue installs says nothing about them.",
+        "answer": "D8: out of scope here (it is INFRA-114's class of gap), reported to the architect with its evidence for a scope decision, and the check's wording claims only what it holds - the comment, comment-edit and message bodies DISPATCH_BODY_MAX caps. Broadcast bodies share the cap but are not embedded: no broadcast trigger exists among migrations 0073-0077."
+      },
+      {
+        "finding": "F4: acceptance #2 (whoever reads either number learns the other exists) has no command, test or output that decides it; the spec's proof bullets prove only acceptance #1.",
+        "answer": "D3: the same script enforces it with four named assertions - the comment block immediately above each declaration names the other constant, and some line of each of the two AGENTS.md files names both. Test cases 10 and 11 cover them. Flagged to the architect as a plan choice it may overrule."
+      },
+      {
+        "finding": "F5: the cheapest way to green a broken check is to lower maxInputChars, which breaks embedqueue/queue_test.go:923-924's 25 x 8,000 = 200,000 arithmetic and packages/envoy/cmd/dispatch/README.md:779-781.",
+        "answer": "T1 fixes the remedy sentence's direction: lower DISPATCH_BODY_MAX, or raise maxInputChars deliberately with its cost against tokenRateCeiling, and the message names both sites that move with it. The risks section records that neither number moves in this change."
+      },
+      {
+        "finding": "F6: 'cannot find a number' is not enumerated and says nothing about more than one match.",
+        "answer": "T1 enumerates: file missing; file not decodable as UTF-8; no declaration match (renamed constant, moved file, 32_000 / 0x7D00 / an expression); more than one match, which fails as ambiguous naming each line. Test cases 5-9 cover them, each with no traceback."
+      },
+      {
+        "finding": "F7: 'names both numbers, the file each one lives in, and what to do about it' fixes no literal, so the companion test has nothing to assert against.",
+        "answer": "T1 fixes the annotation shape (::error file=<path>[,line=N]:: per problem, a final ::error:: summary, exit 1) and the pass line's exact wording; T2's cases assert those literals with test-lib.sh's contains."
+      },
+      {
+        "finding": "F8: the spec's claim that main requires lint, typecheck, test and pr-title was unverified.",
+        "answer": "Verified rather than assumed: gh api repos/sjawhar/legion/rulesets/12331919 on 2026-10-24 returns required_status_checks [lint, typecheck, test, pr-title]. Recorded in plan.md's first section."
+      },
+      {
+        "finding": "F9: the spec's 'a body at the limit reaches the embedder whole' holds only because a comment's and a message's embedded text is the body alone, a premise it never states.",
+        "answer": "The premise, with its evidence (migrations 0075:6 and 0077:10, embedqueue/queue.go:724,732), goes in the check script's header comment, so the next reader can see why equality is safe and what would break it."
+      },
+      {
+        "finding": "F10: unstated mechanics - executable modes, root resolution through $0 rather than a resolved realpath (or fixture tests would silently read the real tree), and where in the two jobs the steps land.",
+        "answer": "D10 and T4: both files mode 755; cd \"$(dirname \"$0\")/../..\"; the lint step after the zod step (pr-and-main.yaml:50-51) and before Setup Bun (:101); the test step after Test the zod version check (:241-242); the house two header lines."
+      },
+      {
+        "finding": "F11: a Python module outside the standard library would make the check unrunnable in a role container (check-bun-version.sh's yaml module is already named as CI's alone).",
+        "answer": "D10: standard library only (re, sys, pathlib), so an implementer or reviewer can run it in the pod - which the plan's evidence commands require."
+      },
+      {
+        "finding": "F12: 32000 is committed in five more places (two generated Go files, three claude-envoy dist bundles); the spec does not say what stops a raise applied to a copy.",
+        "answer": "D4: the check reads the two defining sources only and names, in its header, the test that owns the copies (packages/contracts/scripts/gen-go.test.ts, and claude-envoy's check-dist). The risks section records that the dist bundles carry no JSDoc, so the comment edit should leave them byte-identical, with the rebuild as the contingency."
+      },
+      {
+        "finding": "F13: the two comment edits sit on heavy CI and release trigger paths, and no CHANGELOG decision was stated.",
+        "answer": "D5: no CHANGELOG entry (no number, behaviour or caller-visible wording moves; no gate requires one). The risks section lists every job packages/contracts/** and packages/envoy/internal/dispatch/** trigger, and the rule that a flaky row is re-run with gh run rerun --failed, never by pushing."
+      },
+      {
+        "finding": "F14: 'with the tree as it is, it passes' has no case in the spec's test list.",
+        "answer": "T2 case 12 runs the real .github/scripts/check-body-embed-limit.sh from the real root and asserts exit 0 and the pass line, the precedent being check-plugin-names.test.sh:181-187."
+      },
+      {
+        "finding": "F15: the script's name is fixed nowhere and appears in six places.",
+        "answer": "D7: check-body-embed-limit, applied to the script, its test, the two header lines, the two workflow step names and the test's summary line."
+      },
+      {
+        "finding": "F16: the root AGENTS.md is where this repository pairs a cross-file invariant with the script that holds it (Bun, zod), and the spec names only the two package AGENTS.md rows.",
+        "answer": "D6: no root clause - the root records toolchain pins shared across manifests, while this is a Dispatch-internal pairing whose home is the two package rows the acceptance names, which the root's WHERE TO LOOK table already points at. Recorded so the precedent is answered rather than ignored."
+      },
+      {
+        "finding": "F17: the analyst's verification of the spec's remaining claims about the code found them supported (maxInputChars' declaration and uses, text.HeadRunes, the 1 MiB document path, tokenRateCeiling's relationship to maxInputChars).",
+        "answer": "No action; plan.md cites those lines rather than re-deriving them."
+      },
+      {
+        "finding": "Draft-shape judgement: the analyst called the one-sentence update to the INFRA-45 solutions doc out of the approved acceptance, docs/solutions/ being retro's usual territory.",
+        "answer": "D9: kept in the implementation commit, because the doc's 'Hazard this change left adjacent, not crossed' paragraph states 'the two numbers are now equal, with nothing linking them', which this change makes false the moment it lands; its table row at line 30 stays true and is untouched. Named to the architect as a plan choice it may hand to retro instead."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
