@@ -359,51 +359,58 @@ func (b *gcpBackend) set(ctx context.Context, slug, value string) error {
 	return err
 }
 
-func (b *gcpBackend) currentTags(ctx context.Context, slug string) (map[string]string, error) {
+func (b *gcpBackend) currentTags(ctx context.Context, slug string) (heldTags, error) {
 	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
 	if err != nil {
-		return nil, err
+		return heldTags{}, err
 	}
-	return maps.Clone(secret.GetAnnotations()), nil
+	return heldTags{tags: secret.GetAnnotations(), etag: secret.GetEtag()}, nil
 }
 
-// setTags writes tags into the secret's annotations, and removeTags deletes keys from them, each in
-// one UpdateSecret that keeps every annotation it does not name. An UpdateSecret whose mask names
-// "annotations" replaces the whole map, so updateAnnotations reads and merges the current
-// annotations, and sends the read's Etag, so a concurrent annotation change fails instead of being
-// silently overwritten.
-func (b *gcpBackend) setTags(ctx context.Context, slug string, tags map[string]string) error {
-	return b.updateAnnotations(ctx, slug, func(annotations map[string]string) { maps.Copy(annotations, tags) })
-}
-
-func (b *gcpBackend) removeTags(ctx context.Context, slug string, keys []string) error {
-	return b.updateAnnotations(ctx, slug, func(annotations map[string]string) {
-		for _, key := range keys {
-			delete(annotations, key)
-		}
-	})
-}
-
-func (b *gcpBackend) updateAnnotations(ctx context.Context, slug string, change func(map[string]string)) error {
-	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
-	if err != nil {
-		return err
-	}
-	annotations := maps.Clone(secret.GetAnnotations())
+// setTags writes tags into the annotations held holds, and removeTags deletes keys from them, each
+// in one UpdateSecret that keeps every annotation it does not name. An UpdateSecret whose mask names
+// "annotations" replaces the whole map, so each sends held's annotations, changed, with held's
+// etag: the write lands only on the annotations the retag checked, and a write another writer made
+// since held was read refuses it with FAILED_PRECONDITION (errTagsChanged), naming the change,
+// rather than being merged into annotations no one checked.
+func (b *gcpBackend) setTags(ctx context.Context, slug string, held heldTags, tags map[string]string) error {
+	annotations := maps.Clone(held.tags)
 	if annotations == nil {
 		annotations = map[string]string{}
 	}
-	change(annotations)
-	_, err = b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
+	maps.Copy(annotations, tags)
+	return b.updateAnnotations(ctx, slug, held.etag, annotations)
+}
+
+func (b *gcpBackend) removeTags(ctx context.Context, slug string, held heldTags, keys []string) error {
+	annotations := maps.Clone(held.tags)
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	for _, key := range keys {
+		delete(annotations, key)
+	}
+	return b.updateAnnotations(ctx, slug, held.etag, annotations)
+}
+
+func (b *gcpBackend) updateAnnotations(ctx context.Context, slug, etag string, annotations map[string]string) error {
+	_, err := b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
 		Secret: &secretmanagerpb.Secret{
 			Name:        b.id(slug),
 			Annotations: annotations,
-			Etag:        secret.GetEtag(),
+			Etag:        etag,
 		},
 		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"annotations"}},
 	})
+	if status.Code(err) == codes.FailedPrecondition {
+		return fmt.Errorf("%w: %w", errTagsChanged, err)
+	}
 	return err
 }
+
+// conditionalTagWrites is true: every annotation write sends the etag of the read it was checked
+// against.
+func (b *gcpBackend) conditionalTagWrites() bool { return true }
 
 func (b *gcpBackend) delete(ctx context.Context, slug string) (*time.Time, error) {
 	expire := time.Now().UTC().Add(time.Duration(recoveryWindowDays) * 24 * time.Hour)

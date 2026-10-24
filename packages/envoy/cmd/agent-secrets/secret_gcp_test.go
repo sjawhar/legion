@@ -62,6 +62,20 @@ type fakeSecretManager struct {
 	// refuseAnnotationUpdates, when set, makes UpdateSecret refuse an annotations-field-mask
 	// request with PermissionDenied, as IAM refuses a person changing a shared secret's tags.
 	refuseAnnotationUpdates bool
+	// race, when set, runs once on the secret named by the first GetSecret or UpdateSecret after the
+	// first GetSecret, before that call is answered, as another writer's update landing between a
+	// read and the next call does; gets counts GetSecret calls.
+	race  func(*fakeSecret)
+	gets  int
+	raced bool
+}
+
+// raceOnce runs f.race on entry once, on a call after the first GetSecret.
+func (f *fakeSecretManager) raceOnce(entry *fakeSecret) {
+	if f.race != nil && !f.raced && f.gets > 0 {
+		f.raced = true
+		f.race(entry)
+	}
 }
 
 func newFakeSecretManager() *fakeSecretManager {
@@ -86,6 +100,10 @@ func (f *fakeSecretManager) GetSecret(_ context.Context, req *secretmanagerpb.Ge
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	entry, ok := f.secrets[req.GetName()]
+	if ok {
+		f.raceOnce(entry)
+	}
+	f.gets++
 	if !ok {
 		return nil, status.Error(codes.NotFound, "not found")
 	}
@@ -107,6 +125,7 @@ func (f *fakeSecretManager) UpdateSecret(_ context.Context, req *secretmanagerpb
 	if !ok {
 		return nil, status.Error(codes.NotFound, "not found")
 	}
+	f.raceOnce(entry)
 	if etag := req.GetSecret().GetEtag(); etag != "" && etag != entry.secret.GetEtag() {
 		return nil, status.Error(codes.FailedPrecondition, "etag mismatch")
 	}

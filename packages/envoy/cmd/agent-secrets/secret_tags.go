@@ -108,14 +108,17 @@ func checkGitHubOwnersFor(kind, owners string, named bool) error {
 // guard with it (policy.TagRollbackGuard), so a broker from before kinds refuses the secret rather
 // than serve its stored key or refresh token.
 func optionalTags(kind, githubOwners, maxGrant string) map[string]string {
+	named := func(value string) bool { return value != "" && value != tagNone }
 	tags := map[string]string{}
-	for key, value := range map[string]string{policy.TagKind: kind, policy.TagGitHubOwners: githubOwners, policy.TagMaxGrant: maxGrant} {
-		if value != "" && value != tagNone {
-			tags[key] = value
-		}
-	}
-	if _, kinded := tags[policy.TagKind]; kinded {
+	if named(kind) {
+		tags[policy.TagKind] = kind
 		tags[policy.TagRollbackGuard] = policy.RollbackGuardValue
+	}
+	if named(githubOwners) {
+		tags[policy.TagGitHubOwners] = githubOwners
+	}
+	if named(maxGrant) {
+		tags[policy.TagMaxGrant] = maxGrant
 	}
 	return tags
 }

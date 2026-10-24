@@ -225,16 +225,17 @@ func (b *awsBackend) set(ctx context.Context, slug, value string) error {
 	return err
 }
 
-func (b *awsBackend) currentTags(ctx context.Context, slug string) (map[string]string, error) {
+func (b *awsBackend) currentTags(ctx context.Context, slug string) (heldTags, error) {
 	held, err := b.sm.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(b.id(slug))})
 	if err != nil {
-		return nil, err
+		return heldTags{}, err
 	}
-	return secrets.TagMap(held.Tags), nil
+	return heldTags{tags: secrets.TagMap(held.Tags)}, nil
 }
 
-// setTags writes tags in one TagResource, which keeps every tag it does not name.
-func (b *awsBackend) setTags(ctx context.Context, slug string, tags map[string]string) error {
+// setTags writes tags in one TagResource, which keeps every tag it does not name. It takes no
+// condition on held: TagResource has none (conditionalTagWrites).
+func (b *awsBackend) setTags(ctx context.Context, slug string, _ heldTags, tags map[string]string) error {
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(b.id(slug)),
 		Tags:     awsTags(tags),
@@ -242,14 +243,18 @@ func (b *awsBackend) setTags(ctx context.Context, slug string, tags map[string]s
 	return err
 }
 
-// removeTags removes keys in one UntagResource.
-func (b *awsBackend) removeTags(ctx context.Context, slug string, keys []string) error {
+// removeTags removes keys in one UntagResource, with no condition on held either.
+func (b *awsBackend) removeTags(ctx context.Context, slug string, _ heldTags, keys []string) error {
 	_, err := b.sm.UntagResource(ctx, &secretsmanager.UntagResourceInput{
 		SecretId: aws.String(b.id(slug)),
 		TagKeys:  keys,
 	})
 	return err
 }
+
+// conditionalTagWrites is false: no Secrets Manager tag call takes a condition on the tags it
+// changes, so retag reads them back after its write (raceAfterRetag).
+func (b *awsBackend) conditionalTagWrites() bool { return false }
 
 func (b *awsBackend) delete(ctx context.Context, slug string) (*time.Time, error) {
 	out, err := b.sm.DeleteSecret(ctx, &secretsmanager.DeleteSecretInput{

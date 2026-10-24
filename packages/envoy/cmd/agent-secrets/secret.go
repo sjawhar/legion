@@ -363,6 +363,18 @@ func orDash(s string) string {
 	return s
 }
 
+// heldTags is a secret's tags as one read of the store held them: AWS tags or Secret Manager
+// annotations, and, on GCP, that read's etag ("" on AWS), which a tag write sends so it lands only
+// on the tags it was checked against.
+type heldTags struct {
+	tags map[string]string
+	etag string
+}
+
+// errTagsChanged is a tag write the store refused because another write changed the secret after
+// the read the write was made against (GCP: an etag that no longer matches). Nothing was written.
+var errTagsChanged = errors.New("another write changed the secret after this retag read it, so the store refused this write")
+
 // secretBackend is the per-store backend the secret forms call: AWS Secrets Manager
 // (secrets.StoreAWS, or "" from a broker that predates the `store` setting) or GCP Secret
 // Manager (secrets.StoreGCP), chosen from the broker's GET /v1/settings `store` field. Every
@@ -388,13 +400,21 @@ type secretBackend interface {
 	// create makes the secret holding value with tags, which always hold owner and tier.
 	create(ctx context.Context, slug string, tags map[string]string, value string) error
 	set(ctx context.Context, slug, value string) error
-	// currentTags answers the secret's current tags (AWS tags, or Secret Manager annotations), from
-	// which retag builds the tags the secret will hold once its write lands.
-	currentTags(ctx context.Context, slug string) (map[string]string, error)
+	// currentTags answers the secret's tags as one read holds them (AWS tags, or Secret Manager
+	// annotations with that read's etag), from which retag builds the tags the secret will hold once
+	// its write lands, and against which it makes that write.
+	currentTags(ctx context.Context, slug string) (heldTags, error)
 	// setTags writes tags onto the secret in one call and leaves every other tag as it is.
-	setTags(ctx context.Context, slug string, tags map[string]string) error
-	// removeTags removes keys from the secret in one call and leaves every other tag as it is.
-	removeTags(ctx context.Context, slug string, keys []string) error
+	// removeTags removes keys from it in one call and leaves every other tag as it is. Each writes
+	// against held: GCP sends held's annotations, changed, with held's etag, so a write another
+	// writer made since held was read refuses this one (errTagsChanged). AWS's tag calls take no
+	// condition (conditionalTagWrites).
+	setTags(ctx context.Context, slug string, held heldTags, tags map[string]string) error
+	removeTags(ctx context.Context, slug string, held heldTags, keys []string) error
+	// conditionalTagWrites reports whether setTags and removeTags refuse a write once the tags
+	// changed since held was read: GCP's do; AWS's cannot, so retag reads the tags back after its
+	// write instead (raceAfterRetag).
+	conditionalTagWrites() bool
 	// delete schedules the secret's deletion and answers the moment it happens (AWS:
 	// DeleteSecret's own recovery window end; GCP: the expire_time it sets), nil only on error.
 	delete(ctx context.Context, slug string) (deletion *time.Time, err error)
@@ -867,13 +887,13 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		return secretFail(stderr, form, err)
 	}
 	defer s.Close()
-	current, err := s.backend.currentTags(s.ctx, slug)
+	held, err := s.backend.currentTags(s.ctx, slug)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	// after is the secret's tags once this retag lands: its current tags, less those it removes,
-	// with those it sets.
-	after := maps.Clone(current)
+	// after is the secret's tags once this retag lands: the tags held, less those it removes, with
+	// those it sets.
+	after := maps.Clone(held.tags)
 	if after == nil {
 		after = map[string]string{}
 	}
@@ -894,8 +914,11 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		return secretFail(stderr, form, err)
 	}
 	if len(remove) > 0 {
-		if err := s.backend.removeTags(s.ctx, slug, remove); err != nil {
+		if err := s.backend.removeTags(s.ctx, slug, held, remove); err != nil {
 			return secretFail(stderr, form, err)
+		}
+		if code := raceAfterRetag(s, stdout, stderr, form, name, slug, held); code != 0 {
+			return code
 		}
 		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
 		return rereadAfter(s, stdout, stderr, form, name, true, nil)
@@ -905,19 +928,65 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
 	}
 	set[policy.TagOwner], set[policy.TagTier] = owner, tier
-	if err := s.backend.setTags(s.ctx, slug, set); err != nil {
+	if err := s.backend.setTags(s.ctx, slug, held, set); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
 		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
 		// so a deployment instead grants that permission at all only to administrators for the
 		// secrets it protects this way.
-		if s.backend.isAccessDenied(err) && (current[policy.TagOwner] == policy.OwnerShared || owner == policy.OwnerShared) {
+		if s.backend.isAccessDenied(err) && (held.tags[policy.TagOwner] == policy.OwnerShared || owner == policy.OwnerShared) {
 			fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, sharedRetagRefused)
 		}
 		return 1
 	}
+	if code := raceAfterRetag(s, stdout, stderr, form, name, slug, held); code != 0 {
+		return code
+	}
 	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
+}
+
+// raceAfterRetag is how a retag on a store without conditional tag writes (AWS: TagResource and
+// UntagResource take no condition) keeps the github-owners rule when another writer retags the same
+// secret between this retag's read and its write: it reads the tags back, and when the kind and
+// github-owners there are a pair the broker refuses (policy.GitHubOwnersFor), it restores the tags
+// this retag read (held), asks the broker to reread them, and exits 1 naming the race. It answers 0
+// when the pair is one the broker serves, and at once on a store whose writes are conditional
+// (GCP's etag refuses such a write instead, errTagsChanged). A retag on AWS is therefore safe only
+// with one writer at a time: the restore takes back the other writer's change too.
+func raceAfterRetag(s *secretSession, stdout, stderr io.Writer, form, name, slug string, held heldTags) int {
+	if s.backend.conditionalTagWrites() {
+		return 0
+	}
+	now, err := s.backend.currentTags(s.ctx, slug)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets %s: the retag of %s was written, but reading its tags back failed, so whether another write left it a kind without the GitHub owners it needs is unknown: %v\n", form, name, err)
+		return 1
+	}
+	if _, err := policy.GitHubOwnersFor(now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners]); err == nil {
+		return 0
+	}
+	fmt.Fprintf(stderr, "agent-secrets %s: another write retagged %s while this retag ran, leaving kind %q with github-owners %q, which the broker refuses; a retag on AWS is safe only with one writer at a time\n", form, name, now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners])
+	var extra []string
+	for key := range now.tags {
+		if _, ok := held.tags[key]; !ok {
+			extra = append(extra, key)
+		}
+	}
+	slices.Sort(extra)
+	if len(held.tags) > 0 {
+		err = s.backend.setTags(s.ctx, slug, now, held.tags)
+	}
+	if err == nil && len(extra) > 0 {
+		err = s.backend.removeTags(s.ctx, slug, now, extra)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets %s: restoring the tags this retag read failed: %v; set them again once the other writer is done\n", form, err)
+		return 1
+	}
+	fmt.Fprintf(stderr, "agent-secrets %s: %s's tags are restored to what this retag read; run the retag again once the other writer is done\n", form, name)
+	rereadAfter(s, stdout, stderr, form, name, true, nil)
+	return 1
 }
 
 // ---------------------------------------------------------------------------

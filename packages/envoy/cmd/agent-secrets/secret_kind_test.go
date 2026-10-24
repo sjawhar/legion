@@ -412,7 +412,8 @@ func kindTaggedSecret(name string) secrets.LocalSecret {
 // TestSecretRetagRemovalIsOneCallThatChangesNothingElse: on AWS a tag removal is its own
 // UntagResource and nothing else, so IAM refusing it leaves every tag as it was, and a retag that
 // both removes and sets tags is refused before any read or write, since it would take two calls.
-// Each retag reads the secret's tags once, to build the tags it will leave and check them.
+// Each retag reads the secret's tags once, to build the tags it will leave and check them, and a
+// write that lands reads them once more, to find a concurrent writer's (raceAfterRetag).
 func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
 	startSecretBroker(t, servedBy(local))
@@ -451,8 +452,8 @@ func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "removed kind, mint-service-account, max-grant") {
 		t.Fatalf("removal: exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	if writes.tags != 0 || writes.untags != 2 || writes.describes != 2 {
-		t.Fatalf("removals made %d TagResource, %d UntagResource and %d DescribeSecret calls in all, want 0, 2 and 2: one read of the tags and one write each", writes.tags, writes.untags, writes.describes)
+	if writes.tags != 0 || writes.untags != 2 || writes.describes != 3 {
+		t.Fatalf("removals made %d TagResource, %d UntagResource and %d DescribeSecret calls in all, want 0, 2 and 3: one read of the tags and one write each, and one read back after the write that landed", writes.tags, writes.untags, writes.describes)
 	}
 	tags = secrets.TagMap(describe(t, local, "APP_KEY").Tags)
 	if _, ok := tags[policy.TagKind]; ok {
