@@ -4,6 +4,19 @@
 
 ### Added
 
+- A person's browser edit of a document reaches the agent sessions that wrote it. Once the
+  document has been quiet for 30 seconds after a person's last settled version, Dispatch appends
+  one `artifact.human_edited` event: the person who edited last is its actor, and its payload
+  names the two versions the quiet window spans, each person who edited, and the unified diff of
+  the two versions, cut at its last line end within 4,096 bytes. It goes to the issue's route and
+  to each session the document credits, never to a person. The quiet window is a row of the new
+  table `document_edit_notices` (migration 0116), so a notice still pending when a process stops
+  is sent by the next sweep of either process; the sweep runs every 5 seconds under the
+  `edit-notices` lease, and the lease pool grows from eight connections to nine for it. A notice
+  on an issue closed inside its quiet window is dropped. The dashboard's issue log reads `Edited
+  spec.md v4 to v7`. `DISPATCH_TEST_EDIT_NOTICE_QUIET`, under `DISPATCH_TEST_HOOKS=1`, sets the
+  quiet time for an end-to-end test process.
+
 - A person's machine login is an OAuth 2.0 device authorization grant (RFC 8628) on the secrets
   broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
   itself. `agent-secrets machine login` prints the same code, which the person the login names

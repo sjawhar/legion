@@ -523,18 +523,21 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 	return publishSessionRoutes(ctx, deps, eventID, item, a, sessionIDs, "publish follower route to")
 }
 
-// publishAuthorRoutes delivers a human comment-thread action directly to the involved
-// sessions' own topics, regardless of the issue's route (which may point at an entirely
-// different reviewer) and regardless of whether the event's owner is an issue or a project
-// document (which has no route at all). Without this, the agent that started the thread
-// or is the thread's own root author never learns about the human's reply, resolution,
-// reopening, or edit, and the agent that wrote a document never learns of a new comment on it.
-// A reply reaches its thread's root author and its direct parent's author; a new comment on a
-// document (no reply_to and no ask_id), and its edit, reach every session that document credits
-// (loadDocumentSessionAuthors); a comment on an issue's conversation names no document and reaches
-// no author. Ask threads are not walked here: their asker and repliers are the ask's followers
-// (publishFollowerRoutes). The event's own actor is skipped, and so is a session the comment's
-// mentions already reach (suppressed_authors).
+// publishAuthorRoutes delivers a human comment-thread action, or a person's settled edit of a
+// document, directly to the involved sessions' own topics, regardless of the issue's route (which
+// may point at an entirely different reviewer) and regardless of whether the event's owner is an
+// issue or a project document (which has no route at all). Without this, the agent that started
+// the thread or is the thread's own root author never learns about the human's reply, resolution,
+// reopening, or edit, and the agent that wrote a document never learns of a new comment on it or
+// of a person's edit to it. A reply reaches its thread's root author and its direct parent's
+// author; a new comment on a document (no reply_to and no ask_id), and its edit, reach every
+// session that document credits (loadDocumentSessionAuthors); a comment on an issue's
+// conversation names no document and reaches no author; and artifact.human_edited, which the
+// notice sweep appends once a person's quiet window on a document ends (docs.sendEditNotice),
+// reaches every session the document its payload's artifact_id names credits. Ask threads are not
+// walked here: their asker and repliers are the ask's followers (publishFollowerRoutes). The
+// event's own actor is skipped, and so is a session the comment's mentions already reach
+// (suppressed_authors).
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
 	seen := map[string]bool{}
@@ -573,6 +576,9 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		if sessionID := payloadString(event.Payload, "session_id"); sessionID != "" {
 			consider(model.Actor{Kind: "session", ID: sessionID}, true)
 		}
+	case "artifact.human_edited":
+		// The edited document is named in the payload (editedDocument); its writers are read
+		// below.
 	default:
 		return nil
 	}
@@ -589,6 +595,14 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 	} else if commentID != "" && (event.Type == "comment.resolved" || event.Type == "comment.reopened") {
 		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, commentID)); err != nil {
 			return err
+		}
+	} else if document := editedDocument(event); document != "" {
+		authors, err := loadDocumentSessionAuthors(ctx, deps, document)
+		if err != nil {
+			return err
+		}
+		for _, author := range authors {
+			consider(model.Actor{Kind: "session", ID: author}, true)
 		}
 	} else if (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == "" {
 		document := commentedDocument(event)
@@ -645,6 +659,15 @@ func commentedDocument(event model.Event) string {
 		document = *event.ArtifactID
 	}
 	return document
+}
+
+// editedDocument names the document a person's artifact.human_edited is about, its payload's
+// artifact_id, or "" for every other event.
+func editedDocument(event model.Event) string {
+	if event.Type != "artifact.human_edited" {
+		return ""
+	}
+	return payloadString(event.Payload, "artifact_id")
 }
 
 // loadDocumentSessionAuthors lists, in one query, the sessions a document credits: the one that

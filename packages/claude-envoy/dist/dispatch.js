@@ -13632,6 +13632,15 @@ var ArtifactVersionEventPayloadSchema = exports_external.object({
   version: exports_external.object({ number: exports_external.number().optional(), summary: exports_external.string().nullish() }).optional(),
   diff: exports_external.string().optional()
 });
+var ArtifactHumanEditedEventPayloadSchema = exports_external.object({
+  artifact_id: exports_external.string().optional(),
+  name: exports_external.string().optional(),
+  from_version: exports_external.number().int().optional(),
+  to_version: exports_external.number().int().optional(),
+  editors: exports_external.array(exports_external.string()).optional(),
+  diff: exports_external.string().optional(),
+  diff_truncated: exports_external.boolean().optional()
+});
 var ArtifactReviewEventPayloadSchema = exports_external.object({
   artifact_id: exports_external.string().optional(),
   name: exports_external.string().optional(),
@@ -16235,6 +16244,26 @@ function subscriptionRemovedTopics(raw, sessionID) {
   return parsedPayload.data.topics ?? [];
 }
 
+// ../envoy-client/src/human-edit.ts
+function humanEditHead(edit) {
+  const editors = edit.editors ?? [];
+  const by = editors.length === 0 ? "" : `, edited by ${editors.join(", ")}`;
+  return `${edit.name ?? "document"} v${edit.from_version ?? "?"} to v${edit.to_version ?? "?"}${by}`;
+}
+var HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
+function humanEditDiffBlock(diff, cut) {
+  if (diff === undefined || diff === "")
+    return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
+  const longestRun = Math.max(0, ...(diff.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const body = diff.endsWith(`
+`) ? diff : `${diff}
+`;
+  return `${fence}diff
+${body}${fence}${cut === true ? `
+${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
+}
+
 // ../envoy-client/src/search-answer.ts
 function pageSummaryText(offset, count, total) {
   return `showing ${offset + 1}-${offset + count} of ${total}`;
@@ -17322,6 +17351,8 @@ function eventHead(event) {
       return textHead(event.payload.body);
     case "artifact.version":
       return textHead(`${event.payload.name} v${event.payload.version.number}${event.payload.version.summary ? `: ${event.payload.version.summary}` : ""}`);
+    case "artifact.human_edited":
+      return textHead(humanEditHead(event.payload));
     case "issue.created":
     case "issue.updated":
     case "issue.closed":

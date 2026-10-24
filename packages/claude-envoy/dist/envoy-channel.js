@@ -36282,6 +36282,15 @@ var ArtifactVersionEventPayloadSchema = exports_external.object({
   version: exports_external.object({ number: exports_external.number().optional(), summary: exports_external.string().nullish() }).optional(),
   diff: exports_external.string().optional()
 });
+var ArtifactHumanEditedEventPayloadSchema = exports_external.object({
+  artifact_id: exports_external.string().optional(),
+  name: exports_external.string().optional(),
+  from_version: exports_external.number().int().optional(),
+  to_version: exports_external.number().int().optional(),
+  editors: exports_external.array(exports_external.string()).optional(),
+  diff: exports_external.string().optional(),
+  diff_truncated: exports_external.boolean().optional()
+});
 var ArtifactReviewEventPayloadSchema = exports_external.object({
   artifact_id: exports_external.string().optional(),
   name: exports_external.string().optional(),
@@ -38381,6 +38390,26 @@ function picturesNewestFirst(texts) {
   return [...new Set(ordered.flatMap(({ item }) => pictureAddresses(item.text)))];
 }
 
+// ../envoy-client/src/human-edit.ts
+function humanEditHead(edit) {
+  const editors = edit.editors ?? [];
+  const by = editors.length === 0 ? "" : `, edited by ${editors.join(", ")}`;
+  return `${edit.name ?? "document"} v${edit.from_version ?? "?"} to v${edit.to_version ?? "?"}${by}`;
+}
+var HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
+function humanEditDiffBlock(diff, cut) {
+  if (diff === undefined || diff === "")
+    return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
+  const longestRun = Math.max(0, ...(diff.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const body = diff.endsWith(`
+`) ? diff : `${diff}
+`;
+  return `${fence}diff
+${body}${fence}${cut === true ? `
+${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
+}
+
 // ../envoy-client/src/delivery.ts
 var KNOWN_SOURCES = EnvelopeSchema.shape.source.enum;
 var FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -38583,6 +38612,7 @@ var DISPATCH_PAYLOAD_SCHEMAS = {
   "issue.closed": IssueEventPayloadSchema,
   "artifact.created": ArtifactCreatedEventPayloadSchema,
   "artifact.version": ArtifactVersionEventPayloadSchema,
+  "artifact.human_edited": ArtifactHumanEditedEventPayloadSchema,
   "ask.opened": AskEventPayloadSchema,
   "ask.anchor_refreshed": AskEventPayloadSchema,
   "ask.edited": AskEditedEventPayloadSchema,
@@ -38654,6 +38684,12 @@ function askResolutionText(resolution) {
   return reason === "" ? kind : `${kind}: ${reason}`;
 }
 function dispatchCompact(event, comment) {
+  if (event.type === "artifact.human_edited") {
+    const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(event.payload);
+    if (!edit.success)
+      return;
+    return { askId: undefined, record: { edit: humanEditHead(edit.data) } };
+  }
   if (event.type === "comment.created") {
     if (comment?.ask_id === undefined || comment.ask_id === null)
       return;
@@ -38853,6 +38889,7 @@ function renderInbound(raw, sessionID, subject2) {
   let pictures = [];
   let inReplyTo = envelope2.in_reply_to;
   let askAuthor;
+  let trailer = "";
   const dispatchRendered = envelope2.source === "dispatch" && envelope2.payload !== undefined;
   if (envelope2.source === "dispatch") {
     const topic = subject2 ?? envelope2.topic;
@@ -38957,6 +38994,11 @@ function renderInbound(raw, sessionID, subject2) {
         };
         dispatchActor = frame.event.actor;
         pictures = eventPictures(frame.event);
+        if (frame.event.type === "artifact.human_edited") {
+          const edit = ArtifactHumanEditedEventPayloadSchema.safeParse(frame.event.payload);
+          if (edit.success)
+            trailer = humanEditDiffBlock(edit.data.diff, edit.data.diff_truncated);
+        }
       } else {
         dispatchEvent = frame.raw;
         rejectedDelivery = frame.rejectedDelivery;
@@ -39022,7 +39064,9 @@ function renderInbound(raw, sessionID, subject2) {
   };
   return {
     skip: false,
-    content: encode3({ envoy: rendered }),
+    content: trailer === "" ? encode3({ envoy: rendered }) : `${encode3({ envoy: rendered })}
+
+${trailer}`,
     envelope: envelope2,
     ...dispatchActor === undefined ? {} : { dispatchActor },
     ...delivery === undefined ? {} : { delivery },
@@ -41165,6 +41209,8 @@ function eventHead(event) {
       return textHead(event.payload.body);
     case "artifact.version":
       return textHead(`${event.payload.name} v${event.payload.version.number}${event.payload.version.summary ? `: ${event.payload.version.summary}` : ""}`);
+    case "artifact.human_edited":
+      return textHead(humanEditHead(event.payload));
     case "issue.created":
     case "issue.updated":
     case "issue.closed":

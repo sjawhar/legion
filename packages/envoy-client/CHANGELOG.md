@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
+  person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
+  4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
+  names the same line.
+
 ### Fixed
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then

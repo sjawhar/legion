@@ -8286,6 +8286,21 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:08:00Z",
             payload: { question: reopenQuestion },
           },
+          {
+            seq: 9,
+            type: "artifact.human_edited",
+            actor: { kind: "user", id: "person@example.com" },
+            created_at: "2026-09-09T00:09:00Z",
+            payload: {
+              artifact_id: "artifact-1",
+              name: "spec.md",
+              from_version: 4,
+              to_version: 7,
+              editors: ["person@example.com"],
+              diff: "--- previous\n+++ current\n",
+              diff_truncated: false,
+            },
+          },
         ]);
       }
       throw new Error(`unexpected request: ${target.pathname}`);
@@ -8313,6 +8328,7 @@ describe("executeDispatchTool", () => {
         "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
         "- #7 comment.anchor_refreshed · user sami · 2026-09-09T00:07:00Z · Anchor moved after the document edit.",
         `- #8 ask.anchor_refreshed · user sami · 2026-09-09T00:08:00Z · ${reopenQuestion}`,
+        "- #9 artifact.human_edited · user person@example.com · 2026-09-09T00:09:00Z · spec.md v4 to v7, edited by person@example.com",
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
