@@ -2,7 +2,7 @@
 
 This runbook covers the worker image, the session store, the Kubernetes runtime, and the operator-launched controller.
 
-The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286). Its runtime's section below is kept for reference and goes with `packages/daemon` at Stage 7 (LEGION-223).
+The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286), and its sources were deleted on 2026-10-03. Its runtime's section below is kept for reference until someone removes it (LEGION-223).
 
 ## Worker image
 
@@ -3199,8 +3199,12 @@ fails at the restart.
 
 ## Kubernetes runtime (TypeScript daemon)
 
-This section is the TypeScript daemon's runtime, which it no longer runs: it refuses `runtime:
-kubernetes` at config load (LEGION-286), and the section goes with `packages/daemon` at Stage 7. With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
+This section is the retired TypeScript daemon's runtime, which it no longer runs: it refuses
+`runtime: kubernetes` at config load (LEGION-286); its sources were deleted on 2026-10-03 (commit
+`ed00df8b2`, "Legion runs on the Go daemon alone"), so the section names no live directory of its
+own and is kept for reference until someone removes it — except its "Operator configuration"
+subsection and that subsection's "Network shares", which describe the pods Legion runs today.
+With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
 Kubernetes pod per process, on one disk volume per issue tree. The controller always remains an
 interactive tmux pane on the daemon host: `runtime: kubernetes` selects where roots and workers run,
 never the controller. Attach with `tmux -L legion-<project> attach -t legion-<project>`. LEGION-25
@@ -3212,8 +3216,10 @@ and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `acti
 
 ### Configuration
 
-This section is the TypeScript daemon's, which now refuses `runtime: kubernetes` outright, naming the
-Go daemon (LEGION-286); what follows is the block it read before. The Go coordinator (`packages/daemon`, LEGION-208)
+This section is the retired TypeScript daemon's, which now refuses `runtime: kubernetes` outright,
+naming the Go daemon (LEGION-286); what follows is the block it read before — for the pods Legion
+runs today see [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for the live settings
+[Configuration](#configuration), the Go daemon's. The Go coordinator (`packages/daemon`, LEGION-208)
 reads the same `runtime.kubernetes` key with different rules, and refuses the examples below as
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
 `legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
@@ -3277,11 +3283,17 @@ for Legion's pool, provisioned by your infrastructure-as-code.
 The block is file-only: there are no `LEGION_KUBERNETES_*` environment keys, and `LEGION_RUNTIME`
 never outranks the file (a disagreement is logged once and ignored). Defaults (root spec §3):
 
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 | profile | requests (cpu / memory / ephemeral-storage) | limits (cpu / memory / ephemeral-storage) |
 | :--- | :--- | :--- |
 | `small` | 500m / 1Gi / 2Gi | 2 / 3Gi / 8Gi |
 | `medium` | 1 / 2Gi / 10Gi | 4 / 6Gi / 30Gi |
 | `large` | 2 / 4Gi / 20Gi | 6 / 12Gi / 60Gi |
+
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
 
 | role | profile |
 | :--- | :--- |
@@ -3649,12 +3661,15 @@ PersistentVolume instead.
 
 ### Cutting over an instance from tmux to pods
 
+This subsection is the retired TypeScript daemon's, its configuration block included; for the pods
+Legion runs today see [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 Drain every tree while it is still on tmux, stop the daemon, choose a new `state_dir`, and start
 with `runtime: kubernetes`. The state file intentionally holds the controller's tmux locator beside
 root and worker pod locators; the daemon routes them by process kind.
 
-The block below is the TypeScript daemon's. The Go daemon's cutover is the same drain and fresh
-`state_dir`; its [Configuration](#configuration) says where its rules differ, and its
+The Go daemon's cutover is the same drain and fresh `state_dir`; its
+[Configuration](#configuration) says where its rules differ, and its
 [live proof](#the-live-proof) is what to run at the head you deploy.
 
 ```yaml
@@ -3704,6 +3719,9 @@ pull for that digest with `image "docker.io/library/import-…@sha256:…": not 
 
 ### Anatomy of a pod
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 One bare Pod per process generation, named `legion-<issue-slug>-<role>-g<generation>` (issue keys are
 lowercased; an over-long key is truncated with an 8-hex hash so the name fits 63 characters),
 labelled `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue`, `legion.dev/role`, and
@@ -3750,6 +3768,9 @@ Containers, in order:
 
 Volumes and mounts:
 
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 | volume | source | mounted at | in |
 | :--- | :--- | :--- | :--- |
 | `tree` | the tree PVC `legion-<tree-slug>` | `/legion` | both containers |
@@ -3761,6 +3782,9 @@ Volumes and mounts:
 
 The main container's environment is the same set of variables a tmux pane carries, with every value
 that was a daemon-machine path re-pointed at its pod location:
+
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
 
 | variable | pod value | read by |
 | :--- | :--- | :--- |
@@ -3791,6 +3815,10 @@ its own (`/proc/1/environ` inside the pod carries no key; the OMP child's does, 
 
 ### The providers Secret
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for what an operator gives the live
+runtime [Operator configuration](#operator-configuration).
+
 `legion-<project>-providers` (where `<project>` is `legion.yaml`'s `project` lowercased with
 non-alphanumerics removed) is created per deployment, never by the daemon, with one key per variable
 OMP or the extension reads: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `DISPATCH_TOKEN`,
@@ -3813,6 +3841,10 @@ through a `<NAME>_FILE` pointer (`DISPATCH_TOKEN`, `ENVOY_TOKEN`) is skipped, no
 
 ### Contract discipline
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for the live rules
+[Contract discipline](#contract-discipline), the Go daemon's.
+
 For a daemon contract change, first merge the worker image and the two plugin releases, then set
 `runtime.kubernetes.image` to its digest, install both plugin releases (`@sjawhar/pi-envoy`,
 `@sjawhar/pi-legion`) in the Legion profile, and restart the daemon. The Go daemon's own contract
@@ -3822,7 +3854,14 @@ none of it.
 
 ### RBAC the daemon needs
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for the live Role
+[RBAC the Go daemon needs](#rbac-the-go-daemon-needs).
+
 For the daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its namespace:
+
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
 
 | resource | verbs |
 | :--- | :--- |
