@@ -1,6 +1,9 @@
 # Legion on Kubernetes
 
-This runbook covers the worker image, the session store, the Kubernetes runtime, and the operator-launched controller.
+This runbook covers the worker image, the session store, the Kubernetes runtime, the
+operator-launched controller, and the one thing in it a role does for itself: running a workload
+in the cluster from a role container ([Running a workload in the cluster from a
+role](#running-a-workload-in-the-cluster-from-a-role)).
 
 The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286). Its runtime's section below is kept for reference and goes with `packages/daemon` at Stage 7 (LEGION-223).
 
@@ -2448,6 +2451,151 @@ kubectl -n legion delete pod legion-issue-shell
 The pod carries no credential. An agent of the issue can plant git and jj configuration in the clone
 ([Trust model](#trust-model-the-provisioning-token)), which this shell's `jj` obeys, and the pod
 gives that configuration nothing to take. Run no command in it that holds a token.
+
+### Running a workload in the cluster from a role
+
+A role sometimes needs something *running* rather than installed — a database for a test, a
+broker, a second copy of an application under test. Its own pod cannot hold one and the worker
+image cannot carry a running server, so it starts one in the cluster as a Job and reaches it by a
+Service name. What makes that possible is the deployment's, not Legion's: the ingress rule that
+admits connections from the namespace Legion's pods run in, the grant on Services and the
+admission rule that holds them, and the quota that counts them are declared in the deployment's
+own repository and applied by a person (dispatch://INFRA-206). This section is what a role does
+where they exist. Every rule below is that issue's and this issue's specification
+(dispatch://INFRA-71), each one stated as the condition the namespace's admission enforces; a
+workload that breaks one is refused at submission with a message naming the rule it broke, so
+nothing here has to be taken on trust.
+
+**A role has this only where its deployment gives it.** Every Legion pod sets
+`automountServiceAccountToken: false` (`AutomountServiceAccountToken`,
+`internal/runtime/sandbox/manifest.go`), so a role holds a Kubernetes credential only where its
+operator projects one through `runtime.kubernetes.pod.volumes`
+([Configuration](#configuration)); the image carries the client and no credential for it
+([Worker image](#worker-image)). Two answers tell a role which deployment it is in, and they are
+the gate for everything below:
+
+```sh
+kubectl auth can-i create jobs      # may this role start a workload at all
+kubectl auth can-i create services  # may it give one a name on the network
+```
+
+A `no` to the first is a deployment that projects no credential, or one whose cluster does not
+carry these declarations: nothing in this section applies, and a tool the work needs on the
+issue's own files arrives the way it already does, below. A `yes` to the first and a `no` to the
+second is a deployment whose declarations are not applied yet: a workload can be started but not
+reached, which is what that namespace enforces for every build in it.
+
+The namespace is the role's own and is never written down: the projected credential names it in
+`/var/run/secrets/kubernetes.io/serviceaccount/namespace`, which is the namespace `kubectl` uses
+by default, so no command here passes `-n`.
+
+The admission rules the workload must satisfy, each enforced in the namespace rather than in
+anyone's good behaviour:
+
+- it runs under gVisor (`runtimeClassName: gvisor`) on the compute class the deployment's
+  declaration names, selected by `nodeSelector`; that class creates a machine rather than falling
+  back to a general one, so a small workload waits about eighty seconds to start;
+- its largest container requests at least four processors — a smaller job belongs in the role's
+  own pod;
+- it bounds itself **twice**: `activeDeadlineSeconds` on the Job *and* on its pod template, each
+  at most twelve hours, with `ttlSecondsAfterFinished` on the Job at most twenty-four, so the Job
+  and its pod go on their own and nobody may orphan one. Each of the three is a refusal of its
+  own: a manifest that sets the deadline on the template alone is refused as plainly as one that
+  sets neither;
+- it carries no identity: `automountServiceAccountToken: false`, and no service account of its
+  own;
+- it mounts only an empty directory, the downward API, or an ephemeral filesystem volume of the
+  scratch storage class the deployment's declaration names, whose claim template carries no
+  labels, annotations, data source, volume or selector. **No disk outlives the workload**, which
+  is what a database a test fills and discards needs;
+- it carries the pod label the deployment's declaration names for a workload that asks to be
+  reachable. A workload without that label is as closed as every build in that namespace: the
+  ingress rule selects the label, not the namespace, so an unlabelled workload is reachable by
+  nothing. The label's name is in the deployment's own declaration, with the compute class, the
+  storage class and the namespace; a role reads it there rather than here.
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: <workload>                        # yours; the Service below is named for it and owned by it
+spec:
+  activeDeadlineSeconds: 3600           # on the Job, at most 43200
+  ttlSecondsAfterFinished: 3600         # at most 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        <the pod label the deployment's declaration names for a workload that asks to be reachable>
+    spec:
+      restartPolicy: Never
+      activeDeadlineSeconds: 3600         # on the pod template, at most 43200
+      automountServiceAccountToken: false
+      runtimeClassName: gvisor
+      nodeSelector:
+        <the compute-class selector the deployment's declaration names>
+      containers:
+        - name: db
+          image: mirror.gcr.io/library/postgres:16   # the mirror, as every image here is pulled
+          env:
+            - { name: POSTGRES_PASSWORD, value: <a password you choose> }
+          resources:
+            requests: { cpu: "4", memory: 8Gi }      # the largest container asks at least 4 CPU
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+      volumes:
+        - name: data
+          emptyDir: {}                    # dies with the pod, by design
+```
+
+The name on the network is a Service, held to a cluster-internal address: no node port, no load
+balancer, no external address and no external name. It is admitted only while the Job it fronts
+owns it, so removing the Job removes it too and leaves nothing for a person to sweep — which is
+why its `ownerReferences` carries the Job's own uid, read back after the Job is created:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: <workload>
+  ownerReferences:
+    - { apiVersion: batch/v1, kind: Job, name: <workload>, uid: <the Job's uid> }
+spec:
+  type: ClusterIP                         # the only kind this namespace admits
+  selector: { job-name: <workload> }      # the label the Job puts on its own pods
+  ports: [{ port: 5432, targetPort: 5432 }]
+```
+
+The whole sequence, from a role container holding nothing but its checkout and that credential:
+
+```sh
+kubectl apply -f workload.yaml                                     # the Job
+uid=$(kubectl get job <workload> -o jsonpath='{.metadata.uid}')    # what the Service must name
+sed "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -    # the name on the network
+kubectl wait --for=condition=Ready pod -l job-name=<workload> --timeout=300s
+ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+psql "postgres://postgres:<a password you choose>@<workload>.$ns.svc.cluster.local:5432/postgres" -c 'select 1'
+kubectl delete job <workload>                                      # takes its pod and its Service
+kubectl get jobs,pods,svc                                          # nothing of it is left
+```
+
+What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
+which belongs to another namespace and to one node at a time, and a role may not run a command
+inside its pod — the grant is create, read, follow and delete, never `exec`. A formatter started
+that way would never see the file it would format, so **a tool that works on the checkout does not
+belong here**: those arrive through the image's package runners onto the issue's own disk, which
+every role of the issue shares and which outlives any one pod. That is also why the two notes
+recording `kubectl auth can-i` answering `no` are not contradicted here
+(`a-pod-rehearses-a-checkpoints-own-readers-…-LEGION-578.md` in `docs/solutions/legion/`, and
+`prove-a-published-worker-image-from-a-pod-…-LEGION-764.md` in `docs/solutions/testing/`): each
+answers for a different verb — creating a Sandbox, creating a pod, `exec` into one — in the
+namespace Legion's own pods run in, which this changes nothing about.
+
+Two costs are shared and are the reason a role cleans up after itself rather than waiting for a
+deadline. One quota covers that whole namespace and is shared with the team's builds, so a
+workload left running is charged against both. And every project's agents hold the one identity
+(`legion-worker`), so a password written into a Job is readable by every other agent, and any of
+them may delete any workload there; narrowing that to a per-project identity is
+dispatch://INFRA-153's work, not something to design around here.
 
 ### Issue sizing: one reservation per pod
 
