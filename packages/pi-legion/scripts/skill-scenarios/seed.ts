@@ -71,6 +71,7 @@ import {
   listIssueMessages,
 } from "../../../dispatch/e2e/api";
 import { ENTRY_HEADER } from "./fetch-spec-sources";
+import { parseInstant } from "./production-dispatch";
 import { CREATED, session, sessionId, toolResults } from "./transcript";
 
 /** What `ask-on-message` writes and `capture` reads. */
@@ -117,20 +118,28 @@ const StandInAnswer = z.object({
 
 /** One write of a source's input, at the time the source gives it. */
 interface Step {
-  at: number;
+  at: bigint;
   write: () => Promise<void>;
 }
 
-/** The time `value` names, in milliseconds; a value that is no time is the source's fault. */
-function time(value: string, where: string): number {
-  const at = Date.parse(value);
-  if (Number.isNaN(at))
+/** The time `value` names, in nanoseconds since the epoch (production-dispatch.ts's
+ * parseInstant), so the microseconds Dispatch stores keep their order; a value that is no RFC 3339
+ * time is the source's fault. */
+function time(value: string, where: string): bigint {
+  const at = parseInstant(value);
+  if (at === undefined)
     throw new Error(`${where}: ${JSON.stringify(value)} is not an RFC 3339 time`);
   return at;
 }
 
+/** Orders two times in nanoseconds for a stable sort. They are compared, not subtracted: a bigint
+ * difference is no sort key. */
+function byTime(a: bigint, b: bigint): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** The entries of a source's messages.md, oldest first as the file holds them. */
-function sourceEntries(file: string): { kind: string; at: number; body: string }[] {
+function sourceEntries(file: string): { kind: string; at: bigint; body: string }[] {
   const text = readFileSync(file, "utf8");
   const headers = [...text.matchAll(ENTRY)];
   const before = text.slice(0, headers[0]?.index ?? text.length);
@@ -199,7 +208,8 @@ async function seedSpecIssue(file: string, source: string, spec?: string): Promi
     });
   }
   // A stable sort: at one time, the messages come first, then each ask opens before its answer.
-  for (const step of [...steps, ...answers].sort((a, b) => a.at - b.at)) await step.write();
+  const ordered = [...steps, ...answers].sort((a, b) => byTime(a.at, b.at));
+  for (const step of ordered) await step.write();
   const fixture: SpecFixture = { issue: issue.key, spec_artifact: issue.primary_artifact_id };
   writeFileSync(file, `${JSON.stringify(fixture)}\n`);
   writeFileSync(path.join(path.dirname(file), "seeded.json"), `${JSON.stringify(seeded)}\n`);
@@ -398,9 +408,12 @@ export async function captureSpec(file: string, runDir: string): Promise<void> {
   for (const comment of await listComments(fixture.issue, undefined, reader)) {
     add(comment.id, "comment", comment.author, comment.body, comment.created_at);
   }
+  // Dispatch's times carry microseconds, which Date.parse drops; two texts of one time keep the order
+  // the capture read them in.
+  const when = (text: AgentText) => time(text.created_at, `${fixture.issue}'s text ${text.id}`);
   json(
     "agent-texts.json",
-    texts.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+    texts.sort((a, b) => byTime(when(a), when(b)))
   );
 
   // Every other markdown document: plan.md on its own, the rest under documents/.

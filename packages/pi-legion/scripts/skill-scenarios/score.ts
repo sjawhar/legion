@@ -705,76 +705,342 @@ interface DispatchCall {
   text: string;
   flag: (name: string) => string | undefined;
 }
-/** A `dispatch` command at a command's place in shell text: at a line's start, or after `;`, `&`,
- * `|`, `(`, `$(` or a backquote, past any variable assignments. */
-const DISPATCH_COMMAND =
-  /(?:^|[;&|(`]|\$\()[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*(?:(?:command|exec|env)[ \t]+)?dispatch[ \t]+([a-z][a-z-]*)[^\n;&|`)]*/gm;
-/** Every `dispatch` command a tool call ran: in a `bash` command or an `eval` cell, here-document
- * bodies left out (their text is data), or a Dispatch tool a host calls by name. */
-function dispatchCalls(step: Step): DispatchCall[] {
-  const named = /^dispatch_([a-z_]+)$/.exec(step.tool)?.[1];
-  if (named !== undefined) {
-    const flag = (name: string) => {
+/** Where a command starts in shell text: at a line's start, or after `;`, `&`, `|`, `(`, `$(` or a
+ * backquote, past any variable assignments, the words that open a command inside a compound one
+ * (`then`, `do`, `else`, `elif`, `!`, `{`), and `command`, `exec` or `env`. */
+const AT_COMMAND = String.raw`(?:^|[;&|(\x60]|\$\()[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*(?:(?:then|do|else|elif|!|\{)[ \t]+)*(?:(?:command|exec|env)[ \t]+)?`;
+/** A command's text after its first word, up to the next command's place. */
+const COMMAND_REST = String.raw`[^\n;&|\x60)]*`;
+/** A `dispatch` command at a command's place: its text from `dispatch` on, and its command. */
+const DISPATCH_COMMAND = new RegExp(
+  String.raw`${AT_COMMAND}(dispatch[ \t]+([a-z][a-z-]*)${COMMAND_REST})`,
+  "gm"
+);
+/** Any command at a command's place, by the same parser: its first word and the rest. */
+const SHELL_COMMAND = new RegExp(
+  String.raw`${AT_COMMAND}([^\s;&|\x60()<>]+)(${COMMAND_REST})`,
+  "gm"
+);
+/** A here-document: the rest of the line that opens it, then its body up to the line that ends it. */
+const HEREDOC = /(<<-?[ \t]*(['"]?)(\w+)\2[^\n]*\n)[\s\S]*?^[ \t]*\3[ \t]*$/gm;
+/** A skill file a command names: a skill:// target, or a `.md` file under `skills/<name>/`. */
+const SKILL_PATH = /skill:\/\/[\w./-]+|[^\s"'`]*\/skills\/[\w.-]+\/[\w./-]*\.md/g;
+/** A command whose output goes to a file, not to the tool's result. */
+const TO_FILE = /(?:^|\s)1?>>?(?![&>])/;
+/** The words of the shell's compound commands and tests, and commands that print nothing when
+ * they succeed. */
+const SILENT = new Set(
+  "cd mkdir export set unset true false : rm cp mv touch chmod ln sleep local declare shopt trap wait umask exit return if then else elif for while until do in case [ [[ test { !".split(
+    " "
+  )
+);
+/** The words that close a compound command: its exit is the exit of the command it ran last. */
+const CLOSERS = new Set(["fi", "done", "esac", "}"]);
+/** What `dispatch <command>` prints first when Dispatch took the write: for doc-edit
+ * `Applied <n> ops …`, for artifact `Uploaded <name> as version <v> …`, for issue
+ * `Created <key>: …` (packages/envoy-client/src/dispatch-execute.ts). */
+const ANSWER: Readonly<Record<string, RegExp>> = {
+  "doc-edit": /^Applied \d+ ops\b/,
+  artifact: /^Uploaded \S+ as version \d+/,
+  issue: /^Created [A-Z][A-Z0-9]*-[1-9]\d*: /,
+};
+
+/** A `dispatch` command's flags, read from its text. */
+function shellCall(text: string, command: string): DispatchCall {
+  return {
+    command,
+    text,
+    flag: (name: string) => {
+      const found = new RegExp(`(?:^|\\s)--${name}(?:=|\\s+)(?:'([^']*)'|"([^"]*)"|(\\S+))`).exec(
+        text
+      );
+      if (found !== null) return found[1] ?? found[2] ?? found[3];
+      return new RegExp(`(?:^|\\s)--${name}(?:\\s|$)`).test(text) ? "" : undefined;
+    },
+  };
+}
+/** A Dispatch tool a host calls by name (`dispatch_doc_edit`), as the `dispatch` command it is. */
+function nativeCall(step: Step, tool: string): DispatchCall {
+  return {
+    command: tool.replace(/_/g, "-"),
+    text: `${step.tool} ${JSON.stringify(step.args)}`,
+    flag: (name: string) => {
       const value = step.args[name.replace(/-/g, "_")];
       return value === undefined
         ? undefined
         : typeof value === "string"
           ? value
           : JSON.stringify(value);
-    };
-    return [
-      {
-        command: named.replace(/_/g, "-"),
-        text: `${step.tool} ${JSON.stringify(step.args)}`,
-        flag,
-      },
-    ];
+    },
+  };
+}
+/** Shell text with its lines joined where a backslash continues them, and its here-document
+ * bodies taken out (a body is data for the command whose `<<` opens it), with each body and the
+ * place of its `<<` in that text. */
+function withoutBodies(source: string): { code: string; bodies: { at: number; text: string }[] } {
+  const joined = source.replace(/\\\r?\n/g, " ");
+  const bodies: { at: number; text: string }[] = [];
+  let code = "";
+  let last = 0;
+  for (const hit of joined.matchAll(HEREDOC)) {
+    const opener = hit[1] ?? "";
+    code += joined.slice(last, hit.index) + opener;
+    bodies.push({ at: code.length - opener.length, text: hit[0].slice(opener.length) });
+    last = (hit.index ?? 0) + hit[0].length;
   }
-  const shell =
-    step.tool === "bash"
-      ? strings(step.args.command)
-      : step.tool === "eval"
-        ? strings(step.args)
-        : [];
-  return shell.flatMap((source) =>
-    [
-      ...source
-        .replace(/(<<-?[ \t]*(['"]?)(\w+)\2[^\n]*\n)[\s\S]*?^[ \t]*\3[ \t]*$/gm, "$1")
-        .matchAll(DISPATCH_COMMAND),
-    ].map((hit) => {
-      const text = hit[0].replace(/^[\s;&|(`$]+/, "").trim();
-      return {
-        command: hit[1] ?? "",
-        text,
-        flag: (name: string) => {
-          const found = new RegExp(
-            `(?:^|\\s)--${name}(?:=|\\s+)(?:'([^']*)'|"([^"]*)"|(\\S+))`
-          ).exec(text);
-          if (found !== null) return found[1] ?? found[2] ?? found[3];
-          return new RegExp(`(?:^|\\s)--${name}(?:\\s|$)`).test(text) ? "" : undefined;
-        },
-      };
-    })
+  return { code: code + joined.slice(last), bodies };
+}
+/** How the command at `at` follows the one before it. */
+function separator(code: string, at: number): string {
+  if (code.startsWith("$(", at)) return "$(";
+  const char = code[at];
+  if (char === "|") return code[at - 1] === "|" ? "||" : "|";
+  if (char === "&") return code[at - 1] === "&" ? "&&" : "&";
+  return char === ";" || char === "(" || char === "`" ? char : "\n";
+}
+/** The line an `echo` prints, when its arguments are a literal: no option, expansion or escape. */
+function echoed(args: string): string | undefined {
+  const text = args.trim();
+  if (text.startsWith("-")) return undefined;
+  const quoted = /^(["'])([^"']*)\1$/.exec(text);
+  if (quoted !== null) {
+    const line = quoted[2] ?? "";
+    return quoted[1] === '"' && /[$`\\]/.test(line) ? undefined : line;
+  }
+  return /["'$`\\*?[\]{}~]/.test(text) ? undefined : text.replace(/[ \t]+/g, " ");
+}
+/** The refusal the dispatch CLI printed for `command` at `lines[at]`: that line, a
+ * `dispatch <command> was not called: …` line or a usage refusal (which names no command), and
+ * the `- ` lines under it. */
+function refusalAt(
+  lines: string[],
+  at: number,
+  command: string
+): { text: string; end: number } | undefined {
+  const [found] = cliRefusals(lines[at] ?? "");
+  if (found === undefined || (found.command !== null && found.command !== command))
+    return undefined;
+  let end = at + 1;
+  while (lines[end]?.startsWith("- ")) end++;
+  return { text: lines.slice(at, end).join("\n"), end };
+}
+
+/** One thing a tool call did, in the order it did them: a read of a skill file, or one `dispatch`
+ * command, with what the call's result shows of it. `answer` is the line of Dispatch's answer to a
+ * write (ANSWER), or "". `refusal` is the refusal the result shows for the command, or undefined.
+ * `succeeded` is true when the command ran and was not refused. */
+type Operation =
+  | { kind: "read"; step: Step; target: string }
+  | {
+      kind: "dispatch";
+      step: Step;
+      call: DispatchCall;
+      answer: string;
+      refusal: string | undefined;
+      succeeded: boolean;
+    };
+/** A shell command of a call, in order, as operationsOf reads it. */
+type ShellCommand =
+  | { kind: "dispatch"; at: number; sep: string; call: DispatchCall; quiet: boolean }
+  | { kind: "label"; at: number; sep: string; line: string }
+  | { kind: "silent"; at: number; sep: string }
+  | { kind: "closer"; at: number; sep: string }
+  | { kind: "other"; at: number; sep: string };
+
+/**
+ * What a tool call did, in order (Operation).
+ * - A `task` call does nothing here, and a `read` of a skill:// target or of a file under
+ *   `skills/<name>/` reads it.
+ * - A Dispatch tool a host calls by name is one `dispatch` command. Its result is that command's
+ *   output, and the tool's failure is its refusal.
+ * - A `bash` command or an `eval` cell runs each `dispatch` command DISPATCH_COMMAND finds in it
+ *   (here-document bodies left out), and reads each skill file it names outside them: in its text,
+ *   or in a here-document a command other than `dispatch` reads, at that command's place.
+ * - Another tool reads the first skill file its arguments name.
+ *
+ * One result holds the output of every command of the call, with nothing to tell one command's
+ * output from the next. So a command's output is attributed only where the output shows it. The
+ * commands are walked in order with the line where the next output starts, while it is known:
+ * the call's first line, then the line after a literal `echo` label the output shows, or after a
+ * refusal attributed to the command before. A `dispatch` command's refusal is the refusal line at
+ * the start of its own output (refusalAt). A write takes the next line of its kind of answer
+ * (ANSWER), unless a refusal naming its command comes first. The call's failure (a `bash` exit of
+ * 1 or 2, any failure of another tool) is the refusal of its last `dispatch` command when that
+ * command ends the call, except one after `&&` that follows a shown refusal: the shell never ran
+ * it.
+ *
+ * What cannot be attributed:
+ * - a refusal after the output of another command (`cat`, `sed`, a `dispatch` command that
+ *   succeeded), whose end the output does not show: it could be that output's text;
+ * - output a `$(…)` or a redirect to a file takes, which is not in the result where the command
+ *   runs;
+ * - a command in a loop, which runs more than once and is one command here;
+ * - text another command prints that holds a line of Dispatch's answer before a write's own;
+ * - which command of a failed call set its exit, when the call does not end with a `dispatch`
+ *   command.
+ */
+function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
+  if (step.tool === "task") return [];
+  if (step.tool === "read") {
+    const target = typeof step.args.path === "string" ? step.args.path : "";
+    return /^skill:\/\//.test(target) || /(^|\/)skills\/[^/]+\//.test(target)
+      ? [{ kind: "read", step, target }]
+      : [];
+  }
+  const text = outcome?.text ?? "";
+  const output = text.replace(/\s*Command exited with code \d+\s*$/, "");
+  const lines = output.split("\n");
+  const failed =
+    outcome?.failed === true && (step.tool !== "bash" || outcome.exit === 1 || outcome.exit === 2);
+  const native = /^dispatch_([a-z_]+)$/.exec(step.tool)?.[1];
+  if (native !== undefined) {
+    const call = nativeCall(step, native);
+    const answer = lines.find((line) => ANSWER[call.command]?.test(line)) ?? "";
+    const refusal = failed ? output : undefined;
+    const succeeded = outcome !== undefined && !outcome.failed;
+    return [{ kind: "dispatch", step, call, answer, refusal, succeeded }];
+  }
+  if (step.tool !== "bash" && step.tool !== "eval") {
+    const target = new RegExp(SKILL_PATH.source).exec(strings(step.args).join("\n"))?.[0];
+    return target === undefined ? [] : [{ kind: "read", step, target }];
+  }
+  const source = (step.tool === "bash" ? strings(step.args.command) : strings(step.args)).join(
+    "\n"
   );
+  const { code, bodies } = withoutBodies(source);
+  const spans = [...code.matchAll(DISPATCH_COMMAND)].map((hit) => ({
+    at: hit.index ?? 0,
+    end: (hit.index ?? 0) + hit[0].length,
+    command: hit[2] ?? "",
+    text: (hit[1] ?? "").trim(),
+  }));
+  const inside = (at: number) => spans.some((span) => at >= span.at && at < span.end);
+  const commands: ShellCommand[] = spans.map((span) => {
+    const sep = separator(code, span.at);
+    const call = shellCall(span.text, span.command);
+    const quiet = sep === "$(" || sep === "`" || TO_FILE.test(span.text);
+    return { kind: "dispatch", at: span.at, sep, call, quiet };
+  });
+  for (const hit of code.matchAll(SHELL_COMMAND)) {
+    const at = hit.index ?? 0;
+    const end = at + hit[0].length;
+    const word = hit[1] ?? "";
+    // The `1` of a `2>&1`, a comment, or a command that overlaps a `dispatch` one.
+    if (/^\d+$/.test(word) || word.startsWith("#")) continue;
+    if (spans.some((span) => at < span.end && end > span.at)) continue;
+    const sep = separator(code, at);
+    const args = hit[2] ?? "";
+    const line = word === "echo" && !TO_FILE.test(args) ? echoed(args) : undefined;
+    if (line !== undefined) commands.push({ kind: "label", at, sep, line });
+    else if (CLOSERS.has(word)) commands.push({ kind: "closer", at, sep });
+    else if (SILENT.has(word) || TO_FILE.test(args)) commands.push({ kind: "silent", at, sep });
+    else commands.push({ kind: "other", at, sep });
+  }
+  commands.sort((a, b) => a.at - b.at);
+
+  const operations: { at: number; operation: Operation }[] = [];
+  for (const hit of code.matchAll(SKILL_PATH))
+    if (!inside(hit.index ?? 0))
+      operations.push({ at: hit.index ?? 0, operation: { kind: "read", step, target: hit[0] } });
+  for (const body of bodies)
+    if (!inside(body.at))
+      for (const [target] of body.text.matchAll(SKILL_PATH))
+        operations.push({ at: body.at, operation: { kind: "read", step, target } });
+
+  const invocations: Extract<Operation, { kind: "dispatch" }>[] = [];
+  let cursor: number | undefined = 0;
+  let anchor = 0;
+  for (const [place, command] of commands.entries()) {
+    if (command.kind === "dispatch") {
+      const start: number | undefined = command.quiet ? undefined : cursor;
+      const shown: { text: string; end: number } | undefined =
+        start === undefined ? undefined : refusalAt(lines, start, command.call.command);
+      let answer = "";
+      if (shown !== undefined) {
+        cursor = shown.end;
+        anchor = shown.end;
+      } else {
+        const kind = ANSWER[command.call.command];
+        const writes =
+          kind !== undefined &&
+          command.call.flag("help") === undefined &&
+          command.call.flag("dry-run") === undefined;
+        if (writes && !command.quiet)
+          for (let line = start ?? anchor; line < lines.length; line++) {
+            const own = cliRefusals(lines[line] ?? "")[0];
+            if (own?.command === command.call.command) {
+              anchor = line + 1;
+              break;
+            }
+            if (kind.test(lines[line] ?? "")) {
+              answer = lines[line] ?? "";
+              anchor = line + 1;
+              break;
+            }
+          }
+        if (!command.quiet) cursor = undefined;
+      }
+      const invocation = {
+        kind: "dispatch" as const,
+        step,
+        call: command.call,
+        answer,
+        refusal: shown?.text,
+        succeeded: false,
+      };
+      invocations.push(invocation);
+      operations.push({ at: command.at, operation: invocation });
+      continue;
+    }
+    // A command whose output goes into a pipe prints nothing itself.
+    if (command.kind === "silent" || command.kind === "closer") continue;
+    if (commands[place + 1]?.sep === "|") continue;
+    if (command.kind === "other") {
+      cursor = undefined;
+      continue;
+    }
+    const label = command.line;
+    if (cursor !== undefined && lines[cursor] === label) {
+      cursor += 1;
+      anchor = Math.max(anchor, cursor);
+      continue;
+    }
+    const found = label === "" ? -1 : lines.indexOf(label, anchor);
+    cursor = found < 0 ? undefined : found + 1;
+    if (found >= 0) anchor = found + 1;
+  }
+  const last = invocations.at(-1);
+  const ending = commands.filter((command) => command.kind !== "closer").at(-1);
+  if (failed && last !== undefined && ending?.kind === "dispatch" && ending.call === last.call) {
+    const skipped =
+      ending.sep === "&&" && invocations.slice(0, -1).some((other) => other.refusal !== undefined);
+    if (!skipped) last.refusal ??= output;
+  }
+  for (const invocation of invocations)
+    invocation.succeeded =
+      outcome !== undefined &&
+      invocation.refusal === undefined &&
+      !(outcome.failed && invocation === last);
+  return operations.sort((a, b) => a.at - b.at).map(({ operation }) => operation);
 }
 /** A reference to an issue or to one of its documents, as `--ref` takes it: `dispatch://<issue>`
  * or a dashboard URL (`…/issues/<issue>`), then `/spec` or `/artifact/<id>` (`/artifacts/<id>` in
  * a URL). It gives the issue, and the document: `spec`, or the artifact's id. */
 const ISSUE_REF =
   /^(?:dispatch:\/\/|https?:\/\/[^/\s]+\/issues\/)([A-Z][A-Z0-9]{1,9}-[1-9]\d*)(?:\/(spec)|\/artifacts?\/([^/@?#\s]+)(?:@v\d+)?)?(?:[?#]\S*)?$/;
-/** Whether a call wrote the run's primary spec: what the call names, and the answer Dispatch gave
- * in `text`, the result of the tool call that ran it. The answer, not the exit, says whether
- * Dispatch made a version, so a call the CLI refused (`was not called`), an edit that changed
- * nothing (`no new version`) and a failed call give none, and a shell that exits non-zero after
- * the write does not take it back. A `--help` or `--dry-run` call writes nothing.
+/** Whether one `dispatch` command wrote the run's primary spec: what it names, and the line of
+ * Dispatch's answer operationsOf attributed to it (`answer`). The answer, not the exit, says
+ * whether Dispatch made a version, so a command the CLI refused (`was not called`), an edit that
+ * changed nothing (`no new version`) and a failed command give none, and a shell that exits
+ * non-zero after the write does not take it back. A `--help` or `--dry-run` command writes nothing.
  * - `dispatch issue` with a spec, answered with the run's issue made (`Created <issue>:`).
  * - `dispatch doc-edit` of the run's issue (`--issue`, or the issue of a `--ref`) and of its spec
  *   (`--artifact`, or the document of the `--ref`; no document named is the issue's primary
  *   document, as the CLI resolves it), answered `Applied <n> ops (version <v>)`.
  * - `dispatch artifact` of the run's issue and of the spec's file, answered
  *   `Uploaded <name> as version <v>`.
- * A call of another issue, another document or a project's document writes no spec. */
-function writesSpec(call: DispatchCall, fixture: SpecFixture, text: string): boolean {
+ * A command of another issue, another document or a project's document writes no spec. */
+function writesSpec(call: DispatchCall, fixture: SpecFixture, answer: string): boolean {
   if (call.flag("help") !== undefined || call.flag("dry-run") !== undefined) return false;
   const isSpec = (name: string | undefined) =>
     name !== undefined &&
@@ -784,7 +1050,7 @@ function writesSpec(call: DispatchCall, fixture: SpecFixture, text: string): boo
   if (call.command === "issue")
     return (
       (call.flag("spec") !== undefined || call.flag("spec-file") !== undefined) &&
-      new RegExp(`\\bCreated ${escaped(fixture.issue)}:`).test(text)
+      answer.startsWith(`Created ${fixture.issue}: `)
     );
   if (call.command === "doc-edit") {
     const named = ISSUE_REF.exec(call.flag("ref") ?? "");
@@ -792,38 +1058,22 @@ function writesSpec(call: DispatchCall, fixture: SpecFixture, text: string): boo
     return (
       (named?.[1] ?? call.flag("issue")) === fixture.issue &&
       (document === undefined || isSpec(document)) &&
-      /\bApplied \d+ ops[^\n]*\(version \d+\)/.test(text)
+      /^Applied \d+ ops[^\n]*\(version \d+\)/.test(answer)
     );
   }
   if (call.command === "artifact")
     return (
       call.flag("issue") === fixture.issue &&
       isSpec(call.flag("name")) &&
-      /\bUploaded \S+ as version \d+/.test(text)
+      /^Uploaded \S+ as version \d+/.test(answer)
     );
   return false;
 }
-/** Whether a tool result holds a refusal the dispatch CLI printed for one of `calls`
- * (`cliRefusals`, the CLI's own reader of its refusal lines), which a pipe does not hide the way
- * it hides the CLI's exit: a usage refusal, or a `was not called` line naming one of the calls'
- * commands. */
-function cliRefusal(calls: DispatchCall[], text: string): boolean {
-  return cliRefusals(text).some(
-    (refusal) => refusal.command === null || calls.some((call) => call.command === refusal.command)
-  );
-}
-/** The skill file a tool call reads, if any: a `read` of a skill:// target or of a file under a
- * `skills/<name>/` directory, or a shell command that names one. A `dispatch` call or a `task`
- * assignment that names a skill reads nothing. */
-function skillRead(step: Step): string | undefined {
-  if (step.tool === "task" || dispatchCalls(step).length > 0) return undefined;
-  if (step.tool === "read") {
-    const target = typeof step.args.path === "string" ? step.args.path : "";
-    return /^skill:\/\//.test(target) || /(^|\/)skills\/[^/]+\//.test(target) ? target : undefined;
-  }
-  return /skill:\/\/[\w./-]+|[^\s"'`]*\/skills\/[\w.-]+\/[\w./-]*\.md/.exec(
-    strings(step.args).join("\n")
-  )?.[0];
+/** Every operation of a transcript's tool calls, in order: each call's (operationsOf), in the
+ * order the calls were made. */
+function operations(entries: SessionEntry[]): Operation[] {
+  const results = outcomes(entries);
+  return steps(entries).flatMap((step) => operationsOf(step, results.get(step.id)));
 }
 /** Whether a skill file read is skill `name` itself. */
 const readsSkill = (target: string, name: string) =>
@@ -896,7 +1146,8 @@ function checkReport(
 /** The spec writes of a transcript (writesSpec, against the run's fixture.json) and the spec-only
  * checks before them. A check is a `task` call whose assignment holds the seven outline headings as
  * `##` lines and names no path under a checkout in `reach`; a check counts for the first spec write
- * after it. */
+ * after it. Each `dispatch` command of a call is a write of its own (operationsOf), so two writes
+ * in one call with no check between them leave the second unchecked. */
 export function specWork(entries: SessionEntry[], reach: string[], fixture: SpecFixture): SpecWork {
   const results = outcomes(entries);
   const writes: SpecWork["writes"] = [];
@@ -912,23 +1163,23 @@ export function specWork(entries: SessionEntry[], reach: string[], fixture: Spec
       if (outlined && !local) pending.push({ step, assignment });
       continue;
     }
-    const outcome = results.get(step.id);
-    if (outcome === undefined) continue;
-    const calls = dispatchCalls(step).filter((call) => writesSpec(call, fixture, outcome.text));
-    if (calls.length === 0) continue;
-    for (const check of pending)
-      checks.push({
-        assignment: check.assignment,
-        ...checkReport(entries, check.step, results.get(check.step.id)),
-        write: writes.length,
+    for (const operation of operationsOf(step, results.get(step.id))) {
+      if (operation.kind !== "dispatch" || !writesSpec(operation.call, fixture, operation.answer))
+        continue;
+      for (const check of pending)
+        checks.push({
+          assignment: check.assignment,
+          ...checkReport(entries, check.step, results.get(check.step.id)),
+          write: writes.length,
+        });
+      writes.push({
+        index: step.index,
+        at: step.at,
+        text: operation.call.text,
+        checked: pending.length > 0,
       });
-    writes.push({
-      index: step.index,
-      at: step.at,
-      text: calls.map((call) => call.text).join(" ; "),
-      checked: pending.length > 0,
-    });
-    pending = [];
+      pending = [];
+    }
   }
   return { writes, checks };
 }
@@ -1186,11 +1437,15 @@ const indented = (text: string, depth = 6) =>
  * count to its own bound.
  *   - outline: outlineProblems finds nothing.
  *   - checked: the transcript holds at least one spec write (writesSpec: a write Dispatch made of
- *     the run's own primary spec), a spec-only check (specWork) came before every one, the first
- *     included, and findings.json has no `neither` row.
- *   - refusals: each `dispatch` call that exited 1 or 2 (a `bash` result's `isError` and
- *     `details.exitCode`) is followed by a `dispatch` call that succeeded, with no skill file read
- *     between them (skillRead). Each failing pair is printed with its refusal text.
+ *     the run's own primary spec, each `dispatch` command of a call apart), a spec-only check
+ *     (specWork) came before every one, the first included, and findings.json has no `neither`
+ *     row.
+ *   - refusals: each refused `dispatch` command (operationsOf: the refusal at the start of its own
+ *     output, or the call's failure with exit 1 or 2 when the command ends the call) is followed
+ *     by a `dispatch` command that succeeded in a later tool call, with no skill file read between
+ *     them, in the order of each call's commands and reads. A command of the refused one's own call
+ *     is no fix: the agent wrote it before it saw the refusal, so it cannot show that the agent
+ *     fixed the call from the refusal alone. Each failing pair is printed with its refusal text.
  *   - plan: the person approved the spec, the issue holds plan.md (capture-spec runs after the
  *     approval), and the transcript read skill://writing-plans.
  *   - routed: the transcript read skill://dispatch-writing-specs before its first spec write, and
@@ -1221,13 +1476,15 @@ function specRow(
   const fixture = json(path.join(runDir, "fixture.json"), SpecFixture);
   const { approved, version, turns } = approval(runDir);
   const all = steps(entries);
-  const results = outcomes(entries);
   const work = specWork(entries, reach, fixture);
-  const firstWrite = work.writes[0]?.index ?? Number.POSITIVE_INFINITY;
-  const reads = all.flatMap((step) => {
-    const target = skillRead(step);
-    return target === undefined ? [] : [{ index: step.index, target }];
-  });
+  const ops = operations(entries);
+  // Places in `ops`, so a read and a write of one call keep their order.
+  const firstWrite = ops.findIndex(
+    (op) => op.kind === "dispatch" && writesSpec(op.call, fixture, op.answer)
+  );
+  const reads = ops.flatMap((op, place) =>
+    op.kind === "read" ? [{ place, target: op.target }] : []
+  );
   const details: string[] = [];
 
   const outline = outlineProblems(spec);
@@ -1247,24 +1504,13 @@ function specRow(
     details.push(`finding of check ${row.check} neither fixed nor recorded: ${row.finding}`);
 
   const refused: string[] = [];
-  /** Whether a step's dispatch call was refused: its tool failed (for `bash`, with exit 1 or 2), or
-   * its result holds a refusal the dispatch CLI printed itself, which a pipe can hide the exit of. */
-  const refusedCall = (step: Step): boolean => {
-    const outcome = results.get(step.id);
-    const calls = dispatchCalls(step);
-    if (calls.length === 0 || outcome === undefined) return false;
-    if (cliRefusal(calls, outcome.text)) return true;
-    return outcome.failed && (step.tool !== "bash" || outcome.exit === 1 || outcome.exit === 2);
-  };
-  for (const [place, step] of all.entries()) {
-    const outcome = results.get(step.id);
-    if (outcome === undefined || !refusedCall(step)) continue;
-    const calls = dispatchCalls(step);
+  for (const [place, op] of ops.entries()) {
+    if (op.kind !== "dispatch" || op.refusal === undefined) continue;
     let read: string | undefined;
     let fixed = false;
-    for (const next of all.slice(place + 1)) {
-      if (dispatchCalls(next).length === 0) read ??= skillRead(next);
-      else if (results.get(next.id)?.failed === false && !refusedCall(next)) {
+    for (const next of ops.slice(place + 1)) {
+      if (next.kind === "read") read ??= next.target;
+      else if (next.succeeded && next.step !== op.step) {
         fixed = true;
         break;
       }
@@ -1272,8 +1518,8 @@ function specRow(
     if (fixed && read === undefined) continue;
     refused.push(
       [
-        `refused call: ${calls.map((call) => call.text).join(" ; ")}`,
-        indented(outcome.text.replace(/\s*Command exited with code \d+\s*$/, ""), 4),
+        `refused call: ${op.call.text}`,
+        indented(op.refusal, 4),
         fixed
           ? `    then read ${read} before the next dispatch call succeeded`
           : "    no later dispatch call succeeded",
@@ -1285,7 +1531,9 @@ function specRow(
   const planned = reads.some((read) => readsSkill(read.target, "writing-plans"));
   const plan = approved && existsSync(path.join(runDir, "plan.md")) && planned;
   const routedRead = reads.some(
-    (read) => read.index < firstWrite && readsSkill(read.target, "dispatch-writing-specs")
+    (read) =>
+      (firstWrite < 0 || read.place < firstWrite) &&
+      readsSkill(read.target, "dispatch-writing-specs")
   );
   const removed = reads.filter(
     (read) =>

@@ -160,8 +160,9 @@ export class ProductionDispatch {
     return answer as T[];
   }
 
-  /** One GET, tried again after a 429, a 5xx or a failed connection. Its errors name the path
-   * and the query, never the server or the token. */
+  /** One GET, tried again after a 429, a 5xx or a failed connection, the body's arrival included:
+   * a connection that fails after the headers is a failed connection too. Its errors name the
+   * path and the query, never the server or the token. */
   async #get<T>(segments: readonly string[], query?: Record<string, string>): Promise<T> {
     const shown = describe(segments, query);
     const url = new URL(`${this.#base}${shown}`);
@@ -169,17 +170,18 @@ export class ProductionDispatch {
     for (let attempt = 1; attempt <= READ_TRIES; attempt++) {
       if (attempt > 1) await this.#sleep(backoffMs(attempt - 1));
       let response: Response;
+      let text: string;
       try {
         response = await this.#fetch(url.toString(), {
           method: "GET",
           headers: { Accept: "application/json", Authorization: `Bearer ${this.#token}` },
           signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
+        text = await response.text();
       } catch (error) {
         last = `failed: ${messageFor(error)}`;
         continue;
       }
-      const text = await response.text();
       if (response.ok) {
         try {
           return JSON.parse(text) as T;

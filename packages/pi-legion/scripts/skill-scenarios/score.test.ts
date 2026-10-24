@@ -644,6 +644,107 @@ specRun("spec-writing-head-26", {
   spec: outlined({ problem: pastedLine }),
   judges: copied("spec.md", folded(pastedLine), "copies"),
 });
+// One bash call that runs two `dispatch` commands is two invocations, scored in order. Two spec
+// writes in one call with no check between them: the second is unchecked.
+specRun("spec-writing-head-27", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    sh(
+      "w1",
+      "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file first.json; dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file second.json",
+      0,
+      "Applied 1 ops (version 2)\nApplied 1 ops (version 3)"
+    ),
+    finish
+  ),
+});
+// A refusal followed by a command that succeeded in the same call: the agent wrote that command
+// before it saw the refusal, so it is no fix. The fix is the later call after a skill read.
+specRun("spec-writing-head-28", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    sh(
+      "x5",
+      "dispatch ask --issue LWEVAL-7; dispatch read --issue LWEVAL-7",
+      0,
+      "dispatch ask was not called: 1 problem\n- --question is required\nTitle: Greeting"
+    ),
+    readOf("r3", "skill://dispatch"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A refusal fixed in a later call that reads a skill file first: a `cat` of the run's own copy of
+// skills/dispatch/SKILL.md, then the dispatch command.
+const ownSkill = path.join(runs, "spec-writing-head-29", "home", "skills", "dispatch", "SKILL.md");
+specRun("spec-writing-head-29", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    sh(
+      "x6",
+      "dispatch ask --issue LWEVAL-7 --question 'Which name?'",
+      1,
+      "dispatch ask was not called: 1 problem\n- --question gives no recommendation"
+    ),
+    sh("x7", `cat ${ownSkill}; dispatch read --issue LWEVAL-7`, 0, "# Dispatch\nTitle: Greeting"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// Refusal lines that are no refusal of the call: a document that quotes the CLI's refusals, and a
+// log that a `cat` after a dispatch command prints. A later skill read fixes nothing.
+specRun("spec-writing-head-30", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    sh(
+      "x8",
+      "dispatch read --issue LWEVAL-7",
+      0,
+      "Issue description:\n```text\ndispatch: unexpected argument old-flag\ndispatch read was not called: 1 problem\n```"
+    ),
+    sh(
+      "x9",
+      "dispatch read --issue LWEVAL-7; cat saved.log",
+      0,
+      "Title: Greeting\ndispatch: unexpected argument old-flag"
+    ),
+    readOf("r3", "skill://dispatch"),
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A refusal after the label an `echo` prints is the dispatch command's own output, fixed only
+// after a skill read.
+specRun("spec-writing-head-31", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    sh(
+      "x10",
+      'cd /rig/cwd\necho "=== ask ==="; dispatch ask --issue LWEVAL-7 2>&1 | head -5',
+      0,
+      "=== ask ===\ndispatch ask was not called: 1 problem\n- --question is required"
+    ),
+    readOf("r3", "skill://dispatch"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // Spec writes: only a write Dispatch made, of the run's own primary spec, counts. Each call below is
 // something else, and the run's two checked writes still stand. Each result is the one Dispatch
 // gives, so the calls that Dispatch did apply are left out for what they name, not for their result.
@@ -1101,6 +1202,35 @@ test("checked: only an accepted write of the run's own primary spec is a spec wr
   // document named (`--issue` alone, a bare issue ref), which the CLI reads as the primary spec.
   expect(scoresOf("spec-writing-head-22")).toEqual(allPass);
   expect(rowOf("spec-writing-head-22")).toContain(" writes=8 ");
+});
+
+test("checked: two spec writes in one call are two writes, the second unchecked", () => {
+  expect(scoresOf("spec-writing-head-27")).toEqual({ ...allPass, checked: "false" });
+  const row = rowOf("spec-writing-head-27");
+  expect(row).toContain(" writes=2 ");
+  expect(row).toContain("unchecked writes: 1 of 2");
+  expect(row).toContain(
+    "  dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file second.json"
+  );
+});
+
+test("refusals: each dispatch command of a call is scored in order, with the reads between them", () => {
+  // The next command of the same call fixes nothing; the later call that succeeds comes after a
+  // skill read.
+  expect(scoresOf("spec-writing-head-28")).toEqual({ ...allPass, refusals: "false" });
+  expect(rowOf("spec-writing-head-28")).toContain("refused call: dispatch ask --issue LWEVAL-7");
+  expect(rowOf("spec-writing-head-28")).toContain("then read skill://dispatch before");
+  // Fixed only after a `cat` of skills/dispatch/SKILL.md in the call that fixed it.
+  expect(scoresOf("spec-writing-head-29")).toEqual({ ...allPass, refusals: "false" });
+  expect(rowOf("spec-writing-head-29")).toContain(`then read ${ownSkill} before`);
+  // The refusal after an echo's label is the dispatch command's own output.
+  expect(scoresOf("spec-writing-head-31")).toEqual({ ...allPass, refusals: "false" });
+  expect(rowOf("spec-writing-head-31")).toContain("refused call: dispatch ask --issue LWEVAL-7");
+});
+
+test("refusals: a refusal line a successful command's output quotes, or a cat prints, is no refusal", () => {
+  expect(scoresOf("spec-writing-head-30")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-30")).not.toContain("refused call:");
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {

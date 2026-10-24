@@ -402,6 +402,74 @@ describe("spec-writing", () => {
     );
     expect(dispatch.asks).toHaveLength(1);
   });
+
+  // Catches: a seeding that orders the input by a millisecond time, which ties every time of one
+  // millisecond and so posts a later message before an earlier ask.
+  test("orders the input at full precision, microseconds and nanoseconds, ties in source order", async () => {
+    for (const [ask, message, answer] of [
+      ["000001", "000002", "000003"],
+      ["000000001", "000000002", "000000003"],
+    ]) {
+      const src = freshDir("source");
+      writeFileSync(path.join(src, "title.txt"), "Greet\n");
+      writeFileSync(
+        path.join(src, "messages.md"),
+        [
+          `<!-- message 2026-10-24T10:00:00.${message}Z -->`,
+          "Changed my mind after the ask.",
+          "",
+          // At one time as the answer: the answer's ask opened first, then the message comes in
+          // source order, before the answer.
+          `<!-- message 2026-10-24T10:00:00.${answer}Z -->`,
+          "Same time as the answer.",
+          "",
+        ].join("\n")
+      );
+      writeFileSync(
+        path.join(src, "asks.json"),
+        JSON.stringify([
+          {
+            id: "src-ask",
+            kind: "question",
+            question: "First question?",
+            options: [{ label: "Yes" }],
+            multiple: false,
+            state: "answered",
+            created_at: `2026-10-24T10:00:00.${ask}Z`,
+            answer: {
+              selected: ["Yes"],
+              text: "After the message.",
+              user: "p@example.invalid",
+              at: `2026-10-24T10:00:00.${answer}Z`,
+            },
+          },
+        ])
+      );
+      dispatch.calls.length = 0;
+      await seed.specWriting(path.join(freshDir("seed"), "fixture.json"), src);
+      expect(writes(), ask).toEqual([
+        "alice /api/v1/issues",
+        "agent /api/v1/issues/<id>/asks",
+        "alice /api/v1/issues/<id>/messages",
+        "alice /api/v1/issues/<id>/messages",
+        "alice /api/v1/asks/<id>/answer",
+      ]);
+    }
+  });
+
+  // Catches: a source time read loosely: Date.parse takes a time with no seconds, which RFC 3339
+  // does not allow and which Dispatch never writes.
+  test("refuses a source time that is no RFC 3339 time, naming the file", async () => {
+    const src = freshDir("source");
+    writeFileSync(path.join(src, "title.txt"), "Greet\n");
+    writeFileSync(path.join(src, "messages.md"), "<!-- message 2026-10-24T10:00Z -->\nHello.\n");
+    writeFileSync(path.join(src, "asks.json"), "[]");
+    await expect(
+      seed.specWriting(path.join(freshDir("seed"), "fixture.json"), src)
+    ).rejects.toThrow(
+      `${path.join(src, "messages.md")}: "2026-10-24T10:00Z" is not an RFC 3339 time`
+    );
+  });
 });
 
 describe("spec-rewrite", () => {
@@ -696,6 +764,28 @@ describe("capture-spec", () => {
     expect(existsSync(path.join(dir, "documents", "plan-md.md"))).toBe(false);
     expect(existsSync(path.join(dir, "documents", "shot-png.md"))).toBe(false);
     expect(existsSync(path.join(dir, "documents", "spec.md"))).toBe(false);
+  });
+
+  // Catches: captured texts sorted by Date.parse, which drops Dispatch's microseconds and keeps two
+  // texts of one millisecond in the order the capture read them (asks, messages, comments).
+  test("orders the run's texts at full precision", async () => {
+    const spec = dispatch.issue("LWEVAL-2");
+    const at = (id: string, created_at: string) => ({
+      id,
+      issue_key: "LWEVAL-2",
+      author: runSession,
+      body: id,
+      created_at,
+    });
+    dispatch.messages.push({
+      message: at("m-later", "2026-10-24T10:40:00.000002Z"),
+      replies: [],
+    });
+    dispatch.comments.push({ ...at("c-earlier", "2026-10-24T10:40:00.000001Z"), ask_id: null });
+    const dir = runDir();
+    await seed.captureSpec(fixture(dir, spec), dir);
+    const texts = JSON.parse(readFileSync(path.join(dir, "agent-texts.json"), "utf8"));
+    expect(texts.map((text: { id: string }) => text.id)).toEqual(["c-earlier", "m-later"]);
   });
 
   // Catches: a plan.md left from an earlier capture when the issue holds none now.

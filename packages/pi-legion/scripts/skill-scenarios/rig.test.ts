@@ -114,6 +114,106 @@ describe("install_model_route", () => {
   });
 });
 
+// The key-file route's key command reads the operator's key for as long as it exists
+// (install-key-file-model-route.sh: the caller removes --key-dir on every exit that keeps no
+// profile). A setup that stops after the route is installed leaves no profile to use it.
+describe("a setup that fails after install_model_route", () => {
+  /** A checkout whose plugin installer and home maker do nothing, with the real key-file route. */
+  function checkout(): string {
+    const co = freshDir("route-checkout");
+    mkdirSync(path.join(co, "scripts/e2e/lib"), { recursive: true });
+    mkdirSync(path.join(co, "skills/asd-ste100"), { recursive: true });
+    writeFileSync(path.join(co, "skills/asd-ste100/SKILL.md"), "# STE\n");
+    writeFileSync(path.join(co, ".omp-pin"), "omp@pin\n");
+    cpSync(
+      path.join(root, "scripts/e2e/lib/install-key-file-model-route.sh"),
+      path.join(co, "scripts/e2e/lib/install-key-file-model-route.sh")
+    );
+    writeFileSync(
+      path.join(co, "scripts/e2e/lib/omp-home.sh"),
+      'make_omp_home() { mkdir -p "$1/.omp"; }\n'
+    );
+    writeFileSync(path.join(co, "scripts/e2e/lib/install-plugin-profile.sh"), "exit 0\n");
+    return co;
+  }
+  const routeEnv = () => ({
+    LEGION_E2E_MODEL_ROUTE: "key-file",
+    LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
+  });
+
+  // Catches: a label profile that fails after its route is installed (here the superpowers probe)
+  // and keeps a key command that still reads the operator's key.
+  test("cmd_profile removes the label's model-key and marks nothing ready", () => {
+    const work = freshDir("route-work");
+    const script = [
+      "set -euo pipefail",
+      ...[
+        "fail",
+        "label_dir",
+        "on_exit",
+        "drop_unready_keys",
+        "install_model_route",
+        "cmd_profile",
+      ].map(fn),
+      "checkout_commit() { printf 'fixture parents=base\\n'; }",
+      "install_superpowers() { fail 'the superpowers probe failed'; }",
+      'work=$1; cmd_profile probe "$2"',
+    ].join("\n");
+    const failed = bash(script, [work, checkout()], {
+      ...routeEnv(),
+      SKILL_SCENARIOS_SUPERPOWERS: "set",
+    });
+    expect(failed.code).toBe(1);
+    expect(failed.stderr).toContain("the superpowers probe failed");
+    const P = path.join(work, "profiles/probe");
+    expect(existsSync(path.join(P, "home/.omp/profiles/skills-probe/agent/models.yml"))).toBe(true);
+    expect(existsSync(path.join(P, "model-key"))).toBe(false);
+    expect(existsSync(path.join(P, "ready"))).toBe(false);
+
+    // The same setup that succeeds keeps its key command: a ready profile uses it.
+    const kept = freshDir("route-work");
+    const ok = bash(
+      script.replace("fail 'the superpowers probe failed'", ":"),
+      [kept, checkout()],
+      {
+        ...routeEnv(),
+        SKILL_SCENARIOS_SUPERPOWERS: "set",
+      }
+    );
+    expect({ code: ok.code, stderr: ok.stderr }).toEqual({ code: 0, stderr: "" });
+    expect(existsSync(path.join(kept, "profiles/probe/model-key/anthropic-key"))).toBe(true);
+    expect(existsSync(path.join(kept, "profiles/probe/ready"))).toBe(true);
+  });
+
+  // Catches: a judge-profile build that fails at its second profile and keeps the first one's key
+  // command.
+  test("judge_profiles removes both profiles' model-key and marks nothing ready", () => {
+    const work = freshDir("judge-route-work");
+    const co = checkout();
+    const script = [
+      "set -euo pipefail",
+      ...["fail", "on_exit", "drop_unready_keys", "install_model_route", "judge_profiles"].map(fn),
+      "checkout_commit() { printf 'fixture parents=base\\n'; }",
+      "root=$1; work=$2; judge_model=fixture; judge_thinking=high; judge_profiles",
+    ].join("\n");
+    // The bare profile's home cannot be made, after the ste profile's route is installed.
+    writeFileSync(
+      path.join(co, "scripts/e2e/lib/omp-home.sh"),
+      'make_omp_home() { [ "$(basename "$(dirname "$1")")" != bare ] || { echo "no home for bare" >&2; return 1; }; mkdir -p "$1/.omp"; }\n'
+    );
+    const failed = bash(script, [co, work], routeEnv());
+    expect(failed.code).toBe(1);
+    expect(failed.stderr).toContain("make_omp_home failed for the judge's bare profile");
+    const dir = path.join(work, "judge-profiles");
+    expect(existsSync(path.join(dir, "ste/home/.omp/profiles/judge-ste/agent/models.yml"))).toBe(
+      true
+    );
+    expect(existsSync(path.join(dir, "ste/model-key"))).toBe(false);
+    expect(existsSync(path.join(dir, "bare/model-key"))).toBe(false);
+    expect(existsSync(path.join(dir, "ready"))).toBe(false);
+  });
+});
+
 /** Runs SCRIPT (rig.sh functions and a call of them) under bash with ARGS as $1..., in an
  * environment of PATH and the test's own HOME. */
 function bash(script: string, args: string[] = [], env: Record<string, string> = {}) {

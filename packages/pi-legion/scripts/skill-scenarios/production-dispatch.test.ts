@@ -137,6 +137,35 @@ test("a 429 or a 5xx is read again, and another status fails naming the read", a
   );
 });
 
+/** A 200 whose body fails while it arrives: the connection closes after the headers. */
+function brokenBody(): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.error(new Error("socket closed after headers"));
+      },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } }
+  );
+}
+
+test("a body that fails after its headers is read again, as a failed connection is", async () => {
+  let reads = 0;
+  const { fetch, sent } = fakeFetch(() => (++reads === 1 ? brokenBody() : json([{ id: "c1" }])));
+  const waits: number[] = [];
+  const dispatch = new ProductionDispatch(credentials, fetch, async (ms) => {
+    waits.push(ms);
+  });
+  expect(await dispatch.comments("ACME-1")).toEqual([{ id: "c1" }] as never);
+  expect(sent).toHaveLength(2);
+  expect(waits).toHaveLength(1);
+
+  const always = new ProductionDispatch(credentials, fakeFetch(brokenBody).fetch, noSleep);
+  await expect(always.comments("ACME-1")).rejects.toThrow(
+    "GET /api/v1/issues/ACME-1/comments failed: socket closed after headers on each of"
+  );
+});
+
 test("a path below a git or jj checkout names the checkout; a path outside names none", () => {
   const git = dir("git-checkout");
   mkdirSync(path.join(git, ".git"));

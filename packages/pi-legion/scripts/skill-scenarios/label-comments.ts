@@ -274,6 +274,7 @@ async function label(
     if (attempt > 1) await sleep(Math.max(wait, backoffMs(attempt - 1)));
     wait = 0;
     let response: Response;
+    let text: string;
     try {
       response = await fetchImpl(`${route.url}/v1/messages`, {
         method: "POST",
@@ -285,11 +286,12 @@ async function label(
         body,
         signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
       });
+      // A connection that fails while the body arrives is a failed call, as one before the headers.
+      text = await response.text();
     } catch (error) {
       last = `the model call failed: ${messageFor(error)}`;
       continue;
     }
-    const text = await response.text();
     if (!response.ok) {
       last = modelError(response.status, text);
       if (transient(response.status)) {

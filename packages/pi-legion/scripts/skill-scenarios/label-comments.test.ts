@@ -421,6 +421,30 @@ test("a 429, a 5xx or a reply that skips a question is asked again; a comment wi
   ]);
 });
 
+test("a model answer whose body fails after its headers is asked again", async () => {
+  const out = path.join(dir("broken-body"), "labels");
+  const { fetch } = world((comment, attempt) =>
+    attempt === 1
+      ? new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error("socket closed after headers"));
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      : answerWith(comment)
+  );
+  const run = io(fetch);
+  const code = await main(
+    ["--since", SINCE, "--until", UNTIL, "--out", out, "--key-file", keyFile()],
+    run.io
+  );
+  expect(run.stderr).toEqual([]);
+  expect(code).toBe(0);
+  expect(run.stdout).toEqual(EXPECTED_SUMMARY);
+});
+
 test("an --out inside a checkout exits 2, names the rule and reads nothing", async () => {
   const checkout = dir("checkout");
   mkdirSync(path.join(checkout, ".jj"));

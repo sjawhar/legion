@@ -262,6 +262,18 @@ install_model_route() {
   esac
 }
 
+# drop_unready_keys READY KEY_DIR... removes each KEY_DIR, a key-file route's key command
+# (install_model_route's DIR/model-key), unless READY exists. A profile setup sets it as its exit
+# handler (on_exit) before it installs a route: a setup that stops before its ready file keeps no
+# profile that uses the key command, and install-key-file-model-route.sh asks its caller to remove
+# the key command on every such exit. A ready profile keeps its key command, and uses it.
+# shellcheck disable=SC2329 # on_exit's trap runs it
+drop_unready_keys() {
+  local ready=$1
+  shift
+  [ -f "$ready" ] || rm -rf -- "$@"
+}
+
 # checkout_commit CHECKOUT prints the commit the checkout's working copy stands on and that
 # commit's parents, as `<commit> parents=<parent>,...`. A jj checkout (one that holds .jj) gives
 # jj's working-copy commit. Any other checkout gives git's HEAD, with ` dirty` after it when
@@ -287,6 +299,7 @@ cmd_profile() {
   co=$(cd "$2" && pwd -P)
   [ -f "$co/scripts/e2e/lib/install-plugin-profile.sh" ] || fail "$co is not a Legion checkout"
   mkdir -p "$P"
+  on_exit "$(printf 'drop_unready_keys %q %q' "$P/ready" "$P/model-key")"
   printf '%s\n' "$co" >"$P/checkout"
   printf '%s\n' "$profile" >"$P/profile"
   # What the label runs: the checkout's working-copy commit and a digest of its skills tree, the
@@ -316,6 +329,7 @@ cmd_profile() {
   cp "$co/.omp-pin" "$P/pin"
   [ -z "${SKILL_SCENARIOS_SUPERPOWERS:-}" ] || install_superpowers "$P" "$profile" "$(<"$P/pin")"
   touch "$P/ready"
+  trap - EXIT HUP INT TERM
   cat "$P/built-from"
 }
 
@@ -854,6 +868,7 @@ judge_profiles() {
   exec 9>"$dir.lock"
   flock 9
   if [ ! -f "$dir/ready" ]; then
+    on_exit "$(printf 'drop_unready_keys %q %q %q' "$dir/ready" "$dir/ste/model-key" "$dir/bare/model-key")"
     [ -f "$root/skills/asd-ste100/SKILL.md" ] || fail "$root has no skills/asd-ste100, the judge's one skill"
     commit=$(checkout_commit "$root") || fail "cannot read the commit of $root with jj or git"
     for kind in ste bare; do
@@ -877,6 +892,7 @@ judge_profiles() {
       printf 'asd-ste100 %s\n' "$(cd "$root/skills/asd-ste100" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
     } >"$dir/built-from"
     touch "$dir/ready"
+    trap - EXIT HUP INT TERM
   fi
   exec 9>&-
 }
