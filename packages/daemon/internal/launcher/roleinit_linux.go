@@ -66,7 +66,7 @@ func roleInit(cfg RoleInitConfig) error {
 // alone from the moment it starts.
 func prepareRoleNamespace(cfg RoleInitConfig) error {
 	role := filepath.Join(cfg.RolesDir, cfg.Role)
-	homes := filepath.Join(cfg.RolesDir, roleHomesDir, cfg.Role)
+	homes := filepath.Join(cfg.RolesDir, RoleHomesDir, cfg.Role)
 	stage := filepath.Join(homes, "stage")
 	works := filepath.Join(homes, "work")
 	work := filepath.Join(works, shimwire.GenerationDir(cfg.Generation))
@@ -108,10 +108,10 @@ func prepareRoleNamespace(cfg RoleInitConfig) error {
 		source, target string
 		optional       bool
 	}{
-		{filepath.Join(role, roleGHDir), filepath.Join(cfg.FixedRoot, roleGHDir), false},
-		{filepath.Join(role, rolePrivateDir), filepath.Join(cfg.FixedRoot, rolePrivateDir), false},
-		{filepath.Join(role, roleStateDir), filepath.Join(cfg.FixedRoot, roleStateDir), false},
-		{filepath.Join(role, roleAgentSecretsDir), filepath.Join(cfg.FixedRoot, roleAgentSecretsDir), true},
+		{filepath.Join(role, RoleGHDir), filepath.Join(cfg.FixedRoot, RoleGHDir), false},
+		{filepath.Join(role, RolePrivateDir), filepath.Join(cfg.FixedRoot, RolePrivateDir), false},
+		{filepath.Join(role, RoleStateDir), filepath.Join(cfg.FixedRoot, RoleStateDir), false},
+		{filepath.Join(role, RoleAgentSecretsDir), filepath.Join(cfg.FixedRoot, RoleAgentSecretsDir), true},
 	} {
 		if _, err := os.Stat(bind.source); err != nil {
 			if bind.optional && errors.Is(err, fs.ErrNotExist) {

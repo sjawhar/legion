@@ -14,29 +14,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// The directories an issue pod's container gives each role under the roles directory
-// (--roles-dir): its launcher token projection, its gh bundle, and its own memory-backed
-// private, state and agent-secrets directories. role-init binds all of them but the token back
-// at the fixed paths every role is told, so neither the shim nor the agent learns a new path
-// (internal/runtime/sandbox's names.go). roleHomesDir is the one disk directory of the roles
-// directory: it holds each role's home overlay layers and its own temporary directories.
-const (
-	roleLauncherDir     = "launcher"
-	roleGHDir           = "gh"
-	rolePrivateDir      = "private"
-	roleStateDir        = "state"
-	roleAgentSecretsDir = "agent-secrets"
-	roleHomesDir        = ".homes"
-	launcherTokenFile   = "LAUNCHER_TOKEN"
-)
-
 // roleHome is the home directory a role's overlay covers, and roleFixedRoot the root its own
-// directories are bound back under: the worker image's, which the image makes as empty
-// root-owned mount points (packages/daemon/docker/worker.Dockerfile). A test points both at
+// directories are bound back under: the worker image's (Home, FixedRoot). A test points both at
 // directories of its own, since a machine running the tests has neither.
 var (
-	roleHome      = "/home/legion"
-	roleFixedRoot = "/var/run/legion"
+	roleHome      = Home
+	roleFixedRoot = FixedRoot
 )
 
 // RoleHome and RoleFixedRoot are those defaults, which `legion launcher role-init`'s flags carry

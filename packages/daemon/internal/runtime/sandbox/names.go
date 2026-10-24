@@ -57,13 +57,13 @@ const (
 	SessionsSubPath    = "sessions"
 	FeedDir            = TreeRoot + "/" + feedSubPath
 	CacheRoot          = "/legion/cache"
-	LauncherDir        = "/var/run/legion/launcher"
-	LauncherPrivateDir = "/var/run/legion/private"
+	LauncherDir        = launcher.FixedRoot + "/" + launcher.RoleLauncherDir
+	LauncherPrivateDir = launcher.FixedRoot + "/" + launcher.RolePrivateDir
 	LauncherTokenFile  = launcher.LauncherTokenFile
-	GHConfigDir        = "/var/run/legion/gh"
-	ProvisionDir       = "/var/run/legion/provision"
-	StateDir           = "/var/run/legion/state"
-	ProvidersDir       = "/var/run/legion/providers"
+	GHConfigDir        = launcher.FixedRoot + "/" + launcher.RoleGHDir
+	ProvisionDir       = launcher.FixedRoot + "/provision"
+	StateDir           = launcher.FixedRoot + "/" + launcher.RoleStateDir
+	ProvidersDir       = launcher.FixedRoot + "/providers"
 )
 
 // RolesDir is where an issue pod's one container mounts every workflow role's own volumes, one
@@ -75,7 +75,7 @@ const (
 // directory of RoleHomesDir. The names under it are internal/launcher's layout (launcher.RoleGHDir
 // and its siblings), which both sides read.
 const (
-	RolesDir     = "/var/run/legion/roles"
+	RolesDir     = launcher.FixedRoot + "/roles"
 	RoleHomesDir = RolesDir + "/" + launcher.RoleHomesDir
 )
 
@@ -94,8 +94,8 @@ const feedSubPath = "feed"
 // live in, and AgentSecretsTokenDir where the pod's projected token for the broker's audience is
 // mounted, as AgentSecretsTokenFile. The key directory is each role's own; the token is shared.
 const (
-	AgentSecretsKeyDir    = "/var/run/legion/agent-secrets"
-	AgentSecretsTokenDir  = "/var/run/legion/agent-secrets-token"
+	AgentSecretsKeyDir    = launcher.FixedRoot + "/" + launcher.RoleAgentSecretsDir
+	AgentSecretsTokenDir  = launcher.FixedRoot + "/agent-secrets-token"
 	AgentSecretsTokenFile = "token"
 )
 
@@ -108,7 +108,7 @@ const (
 	ompAgentDir    = ompProfileDir + "/agent"
 	ompSessionsDir = ompAgentDir + "/sessions"
 	// podHome is the image's HOME, which the XDG base directories sit under.
-	podHome = "/home/legion"
+	podHome = launcher.Home
 	// imagePath is the image's PATH. A container's env PATH replaces the image's, so the pod's
 	// PATH repeats it after its own directories.
 	imagePath = "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"

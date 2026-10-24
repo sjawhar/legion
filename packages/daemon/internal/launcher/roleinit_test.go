@@ -222,29 +222,29 @@ func runStage(plan stagePlan) error {
 	fixedRoot := filepath.Join(plan.Mount, "fixed")
 	home := filepath.Join(plan.Mount, "home")
 	for _, role := range []string{plan.Role, plan.Sibling} {
-		for _, name := range []string{roleLauncherDir, roleGHDir, rolePrivateDir, roleStateDir, roleAgentSecretsDir} {
+		for _, name := range []string{RoleLauncherDir, RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
 			if err := os.MkdirAll(filepath.Join(rolesDir, role, name), 0o755); err != nil {
 				return err
 			}
 		}
-		if err := os.MkdirAll(filepath.Join(rolesDir, role, roleGHDir, plan.Owner), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(rolesDir, role, RoleGHDir, plan.Owner), 0o755); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Join(rolesDir, role, rolePrivateDir, "g1"), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(rolesDir, role, RolePrivateDir, "g1"), 0o700); err != nil {
 			return err
 		}
 		for path, content := range map[string]string{
-			filepath.Join(rolesDir, role, roleLauncherDir, launcherTokenFile):        "launcher-token-" + role,
-			filepath.Join(rolesDir, role, roleGHDir, plan.Owner, "hosts.yml"):        "gh-" + role,
-			filepath.Join(rolesDir, role, rolePrivateDir, "g1", "LEGION_BOOT_TOKEN"): "boot-" + role,
-			filepath.Join(rolesDir, role, roleAgentSecretsDir, "key.pem"):            "key-" + role,
+			filepath.Join(rolesDir, role, RoleLauncherDir, LauncherTokenFile):        "launcher-token-" + role,
+			filepath.Join(rolesDir, role, RoleGHDir, plan.Owner, "hosts.yml"):        "gh-" + role,
+			filepath.Join(rolesDir, role, RolePrivateDir, "g1", "LEGION_BOOT_TOKEN"): "boot-" + role,
+			filepath.Join(rolesDir, role, RoleAgentSecretsDir, "key.pem"):            "key-" + role,
 		} {
 			if err := os.WriteFile(path, []byte(content), 0o400); err != nil {
 				return err
 			}
 		}
 	}
-	for _, name := range []string{roleGHDir, rolePrivateDir, roleStateDir, roleAgentSecretsDir} {
+	for _, name := range []string{RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
 		if err := os.MkdirAll(filepath.Join(fixedRoot, name), 0o755); err != nil {
 			return err
 		}
@@ -282,7 +282,7 @@ func runStage(plan stagePlan) error {
 	if err := runGeneration(plan, layout, 1, "agent"); err != nil {
 		return err
 	}
-	homes := filepath.Join(rolesDir, roleHomesDir, plan.Role)
+	homes := filepath.Join(rolesDir, RoleHomesDir, plan.Role)
 	fmt.Printf("stage upper-home=%s\n", presence(filepath.Join(homes, "upper", "planted")))
 	fmt.Printf("stage upper-tmp=%s\n", presence(filepath.Join(homes, "tmp", "planted")))
 	fmt.Printf("stage upper-var-tmp=%s\n", presence(filepath.Join(homes, "var-tmp", "planted")))
@@ -293,7 +293,7 @@ func runStage(plan stagePlan) error {
 
 	// The role's relaunch: a second generation over the same role-homes volume, with the
 	// agent-secrets directory gone, as a pod that is not enrolled with the secrets broker has it.
-	if err := os.RemoveAll(filepath.Join(rolesDir, plan.Role, roleAgentSecretsDir)); err != nil {
+	if err := os.RemoveAll(filepath.Join(rolesDir, plan.Role, RoleAgentSecretsDir)); err != nil {
 		return err
 	}
 	layout.Detached = plan.Detached + "2"
@@ -385,15 +385,15 @@ func TestRoleInitAgentHelper(t *testing.T) {
 	}
 	say := func(key, value string) { fmt.Printf("%s %s=%s\n", plan.Label, key, value) }
 	say("uid", strconv.Itoa(os.Getuid()))
-	say("own-gh", content(filepath.Join(plan.FixedRoot, roleGHDir, plan.Owner, "hosts.yml")))
-	say("own-boot-token", content(filepath.Join(plan.FixedRoot, rolePrivateDir, "g1", "LEGION_BOOT_TOKEN")))
-	say("own-state", writable(filepath.Join(plan.FixedRoot, roleStateDir)))
+	say("own-gh", content(filepath.Join(plan.FixedRoot, RoleGHDir, plan.Owner, "hosts.yml")))
+	say("own-boot-token", content(filepath.Join(plan.FixedRoot, RolePrivateDir, "g1", "LEGION_BOOT_TOKEN")))
+	say("own-state", writable(filepath.Join(plan.FixedRoot, RoleStateDir)))
 	// The agent-secrets directory is bound only when the pod is enrolled with the broker: its
 	// key is the role's own in the first generation, and the second runs with none.
-	say("own-agent-secrets", presence(filepath.Join(plan.FixedRoot, roleAgentSecretsDir, "key.pem")))
-	say("own-agent-secrets-key", content(filepath.Join(plan.FixedRoot, roleAgentSecretsDir, "key.pem")))
+	say("own-agent-secrets", presence(filepath.Join(plan.FixedRoot, RoleAgentSecretsDir, "key.pem")))
+	say("own-agent-secrets-key", content(filepath.Join(plan.FixedRoot, RoleAgentSecretsDir, "key.pem")))
 	say("sibling", presence(filepath.Join(plan.RolesDir, plan.Sibling)))
-	say("own-launcher-token", presence(filepath.Join(plan.RolesDir, plan.Role, roleLauncherDir, launcherTokenFile)))
+	say("own-launcher-token", presence(filepath.Join(plan.RolesDir, plan.Role, RoleLauncherDir, LauncherTokenFile)))
 	if entries, err := os.ReadDir(plan.RolesDir); err != nil {
 		say("roles-entries", "unreadable: "+err.Error())
 	} else {

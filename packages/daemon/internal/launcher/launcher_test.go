@@ -607,7 +607,7 @@ func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
 		fixed: filepath.Join(scratch, "fixed"), result: make(chan error, 1), stderr: &lockedBuffer{},
 		conns: map[string]*roleConn{},
 	}
-	for _, name := range []string{roleGHDir, rolePrivateDir, roleStateDir, roleAgentSecretsDir} {
+	for _, name := range []string{RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
 		if err := os.MkdirAll(filepath.Join(f.fixed, name), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -616,12 +616,12 @@ func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
 		t.Fatal(err)
 	}
 	for _, role := range roles {
-		for _, name := range []string{roleLauncherDir, roleGHDir, rolePrivateDir, roleStateDir, roleAgentSecretsDir} {
+		for _, name := range []string{RoleLauncherDir, RoleGHDir, RolePrivateDir, RoleStateDir, RoleAgentSecretsDir} {
 			if err := os.MkdirAll(filepath.Join(f.rolesDir, role, name), 0o755); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if err := os.WriteFile(filepath.Join(f.rolesDir, role, roleLauncherDir, launcherTokenFile), []byte(roleToken(role)+"\n"), 0o400); err != nil {
+		if err := os.WriteFile(filepath.Join(f.rolesDir, role, RoleLauncherDir, LauncherTokenFile), []byte(roleToken(role)+"\n"), 0o400); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -674,7 +674,7 @@ func (f *fleet) role(name string) *roleConn {
 // roleTmp is what the role wrote at /tmp/<name> inside its namespaces, as the container sees it:
 // its own temporary directory on the roles directory's disk volume.
 func (f *fleet) roleTmp(role, name string) string {
-	return filepath.Join(f.rolesDir, roleHomesDir, role, "tmp", name)
+	return filepath.Join(f.rolesDir, RoleHomesDir, role, "tmp", name)
 }
 
 // awaitExit reads frames until the role reports generation's exit.

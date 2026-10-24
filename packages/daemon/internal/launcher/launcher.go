@@ -117,7 +117,7 @@ func newManagers(cfg Config) ([]*manager, error) {
 	log := &roleLog{stdout: cfg.Stdout, stderr: cfg.Stderr}
 	managers := make([]*manager, 0, len(cfg.Roles))
 	for _, role := range cfg.Roles {
-		file := filepath.Join(cfg.RolesDir, role, roleLauncherDir, launcherTokenFile)
+		file := filepath.Join(cfg.RolesDir, role, RoleLauncherDir, LauncherTokenFile)
 		token, err := os.ReadFile(file)
 		if err != nil {
 			return nil, fmt.Errorf("launcher: role %s launcher token: %v", role, err)
@@ -128,7 +128,7 @@ func newManagers(cfg Config) ([]*manager, error) {
 		stdout, stderr := log.writers(role)
 		managers = append(managers, &manager{
 			cfg: cfg, role: role, token: strings.TrimSpace(string(token)), namespaced: true,
-			private: filepath.Join(cfg.RolesDir, role, rolePrivateDir), launcherID: randomID(),
+			private: filepath.Join(cfg.RolesDir, role, RolePrivateDir), launcherID: randomID(),
 			stdout: stdout, stderr: stderr, requests: map[string]request{},
 		})
 	}
