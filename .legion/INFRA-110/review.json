@@ -2,28 +2,46 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-110",
-  "completed": "2026-10-24T16:40:00Z",
+  "completed": "2026-10-24T18:55:00Z",
+  "round": 2,
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": ".github/scripts/check-body-embed-limit.sh:49-50",
-      "description": "Fail-open, reviewer-demonstrated at c982e6a2: both declaration patterns capture `(\\d+)`, and `int(\"032000\")` is 32000 in Python while Go reads the same literal as octal 13312. A scratch tree holding the real script, `DISPATCH_BODY_MAX = 32000` and `maxInputChars = 032000` exits 0 with `body limit 32000 ... fits the embedder's 32000`, while the embedder truncates every body past 13,312 runes - the exact silent loss this check exists to stop. Confirmed against the Go toolchain: `const maxInputChars = 032000; fmt.Println(maxInputChars)` prints 13312. This is a hole in the gate the issue asks for (acceptance 1), and the script's own refusal text promises the opposite ('a number written another way (digit separators, hexadecimal, an expression)'), so it is not a Minor. Remedy: capture `(0|[1-9][0-9]*)` in BODY_PATTERN and EMBED_PATTERN, so a leading-zero numeral lands in the existing 'declares no <const> this check can read' refusal, plus one suite case pinning it."
+      "file": ".github/scripts/check-body-embed-limit.sh:144-157",
+      "description": "False ACCEPT of acceptance criterion 2, reproduced by the reviewer at code head 23f290e5 and found independently by both thermonuclear agents. The `*/` branch of `attached_comment` climbs upward accumulating every line into `pending` until one *starts with* `/*`, so the invariant it enforces is 'some `/*` exists above', not 'the `/*` I found opens the `*/` I saw'. Round 2's fix (23f290e5, `if not opened: break`) closed only the sub-case where the file holds no opener at all. Tree 1, ordinary prettier-clean TypeScript: `/* History: maxInputChars was 8000 before INFRA-42, and this block documents nothing below it. */` / `export const DISPATCH_TITLE_MAX = 200;` / `export const DISPATCH_SLUG_MAX = 80; /* a trailing note */` / `export const DISPATCH_BODY_MAX = 14500;` exits 0 with `body limit 14500 (...:4) fits the embedder's 19000 (...), and each names the other`, while the declaration carries no comment at all - the credit comes from line 1, which documents nothing. Tree 2: `/* maxInputChars */` / `const secret = 1;` / `const other = 2;` / `function f() { return 3; } /* side note */` / declaration exits 0, crediting three lines of executable code as the declaration's comment. The numeric gate is unaffected: the same tree with `DISPATCH_BODY_MAX = 99000` exits 1 with both numbers and the remedy, so no silent truncation escapes - what is lost is the pairing half, and the PR body's claim that the pairing `cannot rot unnoticed` is false while this stands. Same class as the regression the tester pinned at 0c5d413f, in a second shape. Remedy: the walk must credit comment text only - the `/*` it stops at must be the opener of the `*/` it saw, and no non-comment line may enter the block. The simplest shape that does it is one downward classification pass (is each line inside a comment?) and then the contiguous run above the declaration; thermonuclear-code-quality ran exactly that against the committed 61-assertion suite unchanged (61 passed, 0 failed) and against both trees above (refused). Pin tree 1 and tree 2 as red cases."
+    }
+  ],
+  "roundOneFindingsVerified": [
+    {
+      "finding": "octal fail-open (round 1, blocking)",
+      "fixedIn": "12050a4f0170",
+      "verified": "`maxInputChars = 019000` against an otherwise green tree now exits 1 with `declares no maxInputChars this check can read: no line matches ^\\s*maxInputChars\\s*=\\s*(0|[1-9][0-9]*)\\s*(?://.*)?$`, and the refusal's enumeration now names `a leading zero`. Reviewer-run at the reviewed head."
     },
     {
-      "severity": "important",
-      "file": ".github/scripts/check-body-embed-limit.sh:114-128",
-      "description": "False refusal on a required job, reviewer-demonstrated at c982e6a2: `comment_block_above` reads only the unbroken run of lines above the declaration whose stripped form starts with `//`, `*` or `/*`. Three correct trees are refused with a remedy the file already satisfies - a `/* ... */` block whose body lines carry no `*` prefix (exit 1, 'the comment above DISPATCH_BODY_MAX (...:5) does not name maxInputChars ... write maxInputChars into the comment above DISPATCH_BODY_MAX'); a Go doc comment on the `const (` group rather than on the member; and a trailing same-line comment, which both declaration patterns explicitly accept via their `(?://.*)?$` tail, so the script reads a declaration shape whose cross-reference it then refuses. Fails closed, so no drift escapes, but the required `lint` job refuses a tree that satisfies the rule and prints an instruction already carried out. Remedy: keep walking upward past a non-comment line while inside an unterminated `/* ...` (stopping at the opening `/*`), and let `cross_reference` also read the declaration line's own trailing comment."
+      "finding": "comment walk refusing three conforming shapes (round 1, blocking)",
+      "fixedIn": "5229534fb656",
+      "verified": "All three now pass, reviewer-run at the reviewed head: a trailing same-line comment (`export const DISPATCH_BODY_MAX = 14500; // never past maxInputChars (embed.go)`) exit 0; an unprefixed `/* ... */` block exit 0; a Go doc comment on the `const (` group exit 0. The widening is what opened the new finding above, so the fix is right in direction and too wide in reach."
+    },
+    {
+      "finding": "error model (round 1, folded in by the architect)",
+      "fixedIn": "57cc85eeb000",
+      "verified": "`load()` and `declaration()` return non-optional values and every unreadable-tree class ends in `fatal()` with one `::error file=...` line, matching check-zod-version.sh's convention; reviewer-run: a mode-000 file gives `packages/contracts/AGENTS.md cannot be read: [Errno 13] Permission denied` exit 1, and a directory in place of a file gives `[Errno 21] Is a directory` exit 1 - both tracebacks gone. `load()` now splits on `\\n` with a trailing `\\r` dropped, so U+2028 and friends no longer shift reported line numbers."
     }
   ],
   "verified": {
-    "ci": "Read on GitHub, not from a handoff. main's required set is lint, typecheck, test, pr-title (ruleset 12331919; main carries no branch-protection required set). The branch's newest pull_request run has head 7eed5a0982b4f58436f3dcc17e4cae13d4f2340a; compare 7eed5a09...c982e6a2 is `ahead` by .legion/INFRA-110/implement.json and test.json alone, so that commit's checks stand for this code. All four required check-runs are completed/success there. envoy-go (not required) settled success after the implementer's single re-run.",
-    "threads": "gh api graphql reviewThreads(first:100) returned 0 nodes; no review of any kind on #2138 before this round. No bot thread to adjudicate.",
-    "e2e": "Both lines present in the live body: `E2E (implementer)` and `E2E (tester)`, each naming a surface, a command, an observation, head 7eed5a0982b4f58436f3dcc17e4cae13d4f2340a and a negative control.",
-    "thermo": "Pair run once at the reviewed head c982e6a2. thermonuclear-deep-review: APPROVE, 0 blocking, 2 Minor, a 15-tree fail-open analysis and the Security rows. thermonuclear-code-quality: CHANGES, on the error model. The reviewer reproduced both deep-review Minors itself and re-graded them (above); the quality finding is the fast-follow."
+    "ci": "Read on GitHub at the round's start. main's required set is lint, typecheck, test, pr-title (ruleset 12331919; no branch-protection set). The branch's newest pull_request run heads at code commit 23f290e588a45844b829b443f487c11305a017b4; compare 23f290e5...7d33262f is `ahead` by .legion/INFRA-110/implement.json and test.json alone. All four required check-runs are completed/success there (Tests run 40113173607, PR Title run 40113206579). Not required and not a gate: `envoy-go` reports failure at that commit with its `Unit test envoy Go package` step unfinished and its run (40113173766) still in progress, and `dispatch` is in_progress; the same job flaked in round 1 and went green on one re-run. Nothing required is red.",
+    "threads": "gh api graphql: two threads, both mine from round 1, both resolved by the implementer with a Fixed-in reply. I replied on each with my own disposition this round: PRRT_kwDORFy7ds6v5wkU accepted as fixed; PRRT_kwDORFy7ds6v5wkY fixed for the three shapes it named, with the new false accept opened as a thread of its own rather than reopening it. No bot thread exists, so there is none to adjudicate and none to name to the implementer.",
+    "e2e": "Both lines present in the live body and carrying this round's head: `E2E (implementer)` and `E2E (tester)`, each with surface, command, observation, head 23f290e588a45844b829b443f487c11305a017b4 and a negative control.",
+    "thermo": "Pair run once at the reviewed head. thermonuclear-deep-review: CHANGES, Medium, the same false accept, four trees. thermonuclear-code-quality: CHANGES, the same defect plus a verified rewrite passing the committed suite unchanged; it confirms the error model now matches the directory's fatal() convention. The reviewer reproduced the finding itself in two trees before grading."
   },
-  "fastFollow": "The script's error model: load() and declaration() return `... | None` and thread five `is not None` guards through the main flow, where every sibling in .github/scripts (check-zod-version.sh:47-49, check-bun-workspace-manifests.sh:24-25, check-gh-version.sh:26-28) ends an unreadable input with fatal() and accumulates only the findings a human wants listed together. The success print at :194-197 dereferences body.value and embed.value, which the declared types say may be None - safe today only because every None path records a problem and the script exits first, an invariant nothing type-checks in a heredoc. Folding in the same pass: load() catches FileNotFoundError and UnicodeDecodeError only, so a mode-000 file or a directory in place of a file ends in a traceback rather than an `::error file=...` line (catch OSError), and text.splitlines() splits on U+2028, U+0085, \\v and \\f, shifting every reported line number (split on \\n instead)."
+  "gradedNotFindings": [
+    "A block comment whose closing line starts with `//` (`/*`, text, `// */`) is no longer credited: the `//` branch wins before the `*/` branch, the tree is refused naming the site and the remedy, and neither gofmt nor Biome writes such a closer. Fail-closed; the architect graded it and I agree. The downward-classification remedy above makes the case disappear rather than needing a rule.",
+    "The check binds the TypeScript literal, not the generated Go copies, which `bun run check:go` holds in a job main's ruleset does not require. Pre-existing, named in the script's header, and outside this issue.",
+    "The implementer's `discoveredComplexity` availability line about a cross-model read is an availability note, not a skipped step."
+  ],
+  "fastFollow": "The local name `declaration` at .github/scripts/check-body-embed-limit.sh:130 holds the declaration's own source line while the module-level `declaration()` returns a `Declaration`; rename the local to `declaration_line`. Naming only, no behaviour."
 }
