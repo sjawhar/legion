@@ -92,8 +92,8 @@ wait_healthz() {
 # state directory; this run's own HOME (pane_home, below) has the same effect. From a working
 # directory under the operator's real HOME, mise then finds that HOME's config as a parent
 # directory's config with no trust record, so it exits 1. The daemon's boot scrubs its private tmux
-# server's environment
-# (`tmux show-environment`) and reads that exit as a failure, not as no server, so boot refuses.
+# server's environment (`tmux show-environment`) and reads that exit as a failure, not as no
+# server, so boot refuses.
 # So when the first tmux is a script or mise itself, the run's PATH, and so the daemon's, starts
 # with the real binary (lib/rig.sh, real_bin_path), which fails loudly when mise cannot name it.
 # CI's tmux is the runner's apt binary, which this leaves alone. mise reads which configs are
