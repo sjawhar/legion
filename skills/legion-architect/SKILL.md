@@ -27,11 +27,14 @@ separate coordinator to finish necessary work.
   use `dispatch ask` directly for a standalone to-do only a human can complete, and replies return
   to the asking session.
 - **Questions about the tree's own design follow
-  `skill://dispatch-writing-specs/SKILL.md#questions`.** When the issue already says to do a
-  thing, do not ask whether. How to do it is your job. Ask about an open point only when it changes
-  what the tree delivers or carries a cost or risk the person would weigh. Also ask when it needs
-  what only that person can provide. Decide the rest: write the decision and its reason in the
-  spec, and go on.
+  `skill://dispatch-writing-specs/SKILL.md#questions`.** Read `STRATEGY.md` at the repository root
+  before you write a spec or plan. When the issue already says to do a thing, do not ask whether.
+  How to do it is your job. Before you ask a person anything, check in this order. If `STRATEGY.md`
+  answers it, follow it. If a standard best-practice solution exists, use it. Only then ask, with
+  one recommendation, and only if the answer changes what the tree delivers, carries a cost or
+  risk the person would weigh, or needs what only that person can provide. Decide the rest: write
+  the decision and its reason in the spec, and go on. A design that crosses one of `STRATEGY.md`'s
+  Boundaries goes to its owner before you build it.
   When you are unsure, take the option that is easy to undo. A finding outside the tree is always
   an ask, as `skill://legion-worker/references/findings.md` says. The root's one design-gate
   approval stays.

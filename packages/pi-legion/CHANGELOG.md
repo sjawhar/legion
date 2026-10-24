@@ -15,6 +15,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   path. In a Legion tree the daemon's workflow and the role prompt keep their own sequence. The
   dotfiles copy goes once a release carries this one.
 
+- `STRATEGY.md` at the repository root holds Legion's and Dispatch's strategy: purpose, users, key
+  metrics, tracks, principles, and the boundaries that need the owner's decision. It replaces
+  `docs/design-principles.md`. `legion-architect` and the planner's role prompt
+  (`roles/core/planner.md`) say to read it before a spec or plan, and to check before any question
+  to a person, in order: what `STRATEGY.md` answers, then a standard best-practice solution, and
+  only then an ask with one recommendation, when the answer changes what the tree delivers. A
+  design that crosses one of its boundaries goes to its owner before it is built.
+
 - An architect's questions about its own tree follow `dispatch-writing-specs`, "Questions". When
   the issue already says to do a thing, it does not ask whether. It asks about an open point only
   when that point changes what the tree delivers, carries a cost or risk the person would weigh,
