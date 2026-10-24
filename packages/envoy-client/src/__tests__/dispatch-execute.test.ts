@@ -561,7 +561,7 @@ describe("executeDispatchTool", () => {
     expect(await problemsOf("dispatch_doc_read", { ref: documentAsk })).toEqual([
       `ref ${documentAsk} names an ask on CORE/runbook-md; dispatch doc-read would act on CORE/runbook-md and drop the ask: read it with dispatch read, or name CORE/runbook-md with project CORE and artifact runbook-md`,
     ]);
-    // suggest and doc-edit act on a document, so an issue-owned link's hint names one.
+    // suggest still requires an artifact, so an issue-owned link's hint names one.
     expect(
       await problemsOf("dispatch_suggest", {
         ref: ask,
@@ -570,6 +570,15 @@ describe("executeDispatchTool", () => {
       })
     ).toEqual([
       `ref ${ask} names an ask on DSP-42; dispatch suggest would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42 and artifact <the document's slug>`,
+    ]);
+    // doc-edit edits the issue's primary document, so its hint names the issue alone.
+    expect(
+      await problemsOf("dispatch_doc_edit", {
+        ref: ask,
+        ops: [{ op: "replace", find: "old line", with: "new line" }],
+      })
+    ).toEqual([
+      `ref ${ask} names an ask on DSP-42; dispatch doc-edit would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42`,
     ]);
   });
 
@@ -6001,6 +6010,47 @@ describe("executeDispatchTool", () => {
       summary: "Record final wording",
       precondition: { document: "sha256:current-document" },
     });
+  });
+
+  test("edits the issue's primary document when no artifact names another", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), init: init ?? {} };
+      requests.push(request);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [
+            { id: "artifact-7", slug: "notes", name: "notes.md", primary: false },
+            { id: "artifact-42", slug: "spec", name: "spec.md", primary: true },
+          ],
+        });
+      }
+      if (path === "/api/v1/artifacts/artifact-42/edits") {
+        return response({ applied: 1, version: null, token: "sha256:after-edit" });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_edit",
+      args: {
+        issue: "DSP-42",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toEqual({ issue: "DSP-42", applied: 1, token: "sha256:after-edit" });
+    expect(requests[1]?.url).toContain("/api/v1/artifacts/artifact-42/edits");
   });
 
   test("says nothing changed and names the operations that changed nothing", async () => {

@@ -89,9 +89,10 @@ function documentOwnerValidation(
   };
 }
 
+const documentEditOwner = documentOwnerValidation(true);
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
-    if (!documentOwnerValidation(true, true).check(value)) return false;
+    if (!documentEditOwner.check(value)) return false;
     const input = value as { readonly precondition?: unknown };
     if (input.precondition === undefined) return true;
     if (typeof input.precondition !== "object" || input.precondition === null) return false;
@@ -101,8 +102,7 @@ const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
     };
     return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
   },
-  message:
-    "Exactly one of issue and project is required; artifact or ref must name the document. A precondition selects exactly one of document or blocks.",
+  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
@@ -880,7 +880,9 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Project document artifact id, slug, or filename; optional when ref names it.")
+        .describe(
+          "Optional project document artifact id, slug, or filename; primary document by default for an issue."
+        )
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z

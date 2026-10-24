@@ -1015,11 +1015,12 @@ function innerRefProblem(
   }
   if (tool === "dispatch_read" || tool === "dispatch_ask") return undefined;
   const owner = refOwnerName(ref);
-  // suggest and doc-edit act on a document, so naming an issue alone would be refused in turn.
-  const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
+  // suggest acts on a document and still requires an artifact, so an issue-owned link's hint
+  // names one; doc-edit takes an issue alone and edits its primary document.
+  const suggestTool = tool === "dispatch_suggest";
   const ownerArguments =
     ref.owner.kind === "issue"
-      ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}`
+      ? `issue ${ref.owner.issue}${suggestTool ? " and artifact <the document's slug>" : ""}`
       : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix =
     tool === "dispatch_comment" && ref.kind === "ask"
@@ -3497,7 +3498,7 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_doc_edit": {
-      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), optionalString(args, "artifact"));
       const ops = args.ops as EditOp[];
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
