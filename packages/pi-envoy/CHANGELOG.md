@@ -13,8 +13,9 @@
   session's listed asks cover, and PROCEEDING counts a wait any open ask covers, another session's
   included. With no open asks of its own, the prompt says the session has none, where it said
   Dispatch had none: when another session's open ask covered the wait, that line denied the ask
-  existed, the check answered WAITING, and the steer had the agent open a duplicate ask. The
-  one-word WAITING/PROCEEDING answer and its parse are unchanged.
+  existed, the check answered WAITING, and the steer told the agent to open an ask the other
+  session's ask already covered. The one-word WAITING/PROCEEDING answer and its parse are
+  unchanged.
 
 - The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
   client and sends the call without the pane. A tmux client waiting to connect to a tmux server too

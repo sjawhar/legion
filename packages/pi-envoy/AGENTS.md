@@ -332,11 +332,11 @@ it says the session has none, not that Dispatch has none, since another session'
 cover the wait. Every Unicode line separator ends that displayed first line, and other C0/C1
 controls become spaces, so a listed ask cannot add prompt lines. The one prompt asks whether the
 agent is waiting on a human for anything those asks do not cover, answered with exactly WAITING or
-PROCEEDING. Its PROCEEDING definition covers a reply a human already said they will send and that
-is on its way (a go-ahead message the user promised): such a reply is an event, not an open
-question, and a wait any open ask covers, another session's included. Something the human put off
-for later, or promised and then did not send, stays WAITING, and so does any decision nobody has
-said they will make. An open ask or `opened_since` never suppresses this check.
+PROCEEDING. Its PROCEEDING definition covers a wait any open ask covers, another session's
+included, and a reply a human already said they will send and that is on its way (a go-ahead
+message the user promised): such a reply is an event, not an open question. Something the human
+put off for later, or promised and then did not send, stays WAITING, and so does any decision
+nobody has said they will make. An open ask or `opened_since` never suppresses this check.
 
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with
