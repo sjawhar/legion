@@ -917,8 +917,8 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		if err := s.backend.removeTags(s.ctx, slug, held, remove); err != nil {
 			return secretFail(stderr, form, err)
 		}
-		if code := raceAfterRetag(s, stdout, stderr, form, name, slug, held); code != 0 {
-			return code
+		if raceAfterRetag(s, stdout, stderr, form, name, slug, held) {
+			return 1
 		}
 		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
 		return rereadAfter(s, stdout, stderr, form, name, true, nil)
@@ -939,8 +939,8 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
-	if code := raceAfterRetag(s, stdout, stderr, form, name, slug, held); code != 0 {
-		return code
+	if raceAfterRetag(s, stdout, stderr, form, name, slug, held) {
+		return 1
 	}
 	fmt.Fprintf(stdout, "retagged %s (owner=%s, tier=%s)\n", name, owner, tier)
 	return rereadAfter(s, stdout, stderr, form, name, true, nil)
@@ -950,21 +950,22 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 // UntagResource take no condition) keeps the github-owners rule when another writer retags the same
 // secret between this retag's read and its write: it reads the tags back, and when the kind and
 // github-owners there are a pair the broker refuses (policy.GitHubOwnersFor), it restores the tags
-// this retag read (held), asks the broker to reread them, and exits 1 naming the race. It answers 0
-// when the pair is one the broker serves, and at once on a store whose writes are conditional
-// (GCP's etag refuses such a write instead, errTagsChanged). A retag on AWS is therefore safe only
-// with one writer at a time: the restore takes back the other writer's change too.
-func raceAfterRetag(s *secretSession, stdout, stderr io.Writer, form, name, slug string, held heldTags) int {
+// this retag read (held), asks the broker to reread them, prints the race and answers true, for
+// the retag to exit 1. It answers false when the pair is one the broker serves, and at once on a
+// store whose writes are conditional (GCP's etag refuses such a write instead, errTagsChanged). A
+// retag on AWS is therefore safe only with one writer at a time: the restore takes back the other
+// writer's change too.
+func raceAfterRetag(s *secretSession, stdout, stderr io.Writer, form, name, slug string, held heldTags) bool {
 	if s.backend.conditionalTagWrites() {
-		return 0
+		return false
 	}
 	now, err := s.backend.currentTags(s.ctx, slug)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: the retag of %s was written, but reading its tags back failed, so whether another write left it a kind without the GitHub owners it needs is unknown: %v\n", form, name, err)
-		return 1
+		return true
 	}
 	if _, err := policy.GitHubOwnersFor(now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners]); err == nil {
-		return 0
+		return false
 	}
 	fmt.Fprintf(stderr, "agent-secrets %s: another write retagged %s while this retag ran, leaving kind %q with github-owners %q, which the broker refuses; a retag on AWS is safe only with one writer at a time\n", form, name, now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners])
 	var extra []string
@@ -982,11 +983,11 @@ func raceAfterRetag(s *secretSession, stdout, stderr io.Writer, form, name, slug
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: restoring the tags this retag read failed: %v; set them again once the other writer is done\n", form, err)
-		return 1
+		return true
 	}
 	fmt.Fprintf(stderr, "agent-secrets %s: %s's tags are restored to what this retag read; run the retag again once the other writer is done\n", form, name)
 	rereadAfter(s, stdout, stderr, form, name, true, nil)
-	return 1
+	return true
 }
 
 // ---------------------------------------------------------------------------
