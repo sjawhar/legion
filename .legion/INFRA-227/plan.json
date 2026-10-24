@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-227",
+  "completed": "2026-10-24T23:45:00Z",
+  "plan": "dispatch://INFRA-227/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's charter here — the one commit, the push with no skip-checks trailer (this push carries files outside .legion/), the pull request body with its Dispatch: INFRA-227 line, the E2E (implementer) line and the proof array, and the no-deferral rule.",
+      "legion-worker/references/systematic-rename.md: the change replaces one word across four scoped paths and a generated mirror, which is exactly that reference's sweep-every-occurrence-and-prove-none-is-left discipline.",
+      "legion-worker/references/pr-body.md: the template and the definition of a proof, since each criterion's proof in the plan must be recorded as command, observation, head SHA and negative control.",
+      "dispatch-first: search Dispatch before posting anything; this issue's own spec (dispatch://INFRA-227) is the only covering record and no new issue is filed.",
+      "dispatch: any write the implementer makes to Dispatch (a comment, an ask, a message) follows it."
+    ],
+    "test": [
+      "legion-worker: the tester's charter — drive the surface for real, read CI for everything static (lint, types, the unit suites), write the test handoff with implementerProof, failures and its own proof.",
+      "legion-worker/references/pr-body.md: what counts as a proof and what the tester must verify in the implementer's proof array and E2E line; the surfaces here are the staged skills partition, the regenerated Claude plugin tree and the legion binary's embedded prompt, each re-runnable from the plan's table.",
+      "dispatch-first: search before posting a finding; a problem outside this issue is a dispatch ask, never a new issue.",
+      "dispatch: any Dispatch write the tester makes follows it."
+    ],
+    "review": [
+      "legion-worker: the reviewer's charter and the order of a review round, including that its phase ends with its completion and not with its review.",
+      "legion-worker/references/merge-gate.md: the approval of the head by SHA, what the reviewer checks before approving and what retro and READY depend on.",
+      "legion-worker/references/review-threads.md: one disposition reply per thread, read before answered, resolved one by one by the author.",
+      "dispatch: any Dispatch write the reviewer makes follows it."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: acceptance criterion 1's `git grep` cannot run in this workspace, which the analyst read as a jj workspace with no git directory.",
+        "answer": "Refuted by measurement. The workspace is a git worktree: `.git` is a file naming /legion/repos/github.com/sjawhar/legion/.git/worktrees/infra-227, `git rev-parse --is-inside-work-tree` prints true, and `git grep -in sami -- skills packages/daemon/internal/prompts packages/claude-envoy/legion '*AGENTS.md'` returns the 12 expected lines today. The plan keeps the criterion's command verbatim; no substitute is needed."
+      },
+      {
+        "finding": "F2: criterion 1 pins packages/envoy/AGENTS.md:529 and :605, and the edit at :280 could reflow and move them.",
+        "answer": "The plan fixes the replacement at two lines (95 and 33 columns), the same count the passage has today, so the two dependency-version lines stay at 529 and 605. The implementer checks this by running criterion 1's own command, whose expected output is those two line numbers."
+      },
+      {
+        "finding": "F3: the new root AGENTS.md rule is itself inside criterion 1's '*AGENTS.md' pathspec, so an illustrative example spelling the name would break the headline criterion.",
+        "answer": "The plan's bullet states the identifier carve-out abstractly ('a repository path, a dependency version, a login and a machine name all stay') with no worked example, and says in the plan why. The acceptance command run after the edit is the self-check."
+      },
+      {
+        "finding": "F4: 'from a person' may widen who can issue a ruling, and nothing says how the controller decides a message is a person's.",
+        "answer": "No widening and no new test. The same reference already generalises at line 58 ('a ruling of a person's'), and skills/legion-controller/SKILL.md:107-109 already states the channel test (any plain user turn other than the start message or a `legion claims deliver` task is a person writing from Dispatch's Agents page). The rewrite adds no sentence there and removes none; this reading is named in the completion summary for the architect."
+      },
+      {
+        "finding": "F5: criterion 2's greps cannot decide what they claim — `grep -n 'ruling'` matches unrelated lines and the reconciliation-pass line is never edited — and no criterion covers the role prompt's sentence.",
+        "answer": "The plan keeps the spec's two commands and adds exact-sentence counts that would fail if the definition were dropped or reworded: `grep -c` of the new definition in each skill file and in each packages/claude-envoy/legion mirror, and `grep -c \"a person's rulings\"` in packages/daemon/internal/prompts/roles/controller-root.md. The staged partition a pane loads is greppped as the same criterion's production-like surface."
+      },
+      {
+        "finding": "F6: no criterion reaches a live surface; the controller runs the released plugin and a compiled binary, not this checkout.",
+        "answer": "The plan names the three artifacts that are reachable in the pod (the staged @sjawhar/pi-legion skills partition, the regenerated packages/claude-envoy/legion tree, and the legion binary's embedded prompt: `grep -aci sami` on a fresh build is 1 today and must be 0) and states that the issue ends at merge, the change reaching the live controller with the next plugin release and daemon rollout. No daemon API contract changes, so no daemonApiVersion bump. The production check after the merge is written out: re-read /opt/legion/pi-legion/dist/skills/legion-controller/SKILL.md in a pod (today it is plugin 10.19.8 and still carries the old lines), pass once it carries the new wording, pending until then."
+      },
+      {
+        "finding": "F7: the deployment's own instructions may define rulings by name, outside this repository.",
+        "answer": "The INFRA deployment instructions as delivered to this pane's system prompt name no person; they cover only how a change to a Dispatch reader-facing page is proven. So no companion text outside the repository has to change for a ruling to keep being recognised. Whether the weekly-plan artifact's own ruling row names him is a Dispatch record rather than instruction text, and is outside this issue's scope and this rule."
+      },
+      {
+        "finding": "F8: `bun scripts/build.ts` deletes and rebuilds dist/ as well as legion/, so the commit could carry regenerated bundles or a changed THIRD_PARTY_NOTICES.",
+        "answer": "The plan orders `bun install --frozen-lockfile` first, records the baseline `bun run check-dist` pass before any edit (it passes today: 'dist/ and legion/ match a fresh build'), and requires `jj diff --stat` after the build to show the only generated files moved are the two under packages/claude-envoy/legion/skills/legion-controller/. A dist/ diff is a stop-and-report, not something to commit."
+      },
+      {
+        "finding": "F9: criterion 3's 'the guards pass' is partial in this pod, since several rules skip without LEGION_TEST_OMP.",
+        "answer": "The plan states what a local pass means and measures the baseline: pi-legion 492 pass / 8 skip in 40 s, pi-envoy 899 pass / 3 skip in 44 s, both green before the change. The omp-gated rules run in CI, which sets GITHUB_ACTIONS=true and refuses to skip them, in the pi_legion and pi_envoy jobs whose filters this pull request matches (skills/**, AGENTS.md, packages/daemon/**). The implementer may set LEGION_TEST_OMP=/opt/omp/bin/omp locally and, if that run fails for a reason outside this change, say so and rely on CI."
+      },
+      {
+        "finding": "F10: 'no line beyond the ten moves' has a strict reading (no other line's bytes change) and a loose one (no other passage changes meaning), and the wording forces a reflow.",
+        "answer": "The plan takes the loose reading and measures the result: SKILL.md stays line-neutral at 488 lines (its two passages keep 1 and 3 lines), controller-root.md keeps 3 lines, packages/envoy/AGENTS.md keeps 2, and only references/backlog-stewardship.md grows by one line (63 to 64) because its paragraph holds 302 characters after the substitution, which cannot fit three lines at 100 columns. That file carries no line budget. Named for the architect in the completion summary."
+      },
+      {
+        "finding": "F11: criterion 5's CHANGELOG half has no command and no named subsection.",
+        "answer": "The entry goes under the existing `### Changed` heading (line 67), following packages/pi-envoy/CHANGELOG.md's own entry for the first de-naming, and the plan gives the criterion a command: `sed -n '/^## \\[Unreleased\\]/,/^## \\[/p' packages/pi-legion/CHANGELOG.md | grep -n 'name no person\\|names no person'`."
+      },
+      {
+        "finding": "F12: the rule's carve-out overstates what skills/dispatch/SKILL.md requires — that skill requires the name only when the agent was given one, and 'the person' otherwise.",
+        "answer": "The plan's bullet states it the accurate way, so the standing rule is not read as licence to use a name an agent was not given. Recorded below as the plan's one departure from the spec's wording, with the spec's Summary, Acceptance, scope and settled decisions unaffected."
+      },
+      {
+        "finding": "F13: the rule binds three file kinds while the name stays elsewhere in the tree, and criterion 1 can only ever catch this one name.",
+        "answer": "The plan says so explicitly under 'What this issue does not do': docs/, deploy/, the Go and TypeScript sources, the scripts, .claude-plugin/marketplace.json, .omp-pin and the package changelogs keep their text and are not in violation, so a reviewer should not flag them; packages/envoy/CHANGELOG.md keeps the attribution that packages/envoy/AGENTS.md drops. Enforcement is a reviewer's by the human's answered decision."
+      },
+      {
+        "finding": "F14: 'the operator's decision' may be the wrong role for LEGION-496, and only the owner can say.",
+        "answer": "The approved spec settles it in as many words ('the decision becomes the operator's'), so the plan follows it and does not reopen it. The reading is named in the completion summary so the architect can take it to the human if he disagrees."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The spec's rule sentence says the rule 'says nothing about what an agent writes into Dispatch, where skills/dispatch/SKILL.md requires a decision to carry the name of the person who made it'.",
+      "plan": "The root AGENTS.md bullet states that carve-out as the cited skill actually reads: a decision carries the name of the person who made it when the agent was given one, and 'the person' when it was not.",
+      "evidence": "skills/dispatch/SKILL.md line 55: 'Write it into the text in the person's words, quoted and dated. Name them from `dispatch whoami` or the conversation. If neither names them, write \"the person\". Never use a name you were not given.'",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}
