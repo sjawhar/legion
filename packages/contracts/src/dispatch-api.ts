@@ -191,6 +191,7 @@ export interface IssueComponentsInput {
 export interface WriteAdvice {
   /** Issue-scoped fields are omitted on project-document writes. */
   readonly issue_status?: IssueStatus;
+  /** The calling session's own messages, comments and asks on the issue since the last human event. */
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   /** The ask blocks in the document an upload or issue creation stored, answered ones included. */

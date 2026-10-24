@@ -62,6 +62,9 @@ func (s *server) computeWriteAdvice(
 	excludeAskID string,
 ) (*writeAdvice, error) {
 	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}}
+	if actor.Kind != "session" {
+		return advice, nil
+	}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
@@ -71,16 +74,12 @@ func (s *server) computeWriteAdvice(
 			where issue_key = $1 and actor->>'kind' = 'user'
 		)
 		select count(*) from events, last_human
-		where issue_key = $1 and actor->>'kind' = 'session'
+		where issue_key = $1 and actor->>'kind' = 'session' and actor->>'id' = $2
 		  and type in ('message.created', 'comment.created', 'ask.opened')
 		  and id > last_human.last_id
-	`, issueKey).Scan(&advice.SessionWritesSinceHuman); err != nil {
+	`, issueKey, actor.ID).Scan(&advice.SessionWritesSinceHuman); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
-	if actor.Kind != "session" {
-		return advice, nil
-	}
-
 	if err := s.runAdviceQueryHook(ctx, tx, "your_open_asks"); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}

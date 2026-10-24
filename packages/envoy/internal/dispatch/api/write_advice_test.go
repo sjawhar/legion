@@ -305,6 +305,53 @@ func TestWriteAdviceCountsSessionWritesSinceLastHumanEvent(t *testing.T) {
 	}
 }
 
+// Each session hears its own consecutive-write count, not the issue's: the client renders the
+// number as "You've sent N messages on KEY with no human response", so a second session's writes
+// must not inflate the first session's count, and a human event resets both.
+func TestWriteAdviceCountsOnlyTheCallingSessionsOwnWrites(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "OWN")
+	spec := "# Own writes\n"
+	issue := createAdviceIssue(t, handler, "OWN", "Own writes", &spec)
+	path := "/api/v1/issues/" + issue.Key + "/messages"
+	first := adviceSessionActor("session-first")
+	second := adviceSessionActor("session-second")
+
+	post := func(actor any, body string) int {
+		t.Helper()
+		response := sessionRequest(t, handler, http.MethodPost, path, map[string]any{
+			"body": body, "actor": actor,
+		})
+		return adviceFromResponse(t, response.Code, response.Body.String()).SessionWritesSinceHuman
+	}
+
+	if got := post(first, "first one"); got != 1 {
+		t.Fatalf("first session's first message count = %d, want 1", got)
+	}
+	if got := post(second, "second one"); got != 1 {
+		t.Fatalf("second session's first message count = %d, want 1", got)
+	}
+	if got := post(second, "second two"); got != 2 {
+		t.Fatalf("second session's second message count = %d, want 2", got)
+	}
+	if got := post(first, "first two"); got != 2 {
+		t.Fatalf("first session's second message count = %d, want 2", got)
+	}
+
+	human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]string{
+		"body": "human response",
+	}, "alice")
+	if human.Code != http.StatusCreated {
+		t.Fatalf("human comment: status=%d body=%s", human.Code, human.Body.String())
+	}
+	if got := post(first, "first after human"); got != 1 {
+		t.Fatalf("first session's count after human event = %d, want 1", got)
+	}
+	if got := post(second, "second after human"); got != 1 {
+		t.Fatalf("second session's count after human event = %d, want 1", got)
+	}
+}
+
 func appendAdviceSystemEvent(t *testing.T, database *store.Store, issueKey string) {
 	t.Helper()
 	tx, err := database.Pool.Begin(context.Background())
@@ -594,7 +641,7 @@ func TestWriteAdviceStaysBoundedOnLongIssueHistory(t *testing.T) {
 	if _, err := tx.Exec(context.Background(), `
 		insert into events (issue_key, seq, type, actor, payload, notify)
 		select $1, $2 + ordinal, 'message.created',
-		       '{"kind":"session","id":"bulk-session"}'::jsonb, '{}'::jsonb, false
+		       '{"kind":"session","id":"session-performance"}'::jsonb, '{}'::jsonb, false
 		from generate_series(1, $3) ordinal
 	`, issue.Key, lastSeq, seededEvents); err != nil {
 		t.Fatalf("seed events: %v", err)
