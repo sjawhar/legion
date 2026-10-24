@@ -251,7 +251,10 @@ export interface PiEventContract {
   };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
-  readonly tool_execution_end: { readonly event: ToolExecutionEndEvent; readonly result: undefined };
+  readonly tool_execution_end: {
+    readonly event: ToolExecutionEndEvent;
+    readonly result: undefined;
+  };
 }
 
 /** The context OMP hands a registered slash-command handler. Its `sessionManager` is the same
