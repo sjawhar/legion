@@ -53,10 +53,11 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	}
 	// A registration whose read predates a review the live event already told keeps that record:
 	// it rebuilds the gate from Dispatch, and the gate seed that follows re-reads the same review.
-	if !classify.DesignGateOpen(gate) && stored != nil && stored.ToldChangesVersion != nil && *stored.ToldChangesVersion == gate.LatestVersion {
+	if !classify.DesignGateOpen(gate) && stored != nil && stored.ArtifactID == gate.ArtifactID &&
+		stored.ToldChangesVersion != nil && *stored.ToldChangesVersion == gate.LatestVersion {
 		gate = classify.RecordChangesTold(gate, *stored.ToldChangesVersion, stored.ToldChangesReason)
 	}
-	answered, err := e.answerRegisteredGate(ctx, tx, fact.Issue, gate, changesRequested, fact.RequestWaitsOnAgent)
+	answered, err := e.answerRegisteredGate(ctx, tx, fact, gate, changesRequested)
 	if err != nil {
 		return intake.Result{}, err
 	}
@@ -100,41 +101,43 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	return intake.Result{}, nil
 }
 
-// answerRegisteredGate answers a root waiting on its design gate with what the registration
-// itself carries, and reports whether it answered. register_gate reads Dispatch, so a review
-// given between the architect's hand-back and that read, or a version written then whose event
-// the daemon never applied, arrives with the registration: the live event and the gate seed that
-// follow find the gate as the registration left it and answer nothing, so without this only
-// another act by the person would resume the root. A version newer than the one waited on answers
-// it whoever wrote it, as a live artifact.version does, since Dispatch then waits on the agent. At
-// the version waited on, only the person's approval or changes request answers: a request Dispatch
-// merely shows waiting on the agent (waitsOnAgent) carries no author, and a session's note can put
-// it there. A registration below the version waited on answers nothing.
-func (e *Engine) answerRegisteredGate(ctx context.Context, tx pgx.Tx, key string, gate record.DesignGate, changesRequested, waitsOnAgent bool) (bool, error) {
-	issue, err := e.store.Issue(ctx, tx, key)
+// answerRegisteredGate answers a root waiting on its design gate with what the registration's
+// read of Dispatch found, and reports whether it answered. register_gate reads Dispatch, so a
+// review given between the architect's hand-back and that read, or a version written then whose
+// event the daemon never applied, arrives with the registration: the live event and the gate seed
+// that follow find the gate as the registration left it and answer nothing, so without this only
+// another act by the person would resume the root. Only what Dispatch showed counts, never the
+// version the caller named: a document version Dispatch shows newer than the one waited on
+// (DispatchVersion) answers it whoever wrote it, as a live artifact.version does, since Dispatch
+// then waits on the agent; and the person's approval or changes request of Dispatch's latest
+// version answers it when that version is at least the one waited on. A request Dispatch merely
+// shows waiting on the agent carries no author, and a session's note can put it there, so it
+// answers nothing.
+func (e *Engine) answerRegisteredGate(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered, gate record.DesignGate, changesRequested bool) (bool, error) {
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil || !issue.AwaitingPerson() || issue.Awaiting.GateVersion == 0 || issue.Awaiting.AnsweredAt != nil {
 		return false, err
 	}
+	waited := issue.Awaiting.GateVersion
 	var event string
+	version := 0
 	switch {
-	case gate.LatestVersion > issue.Awaiting.GateVersion:
-		event = "version"
-	case gate.LatestVersion < issue.Awaiting.GateVersion:
-		return false, nil
-	case classify.DesignGateOpen(gate):
-		event = "approved"
-	case changesRequested:
-		event = "changes_requested"
+	case fact.DispatchVersion > waited:
+		event, version = "version", fact.DispatchVersion
+	case classify.DesignGateOpen(gate) && fact.ApprovedVersion >= waited:
+		event, version = "approved", fact.ApprovedVersion
+	case changesRequested && fact.ChangesRequestedVersion >= waited:
+		event, version = "changes_requested", fact.ChangesRequestedVersion
 	default:
-		if waitsOnAgent {
+		if fact.RequestWaitsOnAgent {
 			e.logOnCommit(ctx, "workflow: a registration shows the request waiting on the agent, which answers no wait", "issue", issue.Key, "version", gate.LatestVersion)
 		}
 		return false, nil
 	}
-	issue.Awaiting.GateVersion = gate.LatestVersion
+	issue.Awaiting.GateVersion = version
 	at := e.now()
 	issue.Awaiting.AnsweredAt = &at
-	e.logOnCommit(ctx, "workflow: a registration answered a design gate wait", "issue", issue.Key, "version", gate.LatestVersion, "event", event)
+	e.logOnCommit(ctx, "workflow: a registration answered a design gate wait", "issue", issue.Key, "version", version, "event", event)
 	return true, e.store.PutIssue(ctx, tx, *issue)
 }
 

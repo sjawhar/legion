@@ -230,7 +230,8 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	changes, reason := approval.ChangesRequestedLatest()
 	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version),
 		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
-			ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent"},
+			ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent",
+			DispatchVersion: approval.LatestVersion},
 		GateRegisterResponse{})
 }
 

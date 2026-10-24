@@ -509,7 +509,9 @@ func (SignOff) isFact() {}
 // latest version, with its reason, and 0 otherwise: the root keeps its slot with its architect told.
 // RequestWaitsOnAgent says Dispatch showed the open approval request waiting on the agent (a reply
 // or a newer version since it was handed to the person): no wait starts, since the person is not
-// asked to act, and the architect's hand-back of the request starts it.
+// asked to act, and the architect's hand-back of the request starts it. DispatchVersion is the
+// document's latest version as that read found it: Version is the caller's, so only
+// DispatchVersion proves the document moved past the version a root waits on.
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string
@@ -518,6 +520,7 @@ type GateRegistered struct {
 	ChangesRequestedVersion int
 	ChangesReason           string
 	RequestWaitsOnAgent     bool
+	DispatchVersion         int
 }
 
 func (GateRegistered) isFact() {}

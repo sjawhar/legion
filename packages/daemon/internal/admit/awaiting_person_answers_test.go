@@ -207,21 +207,34 @@ func TestARegistrationWhoseRequestWaitsOnTheArchitectAnswersNothing(t *testing.T
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
 }
 
-// A registration of a version newer than the one the root waits on answers the wait whoever wrote
-// that version, as the live artifact.version would: Dispatch then waits on the agent, and the
-// version's own event may never reach the daemon, so nothing else would resume the root.
+// A registration whose read of Dispatch shows a document version newer than the one the root waits
+// on answers the wait whoever wrote that version, as the live artifact.version would: Dispatch then
+// waits on the agent, and the version's own event may never reach the daemon, so nothing else
+// would resume the root. The version the caller names proves nothing: a registration naming v5
+// while Dispatch still shows v4 waiting on the person answers nothing.
 func TestARegistrationOfANewerVersionAnswersTheWaitWhenItsEventIsLost(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	handBackOnAClosedGate(t, pool, admission)
-	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v5", intake.GateRegistered{
-		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, RequestWaitsOnAgent: true,
-	}, admission.engine, admission); err != nil {
-		t.Fatalf("register gate v5: %v", err)
-	}
-	got := issue(t, pool, "LEGION-ROOT")
-	if !got.Answered() || got.Awaiting.GateVersion != 5 {
-		t.Fatalf("root after registering v5 over a wait on v4 = %#v, want answered at version 5", got)
+	for _, tc := range []struct {
+		name     string
+		fact     intake.GateRegistered
+		answered bool
+	}{
+		{name: "Dispatch shows version 5", answered: true,
+			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, RequestWaitsOnAgent: true, DispatchVersion: 5}},
+		{name: "only the caller names version 5",
+			fact: intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 5, DispatchVersion: 4}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			handBackOnAClosedGate(t, pool, admission)
+			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v5", tc.fact, admission.engine, admission); err != nil {
+				t.Fatalf("register gate v5: %v", err)
+			}
+			got := issue(t, pool, "LEGION-ROOT")
+			if got.Answered() != tc.answered || tc.answered && got.Awaiting.GateVersion != 5 {
+				t.Fatalf("root after the registration = %#v, want answered %t (at version 5 when answered)", got, tc.answered)
+			}
+		})
 	}
 }
 
@@ -277,6 +290,14 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 		{name: "the live event, then a registration whose read predates it, then the seed", busy: true,
 			order:   []intake.Fact{changes, intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4}, seeded},
 			reasons: []string{"name the rollback path"}},
+		// A registration of another document starts with no told record, so that document's own
+		// review, even with the same reason, is told.
+		{name: "another document registered after the first one's review was told", busy: true,
+			order: []intake.Fact{changes,
+				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-other", Version: 4},
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-other", Kind: intake.DispatchArtifactChangesRequested,
+					Version: 4, Reason: "name the rollback path", Seed: true}},
+			reasons: []string{"name the rollback path", "name the rollback path"}},
 		{name: "a second review at the same version", order: []intake.Fact{changes, second},
 			reasons: []string{"name the rollback path", "and name who runs the restore"}},
 	} {

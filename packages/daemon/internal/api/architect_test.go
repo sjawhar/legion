@@ -854,8 +854,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, DispatchVersion: 3},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3, DispatchVersion: 1},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("gate facts = %#v, want the approved document to carry its approval and the other none", got)
@@ -887,9 +887,9 @@ func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) 
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason, DispatchVersion: 4},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true, DispatchVersion: 4},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("gate facts = %#v, want %#v", got, want)
