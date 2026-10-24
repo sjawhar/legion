@@ -2265,20 +2265,16 @@ two slots, so the binary is never rolled back past it once a slotted enrollment 
 An enrollment's kind is `session` (an agent session on a machine its person logged in: the
 helper's own, or a key a launcher such as agentbox brings through the helper's
 `enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
-Each side still meets the other's old shape until every running client is on this release, and
-each fallback names its removal condition at its definition: the broker records an old helper's
-`host`/`box` as `session` and logs `an enrollment named a legacy kind` (`api/handlers_enroll.go`,
-`legacyKinds`: gone after 30 days of no such line from the production broker); the helper asks an
-older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box`
-(`helper/broker.go`, `enroll`: gone once the production broker records `session`); the CLI asks an
-older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`unenroll-box`
-(`cmd/agent-secrets/enroll.go`, `oldHelperSessionKeyOps`: gone once no helper older than this
-release runs); the helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair
-and logs `a client asked a legacy op` (`helper/server.go`, `oldCLISessionKeyOps`: gone once
-dotfiles' pin is at this release and no helper has logged that line for 30 days); and
-`enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`
-(`cmd/agent-secrets/enroll.go`, `cmdEnroll`: gone once dotfiles' pin is legion-envoy 10 or later
-and `scripts/agentbox` on dotfiles' main passes no `--kind`).
+`POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise): the `host`
+and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in
+again. No reader of stored data needs them: the `enrollments` kind constraint admits only the
+two, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which
+`record.ParseBody` reads without checking the kind. The helper still asks an older broker, which
+answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
+gone once the production broker records `session`). The CLI and helper speak only the kind-free
+pair: the helper answers `enroll-box` and `unenroll-box`, the ops of a CLI before legion-envoy 10,
+`BAD_REQUEST unknown op <op>`; the CLI asks a helper nothing else; and `enroll` takes no `--kind`,
+so `--kind box` is a usage error (exit 2) naming the flag.
 `enroll.Service.verifyPodToken` verifies a pod's projected token (issuer, audience, signature,
 expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
 `POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the
@@ -2743,8 +2739,8 @@ signed with that credential's own launcher proof, `enroll.Service.RetireCredenti
 to now and its OAuth tokens deleted in one transaction, so a retired refresh token presented later
 is a plain `invalid_grant` that revokes nothing, its sessions left running and renewing with
 their own proofs), best effort, logging a failure at WARN. The
-helper no longer speaks the earlier
-`POST /v1/launcher-credentials` login, so it needs a broker that serves the OAuth routes.
+helper speaks no other login than the device grant, and the broker serves no other for a person's
+machine.
 `agent-secrets-helper install [--url URL] [--restart-with-sessions]` (`install.go`) writes the
 helper's user unit to `helper.UnitPath` (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`,
 else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`,
@@ -3010,7 +3006,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 28 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 29 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -3033,12 +3029,13 @@ reload; a reread spends a token from either bucket only when both allow it
 (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
 with the refusing limit's `Retry-After`), and the
-unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
-bucket keys on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
+unauthenticated `POST /v1/oauth/device_authorization` spends its source address's bucket before
+the provider does any work, then verifies the request object locally and spends a per-login
+bucket keyed on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
 the `login_hint` names; a request naming a service is refused `400 SERVICE_LOGS_IN_WITH_TOKEN` before
-any bucket. An attacker naming a specific victim operator repeatedly can still lock out that
+any per-login bucket. An attacker naming a specific victim operator repeatedly can still lock out that
 operator's machine logins at a low rate; this is inherent to a per-login limit on an
-unauthenticated route and is an accepted risk, not a bug. A request object `Login` refuses (a
+unauthenticated route and is an accepted risk, not a bug. A request object `LoginDevice` refuses (a
 person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
 `POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket
 before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
@@ -3060,7 +3057,7 @@ was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Servic
 keyed by exact subject, no wildcard) to the one service it logs in as; a subject not listed, or
 listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token
 `401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does
-not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `Login`
+not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `LoginDevice`
 shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no
 issuer `404 TOKEN_LOGIN_OFF`. `enroll.Service.IssueTokenLogin` writes the credential. Each subject
 holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial
@@ -3111,7 +3108,7 @@ lowercase login against it, with `service` the one the record's signed request o
 but `anyone` itself deciding a machine login whose request names a service, whatever its record
 stored (a broker before that rule stored the person its `login_hint` named), and an `agent_secret`
 record whose approver is `anyone`; no login deciding a person's machine login whose approver is
-`anyone` (one a binary from before `Login` refused that hint could have opened); and a decision
+`anyone` (one a binary from before the login refused that hint could have opened); and a decision
 recording the canonical login it returns. `record.ChainVerifier`
 (`chain.go`, built per record kind by `store.Store.ChainVerifier`, whose `Kind` also selects that
 rule, so a record of one kind never backs the other's credential) is
@@ -3272,16 +3269,14 @@ value itself is read fresh from
 the `secrets.Store` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
-machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`
-authorization detail naming no service, and a `login_hint`, the approving operator's email, never
-`anyone`; a detail naming a `service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` at the route and
-`machine.ErrServiceLogsInWithToken` here, since a service logs in with its token, below), mints an
-eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
-`pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
-(keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
-pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`,
-which, like the decision's code check, takes the code as typed: `oauth.NormalizeUserCode`)
-— never the machine's opaque pending id — and this is the *only* route that selects a machine
+machine login, which a person's machine opens through the OAuth device grant (`LoginDevice`,
+below). Its request object carries exactly one `launcher_credential` authorization detail naming no
+service, and a `login_hint`, the approving operator's email, never `anyone`; a detail naming a
+`service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` (`machine.ErrServiceLogsInWithToken`), since a
+service logs in with its token, below. The record's code is the provider's eight-symbol user code
+(`XXXX-XXXX`). The operator's UI resolves a pending login by that human-readable code alone
+(`LookupByCode` / `POST /v1/machine-logins/lookup`, which, like the decision's code check, takes the
+code as typed: `oauth.NormalizeUserCode`), and this is the *only* route that selects a machine
 record (ruling 13: a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
@@ -3301,18 +3296,18 @@ embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_S
 from the decision, so a crash between minting and recording the decision never orphans a
 credential no decision names. Approving a login whose key already holds a live launcher credential
 under another record (a machine that signed two logins with one key) is `409
-KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
-poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
-the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
-only with proofs signed by the key the request object embedded. `Login` and `Read`
-(`POST /v1/launcher-credentials` and its poll) are the login that helpers from earlier releases
-use; nothing refreshes a credential they issue, so past `expires_at` such a machine logs in again.
+KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. No token is ever returned by a decision;
+the credential is usable only with proofs signed by the key the request object embedded. The
+earlier login, `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
+is gone (the POST `405`, since `GET /v1/launcher-credentials` remains, the poll `404`), and migration 0017 dropped its `machine_login_polls` table; a record such a broker
+opened and left pending is still decided by its code, and having no device code
+(`decideDevice`'s `oauth2.ErrNotFound`), records nothing on the provider.
 
-The current helper logs in through `LoginDevice` instead, the OAuth provider's (`internal/broker/oauth`,
+A person's machine logs in through `LoginDevice`, the OAuth provider's (`internal/broker/oauth`,
 storage `internal/broker/oauthstore`, migration 0016) device authorization step behind
-`POST /v1/oauth/device_authorization`: the same request object and refusals as `Login`, its
-`dpop_jkt` required to be the object's key thumbprint, the record's code the provider's user code,
-and no poll row. It runs in the provider's transaction, and so does its request object's `jti`
+`POST /v1/oauth/device_authorization`: the request object and refusals above, its
+`dpop_jkt` required to be the object's key thumbprint, and the record's code the provider's user
+code. It runs in the provider's transaction, and so does its request object's `jti`
 (`enroll.Service.Replay` writes in the transaction its context carries, `oauthstore.TxFrom`, and on
 the pool only when it carries none): a device login holds that transaction's one pooled
 connection and never waits for a second, which a burst of logins as large as the pool would

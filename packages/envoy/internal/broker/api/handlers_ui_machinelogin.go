@@ -21,8 +21,8 @@ type lookupMachineLoginBody struct {
 	Code string `json:"code"`
 }
 
-// lookupMachineLogin resolves a pending machine login by its human-readable confirmation code —
-// the operator's dashboard never needs the machine's opaque pending id — and is the only route
+// lookupMachineLogin resolves a pending machine login by its human-readable confirmation code, the
+// user code the machine's device authorization minted, and is the only route
 // that selects a machine record. Deciding it takes the same code again (CODE_REQUIRED /
 // CODE_MISMATCH), so a direct link to the record can never approve it (ruling 13).
 func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request) {

@@ -71,7 +71,7 @@ func deviceLogin(t *testing.T, svc *Service) string {
 	return body.UserCode
 }
 
-func TestADeviceLoginsRecordIsLoginsWithItsUserCodeAndNoPollRow(t *testing.T) {
+func TestADeviceLoginsRecordIsLoginsWithItsUserCode(t *testing.T) {
 	svc := newFixture(t)
 	withProvider(t, svc, 10*time.Minute)
 	ctx := context.Background()
@@ -79,10 +79,6 @@ func TestADeviceLoginsRecordIsLoginsWithItsUserCodeAndNoPollRow(t *testing.T) {
 	view, err := svc.LookupByCode(ctx, code)
 	if err != nil || view.Approver != testApprover || view.Host != "example-host-devbox" || view.State != "pending" {
 		t.Fatalf("LookupByCode(%s) = %+v, %v; want a pending login for example-host-devbox", code, view, err)
-	}
-	var polls int
-	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from machine_login_polls`).Scan(&polls); err != nil || polls != 0 {
-		t.Fatalf("machine_login_polls = %d (%v), want 0", polls, err)
 	}
 }
 
@@ -93,8 +89,9 @@ func TestLoginDeviceRunsInTheProvidersTransaction(t *testing.T) {
 	}
 }
 
-// TestALoginWithNoDeviceCodeIsDecidedAsBefore pins that a record POST /v1/launcher-credentials
-// opened, which has no device code, is decided as it was with a provider wired.
+// TestALoginWithNoDeviceCodeIsDecidedAsBefore pins that a record with no device code (one an
+// earlier broker's POST /v1/launcher-credentials opened, still pending at the deploy) is decided
+// as it was with a provider wired.
 func TestALoginWithNoDeviceCodeIsDecidedAsBefore(t *testing.T) {
 	svc := newFixture(t)
 	withProvider(t, svc, 10*time.Minute)
@@ -238,29 +235,4 @@ func TestTheTokenHooksRefuseOnlyAnEndedLogin(t *testing.T) {
 			t.Errorf("Before(client_credentials) = %v, want an error that is not a login-ended one", err)
 		}
 	})
-}
-
-// TestTheEarlierRoutesCredentialKeepsItsSevenDays: a credential minted from a record POST
-// /v1/launcher-credentials opened (no device code) cannot refresh, so it lives the earlier
-// route's seven days, or CredentialLifetime when that is shorter; a device login's lives
-// CredentialLifetime.
-func TestTheEarlierRoutesCredentialKeepsItsSevenDays(t *testing.T) {
-	for _, c := range []struct {
-		lifetime, want time.Duration
-	}{
-		{30 * 24 * time.Hour, 7 * 24 * time.Hour},
-		{24 * time.Hour, 24 * time.Hour},
-	} {
-		svc := newFixture(t)
-		withProvider(t, svc, 10*time.Minute)
-		svc.CredentialLifetime = c.lifetime
-		_, credentialID := approvedCredential(t, svc)
-		var left float64
-		if err := svc.Store.Pool.QueryRow(context.Background(), `select extract(epoch from expires_at - now())::float8 from launcher_credentials where id=$1`, credentialID).Scan(&left); err != nil {
-			t.Fatal(err)
-		}
-		if got := time.Duration(left) * time.Second; got < c.want-time.Minute || got > c.want {
-			t.Errorf("CredentialLifetime %s: the earlier route's credential lives %s, want %s", c.lifetime, got, c.want)
-		}
-	}
 }
