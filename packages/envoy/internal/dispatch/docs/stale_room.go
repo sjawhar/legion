@@ -287,11 +287,11 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	// An attempt, not a verdict: the room is left exactly as stale as it was found, and only a
 	// write that appends something comes back for it. Two of the three writers this reports do
 	// come back - a browser append from a room behind the head is refused and fails the room, a
-	// settlement is retried and fails it - but a live write that appends nothing (no changes, a
-	// mutate that failed, an operation rolled back) commits no history and so announces none, and
-	// this is the only reader of hasWriteInFlight. Dropped here, that room is left behind the
-	// head with a connected reader on it and its window spent. Armed, it costs one more
-	// re-examination a window later, by which time the write is finished.
+	// settlement is refused and closes it (reloadRoomBehindHead) - but a live write that appends
+	// nothing (no changes, a mutate that failed, an operation rolled back) commits no history and
+	// so announces none, and this is the only reader of hasWriteInFlight. Dropped here, that room
+	// is left behind the head with a connected reader on it and its window spent. Armed, it costs
+	// one more re-examination a window later, by which time the write is finished.
 	if service.hasWriteInFlight(artifactID) {
 		e.armRetry(artifactID)
 		return false

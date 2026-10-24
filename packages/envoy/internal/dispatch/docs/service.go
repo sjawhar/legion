@@ -1249,15 +1249,17 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// ask whose block this stale tree cannot see.
 	//
 	// Nothing is lost by refusing. The transaction rolls back, so doc_settlements_pending still
-	// stands, and retry is the existing path: retrySettleLocked reschedules, and the third refusal
-	// in a row fails the room (maxSettleFailures), whose eviction reloads the document at the head
-	// and arms the settlement again from that row (onLoadDocument), which then settles every
-	// update, this process's and the other's.
+	// stands. The refusal is a verdict, not a fault to retry: a room behind the head never catches
+	// up without a reload (advanceRoomCursor), so every retry of this settlement on it is refused
+	// the same way. Counted toward maxSettleFailures, the third refusal failed the room, and every
+	// transaction that met the document until the failure's eviction had run answered
+	// ErrServiceUnavailable (INFRA-218). The room is reloaded instead (reloadRoomBehindHead), and
+	// the settlement that re-arms settles every update, this process's and the other's.
 	//
 	// The cursor is the one this settlement marked its context with, read through the accessor
 	// its repairs' appends read (appendingCursor), so the two can never disagree.
 	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), snapshotCursor); err != nil {
-		retry(err)
+		s.reloadRoomBehindHead(parent, tx, room, state, generation, err, retry)
 		return
 	}
 	// The pending authors as this settlement's lock holds them: no append or write changes them
@@ -1618,6 +1620,61 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		s.scheduleSettle(copy)
 	}
 	s.sweepUnrecordedMarks(room, versioned)
+}
+
+// reloadRoomBehindHead answers a settlement the gate refused (refusal, ErrRoomBehindHead): the room
+// instance it holds stands behind the document's durable head, because another envoy-dispatch
+// process appended an update this instance never took, and only a reload brings that update in.
+// The settlement has written nothing. It rolls back first, which releases the document's advisory
+// lock that the close below needs, since a close flushes the room's persistence and its appends
+// take that lock. Then it closes the room as the stale-room evictor does (Evict) and arms the
+// settlement again: its timer loads the document at the head and settles every update, this
+// process's and the other's, and doc_settlements_pending, which the rollback kept, says the work
+// is owed should this process stop first.
+//
+// A room this process is still writing is left alone, as the evictor leaves it
+// (hasWriteInFlight), since a close would take that write's publish with it. An open live write
+// gets its settlement when it finishes (settleDeferred, finishLiveWrite); a browser update not yet
+// stored is refused at its own append from this room, which fails the room, and the reload that
+// failure makes arms the settlement (onLoadDocument), so a timer armed here meets either the
+// failed room or the reloaded one. A shutdown's settlement leaves the room for the next process,
+// as it does for any other write into a room it is closing (retry).
+//
+// The settlement compares its generation, under the room's state lock, with the one it started
+// at, and moves it before it closes the room, so of two settlements that meet the same refusal
+// only one closes the room, and neither closes a room that replaced the one it read.
+func (s *Service) reloadRoomBehindHead(ctx context.Context, tx pgx.Tx, room string, state *roomState, generation uint64, refusal error, retry func(error)) {
+	_ = tx.Rollback(ctx)
+	if ctx.Err() != nil || s.shuttingDown(room) {
+		retry(refusal)
+		return
+	}
+	state.mu.Lock()
+	if s.stopping.Load() || state.closed || state.failed != nil || state.roomGeneration != generation {
+		s.unlockState(room, state)
+		return
+	}
+	if state.liveWriter != nil {
+		state.settleDeferred = true
+		s.unlockState(room, state)
+		return
+	}
+	if state.pendingUpdates > 0 || state.durableAppends.Load() > 0 {
+		s.scheduleSettleLocked(room, state)
+		s.unlockState(room, state)
+		return
+	}
+	state.roomGeneration++
+	s.stopSettleTimer(state.settle)
+	s.unlockState(room, state)
+	if err := s.evictRoom(room, state); err != nil {
+		slog.Warn("dispatch: close a document room its settlement found behind the durable head", "room", room, "error", err)
+		s.scheduleSettle(room)
+		return
+	}
+	slog.Info("dispatch: closed a document room its settlement found behind the durable head; settling it again from the store",
+		"room", room, "error", refusal)
+	s.scheduleSettle(room)
 }
 
 // currentUpdateCursor is the version q sees the document's stored history standing at: the read

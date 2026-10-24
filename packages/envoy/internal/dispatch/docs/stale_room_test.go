@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -184,6 +185,104 @@ func TestASettlementFromARoomBehindTheHeadIsRefusedAndLosesNothing(t *testing.T)
 	}
 	if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
 		t.Fatalf("the settled version records update cursor %d, want the head %d", cursor, head)
+	}
+}
+
+// A settlement refused because its room stands behind the head reloads the room rather than
+// retrying on it: no retry on that room can pass the gate, and counted as failures the third
+// failed the room, so every transaction that met the document until the failure's eviction had
+// run - a named version among them - was refused (INFRA-218). The next settlement reads the
+// reloaded room and versions both processes' text at the head, and the room never fails.
+func TestASettlementFromARoomBehindTheHeadReloadsItAndTheNextSettlesBoth(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+	versions := latestVersionNumber(t, pair.taskA, pair.artifactID)
+
+	settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+	if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+		t.Fatalf("the refused settlement failed task A's room: %v", err)
+	}
+	if now := latestVersionNumber(t, pair.taskA, pair.artifactID); now != versions {
+		t.Fatalf("task A's refused settlement wrote version %d", now)
+	}
+	if live := pair.taskA.srv.GetDoc(pair.artifactID); live != nil && roomBehind(t, pair.taskA, pair.artifactID) {
+		t.Fatal("task A's room still stands behind the head after its settlement was refused there, so its next settlement is refused too")
+	}
+
+	settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+	if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+		t.Fatalf("task A's room failed: %v", err)
+	}
+	markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+	if !strings.Contains(markdown, "Bob's paragraph.") {
+		t.Fatalf("task A's next settlement versioned %q, want it to hold Bob's paragraph", markdown)
+	}
+	if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+		t.Fatalf("the settled version records update cursor %d, want the head %d", cursor, head)
+	}
+	commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "versioner-a"})
+}
+
+// A named version on a process whose room stands behind the head records the stored document,
+// which holds the other process's paragraph, at the head it records. Rendered from the room it
+// recorded text missing Bob's paragraph at a cursor saying it held it, so no later settlement saw
+// those words past that cursor (INFRA-218; corruption 1 of INFRA-66, on the version path).
+func TestANamedVersionFromARoomBehindTheHeadRecordsTheStoredDocument(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	versioner := model.Actor{Kind: "session", ID: "versioner-a"}
+	version := commitNamedVersion(t, pair.taskA, pair.artifactID, versioner)
+	markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+	if stored := storedMarkdown(t, pair.database, pair.artifactID); markdown != stored {
+		t.Fatalf("task A's named version = %q, want the stored document %q", markdown, stored)
+	}
+	if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+		t.Fatalf("task A's named version records update cursor %d, want the head %d", cursor, head)
+	}
+	if !slices.Equal(version.Authors, []model.Actor{versioner, bob}) {
+		t.Fatalf("task A's named version lists %+v, want %+v and %+v", version.Authors, versioner, bob)
+	}
+}
+
+// A browser edit a room behind the head takes is not listed on a version that room's process names
+// while the edit is in flight: the version is rendered from the stored document, which does not
+// hold the edit, and the edit's append is refused from that room, so its browser resends it to the
+// reloaded room and it is credited again there. Listed from the room's in-flight credits, alice was
+// listed on that version and again on the one holding her resent edit (INFRA-218).
+func TestAnEditInFlightOnARoomBehindTheHeadIsListedOnlyOnceItIsStored(t *testing.T) {
+	pair := newProcessPair(t)
+	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
+	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
+	pair.leaveTaskABehind(t, 1, bob, "Bob's paragraph.\n")
+
+	room := pair.taskA.srv.GetDoc(pair.artifactID)
+	peer, update := peerEdit(t, room, appendBlocks(t, "Alice's paragraph.\n"))
+	pair.taskA.addConnection(pair.artifactID, 2, alice)
+	release := holdObserver(t, pair.taskA, pair.artifactID, &pair.taskA.afterCreditUpdate, func() error {
+		return crdt.ApplyUpdateV1(room, update, "peer")
+	})
+	inFlight := commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "versioner-a"})
+	release()
+	pair.taskA.removeConnection(pair.artifactID, 2)
+	if slices.Contains(inFlight.Authors, alice) {
+		t.Fatalf("the version named while alice's edit was in flight lists %+v, want no alice: the version does not hold her edit", inFlight.Authors)
+	}
+	if markdown, _ := latestVersionOf(t, pair.database, pair.artifactID); !strings.Contains(markdown, "Bob's paragraph.") || strings.Contains(markdown, "Alice's paragraph.") {
+		t.Fatalf("the version named while alice's edit was in flight = %q, want Bob's paragraph and not Alice's", markdown)
+	}
+
+	resendUntilStored(t, pair.taskA, pair.artifactID, 2, alice, peer)
+	commitNamedVersion(t, pair.taskA, pair.artifactID, model.Actor{Kind: "session", ID: "sweeper-a"})
+	for _, author := range []model.Actor{alice, bob} {
+		if listed := countVersionAuthor(t, pair.database, pair.artifactID, author); listed != 1 {
+			t.Errorf("%s is listed on %d versions, want exactly one", author.ID, listed)
+		}
+	}
+	if owed := pendingAuthorRows(t, pair.database, pair.artifactID); len(owed) != 0 {
+		t.Errorf("pending authors after the last version = %+v, want none", owed)
 	}
 }
 

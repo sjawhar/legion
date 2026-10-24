@@ -599,7 +599,7 @@ func TestARoomWithAWriteInFlightIsNotEvictedUnderIt(t *testing.T) {
 // the guard that spares it is an attempt, not a verdict. The wake has already spent the window
 // that brought the room here (dueRooms), and two of the three writers the guard reports do come
 // back for the room - a browser append from a room behind the head is refused and fails the room,
-// a settlement is retried and fails it - but a live write that appends nothing (no changes, a
+// a settlement is refused and closes it - but a live write that appends nothing (no changes, a
 // mutate that failed, an operation rolled back) commits no history and so announces none, and
 // nothing else reads hasWriteInFlight. Dropped here, the room is left behind the head with a
 // reader on it and nothing left to look at it again: roomIdleTimeout counts from the last peer

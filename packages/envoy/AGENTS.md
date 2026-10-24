@@ -652,9 +652,16 @@ Two `envoy-dispatch` processes do not share a live document session, and durable
 not depend on one: every edit is appended under the document's advisory lock, Yjs updates commute,
 and the stored history is their union, so no edit is lost whichever process took it. No process
 writes durable state for a document from a room that is not at the durable head: each resident
-instance carries the version it holds the document through, and an append, a settlement, a
-version, a fork of the live tree or a rebuild from a room behind the head is refused
-(`ErrRoomBehindHead`, `docs/pending_authors.go`), the live write taking the cold path instead.
+instance carries the version it holds the document through, and an append, a settlement, a fork
+of the live tree or a rebuild from a room behind the head is refused (`ErrRoomBehindHead`,
+`docs/pending_authors.go`), the live write taking the cold path instead. A settlement refused so
+closes the room at once rather than retrying on it (`reloadRoomBehindHead`), since no retry on
+that room can pass the gate and three would fail the room, refusing every transaction on the
+document until its eviction ran; the settlement re-arms on the reloaded room (INFRA-218). A named
+or snapshot version whose room is behind the head, read under the document's advisory lock, is
+rendered from the stored document instead (`storedTree`), and neither it nor a version over a
+cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of those
+changes, and an append the gate refuses is credited again when its browser resends it.
 What is per-process is the room: while a room is resident in one process it receives none of the
 other's updates, so presence and cursors show only the peers on that process. Every durable
 change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory
