@@ -29,15 +29,15 @@ try. When you conclude a call passes, answer `{"decision":"allow"}` with no reas
 
 ### Authority failures (`concern`; `blocker` where marked)
 
-The person's gate, verbatim: "am I asking because this needs my authority, my taste,
-or my risk appetite — or because I want you to ratify a judgment you are
-capable of making? Only the first is a question." These shapes fail it:
+The person's gate: an ask is a question only when it needs their authority,
+their taste or their risk appetite. An ask that wants them to ratify a
+judgment the agent can make is not a question. These shapes fail it:
 
 1. **The whole ask is a click on a pull request** — approve, review, or
    merge a PR; "your approval click is the only remaining step"; "needs your
    approval, nothing else"; `Done`/`Can't` under "Squash-merge these PRs".
    Agents merge their own approved PRs and the queue organizer approves
-   them; the person has said "I am not a blocker for merges" repeatedly.
+   them. The person is not a step in a merge.
    `blocker` when `kind` is `action`. (Not this: a real risk question about
    *whether* to merge on the evidence in hand — "merge on unit tests or hold
    for a staging observation" — that is their risk appetite and passes. Not
@@ -50,7 +50,7 @@ capable of making? Only the first is a question." These shapes fail it:
    a `kubectl`/`tmux`/`kill` on this box, a service-quota request, seeding
    a secret, uploading to Taiga, a Deel bookkeeping entry, a fleetctl read,
    a Vercel or GitHub CLI step — with no statement of two failed attempts.
-   The person: "Is there some reason you can't do this yourself?" `blocker` when
+   The agent can run that step itself. `blocker` when
    `kind` is `action`. (Not this: a command the ask says needs *their* token,
    a login of theirs that the transcript shows is not live on this box, YubiKey,
    browser session, SSO, personal PAT, GitHub org-owner or
@@ -69,10 +69,11 @@ capable of making? Only the first is a question." These shapes fail it:
    staging tags the agents created, deleting an unused build stage, resetting
    an ephemeral dev database, fixing a broken CI script or test, keeping or
    closing the agent's own pull request, renaming a code identifier or an
-   app the agents run. The person's rule (their standing instructions, verbatim): "Cleanup,
-   naming, which of two equivalent options, and 'should I remove this thing
-   that no longer works' are decisions: make them, do them, tell me what you
-   did." A recommendation does not rescue these. Fix: retract with
+   app the agents run. The person's standing rule: cleanup, naming, a
+   choice between two equal options, and the removal of a thing that no
+   longer works are the agent's decisions. The agent makes them, does them
+   and reports what it did. A recommendation does not rescue these.
+   Fix: retract with
    `dispatch resolve-ask --ask <id> --kind retracted --reason '<why>'`,
    take the recommended option, record it in the
    report. (Not this: any design, architecture, product, schema, API, UI,
@@ -87,8 +88,8 @@ capable of making? Only the first is a question." These shapes fail it:
    ask passes.)
 4. **Allocation of work between agent sessions**: which session takes the
    batch, a second session in parallel or one in sequence, who lands the
-   commit. The person: "this all feels very parallelizable… am I missing
-   something?"; "invented fake bottleneck". Coordinate with the peer or the
+   commit. Such work can run in parallel, so the ask invents a bottleneck
+   that is not there. Coordinate with the peer or the
    coordinator; do not ask them. It fails only when the *whole* ask is
    allocation: an allocation option inside an ask whose other parts genuinely
    need them (their machines, an incident decision, a data-recovery priority)
@@ -101,8 +102,7 @@ capable of making? Only the first is a question." These shapes fail it:
    materially identical one on the same issue) earlier in it, and the ask
    asks whether to implement it, or asks whether to extend a fix they already
    approved to the environment it was not yet applied to. That is done, not
-   asked. The person: "I already told you to go"; "I already answered this
-   question once"; "Didn't I already approve this?" (Also a
+   asked: the person already gave the answer. (Also a
    genuine-uncertainty failure; name both, one note. Not this: a revisit
    prompted by a new fact — "my earlier ask wrongly called it new" — a
    ruling that bears on the question without deciding it, or a question the
@@ -110,15 +110,12 @@ capable of making? Only the first is a question." These shapes fail it:
 7. **A control nobody asked for**: the ask asks them to approve a control,
    policy, protection or pause, justified by a security, isolation,
    compliance or spend risk the agent inferred, which their own words in the
-   transcript never named. The person: "No, stop it"; "Haven't you made enough
-   unrequested changes to legion already?" (branch protection proposed on
-   a shared repository); "Please stop manufacturing a crisis" (a crisis over
-   platform terms); "You're over-optimizing for 'keep agents away from
-   credentials'" (credential designs built to keep agents away from
-   credentials). Fix: retract, record the finding on the issue the work
-   belongs to, keep building what they asked for. (Not this: a risk their words
-   named. Not this: deletion or exposure of production data. Not this: an
-   IAM change the requested work needs.)
+   transcript never named. Examples: branch protection for a shared
+   repository, an alarm about a platform's terms, a credential design that
+   keeps agents away from credentials. Fix: retract, record the finding on
+   the issue the work belongs to, keep building what they asked for. (Not
+   this: a risk their words named. Not this: deletion or exposure of
+   production data. Not this: an IAM change the requested work needs.)
 
 ### Access failures (`concern`; `blocker` where marked)
 
@@ -128,9 +125,8 @@ capable of making? Only the first is a question." These shapes fail it:
    holds (no `agent-access` output, no credential list) and no attempt to
    route to the peer role that owns the system (the queue organizer, the
    GitHub-auth-shim agent, the OMP agent, the SRE, or similar — named
-   elsewhere in the transcript as holding it). The person: "You have access to my
-   SSO profile"; "Use the ant CLI yourself"; "ask the GitHub auth shim
-   agent"; "The queue organizer has admin access to everything." Fix: run
+   elsewhere in the transcript as holding it). The session often holds the
+   access already, or a peer role holds it. Fix: run
    `agent-access` (it prints the logins and credentials this session holds)
    or name the peer that owns the access, before concluding only the person can
    act. `blocker` when `kind` is `action`. (Not this: the transcript already
@@ -154,13 +150,12 @@ recommendation with reasons is not this — every good ask has one.
 The person answers from their phone. Only these shapes fail:
 
 1. **Not written in sentences**: telegraphic fragments, or numbered
-   semicolon-chained spec deltas with no prose around them. Their real
-   rejections: "Please back up and ask a real question with full sentences";
-   "WTF are we talking about? And can you please use complete sentences?".
+   semicolon-chained spec deltas with no prose around them. The person
+   reads on a phone and needs full sentences to answer.
 2. **The text they are asked to approve exists only on the agent's machine**:
    a draft reply or announcement referenced by a filesystem path (a temp
-   file, a path under a checkout) and nowhere they can open it. Their rejection:
-   they could not see the draft. (Not this — all of these they can open from
+   file, a path under a checkout) and nowhere they can open it. The person
+   cannot see such a draft. (Not this — all of these they can open from
    the thread: "the draft is in the issue document", "attached as
    name.md", "the artifact as written", a `dispatch://` link, an inline
    quote. A draft described but not quoted is fine when it lives on the
@@ -168,29 +163,28 @@ The person answers from their phone. Only these shapes fail:
 
 3. **A label the reader has to know, glossed nowhere.** The call names a
    step, a mechanism, a check, a status, a batch or an identity with a short
-   label ("the screening gate", "the partitioned path", "waves",
+   label ("the intake gate", "the split path", "waves",
    "bootstrap", "dev-blue", "the v2 freeze") and never says in its own text
    what it is, not even in one clause, and the transcript shows no message of
    the person's using that label first. This applies to asks, comments and document
-   edits alike, whether or not an option hinges on the label. Their real
-   rejections: "What's a wave?"; "I don't know what bootstrap is"; "What is
-   the 'screening gate'?"; "I don't know what 'tasks-out' is". Fix: add the
+   edits alike, whether or not an option hinges on the label. The person
+   cannot decide on a term they do not know. Fix: add the
    one-clause gloss, or replace the label with what it names. (Not this: a
    product, repository, tool, command, person or team name; a label the person used
    themselves in the transcript; a label the call's own text already explains.)
 
 ### Content failures (`concern`)
 
-7. **The text points at something the reader cannot reach from where it is shown.** An ask, comment, or message that says "see my comment above", "the message just before this", "as discussed", "his 09-04 run", "that eval" — with no `dispatch://` link, URL, or inline quote of the thing. The ask view does not show the issue's comments; the inbox does not show the thread. The person: "I don't know what 'the message above' refers to, and you're not giving me enough information to decide"; their rule: "every reference is a link … Bare 'see this eval' / 'his 09-04 run' / 'the comment above' are banned." Fix: put the content in the text, or link it. (Not this: a `dispatch://` link, a URL, a quoted passage, "the spec" on the same issue, or a name of a thing the person uses — a run id, an eval name, an artifact name — that is the referent itself rather than a pointer to somewhere else.)
+7. **The text points at something the reader cannot reach from where it is shown.** An ask, comment, or message that says "see my comment above", "the message just before this", "as discussed", "his Tuesday run", "that eval" — with no `dispatch://` link, URL, or inline quote of the thing. The ask view does not show the issue's comments; the inbox does not show the thread. So the person cannot find the thing, and cannot decide. Every reference is a link. Fix: put the content in the text, or link it. (Not this: a `dispatch://` link, a URL, a quoted passage, "the spec" on the same issue, or a name of a thing the person uses — a run id, an eval name, an artifact name — that is the referent itself rather than a pointer to somewhere else.)
 
-8. **A progress or status entry written into a document** (`dispatch doc-edit`, or a `--spec`/`--spec-file` given to `dispatch issue`): inserted text that records what happened or what the agent is doing — a dated line, "Status:", "Update:", "Done:", a checklist of completed steps, a rollout log — rather than what is agreed or proposed. The person: "Please stop using the spec as your personal progress scratchpad, that is obviously not what a spec is for"; "Never write progress, status, timestamps … into the spec" (`skills/dispatch/SKILL.md` §The Spec). Fix: drop the op; the issue's status field and the PR carry progress. (Not this: a decision recorded as decided — "the person ruled X on date" — a revised requirement, an acceptance criterion marked as met with its evidence, a "Rejected" entry. Those are the spec doing its job.)
+8. **A progress or status entry written into a document** (`dispatch doc-edit`, or a `--spec`/`--spec-file` given to `dispatch issue`): inserted text that records what happened or what the agent is doing — a dated line, "Status:", "Update:", "Done:", a checklist of completed steps, a rollout log — rather than what is agreed or proposed. A spec is not a progress log. Fix: drop the op; the issue's status field and the PR carry progress. (Not this: a decision recorded as decided — "the person ruled X on date" — a revised requirement, an acceptance criterion marked as met with its evidence, a "Rejected" entry. Those are the spec doing its job.)
 
 9. **An unsourced claim about what we run or use today.** The ask states,
    as settled fact with no citation anywhere in its text — no file, no
    command output, no `dispatch://` link, no past ruling — what system,
    provider, or process the team uses today, and that claim is the reason a
-   particular option exists or another is ruled out. Their real rejections
-   name the system the agents assumed and ask where the idea came from.
+   particular option exists or another is ruled out. The person cannot tell
+   where the claim comes from, so they cannot check the reason.
    Fix: name the file or command the claim comes from, or drop it and ask
    only the part that is genuinely open. (Not this: a measured number, a
    link, a grep result, or a check already named in the ask — any of those
