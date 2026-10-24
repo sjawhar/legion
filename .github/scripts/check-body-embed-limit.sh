@@ -36,7 +36,7 @@ python3 <<'PY'
 import re
 import sys
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 
 BODY_FILE = "packages/contracts/src/dispatch-tools.ts"
 EMBED_FILE = "packages/envoy/internal/dispatch/embed/embed.go"
@@ -62,17 +62,27 @@ def problem(path: str, line: int | None, message: str) -> None:
     problems.append((path, line, message))
 
 
-def load(path: str) -> list[str] | None:
-    """The file's lines, or None after recording why it could not be read."""
+def fatal(path: str, message: str) -> NoReturn:
+    """A tree this check cannot read at all: one `::error` line and done. There is nothing to
+    list it beside - every finding after it would be a guess about a file or a declaration this
+    check never saw."""
+    print(f"::error file={path}::{message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def load(path: str) -> list[str]:
+    """The file's lines, split on `\\n` alone with a trailing `\\r` dropped, so a line number this
+    check reports is the one an editor opens. `str.splitlines()` also breaks on U+2028, U+0085,
+    `\\v` and `\\f`, each of which would shift every number below it."""
     try:
         text = Path(path).read_bytes().decode("utf-8")
     except FileNotFoundError:
-        problem(path, None, f"{path} is missing: this check cannot prove the limits agree without it")
-        return None
+        fatal(path, f"{path} is missing: this check cannot prove the limits agree without it")
     except UnicodeDecodeError as error:
-        problem(path, None, f"{path} is not readable as UTF-8 text: {one_line(error)}")
-        return None
-    return text.splitlines()
+        fatal(path, f"{path} is not readable as UTF-8 text: {one_line(error)}")
+    except OSError as error:
+        fatal(path, f"{path} cannot be read: {one_line(error)}")
+    return [line.removesuffix("\r") for line in text.split("\n")]
 
 
 class Declaration(NamedTuple):
@@ -80,33 +90,29 @@ class Declaration(NamedTuple):
     line: int
 
 
-def declaration(path: str, lines: list[str], const: str, pattern: str) -> Declaration | None:
-    """The declared number and its line number, or None after recording the failure."""
+def declaration(path: str, lines: list[str], const: str, pattern: str) -> Declaration:
+    """The declared number and its line number; a tree that declares it never or twice is fatal."""
     matches = [
         (number, match)
         for number, line in enumerate(lines, start=1)
         if (match := re.match(pattern, line))
     ]
     if not matches:
-        problem(
+        fatal(
             path,
-            None,
             f"{path} declares no {const} this check can read: no line matches {pattern}. A "
             f"renamed constant, a moved file, or the number written another way (digit "
             f"separators, a leading zero, hexadecimal, an expression) is this failure. Restore a "
             f"plain decimal declaration, or update this check's pattern with the sites that moved",
         )
-        return None
     if len(matches) > 1:
         where = ", ".join(f"{path}:{number}" for number, _ in matches)
-        problem(
+        fatal(
             path,
-            matches[0][0],
             f"{path} declares {const} more than once ({where}), so this check cannot tell which "
             f"number is in force and refuses to read the harmless one. Leave exactly one "
             f"declaration",
         )
-        return None
     number, match = matches[0]
     return Declaration(int(match.group(1)), number)
 
@@ -161,10 +167,10 @@ embed_lines = load(EMBED_FILE)
 contracts_agents_lines = load(CONTRACTS_AGENTS)
 envoy_agents_lines = load(ENVOY_AGENTS)
 
-body = declaration(BODY_FILE, body_lines, BODY_CONST, BODY_PATTERN) if body_lines is not None else None
-embed = declaration(EMBED_FILE, embed_lines, EMBED_CONST, EMBED_PATTERN) if embed_lines is not None else None
+body = declaration(BODY_FILE, body_lines, BODY_CONST, BODY_PATTERN)
+embed = declaration(EMBED_FILE, embed_lines, EMBED_CONST, EMBED_PATTERN)
 
-if body is not None and embed is not None and body.value > embed.value:
+if body.value > embed.value:
     problem(
         BODY_FILE,
         body.line,
@@ -178,14 +184,10 @@ if body is not None and embed is not None and body.value > embed.value:
         f"25 x 8,000 = 200,000 arithmetic and packages/envoy/cmd/dispatch/README.md",
     )
 
-if body is not None:
-    cross_reference(BODY_FILE, body_lines, body.line, BODY_CONST, EMBED_CONST)
-if embed is not None:
-    cross_reference(EMBED_FILE, embed_lines, embed.line, EMBED_CONST, BODY_CONST)
+cross_reference(BODY_FILE, body_lines, body.line, BODY_CONST, EMBED_CONST)
+cross_reference(EMBED_FILE, embed_lines, embed.line, EMBED_CONST, BODY_CONST)
 
 for agents_path, agents_lines in ((CONTRACTS_AGENTS, contracts_agents_lines), (ENVOY_AGENTS, envoy_agents_lines)):
-    if agents_lines is None:
-        continue
     if any(BODY_CONST in line and EMBED_CONST in line for line in agents_lines):
         continue
     problem(

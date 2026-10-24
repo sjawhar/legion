@@ -208,6 +208,31 @@ check "names the file" \
   "$(contains "$out" 'packages/contracts/AGENTS.md is not readable as UTF-8 text')"
 check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
 
+echo "case: a directory where embed.go belongs"
+# A directory, not a mode-000 file: root may read a file no mode forbids it, and the suite must
+# behave the same under either user.
+root=$(fixture embed-is-a-directory)
+rm "$root/packages/envoy/internal/dispatch/embed/embed.go"
+mkdir "$root/packages/envoy/internal/dispatch/embed/embed.go"
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the file it could not read" \
+  "$(contains "$out" '^::error file=packages/envoy/internal/dispatch/embed/embed.go::packages/envoy/internal/dispatch/embed/embed.go cannot be read: ')"
+check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
+check "nothing is listed beside it" "$(is "$(contains "$out" 'problem(s)')" false)"
+
+echo "case: a form feed in the comment above a declaration"
+# `str.splitlines()` breaks on \f, U+2028, U+0085 and \v, which an editor does not, so a line
+# number counted that way names a line the reader cannot open. The declaration below carries
+# four newlines before it and so sits on line 5, whatever the comment holds.
+root=$(fixture form-feed)
+printf 'package embed\n\nconst (\n\t// The longest text handed to the model,\fin runes.\n\tmaxInputChars = 19000\n)\n' \
+  > "$root/packages/envoy/internal/dispatch/embed/embed.go"
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "reports the line a reader opens, not one shifted by the form feed" \
+  "$(contains "$out" 'the comment above maxInputChars (packages/envoy/internal/dispatch/embed/embed.go:5) does not name DISPATCH_BODY_MAX')"
+
 echo "case: the body limit's comment does not name maxInputChars"
 root=$(fixture body-no-xref)
 cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
