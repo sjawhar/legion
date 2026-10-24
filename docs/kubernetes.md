@@ -1421,60 +1421,6 @@ refuses a name already added, and `omp plugin install` an installed plugin witho
 container's first start the `update` finds no such marketplace, so the role's log shows one
 `Failed to update marketplace … not found` line before the `add` succeeds; that line is expected.
 
-What this repository offers that line is `scripts/legion-setup.sh`, which installs its own packages
-into the issue's workspace so that the checks a role is told to run can run at all — without
-`node_modules`, `bunx biome check` answers with a squatted npm package that checks nothing and
-exits 0. The deployment's whole side of it is one line, and the `-r` test belongs to that line
-rather than to the script, because the same argv runs where the file does not exist: the
-controller's `/legion`, an issue on a repository that carries no such script, and any branch older
-than the change that added it, each of which a shell's own "not found" would turn into a non-zero
-exit and a held issue.
-
-```yaml
-runtime:
-  kubernetes:
-    setup: [/bin/sh, -c, 'if [ -r ./scripts/legion-setup.sh ]; then sh ./scripts/legion-setup.sh; fi']
-```
-
-It writes nothing to the container's own filesystem: the install's download cache is the
-`BUN_INSTALL_CACHE_DIR` the pod already names — the issue's own, under its scratch on its volume,
-the one directory every role container of the pod is told — and its lock, log and marker go to
-`/legion/bun/state`, on that same volume, so the install is paid once for the issue rather than
-once for each of its six roles. Run anywhere that names no such cache, it uses `/legion/bun/cache`
-instead, which keeps bun's downloads off the container's disk either way. The marker holds
-`cksum < bun.lock` and is honoured
-only while `node_modules/.bin/biome` is there too, so a forward merge that moves the lock mid-issue
-installs again and a deleted tree cannot skip the install forever. A workspace outside the
-`/workspaces/` layout falls back to `<workspace>/.legion-setup`, which `.gitignore` holds.
-
-The install runs under `/usr/bin/flock` on the cache directory itself, as the plugin install
-above does and for the same reason: filling a cold entry of a bun install cache is not
-concurrency-safe, and the roles of an issue share one cache, so a plugin install in this same
-container moments earlier and another role's setup both meet it. A first attempt that died with
-`ENOENT: failed copying files from cache to destination` is retried once, within what is left of
-this run's budget. Every path of it ends `exit 0`, the failures included, because the non-zero
-exit above would stop
-the agent from starting over an install it could have run without. It bounds itself twice:
-`LEGION_SETUP_BUDGET` (270 s) is the run's wall clock, and every wait inside it — the
-`flock` on the cache, the install's own `timeout`, the retry — is what is left of that budget when
-that wait begins, so the wait for the lock can never expire before the install it is waiting for
-would have. The worst case is that budget plus the 5 s `timeout` leaves between its SIGTERM and
-its SIGKILL, 275 s inside the 360 s registration deadline this run shares with the rest of the
-role's launch, against a measured 54 s for the first install of 1,986 packages and
-about 0.3 s when they are already there — and whatever went wrong (an unreachable registry, a lock
-file that moved under the frozen install, a timeout, the kernel's OOM kill of a 1 Gi role's
-install) it writes `$LEGION_STATE_DIR/legion-setup-report.json` and exits 0, leaving no marker, so
-the next role to start installs again. A second bound sits inside that one, on the only part of
-the run that makes another process wait: `LEGION_SETUP_LOCK_HOLD` (90 s) is the longest one
-attempt may hold the cache's lock, because the plugin install above waits on that same inode and
-fails the launch when its wait runs out. It is the first thing to lower in a deployment that
-lowers `worker_boot_timeout_seconds`, which lowers that wait with it.
-The role's own pi-legion reads that report at `session_start`
-and saves it as a notice in the agent's first turn, matching the report's `issue`, `role` and
-`generation` against its own environment, since that directory outlives a generation in a pod and,
-under `runtime: tmux`, is shared by every pane of the host. The agent therefore starts either way
-and knows which checks it cannot run.
-
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
 `omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. It refuses a
@@ -2064,15 +2010,7 @@ launch anyway. Above that floor the bound is also long enough for the last of si
 behind five serialised
 installs of the pair, 24 seconds each at the defaults — the half of the bound a smaller divisor
 would break, which `TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline` holds
-against the installs rather than against the derivation. Those five installs are not the only
-holders of that lock: `scripts/legion-setup.sh` takes `/usr/bin/flock` on this same
-`BUN_INSTALL_CACHE_DIR` inode for the issue's own `bun install`, so the role waiting here can be
-behind a setup install of another role of the pod as well as behind the pair's. That hold is
-bounded by a number of its own rather than by this wait — `LEGION_SETUP_LOCK_HOLD`, 90 seconds by
-default, under this wait at its defaults, so a plugin install that began waiting the moment setup
-took the lock never sees its first wait expire — and that number is set out in that
-script's header and in the comment where it is defined, which is also where a deployment that
-lowers `worker_boot_timeout_seconds`, and with it this wait, is told to lower it. A wait that
+against the installs rather than against the derivation. A wait that
 times out exits 1, so it takes the retry and then the script's named failure — that one bump's
 launch fails the way it did before the lock existed, rather than hanging. `flock` is advisory
 and per-inode, which holds exactly where this needs it — the six containers of one pod share a
@@ -3670,7 +3608,7 @@ that was a daemon-machine path re-pointed at its pod location:
 | `PATH` | `/legion/worker-bin:` + the image's PATH | the pane's `gh` shim first, as on tmux |
 | `GH_CONFIG_DIR` | `/legion/gh` | `gh` |
 | `LEGION_GRANT_FILE` | `/var/run/legion/grant/<role token>-grant` | the pi-legion extension (writes), `legion credential`/`gh`/`handoff complete` (read) |
-| `LEGION_STATE_DIR` | `/var/run/legion/state` (`names.go`'s `StateDir`, a per-role memory-backed emptyDir) | the pi-legion extension's jj attribution overlay and its setup report (`scripts/legion-setup.sh`) |
+| `LEGION_STATE_DIR` | `/legion` | the pi-legion extension's jj attribution overlay |
 | `LEGION_CREDENTIAL_HELPER` | `!/opt/legion/bin/legion credential` | what `workspace-init` wrote into the clone's git config |
 | `DISPATCH_TOKEN_FILE` | `/var/run/legion/providers/DISPATCH_TOKEN` | `dispatchSettings` (when the deployment sets `dispatch_url`) |
 | `LEGION_ROOT_WORKSPACE` / `LEGION_WORKSPACE` | `/legion/workspaces/<owner>/<repo>/<key-lower>` | the extension; also the container's `workingDir` |

@@ -698,7 +698,7 @@ jobs:
         # source only serves upgrades, so drop it before installing our deps.
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          ../../scripts/repo-tool.sh playwright install --with-deps chromium webkit firefox
+          bunx playwright install --with-deps chromium webkit firefox
         working-directory: packages/dispatch
       - name: Start an S3-compatible server for uploaded files
         # The browser suite runs the server with DISPATCH_FILE_STORE_BUCKET set (e2e/run-server.sh
@@ -729,7 +729,7 @@ jobs:
         # drops this job to one Vite build. Safe because that build and this one are now the same
         # binary: `packages/dispatch` no longer has an E2E-only build flag (removed with its sole,
         # unconsumed consumer, the `window.__dispatchDocument` inspection probe).
-        run: ../../scripts/repo-tool.sh playwright test --config e2e/playwright.config.ts
+        run: bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()

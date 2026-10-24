@@ -49,14 +49,10 @@ Claude Code's stream-json on the other (`packages/daemon/internal/claudebridge`)
 
 ```bash
 bun install                   # Setup
-bun run lint <package>/       # Lint (the recipe reaches this repository's pinned Biome through `scripts/repo-tool.sh`, which resolves `node_modules/.bin` and never PATH or the registry, so an uninstalled workspace fails naming the missing tool instead of passing. CI's required `lint` job runs `bun run lint .` over the whole tree, and a package's `bun run lint` checks only the paths its recipe names)
-bun run typecheck             # Type check (the pinned tsc, through the same wrapper)
+bunx biome check <package>/   # Lint (the root pins @biomejs/biome so bunx resolves the real Biome; CI's required `lint` job runs `bunx biome check .`, and a package's `bun run lint` checks only the paths its recipe names)
+bunx tsc --noEmit             # Type check
 bun test                      # Test
 ```
-
-In a Legion role container the packages are installed into the issue workspace by Legion before
-the agent's first turn (`scripts/legion-setup.sh`), and an install that failed arrives as a notice
-in that first turn — so a check that cannot run is visible rather than silently green.
 
 ```bash
 legion start [--config <legion.yaml>] [--check-config]  # Run the daemon in the foreground for the project that file names (./legion.yaml by default); --check-config also prints the configuration's open capability gaps after its OK line (exit 0), and under `runtime: kubernetes` the repository cache each mapped repository gets (docs/kubernetes.md "The repository cache") and the plugin pair a stale-plugin relaunch would install or the gap that leaves it relaunching none (docs/kubernetes.md "Contract discipline")
@@ -97,13 +93,6 @@ the project's default; `legion.yaml` names none, and refuses `projects.<KEY>.rep
 reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped
 repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json`
 (`repositories.refused`), one either App is missing from.
-
-A Kubernetes deployment also names one setup command, `runtime.kubernetes.setup`, run in every
-role's container before its agent starts. What this repository offers it is
-`scripts/legion-setup.sh`, which installs these packages into the issue's shared workspace with
-bun's cache on the issue volume, once per `bun.lock` digest, and never exits non-zero: a failed
-install is a report the role's agent reads in its first turn, never a role that does not start
-(`docs/kubernetes.md`, the `setup` section).
 
 ## Version Control
 

@@ -51,25 +51,15 @@ shows nothing.
 
 ## The rule
 
-Reach this repository's checks through its own recipes — `bun run lint`, `bun run typecheck`, and
-a package's own recipes — never through a bare tool name. Every one of them runs
-`scripts/repo-tool.sh <tool> …`, which resolves `./node_modules/.bin/<tool>` then the root's and
-never PATH or the registry: either the binary is the one the lockfile installed, or there is none
-and the command fails naming the tool, both paths it tried, and the remedy. An uninstalled
-workspace therefore fails loudly instead of passing, which is the whole of what went wrong above.
-CI's required `lint` job runs `bun run lint .` from the root over the whole tree; a package's
+The root `package.json` pins `@biomejs/biome` and `typescript` as devDependencies, so after
+`bun install`, `bunx biome` and `bunx tsc` resolve to the pinned tools from the root or from any
+package directory. CI's required `lint` job runs `bunx biome check .` from the root. A package's
 `bun run lint` checks only the paths its recipe names.
 
-A Legion role container has its packages installed into the issue workspace before the agent's
-first turn (`scripts/legion-setup.sh`), and an install that failed arrives as a notice in that
-first turn — so a check that cannot run is visible rather than silently green.
-
-Before trusting either tool's verdict, confirm the version is the pinned one:
-`scripts/repo-tool.sh tsc --version` → 5.9.x and `scripts/repo-tool.sh biome --version` → 2.4.x,
-run from the root or from the package directory (the wrapper is the same binary the recipes use).
-Biome's own `Checked N files` summary line is the other confirmation: a `check` that reports no
-file count checked nothing. Any `Resolving dependencies` line before a lint or typecheck means a
-tool was just downloaded from the registry, which means it is not the one CI runs.
+Before trusting either tool's verdict, confirm the version is the pinned one
+(`bunx tsc --version` → 5.9.x; `bunx biome --version` → 2.4.x). Any `Resolving dependencies`
+line before a lint or typecheck means the tool was just downloaded, which means it is not the one
+CI runs.
 
 ## Why it matters for a handoff
 

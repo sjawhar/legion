@@ -11,8 +11,6 @@
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
   "scripts": {
-    "lint": "scripts/repo-tool.sh biome check",
-    "typecheck": "scripts/repo-tool.sh tsc --noEmit",
     "dispatch:local": "cd packages/dispatch && bun run dispatch:local",
     "docs:dev": "cd docs/site && bun run dev",
     "docs:build": "cd docs/site && bun run build",

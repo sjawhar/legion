@@ -37,8 +37,7 @@ When removing or renaming an action type in `packages/daemon/src/state/`:
 □ SKILL.md          — Any condition tables that list the action as an outcome
 ```
 
-**TypeScript as a guide:** After updating `types.ts` and `decision.ts`, run the package's typecheck
-(`scripts/repo-tool.sh tsc --noEmit`, which the `typecheck` recipes run).
+**TypeScript as a guide:** After updating `types.ts` and `decision.ts`, run `bunx tsc --noEmit`.
 Compile errors will point to any remaining consumers. This catches `ACTION_TO_MODE` entries
 and test assertions that reference the removed type.
 

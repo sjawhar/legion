@@ -108,10 +108,10 @@ Three steps, one per job, beside the daemon's:
 
 ```yaml
       - name: Lint workspace
-        run: ../../scripts/repo-tool.sh biome check --error-on-warnings src/
+        run: bunx biome check --error-on-warnings src/
         working-directory: packages/workspace
       - name: Typecheck workspace
-        run: ../../scripts/repo-tool.sh tsc --noEmit
+        run: bunx tsc --noEmit
         working-directory: packages/workspace
       - name: Test workspace
         run: bun test
@@ -120,13 +120,9 @@ Three steps, one per job, beside the daemon's:
 
 The `test` job already puts the worker image's jj on PATH (`.github/actions/install-jj`) and
 installs `github:jj-vcs/jj@0.44.0` through mise, so a suite that runs
-`mise x github:jj-vcs/jj@0.44.0 -- jj` (`STOCK_JJ` in the workspace tests) needs nothing more. Each
-check step goes through `scripts/repo-tool.sh`, which runs this repository's pinned Biome and tsc
-from `node_modules/.bin` and never from PATH or the registry — a package that has its own `lint`
-and `typecheck` recipes runs those instead, since they are the same wrapper. `bun install
---frozen-lockfile` at the repository root is what installs those binaries and gives the typecheck
-its `bun` types; a package's `tsc --noEmit` fails with `Cannot find type definition file for
-'bun'` without it.
+`mise x github:jj-vcs/jj@0.44.0 -- jj` (`STOCK_JJ` in the workspace tests) needs nothing more. `bun install --frozen-lockfile` at the repository root is what gives
+`bunx tsc` its `bun` types; a package's `tsc --noEmit` fails with
+`Cannot find type definition file for 'bun'` without it.
 
 Related: `docs/solutions/legion/template-names-a-ci-check-the-repository-never-produces.md` (the
 converse — a PR body naming a check that no workflow produces).

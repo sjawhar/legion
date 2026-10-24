@@ -263,10 +263,6 @@ $RECYCLE.BIN/
 # .legion/ handoff data must be committed — do not ignore the directory
 # (see implement.md step 6 note)
 
-# scripts/legion-setup.sh's fallback install root, used when the issue volume's root cannot be
-# derived; a fallback run must never be snapshotted into a worker's commit.
-/.legion-setup/
-
 # Playwright MCP transient snapshots
 .playwright-mcp/
 

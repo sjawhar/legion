@@ -68,9 +68,6 @@ jobs:
       - name: Check the release workflows keep credentials out of jobs that run dependency code
         run: .github/scripts/check-release-credentials.sh
 
-      - name: Check every prescribed check command runs this repository's pinned tool
-        run: .github/scripts/check-check-commands.sh
-
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
       # page, so this required job checks them at every push. pr-title.yaml checks them again when
@@ -111,7 +108,7 @@ jobs:
       # AGENTS.md documents, over the whole tree, so a fixture, config or test file that Biome
       # would rewrite fails here instead of on the next person who runs it.
       - name: Check the whole tree with Biome
-        run: bun run lint .
+        run: bunx biome check .
 
       # The notices step below builds go-licenses and loads every release binary's modules. It
       # keeps them under a key of its own, apart from the one setup-go above leaves unsaved.
@@ -262,34 +259,28 @@ jobs:
       - name: Test the release credential check
         run: .github/scripts/check-release-credentials.test.sh
 
-      - name: Test the prescribed check-command guard
-        run: .github/scripts/check-check-commands.test.sh
-
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh
-
-      - name: Test the Legion role-container setup script (a stub bun)
-        run: bash scripts/legion-setup.test.sh
 
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib
 
       - name: Lint the Dispatch census script
-        run: bun run lint --error-on-warnings scripts/dispatch
+        run: bunx biome check --error-on-warnings scripts/dispatch
 
       # scripts/dispatch is no workspace; the root package pins its TypeScript and Bun types.
       - name: Typecheck the Dispatch census script
-        run: bun run typecheck -p scripts/dispatch
+        run: bunx tsc --noEmit -p scripts/dispatch
 
       - name: Test the Dispatch census script
         run: bun test scripts/dispatch
 
       - name: Lint the GitHub App registration script
-        run: bun run lint --error-on-warnings scripts/github-apps
+        run: bunx biome check --error-on-warnings scripts/github-apps
 
       # scripts/github-apps is no workspace either; the root package pins its TypeScript and Bun types.
       - name: Typecheck the GitHub App registration script
-        run: bun run typecheck -p scripts/github-apps
+        run: bunx tsc --noEmit -p scripts/github-apps
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

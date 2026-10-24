@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
@@ -32,11 +31,6 @@ import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
 import {
-  branchHoldsNotice,
-  type FirstTurnNoticeMessage,
-  withoutRepeatedNotice,
-} from "../src/first-turn-notice";
-import {
   assistantText,
   inboundKind,
   PHASE_STALL_ENTRY,
@@ -46,10 +40,15 @@ import {
   stepPhaseStall,
 } from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
-import { setupReportMessage, setupReportNotice } from "../src/setup-report";
 import { daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
-import { workspaceRecreatedMessage, workspaceRecreatedNotice } from "../src/workspace-recreated";
+import {
+  branchHoldsWorkspaceRecreatedNotice,
+  type WorkspaceRecreatedNotice,
+  withoutRepeatedWorkspaceRecreatedNotice,
+  workspaceRecreatedMessage,
+  workspaceRecreatedNotice,
+} from "../src/workspace-recreated";
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -202,10 +201,9 @@ export default function legionExtension(pi: PiApi): void {
     );
   };
 
-  // The notices this process owes its first run, in the order it sends them: set at session_start
-  // below, each with the id its copies carry, and owed until that run starts (agent_start),
-  // whatever starts it.
-  let owedNotices: FirstTurnNoticeMessage[] = [];
+  // The recreated-workspace notice this process owes its first run: set at session_start below,
+  // with the id its copies carry, and owed until that run starts (agent_start), whatever starts it.
+  let recreatedNotice: WorkspaceRecreatedNotice | undefined;
 
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
@@ -233,23 +231,20 @@ export default function legionExtension(pi: PiApi): void {
       await controllerSession.handleSessionStart(context);
     } else {
       // A resume whose role launcher found the workspace recreated since the session was last
-      // written (src/workspace-recreated.ts), and a setup command that could not install this
-      // repository's packages in this container (src/setup-report.ts), are told so in messages
-      // saved to the session ahead of the next turn, whatever starts that turn (a task, an Envoy
-      // delivery), so a process lost in that turn resumes with them already in its history. They
-      // go before the role claim, so no delivery on the role's topic can start a turn ahead of
-      // them, and a subagent, which returned above, never is told.
-      const recreated = workspaceRecreatedNotice(
+      // written (src/workspace-recreated.ts) is told so in a message saved to the session ahead of
+      // the next turn, whatever starts that turn (a task, an Envoy delivery), so a process lost in
+      // that turn resumes with the notice already in its history. It goes before the role claim, so
+      // no delivery on the role's topic can start a turn ahead of it, and a subagent, which returned
+      // above, never is told.
+      recreatedNotice = workspaceRecreatedNotice(
         process.env,
         session.kind === "root-architect" ? session.tree : session.issue
       );
-      const setupReport = setupReportNotice(process.env, (file) => readFileSync(file, "utf8"));
-      owedNotices = [
-        ...(recreated === undefined ? [] : [workspaceRecreatedMessage(recreated)]),
-        ...(setupReport === undefined ? [] : [setupReportMessage(setupReport)]),
-      ];
-      for (const notice of owedNotices) {
-        pi.sendMessage(notice, { deliverAs: "steer", triggerTurn: false });
+      if (recreatedNotice !== undefined) {
+        pi.sendMessage(workspaceRecreatedMessage(recreatedNotice), {
+          deliverAs: "steer",
+          triggerTurn: false,
+        });
       }
       await claimSession.bootstrap(context);
     }
@@ -259,50 +254,30 @@ export default function legionExtension(pi: PiApi): void {
 
   // A prompt (the daemon's task as an RPC `prompt`, or a person's direct message pi-envoy
   // delivers as a user turn) first recovers a failed last turn, and Oh My Pi recovers an empty
-  // `length` stop by moving the branch back to that turn's parent, which takes the copies saved
-  // after it off the branch. before_agent_start runs after that recovery, so it puts each notice
-  // back into the run's messages when the branch no longer holds this process's copy of it, a
-  // notice an earlier process saved not counting, and the run saves them on the branch. An Envoy
-  // card, sent with triggerTurn, starts its turn with neither the recovery nor
-  // before_agent_start, so its branch keeps the saved copies.
-  const resentNotices: FirstTurnNoticeMessage[] = [];
+  // `length` stop by moving the branch back to that turn's parent, which takes the copy saved
+  // after it off the branch. before_agent_start runs after that recovery, so it puts the notice
+  // back into the run's messages when the branch no longer holds this process's copy, a notice an
+  // earlier recreation saved not counting, and the run saves it on the branch. An Envoy card,
+  // sent with triggerTurn, starts its turn with neither the recovery nor before_agent_start, so
+  // its branch keeps the saved copy.
+  let resentNoticeId: string | undefined;
   pi.on("before_agent_start", async (_event, context) => {
-    // Owed nothing is every turn after the first, so the branch is not read for them.
-    if (owedNotices.length === 0) return undefined;
+    if (recreatedNotice === undefined) return undefined;
     const branch = context.sessionManager.getBranch?.() ?? [];
-    const missing = owedNotices.filter(
-      (notice) => !branchHoldsNotice(branch, notice.customType, notice.details.id)
-    );
-    const last = missing.at(-1);
-    if (last === undefined) return undefined;
-    for (const notice of missing) {
-      if (!resentNotices.some((resent) => resent.details.id === notice.details.id)) {
-        resentNotices.push(notice);
-      }
-    }
-    // The hook carries one message into the run, so every notice but the last goes in ahead of it
-    // as the steer that starts no turn session_start sent, which keeps them in the owed order.
-    for (const notice of missing.slice(0, -1)) {
-      pi.sendMessage(notice, { deliverAs: "steer", triggerTurn: false });
-    }
-    return { message: last };
+    if (branchHoldsWorkspaceRecreatedNotice(branch, recreatedNotice.id)) return undefined;
+    resentNoticeId = recreatedNotice.id;
+    return { message: workspaceRecreatedMessage(recreatedNotice) };
   });
   pi.on("agent_start", async () => {
-    owedNotices = [];
+    recreatedNotice = undefined;
   });
-  // The recovery kept the saved copies in the process's live context, so once one is sent again
+  // The recovery kept the saved copy in the process's live context, so once it is sent again
   // every later request of this process would carry it twice: the first copy, where the history
   // put it, is the one each request keeps.
   pi.on("context", async (event) => {
-    let messages: readonly unknown[] = event.messages;
-    let repeated = false;
-    for (const notice of resentNotices) {
-      const kept = withoutRepeatedNotice(messages, notice.customType, notice.details.id);
-      if (kept === undefined) continue;
-      messages = kept;
-      repeated = true;
-    }
-    return repeated ? { messages } : undefined;
+    if (resentNoticeId === undefined) return undefined;
+    const messages = withoutRepeatedWorkspaceRecreatedNotice(event.messages, resentNoticeId);
+    return messages === undefined ? undefined : { messages };
   });
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree

@@ -791,8 +791,7 @@ package is covered, and it takes two entries rather than one: the root rule cove
 packages that have no config of their own, and `claude-envoy` repeats
 `"noImportCycles": "error"` in its own `biome.json`, because a nested config replaces the
 root's rules for its subtree instead of adding to them. Its planted-cycle proof is its own
-recipe (`../../scripts/repo-tool.sh biome check --max-diagnostics=none src/ hooks/ scripts/`
-from `packages/claude-envoy` — its own `lint` recipe with the cap lifted → 2 errors, exit 1;
+recipe (`bunx biome check --max-diagnostics=none src/ hooks/ scripts/` → 2 errors, exit 1;
 clean tree exit 0). If a package ever needs a real exemption, scope it with an `overrides`
 entry to the widest path that is still clean, not the narrowest that suffices, and say here
 where the guard stops.
@@ -879,7 +878,7 @@ post-update text selection; Yjs document transport and local editing remain acti
 `e2e/failed-room.e2e.ts` is opt-in and skipped without `DISPATCH_FAILED_ROOM_PROBE=1`: it holds
 the room's next durable append for 20 s with a `doc_updates` trigger and cancels that backend, so
 it costs about 40 s and does not belong in the suite CI runs. Run it as
-`DISPATCH_FAILED_ROOM_PROBE=1 ../../scripts/repo-tool.sh playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
+`DISPATCH_FAILED_ROOM_PROBE=1 bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/failed-room.e2e.ts`.
 That recipe loads the same config, so it refuses the harness ports while another run holds them.
 It is the end-to-end check for a failed document room: the writer inside the docs layer when the
 room fails is answered `503 DOC_SERVICE_UNAVAILABLE` rather than waiting for a recovery that
@@ -1108,7 +1107,7 @@ its title can resize an ask card and make Firefox or WebKit anchor the margin's 
 
 The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` and the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
-No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `../../scripts/repo-tool.sh playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
+No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, `e2e/offline-edits.e2e.ts`, and

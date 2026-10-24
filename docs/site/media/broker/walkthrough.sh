@@ -19,5 +19,5 @@ done
 
 ln -sfn ../../../../packages/dispatch/node_modules "$SCRIPT_DIR/node_modules"
 exec bash "$SCRIPT_DIR/rig.sh" -- \
-  bash -c 'cd "$1/packages/dispatch" && ../../scripts/repo-tool.sh playwright test --config "$2/playwright.config.ts" walkthrough.record.ts' \
+  bash -c 'cd "$1/packages/dispatch" && bunx playwright test --config "$2/playwright.config.ts" walkthrough.record.ts' \
   walkthrough "$ROOT" "$SCRIPT_DIR"

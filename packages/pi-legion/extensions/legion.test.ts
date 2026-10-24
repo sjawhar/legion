@@ -38,7 +38,6 @@ import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
 import { type CapabilityHost, ENVOY_TOOL_NAMES } from "../src/capability-report";
 import { classifySession } from "../src/classify";
-import { setupReportPath } from "../src/setup-report";
 
 const natsConnections: {
   readonly name: string;
@@ -169,7 +168,6 @@ const environmentKeys = [
   "LEGION_PROJECT",
   "LEGION_ROLE",
   "LEGION_ISSUE",
-  "LEGION_GENERATION",
   "LEGION_WORKSPACE",
   "LEGION_STATE_DIR",
   "LEGION_SLACK_CHANNELS",
@@ -3865,16 +3863,13 @@ describe("a Legion session's title", () => {
   });
 });
 
-/** Every first-turn notice of `customType` the pane sent, with the options it went out under:
- * the recreated-workspace notice unless the caller names the other type. */
-const notices = (pane: ClaimPane, customType = "legion-workspace-recreated") =>
-  pane.sentMessages.flatMap((message, i) =>
-    "customType" in message && message.customType === customType
-      ? [{ message, options: pane.sentMessageOptions[i] }]
-      : []
-  );
-
 describe("the recreated-workspace notice", () => {
+  const notices = (pane: ClaimPane) =>
+    pane.sentMessages.flatMap((message, i) =>
+      "customType" in message && message.customType === "legion-workspace-recreated"
+        ? [{ message, options: pane.sentMessageOptions[i] }]
+        : []
+    );
   // A resumed session, its history uncompacted turns, whose role launcher said its workspace was
   // recreated: at session start the plugin saves one notice naming the issue's branch, and no
   // branch it assumes the repository's default to be, as a steer that starts no turn, so Oh My
@@ -4032,209 +4027,5 @@ describe("the recreated-workspace notice", () => {
     expect(
       await requestOf({ messages: [copy(earlier), copy(id), task, copy(id)] }, context)
     ).toEqual({ messages: [copy(earlier), copy(id), task] });
-  });
-});
-
-describe("the setup-report notice", () => {
-  const SETUP_REPORT = "legion-setup-report";
-  /** The report `scripts/legion-setup.sh` leaves under $LEGION_STATE_DIR when the install failed,
-   * as this pane's own issue, role and generation write it. */
-  const report = (overrides: Readonly<Record<string, unknown>> = {}) =>
-    JSON.stringify({
-      schemaVersion: 1,
-      kind: "install-failed",
-      issue: "REPO-43",
-      role: "implementer",
-      generation: "2",
-      at: "2026-10-21T09:12:44Z",
-      reason: "install-timeout",
-      exitStatus: 124,
-      detail: "error: failed to resolve @oh-my-pi/pi-utils",
-      ...overrides,
-    });
-
-  /** A started pane of generation 2 whose state directory holds `text` as the setup command left
-   * it before the agent started, or no report file at all when `text` is undefined.
-   * `onClaimReady` is called with the pane when its claim reports ready, the last step of the
-   * bootstrap the notice goes before. */
-  const reportPane = async (
-    text: string | undefined,
-    options: {
-      readonly sessionId?: string;
-      readonly recreated?: boolean;
-      readonly onClaimReady?: (pane: ClaimPane) => void;
-    } = {}
-  ) => {
-    let claiming: ClaimPane | undefined;
-    const pane = await claimPane({
-      role: "implementer",
-      issue: "REPO-43",
-      sessionId: options.sessionId ?? "ses_setup_report",
-      readyPosted: () => {
-        if (claiming !== undefined) options.onClaimReady?.(claiming);
-      },
-    });
-    claiming = pane;
-    process.env.LEGION_GENERATION = "2";
-    if (options.recreated === true) process.env.LEGION_WORKSPACE_RECREATED = "true";
-    const file = setupReportPath(process.env);
-    if (file === undefined) throw new Error("the pane's environment names no state directory");
-    if (text !== undefined) await writeFile(file, `${text}\n`);
-    await pane.start();
-    return pane;
-  };
-
-  const noticeId = (pane: ClaimPane) => {
-    const sent = notices(pane, SETUP_REPORT)[0]?.message;
-    const id =
-      sent !== undefined && "details" in sent && typeof sent.details?.id === "string"
-        ? sent.details.id
-        : undefined;
-    if (id === undefined) throw new Error("the pane sent no setup-report notice");
-    return id;
-  };
-  const entry = (id: string) => ({
-    type: "custom_message",
-    customType: SETUP_REPORT,
-    content: "Legion's setup command could not install …",
-    display: true,
-    details: { id },
-  });
-  const copy = (id: string) => ({
-    role: "custom",
-    customType: SETUP_REPORT,
-    content: "…",
-    details: { id },
-  });
-  const task = { role: "user", content: [{ type: "text", text: "TURN-2" }] };
-
-  // The setup command could not install this repository's packages in this container, so it left
-  // the one report it never exits non-zero for. The agent is told at session start, before its
-  // claim reports ready, as the steer that starts no turn the recreated-workspace notice is.
-  test("a report of this issue, role and generation is one notice saved before the claim", async () => {
-    let noticesAtReady = -1;
-    const pane = await reportPane(report(), {
-      onClaimReady: (claiming) => {
-        noticesAtReady = notices(claiming, SETUP_REPORT).length;
-      },
-    });
-
-    expect(notices(pane, SETUP_REPORT)).toEqual([
-      {
-        message: {
-          customType: SETUP_REPORT,
-          content: expect.stringContaining('reason "install-timeout", exit status 124'),
-          display: true,
-          details: { id: expect.any(String) },
-        },
-        options: { deliverAs: "steer", triggerTurn: false },
-      },
-    ]);
-    const text = JSON.stringify(notices(pane, SETUP_REPORT));
-    expect(text).toContain("error: failed to resolve @oh-my-pi/pi-utils");
-    expect(text).toContain("check commands cannot run here");
-    expect(text).toContain("CI's required jobs are the authority");
-    expect(text).toContain("sh scripts/legion-setup.sh");
-    expect(noticesAtReady).toBe(1);
-    expect(notices(pane)).toEqual([]);
-  });
-
-  // LEGION_STATE_DIR outlives a generation in a pod and, under the tmux runtime, is shared by
-  // every pane of the host: a report another run left is that run's, not this agent's.
-  test("a report another generation, another role or another issue left is no notice", async () => {
-    for (const [field, overrides] of [
-      ["generation", { generation: "1" }],
-      ["role", { role: "tester" }],
-      ["issue", { issue: "REPO-44" }],
-    ] as const) {
-      const pane = await reportPane(report(overrides), { sessionId: `ses_setup_${field}` });
-      expect(notices(pane, SETUP_REPORT)).toEqual([]);
-      expect(
-        await pane.handlers.get("before_agent_start")?.({ prompt: "task" }, pane.context)
-      ).toBeUndefined();
-    }
-  });
-
-  test("a report that does not parse, and no report at all, is no notice", async () => {
-    for (const [name, text] of [
-      ["malformed", "{not json"],
-      ["absent", undefined],
-    ] as const) {
-      const pane = await reportPane(text, { sessionId: `ses_setup_${name}` });
-      expect(notices(pane, SETUP_REPORT)).toEqual([]);
-      expect(
-        await pane.handlers.get("before_agent_start")?.({ prompt: "task" }, pane.context)
-      ).toBeUndefined();
-    }
-  });
-
-  // As for the recreated-workspace notice: the prompt that follows a failed last turn recovers it
-  // by moving the branch back past the saved copy, so the run carries the notice again and saves
-  // it, and every later request of this process keeps the first copy alone.
-  test("a prompt whose recovery dropped the saved notice carries it again, once", async () => {
-    let branch: readonly unknown[] = [];
-    const pane = await reportPane(report(), { sessionId: "ses_setup_recovery" });
-    const id = noticeId(pane);
-    const beforeAgentStart = pane.handlers.get("before_agent_start");
-    const requestOf = pane.handlers.get("context");
-    if (beforeAgentStart === undefined || requestOf === undefined) {
-      throw new Error("the pane registered no before_agent_start or context");
-    }
-    const context = {
-      ...pane.context,
-      sessionManager: { ...pane.context.sessionManager, getBranch: () => branch },
-    };
-
-    branch = [{ type: "message", message: task }, entry(id)];
-    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
-    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toBeUndefined();
-    branch = [entry("an-earlier-process")];
-    expect(await beforeAgentStart({ prompt: "task" }, context)).toEqual({
-      message: {
-        customType: SETUP_REPORT,
-        content: expect.stringContaining("sh scripts/legion-setup.sh"),
-        display: true,
-        details: { id },
-      },
-    });
-    await pane.handlers.get("agent_start")?.({}, context);
-    expect(await beforeAgentStart({ prompt: "task" }, context)).toBeUndefined();
-    expect(await requestOf({ messages: [copy(id), task, copy(id)] }, context)).toEqual({
-      messages: [copy(id), task],
-    });
-    expect(await requestOf({ messages: [copy(id), task] }, context)).toBeUndefined();
-  });
-
-  // A resume into a recreated workspace whose install then failed is owed both, in the order the
-  // process sends them: what happened to the workspace first, then what it cannot do in it.
-  test("a recreated workspace and a failed install arrive as two notices, in that order", async () => {
-    const pane = await reportPane(report(), { sessionId: "ses_setup_both", recreated: true });
-    const sentTypes = (sent: readonly SentMessage[]) =>
-      sent.flatMap((message) =>
-        "customType" in message &&
-        (message.customType === "legion-workspace-recreated" || message.customType === SETUP_REPORT)
-          ? [message.customType]
-          : []
-      );
-
-    expect(sentTypes(pane.sentMessages)).toEqual(["legion-workspace-recreated", SETUP_REPORT]);
-    expect(
-      [...notices(pane), ...notices(pane, SETUP_REPORT)].map(({ options }) => options)
-    ).toEqual([
-      { deliverAs: "steer", triggerTurn: false },
-      { deliverAs: "steer", triggerTurn: false },
-    ]);
-
-    // A recovery that dropped both copies owes both again, and the hook carries one message into
-    // the run: the recreated-workspace notice goes back in ahead of it as the same steer.
-    const beforeAgentStart = pane.handlers.get("before_agent_start");
-    if (beforeAgentStart === undefined)
-      throw new Error("the pane registered no before_agent_start");
-    const alreadySent = pane.sentMessages.length;
-
-    expect(await beforeAgentStart({ prompt: "task" }, pane.context)).toEqual({
-      message: expect.objectContaining({ customType: SETUP_REPORT }),
-    });
-    expect(sentTypes(pane.sentMessages.slice(alreadySent))).toEqual(["legion-workspace-recreated"]);
   });
 });

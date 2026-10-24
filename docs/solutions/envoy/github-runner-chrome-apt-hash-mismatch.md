@@ -26,8 +26,8 @@ severity: medium
 ## Problem
 
 The `dispatch` CI job's "Install Playwright Chromium" step
-(`.github/workflows/envoy-and-contracts.yaml:205-213`) runs the pinned Playwright
-(`../../scripts/repo-tool.sh playwright install --with-deps chromium`), which internally runs `apt-get update` before installing Chromium's
+(`.github/workflows/envoy-and-contracts.yaml:205-213`) runs `bunx playwright install
+--with-deps chromium`, which internally runs `apt-get update` before installing Chromium's
 system dependencies. GitHub's runner image preconfigures Google's `chrome-stable` apt
 repository (Chrome is already installed on the image; the repo exists only to serve future
 upgrades). That repository's index intermittently fails `apt-get update` with a hash-sum
@@ -38,7 +38,6 @@ actual dependencies it needs come from the standard Ubuntu repos, not Google's.
 
 The first fix attempt removed the source by an assumed filename:
 
-<!-- check-check-commands: allow quoted historical fix attempt, superseded; this is the text that failed, not a recipe to run -->
 ```yaml
 run: |
   sudo rm -f /etc/apt/sources.list.d/google-chrome*.list
@@ -63,7 +62,7 @@ reference Google's repository before installing (current tree,
   # source only serves upgrades, so drop it before installing our deps.
   run: |
     grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-    ../../scripts/repo-tool.sh playwright install --with-deps chromium
+    bunx playwright install --with-deps chromium
   working-directory: packages/dispatch
 ```
 

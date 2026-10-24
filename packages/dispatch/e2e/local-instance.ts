@@ -1,6 +1,6 @@
 /** `bun run dispatch:local`: the e2e harness, left running and seeded, with a signed-in URL.
  *  It starts every listener the Playwright config starts (e2e/harness-listeners.ts), on the same
- *  ports and variables, so `DISPATCH_E2E_REUSE_SERVERS=1 ../../scripts/repo-tool.sh playwright test ...` runs any spec
+ *  ports and variables, so `DISPATCH_E2E_REUSE_SERVERS=1 bunx playwright test ...` runs any spec
  *  against this instance — and empties its database and its fake Envoy, so restart it to reseed. */
 import { fileURLToPath } from "node:url";
 
@@ -173,7 +173,7 @@ async function main(): Promise<void> {
       `reseed them with PUT ${fakeEnvoy}/__fixture/sessions\n` +
       "  Run a spec against it from packages/dispatch (this empties the instance; restart it to " +
       "reseed):\n" +
-      `    DISPATCH_E2E_REUSE_SERVERS=1 ${harnessEnvironment(databaseUrl)} ../../scripts/repo-tool.sh playwright test ` +
+      `    DISPATCH_E2E_REUSE_SERVERS=1 ${harnessEnvironment(databaseUrl)} bunx playwright test ` +
       "--config e2e/playwright.config.ts --project=chromium e2e/broadcast.e2e.ts\n" +
       "Open exactly that origin: 'localhost' is another Host and the server refuses it (421).\n" +
       "Press Ctrl-C to stop."

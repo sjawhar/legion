@@ -10,11 +10,11 @@
     "check:classes": "bun web/src/theme/classes-in-build-css.ts",
     "test": "bun test --parallel web/src e2e/__tests__",
     "dispatch:local": "bun e2e/local-instance.ts",
-    "e2e": "bun run build:web && ../../scripts/repo-tool.sh playwright test --config e2e/playwright.config.ts",
-    "e2e:deployed": "../../scripts/repo-tool.sh playwright test --config e2e/playwright.config.ts",
-    "e2e:install": "../../scripts/repo-tool.sh playwright install chromium webkit firefox",
-    "typecheck": "../../scripts/repo-tool.sh tsc --noEmit",
-    "lint": "../../scripts/repo-tool.sh biome check web/src e2e"
+    "e2e": "bun run build:web && playwright test --config e2e/playwright.config.ts",
+    "e2e:deployed": "playwright test --config e2e/playwright.config.ts",
+    "e2e:install": "playwright install chromium webkit firefox",
+    "typecheck": "bunx tsc --noEmit",
+    "lint": "bunx biome check web/src e2e"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",

@@ -28,9 +28,9 @@
     "channel": "bun bin/envoy-channel.ts",
     "build": "bun scripts/build.ts",
     "check-dist": "bun scripts/build.ts --check",
-    "typecheck": "../../scripts/repo-tool.sh tsc --noEmit",
+    "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "../../scripts/repo-tool.sh biome check src/ hooks/ scripts/"
+    "lint": "bunx biome check src/ hooks/ scripts/"
   },
   "dependencies": {
     "@legion/contracts": "workspace:*",

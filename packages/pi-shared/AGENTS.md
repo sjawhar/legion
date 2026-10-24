@@ -113,4 +113,4 @@ it returns reads back as `turns`, `selfChecks`, `toolResults` and `transcriptEnt
 
 ## Checks
 
-`bun run typecheck`, `bun test`, `bun run lint` (this package's recipe is `biome check src/ test/`), each from this directory.
+`bunx tsc --noEmit`, `bun test`, `bunx biome check src/ test/`, each from this directory.

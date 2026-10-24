@@ -36,9 +36,9 @@
     "gen:go": "bun run scripts/gen-go.ts",
     "check:go": "bun run scripts/gen-go.ts --check",
     "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-api.ts --outdir dist --target bun --format esm",
-    "typecheck": "../../scripts/repo-tool.sh tsc --noEmit",
+    "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "../../scripts/repo-tool.sh biome check src/ schemas/"
+    "lint": "bunx biome check src/ schemas/"
   },
   "dependencies": {
     "zod": "4.3.6"

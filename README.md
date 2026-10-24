@@ -141,7 +141,7 @@ root `package.json`.
 
 ```sh
 bun install                                          # every workspace
-bun run lint .                                       # what CI's required lint job runs; `<package>/` for one package
+bunx biome check .                                   # what CI's required lint job runs; `<package>/` for one package
 cd packages/<package> && bun run typecheck && bun run test
 go -C packages/daemon test ./...                     # the Legion daemon
 go -C packages/envoy test ./...                      # Envoy, Dispatch's server and the Secrets Broker

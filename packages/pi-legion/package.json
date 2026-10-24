@@ -26,9 +26,9 @@
     "build": "bun build extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
     "prepack": "../../scripts/pi-plugin-prepack.sh",
     "postpack": "rm -rf dist/skills",
-    "typecheck": "../../scripts/repo-tool.sh tsc --noEmit",
+    "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "../../scripts/repo-tool.sh biome lint extensions/ src/"
+    "lint": "bunx biome lint extensions/ src/"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",

@@ -84,7 +84,7 @@ jobs:
         # takes `--with-deps` down with it; Chrome itself is preinstalled, so the source goes.
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          ../../scripts/repo-tool.sh playwright install --with-deps chromium
+          bunx playwright install --with-deps chromium
         working-directory: docs/site
       - name: Take the screenshots
         run: bun run docs:media

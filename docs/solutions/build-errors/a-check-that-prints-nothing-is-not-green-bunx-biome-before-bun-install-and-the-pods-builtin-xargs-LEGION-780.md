@@ -27,14 +27,9 @@ Extends docs/solutions/build-errors/bunx-from-the-repo-root-runs-the-wrong-tsc-a
   `bunx biome check <file>` prints nothing — not even the punycode warning that document names —
   and exits 0, and a subagent reports "biome clean". The real Biome always prints
   `Checked N files in …`; a lint, type or test command whose success line is absent is unverified,
-  whatever its exit status. A Legion role container has its packages installed before the agent's
-  first turn (`scripts/legion-setup.sh`), and a failed install arrives as a notice in that turn;
-  anywhere else, run `bun install --frozen-lockfile` once in the workspace before the first check.
-  Then check the directory as CI does — `bun run lint .` from the root, or the package's own
-  `bun run lint` — never a single file as the proof. INFRA-71 is what made the form quoted above
-  impossible to write in a prescribed command: every `lint`, `typecheck` and `playwright` recipe
-  now runs `scripts/repo-tool.sh <tool> …`, which resolves `node_modules/.bin` and never PATH or
-  the registry, so an uninstalled workspace fails naming the missing tool instead of exiting 0.
+  whatever its exit status. Run `bun install --frozen-lockfile` once in the workspace before the
+  first check, then check the directory as CI does (`bunx biome check .`, or the package path),
+  never a single file as the proof.
 - The worker pod's bash-tool shell has `xargs` as a shell builtin beside its jaq `jq`
   (`docs/solutions/legion/worker-pane-shell-gotchas.md` §14): a measurement of GNU xargs's `-x`
   or `-n` behaviour runs `/usr/bin/xargs` by path, or inside `bash -c`, and records which. The

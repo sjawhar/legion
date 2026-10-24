@@ -91,5 +91,5 @@ function createIssueState(overrides: Partial<IssueStateDict> = {}): IssueStateDi
 1. Before writing test fixture factories, check `IssueStateDict` (and similar
    shared types) on both the branch AND main
 2. Include all fields from both versions in the fixture defaults
-3. Run the package's typecheck (`scripts/repo-tool.sh tsc --noEmit`) locally
-   after pulling latest main to catch this before CI
+3. Run `bunx tsc --noEmit` locally after pulling latest main to catch this
+   before CI

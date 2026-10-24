@@ -48,8 +48,7 @@ Its indentation is written verbatim to `generated.go`. Most editors auto-insert 
 **Before committing:** Inspect the diff for the `keep` block. If you see spaces instead of
 tabs in the Go function body, the CI `gofmt` check will fail.
 
-**Biome side effect:** Running `bun run lint --write packages/contracts/scripts/gen-go.ts` from the
-repository root may reformat
+**Biome side effect:** Running `bunx biome check --write` on `gen-go.ts` may reformat
 surrounding TypeScript code (collapsing multi-line signatures, etc.). This is harmless but
 adds noise to the diff. Run Biome early to isolate formatting changes from logic changes.
 

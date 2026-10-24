@@ -29,9 +29,9 @@
   "scripts": {
     "build": "bun build src/server.ts --root . --outdir dist --target bun --format esm --external '@opencode-ai/*' && ../envoy-client/scripts/build-dispatch-cli.sh dist",
     "prepack": "./scripts/prepack.sh",
-    "typecheck": "../../scripts/repo-tool.sh tsc --noEmit",
+    "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
-    "lint": "../../scripts/repo-tool.sh biome check src/",
+    "lint": "bunx biome check src/",
     "postpack": "rm -rf skills"
   },
   "dependencies": {

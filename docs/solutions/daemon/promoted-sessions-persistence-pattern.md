@@ -74,8 +74,7 @@ registration (Zod validation happens on read, not write). Tests pass because the
 the logger, not the schema. Only `tsc --noEmit` catches the type mismatch, and only if you
 run it locally — otherwise it shows up as a CI-only failure.
 
-**Prevention:** Always run the package's typecheck (`scripts/repo-tool.sh tsc --noEmit`) after
-adding new feedback events.
+**Prevention:** Always run `bunx tsc --noEmit` after adding new feedback events.
 
 ### 2. Startup Role Reclaim for Promoted Sessions
 

@@ -29,7 +29,7 @@ severity: medium
 
 `packages/claude-envoy` resolves `@legion/envoy-client`'s `bun` export condition
 straight to source (`packages/envoy-client/src/dispatch-execute.ts`, not a compiled
-`dist/*.js`), so claude-envoy's own `bun run typecheck` — which sets
+`dist/*.js`), so claude-envoy's own `bunx tsc --noEmit` — which sets
 `noPropertyAccessFromIndexSignature: true` (`packages/claude-envoy/tsconfig.json:19`)
 — type-checks envoy-client's raw file. envoy-client's own `tsconfig.json` has no such flag.
 

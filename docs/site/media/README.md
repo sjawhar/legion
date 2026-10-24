@@ -24,7 +24,7 @@ From the repository root:
 
 ```bash
 bun install
-(cd packages/dispatch && bun run build:web && ../../scripts/repo-tool.sh playwright install chromium)
+(cd packages/dispatch && bun run build:web && bunx playwright install chromium)
 ```
 
 The first command installs the workspace, the second builds the dashboard the harness serves and

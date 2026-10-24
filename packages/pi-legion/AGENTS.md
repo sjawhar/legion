@@ -65,13 +65,10 @@ The plugin speaks to the Legion daemon (`packages/daemon`) through the daemon cl
 `legion.daemonApiVersion`: the claim, grant, workflow, controller, and state
 shapes that client parses, and the pane's environment — the identity variables
 `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_CONTROLLER`/`LEGION_PROJECT` (read by
-`src/classify.ts`, `extensions/legion.ts` and the two session modules; `LEGION_ISSUE` and
-`LEGION_ROLE` also by `src/setup-report.ts`), `LEGION_STATE_DIR`
-(where the claim session writes its jj attribution overlay, and where `scripts/legion-setup.sh`
-leaves the report `src/setup-report.ts` reads), `LEGION_WORKSPACE` (the issue
+`src/classify.ts`, `extensions/legion.ts` and the two session modules), `LEGION_STATE_DIR`
+(where the claim session writes its jj attribution overlay), `LEGION_WORKSPACE` (the issue
 workspace, the pane's cwd; read by nothing here), `LEGION_GENERATION` (set by the daemon, read by
-`src/setup-report.ts`, which takes a report of another generation for another process's),
-`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
+nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
 variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner;
 `GH_CONFIG_DIR`, its issue's owner's directory; `LEGION_GH_PATH`, the real gh the pane's `gh`
 wrapper runs; with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty: read by the pane's `gh` and
@@ -451,5 +448,5 @@ which hands both plugin entries to the Oh My Pi child by path.
 
 ## Checks
 
-`bun run typecheck`, `bun test`, `bun run lint` (this package's recipe is `biome lint extensions/ src/`), each from this directory;
+`bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
 `LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` for the real binary.

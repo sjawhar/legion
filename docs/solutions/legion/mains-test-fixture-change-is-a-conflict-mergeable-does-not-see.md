@@ -64,7 +64,7 @@ When the merge ref does not compile, three facts make the rebase the cheaper pat
 architect recorded the exception on those grounds:
 
 - A test-fix commit is needed regardless, and it needs a CI run regardless; a rebase adds none.
-- The fix cannot be verified on the old base: the typecheck and `bun test` there run against the
+- The fix cannot be verified on the old base: `bunx tsc` and `bun test` there run against the
   harness the branch has, not the one `main` has. Only the merged tree can prove the adaptation.
 - The alternative — fixing blind and pushing to let the merge ref judge — is the extra CI run.
 

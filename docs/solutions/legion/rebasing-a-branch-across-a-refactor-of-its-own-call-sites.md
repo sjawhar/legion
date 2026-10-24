@@ -70,14 +70,13 @@ was chosen to match `main`'s.
 
 ## 3. Type-check the fixtures the conflict did not touch
 
-The E2E test had no textual conflict, but the typecheck failed in it: `DaemonConfig` had
+The E2E test had no textual conflict, but `bunx tsc --noEmit` failed in it: `DaemonConfig` had
 gained five fields, `ProcessManagerDeps.panePath` had become `processPath` plus a required
 `runtime`, and `Locator` had become a `runtime`-tagged union. The fixture was adapted by copying
 the shape its sibling (`real-shutdown-e2e.test.ts`) already used on `main` — a real `TmuxRuntime`
 over the test's own `run`, `locatorsForIssue`, and `toMatchObject({ runtime: "tmux", tmuxSession })`
-— rather than inventing a second way to build a `ProcessManager` in tests. Run the package's
-typecheck (`scripts/repo-tool.sh tsc --noEmit`) and the affected test files before pushing, not
-just the conflicted ones.
+— rather than inventing a second way to build a `ProcessManager` in tests. Run tsc and the affected
+test files before pushing, not just the conflicted ones.
 
 ## 4. Merge state comes from GitHub, not from jj
 

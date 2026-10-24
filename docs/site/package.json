@@ -9,8 +9,8 @@
     "generate": "bun scripts/generate.ts",
     "build": "bun run generate && astro build",
     "preview": "astro preview",
-    "lint": "../../scripts/repo-tool.sh biome check --error-on-warnings .",
-    "typecheck": "../../scripts/repo-tool.sh tsc --noEmit -p tsconfig.tools.json"
+    "lint": "biome check --error-on-warnings .",
+    "typecheck": "tsc --noEmit -p tsconfig.tools.json"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.42.5",

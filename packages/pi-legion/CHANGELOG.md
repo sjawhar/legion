@@ -50,28 +50,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the prompt's run carries the message again and saves it; the model sees it once, and a notice an
   earlier recreation left in the history does not count as this one. A session that is no Legion
   session, and a `task` subagent, is never told.
-- A role whose setup command could not install this repository's packages in its container is told
-  so in its first turn (INFRA-71). `scripts/legion-setup.sh` — the one line Legion's deployment
-  runs in every role container before each start of that role's Oh My Pi,
-  `setup: [/bin/sh, -c, 'if [ -r ./scripts/legion-setup.sh ]; then sh ./scripts/legion-setup.sh; fi']` —
-  never exits non-zero, since that would stop Oh My Pi from starting, and writes
-  `$LEGION_STATE_DIR/legion-setup-report.json` instead, which a successful install deletes. A
-  report whose `kind` is `install-failed` and whose `issue`, `role` and `generation` are all this
-  session's own (`LEGION_STATE_DIR` outlives a generation in a pod and, under the tmux runtime, is
-  shared by every pane of the host, so another run's report is not this agent's) becomes one
-  `legion-setup-report` message, sent as a steer that starts no turn ahead of the next turn and
-  before the role claim: it names the `reason`, the `exitStatus` and the install log's tail, that
-  this repository's own check commands cannot run here and say so rather than passing silently,
-  that CI's required jobs are the authority for lint, types and the unit suites meanwhile, and
-  that the install is retried by hand with `sh scripts/legion-setup.sh` from the workspace, never
-  a bare `bun install`, whose download cache would land on the container's own disk and can evict
-  the pod. A missing, unreadable or malformed report is no notice and never an exception. It
-  shares the recreated-workspace notice's mechanism (`src/first-turn-notice.ts`): a session owed
-  both is sent both, the recreated workspace first, and a prompt whose recovery dropped either
-  copy off the branch carries that one again and keeps every later request to one copy of it. The
-  controller's container has no workspace, so the script installs nothing there and leaves no
-  report. This is no daemon API contract bump and no plugin interface bump: the notice crosses no
-  daemon RPC and no `@legion/pi-shared` interface.
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
   runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
   registers on `/legion/v1/claims/register` with that boot token in place of a controller

@@ -76,7 +76,7 @@ name or the PR body so the next reader does not re-derive it.
 
 This issue verified only the `envoy-plugin` job. The `Build contracts for …` steps in the
 `envoy-client` and `pi-envoy` jobs were not tested for removability — both packages' `typecheck`
-and `test` scripts are the same `scripts/repo-tool.sh tsc --noEmit` / `bun test`, so the same resolution argument
+and `test` scripts are the same `bunx tsc --noEmit` / `bun test`, so the same resolution argument
 applies to those two steps, but their `bun run build` steps (`bun build --target bun`) may still
 need the dependency's `dist/` for reasons this issue did not exercise. Treat them as "probably
 removable before test, unverified before build", and prove it with the command above before
