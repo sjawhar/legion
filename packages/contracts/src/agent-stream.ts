@@ -13,6 +13,8 @@
  * the browser.
  */
 
+import { cutUnits } from "./text-cut";
+
 /** Subject root of the stream. Outside `notifications.`: see the note above. */
 export const AGENT_STREAM_SUBJECT_PREFIX = "agentstream." as const;
 
@@ -198,8 +200,11 @@ export interface AgentStreamReplay {
   readonly frames: readonly AgentStreamFrame[];
 }
 
-/** Cuts `text` to `limit` characters, marking it when it had to. */
+/**
+ * Cuts `text` to `limit` characters (UTF-16 units, never half an emoji: `cutUnits`), marking it
+ * when it had to.
+ */
 export function capAgentStreamText(text: string, limit: number): string {
   if (text.length <= limit) return text;
-  return text.slice(0, limit) + AGENT_STREAM_TRUNCATION_SUFFIX;
+  return cutUnits(text, limit) + AGENT_STREAM_TRUNCATION_SUFFIX;
 }

@@ -2,8 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `capAgentStreamText` never ends on the first half of a surrogate pair (half an emoji), which a
+  viewer is shown as U+FFFD: a cut that would split one stops a UTF-16 unit short of the limit.
+
 ### Added
 
+- `cutUnits(text, limit)`: `text` cut to at most `limit` UTF-16 units, one unit short when the
+  cut would split a surrogate pair, so no cut leaves half an emoji; text within the limit is
+  returned as it is. `capAgentStreamText`, `@legion/envoy-client`, the Envoy plugins and the
+  Dispatch dashboard cut with it.
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

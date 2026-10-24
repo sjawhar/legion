@@ -1,3 +1,5 @@
+import { cutUnits } from "@legion/contracts";
+
 import type { Actor } from "../../api/types";
 import { actorLabel, actorName } from "../refs/actor";
 
@@ -8,7 +10,8 @@ export interface Author {
 }
 
 /** The Conversation's turn author: the app-wide `actorLabel`, plus the avatar's initials (from
- *  `actorName` alone, never the `(for <owner>)` attribution) and shape (square for sessions). */
+ *  `actorName` alone, never the `(for <owner>)` attribution; a word's first unit, none for a word
+ *  opening on an emoji: `cutUnits`) and shape (square for sessions). */
 export function resolveAuthor(actor: Actor, titles: ReadonlyMap<string, string>): Author {
   const label = actorLabel(actor, titles);
   const name = actorName(actor, titles);
@@ -16,7 +19,7 @@ export function resolveAuthor(actor: Actor, titles: ReadonlyMap<string, string>)
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
+    .map((part) => cutUnits(part, 1).toUpperCase())
     .join("");
 
   return { initials, label, shape: actor.kind === "session" ? "square" : "round" };

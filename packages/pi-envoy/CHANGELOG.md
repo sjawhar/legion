@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- No text the plugin cuts to a length ends on half an emoji, which reads as U+FFFD: a cut that
+  would split a surrogate pair stops a UTF-16 unit short. That covers the held asks the run-end
+  self-check lists, a reply to a person's typed input cut to a Dispatch body, the agent stream's
+  capped text (messages, reasoning, tool calls and results, the model name and command
+  descriptions), the 120-character heads of ask questions, answers and bodies in deliveries and
+  `dispatch read`, open-ask pointers, the `dispatch` command's output cut to the host's limit, and
+  gateway-page excerpts in errors.
+
 - The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
   client and sends the call without the pane. A tmux client waiting to connect to a tmux server too
   busy to accept caught the SIGTERM of the lookup's 5 s timeout and kept waiting, and the command

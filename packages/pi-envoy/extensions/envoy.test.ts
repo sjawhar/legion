@@ -13,7 +13,7 @@ import {
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { dispatchIssueSubject } from "@legion/contracts";
+import { DISPATCH_BODY_MAX, dispatchIssueSubject } from "@legion/contracts";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import {
   appendResult,
@@ -2332,6 +2332,27 @@ describe("envoy OMP extension", () => {
     await none.userTurn();
     await none.stop();
     expect(none.asked[0]?.prompt).toContain("There are no open asks");
+  });
+
+  // The question limit counts UTF-16 units, and an emoji is two: cutting between them would hand
+  // the model the first alone, so the line stops before the emoji.
+  test("cuts a held ask question short of an emoji the limit would split", async () => {
+    // A fresh module instance, as each ask-nudge test loads, so no other test's nudge state applies.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-prompt-emoji");
+    const held = await bootAskNudge(envoyExtension, "ses_nudge_prompt_emoji", () => ({
+      asks: [{ question: `${"y".repeat(118)}😀${"z".repeat(10)}` }],
+    }));
+    await held.userTurn();
+    await held.stop();
+
+    const heldPrompt = held.asked[0]?.prompt ?? "";
+    const askListStart = heldPrompt.indexOf("Your open asks in Dispatch:");
+    const askListEnd = heldPrompt.indexOf("\n\nAre you right now waiting");
+    expect(heldPrompt.slice(askListStart, askListEnd).split("\n")).toEqual([
+      "Your open asks in Dispatch:",
+      `- ${"y".repeat(118)}…`,
+    ]);
+    expect(Buffer.from(heldPrompt).toString()).toBe(heldPrompt);
   });
 
   test("the ask the agent opens itself spends the check the period owed", async () => {
@@ -8835,6 +8856,34 @@ describe("envoy OMP extension", () => {
           ]);
         });
       }
+
+      // A Dispatch body is DISPATCH_BODY_MAX UTF-16 units, and an emoji is two: the reply cut to
+      // fit stops before an emoji the cut would split, rather than posting its first half.
+      test("answers output past a Dispatch body with a reply cut short of an emoji", async () => {
+        const { agent, delivered, replied, replies } = await bootDirectSession(
+          "typed-input-reply-emoji",
+          {
+            accept: () => ({ accepted: true, body: "/session" }),
+            sendUserInput: async () => ({
+              handled: "command",
+              output: `${"x".repeat(DISPATCH_BODY_MAX - 2)}😀 and more`,
+            }),
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-reply-emoji"));
+        await delivered(1);
+        await replied(1);
+
+        const reply = `${"x".repeat(DISPATCH_BODY_MAX - 2)}…`;
+        expect(replies).toEqual([
+          {
+            body: { actor: { id: "ses_delivery", kind: "session" }, attempt: 1, body: reply },
+            path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/reply`,
+          },
+        ]);
+        expect(Buffer.from(JSON.stringify(replies)).toString()).not.toContain("\\ud83d");
+      });
 
       for (const [name, firstResult] of [
         ["a prompt", { handled: "prompt" }],

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- No text the plugin cuts to a length ends on half an emoji, which reads as U+FFFD: a cut that
+  would split a surrogate pair stops a UTF-16 unit short. That covers the 120-character heads of
+  ask questions, answers and bodies in channel notifications and `dispatch read`, open-ask
+  pointers, the `dispatch` command's output (`dist/dispatch.js`) cut to the host's limit, and
+  gateway-page excerpts in errors.
+
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
   the calling process's environment: tmux printed the tabs as `_` to a process with neither `TMUX`
   nor a UTF-8 locale, and the answer read as one field. A Claude Code session in a tmux pane has

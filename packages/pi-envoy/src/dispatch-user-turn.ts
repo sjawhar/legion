@@ -1,4 +1,4 @@
-import { DISPATCH_BODY_MAX } from "@legion/contracts";
+import { cutUnits, DISPATCH_BODY_MAX } from "@legion/contracts";
 import type { DispatchDelivery, RenderInboundResult } from "@legion/envoy-client/delivery";
 import type { UserInputResult } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
@@ -103,9 +103,10 @@ export type TypedInputOutcome =
   | { readonly hostVersion: string };
 
 /**
- * What the session answers on Dispatch for a person's text, capped to a Dispatch body, or
- * undefined when there is nothing to say: a prompt, skill or command that printed nothing, and, on
- * a host without `pi.sendUserInput`, text that is not a command, which the caller sends as before.
+ * What the session answers on Dispatch for a person's text, capped to a Dispatch body (never
+ * through an emoji: `cutUnits`), or undefined when there is nothing to say: a prompt, skill or
+ * command that printed nothing, and, on a host without `pi.sendUserInput`, text that is not a
+ * command, which the caller sends as before.
  * What a command printed is the answer whether or not it then submitted a prompt
  * (`/force:<tool> <prompt>` prints its confirmation first). The attempt is already the session's
  * user turn, so the answer is a reply rather than an error, and the conversation shows it.
@@ -125,5 +126,5 @@ export function typedInputReply(text: string, outcome: TypedInputOutcome): strin
     reply = `${command} was not run: this session's host cannot run typed input from Dispatch; nothing was sent.`;
   } else if (outcome.output?.trim()) reply = outcome.output;
   if (reply === undefined || reply.length <= DISPATCH_BODY_MAX) return reply;
-  return `${reply.slice(0, DISPATCH_BODY_MAX - 1)}…`;
+  return `${cutUnits(reply, DISPATCH_BODY_MAX - 1)}…`;
 }

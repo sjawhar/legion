@@ -78,6 +78,18 @@ test("a question longer than a name can carry is cut without a trailing space", 
   expect(controlName(atSpace, undefined)).toBe(`CORE-12: ${"x".repeat(47)}…`);
 });
 
+test("a question cut to a name's length stops before an emoji the cut would split", () => {
+  // The length counts UTF-16 units, and an emoji is two: cutting between them would give a
+  // screen reader the first alone, so the name stops before the emoji.
+  const emoji = { ...issueAsk, question: `${"x".repeat(47)}😀 and the rest` };
+  const name = controlName(emoji, undefined);
+  expect(name).toBe(`CORE-12: ${"x".repeat(47)}…`);
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(name)).toBe(false);
+  expect(
+    controlName({ ...issueAsk, question: `${"x".repeat(46)}😀 and the rest` }, undefined)
+  ).toBe(`CORE-12: ${"x".repeat(46)}😀…`);
+});
+
 test("a question's own line breaks and runs of spaces collapse to single spaces", () => {
   expect(controlName({ ...issueAsk, question: "  Which\n\n release? " }, undefined)).toBe(
     "CORE-12: Which release?"

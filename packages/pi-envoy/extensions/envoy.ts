@@ -8,6 +8,7 @@ import {
   agentStreamControlSubject,
   agentStreamFramesSubject,
   agentSubject,
+  cutUnits,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
   type OpenAsk,
@@ -259,7 +260,7 @@ const ASK_SELF_CHECK_PROMPT = (asks: readonly Pick<OpenAsk, "question">[]): stri
             const question =
               firstLine.length <= questionLimit
                 ? firstLine
-                : `${firstLine.slice(0, questionLimit - 1)}…`;
+                : `${cutUnits(firstLine, questionLimit - 1)}…`;
             return `- ${question}`;
           }),
           ...(asks.length > askLimit ? [`+${asks.length - askLimit} more`] : []),

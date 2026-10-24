@@ -45,3 +45,14 @@ test("session authors prefer the live registry title, then the stamped title, th
     shape: "round",
   });
 });
+
+test("an initial is never half an emoji", () => {
+  // An initial is a word's first UTF-16 unit, and an emoji is two: a word that starts with one
+  // gives no initial rather than the first half, which the tile would draw as U+FFFD.
+  const author = resolveAuthor(
+    { id: "zzz", kind: "session", origin: { session_title: "🚀 Ship Logs" } },
+    new Map()
+  );
+  expect(author.initials).toBe("S");
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(author.initials)).toBe(false);
+});

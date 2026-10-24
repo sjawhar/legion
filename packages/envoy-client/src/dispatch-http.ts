@@ -49,6 +49,7 @@ import type {
   Version,
   WhoamiResponse,
 } from "@legion/contracts";
+import { cutUnits } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
 
@@ -266,7 +267,7 @@ const BEARER_PIECE = 8;
  * slice once per piece.
  */
 function redactBearer(text: string, bearer: string): string {
-  if (bearer === "") return text.slice(0, EXCERPT_SCAN_LIMIT);
+  if (bearer === "") return cutUnits(text, EXCERPT_SCAN_LIMIT);
   const length = Math.min(BEARER_PIECE, bearer.length);
   const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
   const covered = new Uint8Array(scanned.length);
@@ -286,7 +287,12 @@ function redactBearer(text: string, bearer: string): string {
     const end = covered.indexOf(0, start);
     kept = end === -1 ? scanned.length : end;
   }
-  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+  // Both cuts stop before an emoji the limit would split (`cutUnits`); the scan above is not cut
+  // shorter, so a run of the bearer across the limit is redacted as before.
+  return cutUnits(
+    `${redacted}${cutUnits(scanned, EXCERPT_SCAN_LIMIT).slice(kept)}`,
+    EXCERPT_SCAN_LIMIT
+  );
 }
 
 /**

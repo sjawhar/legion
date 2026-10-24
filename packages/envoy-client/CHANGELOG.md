@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- A text cut at a length limit never ends on the first half of a surrogate pair (half an emoji),
+  which a reader is shown as U+FFFD: a cut that would split one stops a UTF-16 unit short, through
+  `cutUnits` from `@legion/contracts`. That covers `textHead` (the 120-unit heads of ask
+  questions, answers, bodies and gateway-page excerpts in deliveries, `dispatch read` and
+  errors), the open-ask pointer's 80-character question, `fitOutput`'s cut of the `dispatch`
+  command's output to the host's limit, and the 64 KiB a gateway-page excerpt reads. The search
+  for the client's bearer still reads past that limit, so a bearer across it is redacted as
+  before.
+
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
   aborts the lookup and returns the origin without `tmux` and `pane`. An aborted `defaultExec` call
   kills its child with SIGKILL. A tmux client waiting to connect to a tmux server too busy to

@@ -1208,6 +1208,28 @@ describe("fitOutput", () => {
     expect(out).toStartWith("(the full result, 63 characters: /state/out/63.md)");
   });
 
+  // The limit counts UTF-16 units, and an emoji is two: a cut between them writes the first alone,
+  // which reaches the terminal as U+FFFD, so either cut ends one unit short instead.
+  test("cuts the result text, or the whole output, short of an emoji the limit would split", () => {
+    const text = fitOutput(`${"x".repeat(61)}😀${"y".repeat(137)}`, [], ["note"], 120, write);
+    expect(text).toBe(
+      `${"x".repeat(61)}\n(the full result, 200 characters: /state/out/200.md)\nnote`
+    );
+    const kept = fitOutput(
+      "x".repeat(50),
+      ["- picture: a"],
+      [`${"n".repeat(96)}😀${"n".repeat(400)}`],
+      200,
+      write
+    );
+    expect(kept).toBe(
+      "(the full result, 63 characters: /state/out/63.md)\n" +
+        "(1 more picture line left out: see the full result)\n" +
+        "n".repeat(96)
+    );
+    for (const out of [text, kept]) expect(Buffer.from(out).toString()).toBe(out);
+  });
+
   test("an unbounded limit returns every line as given", () => {
     expect(fitOutput("text", ["- picture: a"], ["note"], Number.POSITIVE_INFINITY, write)).toBe(
       "text\n- picture: a\nnote"

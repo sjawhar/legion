@@ -1028,6 +1028,11 @@
 
 ### Fixed
 
+- The dashboard no longer shows half an emoji where it cuts text at a length: an Inbox row's
+  control names, cut to 48 characters of the question, and an author tile's initials stop a UTF-16
+  unit short of an emoji the cut would split, which a screen reader or the tile gave as U+FFFD.
+  The `?q=` search parameter's cut goes through the same `cutUnits` from `@legion/contracts`.
+
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while
   it recorded its request object's `jti` on a second one, so as many concurrent logins as the

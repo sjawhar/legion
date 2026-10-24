@@ -1,10 +1,15 @@
+import { cutUnits } from "@legion/contracts";
+
 /** Head length, in UTF-16 units, for one-line summaries of event text. */
 const HEAD_LENGTH = 120;
 
-/** The first HEAD_LENGTH units of `text` on one line (whitespace collapsed), with an ellipsis when cut. */
+/**
+ * The first HEAD_LENGTH units of `text` on one line (whitespace collapsed), with an ellipsis when
+ * cut; one unit fewer when the cut would split an emoji (`cutUnits`).
+ */
 export function textHead(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > HEAD_LENGTH ? `${flat.slice(0, HEAD_LENGTH)}…` : flat;
+  return flat.length > HEAD_LENGTH ? `${cutUnits(flat, HEAD_LENGTH)}…` : flat;
 }
 
 /**

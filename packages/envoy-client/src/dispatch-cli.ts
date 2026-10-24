@@ -1,3 +1,4 @@
+import { cutUnits } from "@legion/contracts";
 import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./dispatch-command";
 import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
@@ -102,7 +103,7 @@ export function fitOutput(
     ...kept,
   ].join("\n");
   const room = limit - after.length - 1;
-  return room >= 0 ? `${text.slice(0, room)}\n${after}` : after.slice(0, limit);
+  return room >= 0 ? `${cutUnits(text, room)}\n${after}` : cutUnits(after, limit);
 }
 
 /**

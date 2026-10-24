@@ -768,6 +768,15 @@ describe("DispatchClient", () => {
       `<style>${"s".repeat(64 * 1024 - 75)}</style>${"q".repeat(40)}${pieceBearer.slice(0, -10)} after the limit`,
       `${"q".repeat(40)}[redacted]`,
     ],
+    [
+      // A copy starting 5 characters inside the limit, just after an emoji: fewer than a piece
+      // lie inside, so only the scan reading past the limit redacts it, and the cuts that keep an
+      // emoji whole leave that scan as it was. The copy in the style block, redacted, shortens the
+      // text, so `[redacted]` ends inside the limit.
+      "after an emoji, starting 5 characters inside the scan limit",
+      `<style>${pieceBearer}${"s".repeat(64 * 1024 - 109)}</style>${"q".repeat(40)}😀${pieceBearer} after the limit`,
+      `${"q".repeat(40)}😀[redacted]`,
+    ],
   ] as const)("redacts a piece of the bearer %s", async (_copy, body, quoted) => {
     const { fetchImpl } = fakeFetch([
       new Response(body, { status: 502, headers: { "Content-Type": "text/html" } }),
@@ -782,6 +791,33 @@ describe("DispatchClient", () => {
     expect(bearerPieces(body)).not.toEqual([]);
     expect(bearerPieces(message)).toEqual([]);
     expect(message).toContain(`(${JSON.stringify(quoted)})`);
+    expect(message).not.toContain("after the limit");
+  });
+
+  // The scan limit counts UTF-16 units, and an emoji is two. An emoji the limit cuts through, or
+  // the cut after redaction lengthened the text, would leave its first half closing the excerpt,
+  // which the message spells as `\ud83d`; the excerpt ends before the emoji instead. The first
+  // body puts the emoji's first unit last inside the limit; the second puts it two units earlier,
+  // and redacting the 8 bearer characters at its start as `[redacted]` adds the two.
+  const emojiAtLimit = `<style>${"s".repeat(64 * 1024 - 56)}</style>${"q".repeat(40)}😀 after the limit`;
+  const emojiAfterRedaction = `<style>${pieceBearer.slice(0, 8)}${"s".repeat(64 * 1024 - 66)}</style>${"q".repeat(40)}😀 after the limit`;
+  test.each([
+    ["the scan limit, under a bearer", "secret", emojiAtLimit],
+    ["the scan limit, with no bearer", "", emojiAtLimit],
+    ["the cut after redaction lengthened the text", pieceBearer, emojiAfterRedaction],
+  ] as const)("ends an excerpt before an emoji %s would split", async (_cut, bearer, body) => {
+    const { fetchImpl } = fakeFetch([
+      new Response(body, { status: 502, headers: { "Content-Type": "text/html" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", bearer, fetchImpl);
+
+    const message = await client.getIssue("DSP-1").then(
+      () => "",
+      (error: Error) => error.message
+    );
+
+    expect(message).toContain(`("${"q".repeat(40)}")`);
+    expect(message).not.toContain("\\ud83d");
     expect(message).not.toContain("after the limit");
   });
 

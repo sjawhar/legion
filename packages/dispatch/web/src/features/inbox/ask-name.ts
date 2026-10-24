@@ -5,6 +5,8 @@
  * so the checkbox, the Snooze control and the grouping that counts twins cannot disagree.
  */
 
+import { cutUnits } from "@legion/contracts";
+
 import type { Ask } from "../../api/types";
 
 /** What the naming rules read off a row: the ask's own fields, not a copy of their shapes. */
@@ -93,7 +95,7 @@ export function controlName(ask: NamedAsk, ordinal: AskOrdinal | undefined): str
   const question = ask.question.replace(/\s+/g, " ").trim();
   const short =
     question.length > CONTROL_NAME_QUESTION_CHARS
-      ? `${question.slice(0, CONTROL_NAME_QUESTION_CHARS).trimEnd()}…`
+      ? `${cutUnits(question, CONTROL_NAME_QUESTION_CHARS).trimEnd()}…`
       : question;
   return `${which}: ${short}`;
 }

@@ -408,6 +408,27 @@ describe("Dispatch write advice", () => {
     expect(result.text).not.toContain("ask-3");
     expect(result.details.advice).toEqual(rawAdvice);
   });
+
+  // 80 characters are UTF-16 units, and an emoji is two: the pointer stops before one the cut
+  // would split, rather than printing its first half, which a terminal shows as U+FFFD.
+  test("truncates an open-ask question short of an emoji the 80th character would split", async () => {
+    const rawAdvice = advice({
+      your_open_asks: [{ id: "ask-1", question: `${"A".repeat(79)}😀 and more` }],
+    });
+    const result = await executeWrite(
+      "dispatch_message",
+      { issue: "DSP-42", body: "Update" },
+      rawAdvice
+    );
+
+    expect(result.text).toBe(
+      [
+        `Posted message message-1 (dispatch://DSP-42/message/message-1) ${issueSuffix}`,
+        `You still have an open ask on DSP-42: "${"A".repeat(79)}" (ask-1). Still needed? See the \`dispatch\` skill, "Close what you opened".`,
+      ].join("\n")
+    );
+    expect(Buffer.from(result.text).toString()).toBe(result.text);
+  });
   test.each([
     ["dispatch_comment", { issue: "DSP-42", body: "Update" }],
     [

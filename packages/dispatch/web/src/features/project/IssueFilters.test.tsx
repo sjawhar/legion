@@ -271,6 +271,13 @@ test("a ?q= over the cap from a link is cut on a code point, never leaving half 
     });
     const written = new URLSearchParams(screen.getByTestId("location-search").textContent ?? "");
     expect(written.get("q")).toBe("x".repeat(SEARCH_QUERY_MAX - 1));
+    // An emoji that ends at the cap is kept whole.
+    const whole = `${"x".repeat(SEARCH_QUERY_MAX - 2)}😀`;
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search issues" }), {
+      target: { value: `${whole}y` },
+    });
+    const kept = new URLSearchParams(screen.getByTestId("location-search").textContent ?? "");
+    expect(kept.get("q")).toBe(whole);
   } finally {
     view.unmount();
     getMyState.mockRestore();

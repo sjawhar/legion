@@ -44,6 +44,7 @@ import {
   ASK_URGENCIES,
   actorLabel,
   claimHolds,
+  cutUnits,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DISPATCH_BODY_MAX,
   dispatchToolSchema,
@@ -291,7 +292,7 @@ function renderAdvice(
       const ask = openAsks[index];
       if (ask === undefined) break;
       lines.push(
-        `You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`
+        `You still have an open ask on ${key}: "${cutUnits(ask.question, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`
       );
     }
   }

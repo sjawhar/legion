@@ -13837,6 +13837,16 @@ function actorLabel(actor, titles) {
   }
   return `${name} (as ${serviceSubjectLabel(service)})`;
 }
+// ../contracts/src/text-cut.ts
+function cutUnits(text, limit) {
+  if (text.length <= limit)
+    return text;
+  if (limit <= 0)
+    return "";
+  const last = text.charCodeAt(limit - 1);
+  return text.slice(0, last >= 55296 && last <= 56319 ? limit - 1 : limit);
+}
+
 // ../contracts/src/agent-stream.ts
 var AGENT_STREAM_LIMITS = {
   partChars: 16000,
@@ -15065,7 +15075,7 @@ import { resolve as resolvePath2 } from "path";
 var HEAD_LENGTH = 120;
 function textHead(text) {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > HEAD_LENGTH ? `${flat.slice(0, HEAD_LENGTH)}\u2026` : flat;
+  return flat.length > HEAD_LENGTH ? `${cutUnits(flat, HEAD_LENGTH)}\u2026` : flat;
 }
 function askAnswerText(answer) {
   if (answer === null || answer === undefined)
@@ -15267,7 +15277,7 @@ var EXCERPT_SCAN_LIMIT = 64 * 1024;
 var BEARER_PIECE = 8;
 function redactBearer(text, bearer) {
   if (bearer === "")
-    return text.slice(0, EXCERPT_SCAN_LIMIT);
+    return cutUnits(text, EXCERPT_SCAN_LIMIT);
   const length = Math.min(BEARER_PIECE, bearer.length);
   const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
   const covered = new Uint8Array(scanned.length);
@@ -15288,7 +15298,7 @@ function redactBearer(text, bearer) {
     const end = covered.indexOf(0, start);
     kept = end === -1 ? scanned.length : end;
   }
-  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+  return cutUnits(`${redacted}${cutUnits(scanned, EXCERPT_SCAN_LIMIT).slice(kept)}`, EXCERPT_SCAN_LIMIT);
 }
 function excerpt(text, token) {
   const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
@@ -16360,7 +16370,7 @@ function renderAdvice(tool, key, advice, opts) {
       const ask = openAsks[index];
       if (ask === undefined)
         break;
-      lines.push(`You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
+      lines.push(`You still have an open ask on ${key}: "${cutUnits(ask.question, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
     }
   }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
@@ -19871,8 +19881,8 @@ function fitOutput(text, pictures, kept, limit, writeFull) {
   ].join(`
 `);
   const room = limit - after.length - 1;
-  return room >= 0 ? `${text.slice(0, room)}
-${after}` : after.slice(0, limit);
+  return room >= 0 ? `${cutUnits(text, room)}
+${after}` : cutUnits(after, limit);
 }
 async function runDispatchCli(argv, rawEnv, io) {
   const print = (text2) => io.stdout(text2.endsWith(`
