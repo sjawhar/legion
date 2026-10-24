@@ -1,0 +1,67 @@
+[
+  {
+    "name": "a block at the top level",
+    "markdown": ":::ask{#window}\nWhich deployment window?\n:::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block in a blockquote",
+    "markdown": "> :::ask{#window}\n> Which deployment window?\n> :::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block on a list item's first line",
+    "markdown": "- :::ask{#window}\n  Which deployment window?\n  :::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block opened with four colons",
+    "markdown": "::::ask{#window}\nWhich deployment window?\n::::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block after a fence a list item's end closes",
+    "markdown": "- Example:\n\n  ```md\n  code\n\n:::ask{#window}\nWhich deployment window?\n:::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block after a tilde fence a longer run closes",
+    "markdown": "~~~md\n:::ask{#example}\n:::\n~~~~\n\n:::ask{#window}\nWhich deployment window?\n:::",
+    "asks": ["window"]
+  },
+  {
+    "name": "two blocks",
+    "markdown": ":::ask{#window}\nWhich deployment window?\n:::\n\n> :::ask{#region}\n> Which region?\n> :::",
+    "asks": ["window", "region"]
+  },
+  {
+    "name": "a fenced example at the top level",
+    "markdown": "Example:\n\n```md\n:::ask{#example}\nWhich?\n:::\n```",
+    "asks": []
+  },
+  {
+    "name": "a fenced example four columns into a nested list item",
+    "markdown": "- Format notes:\n  - Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```",
+    "asks": []
+  },
+  {
+    "name": "a fenced example four columns into item 10",
+    "markdown": "10. Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```",
+    "asks": []
+  },
+  {
+    "name": "a fence opened on a list item's first line",
+    "markdown": "- ```md\n  :::ask{#example}\n  Which?\n  :::\n  ```",
+    "asks": []
+  },
+  {
+    "name": "an indented-code example",
+    "markdown": "Example:\n\n    :::ask{#example}\n    Which?\n    :::",
+    "asks": []
+  },
+  {
+    "name": "plain text",
+    "markdown": "A plain revision.",
+    "asks": []
+  }
+]

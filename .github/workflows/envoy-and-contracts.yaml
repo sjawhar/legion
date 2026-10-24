@@ -318,6 +318,9 @@ jobs:
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              # The Go copy its tests hold the TypeScript to: extensions/askgate/new-asks.test.ts
+              # reads the Dispatch server's decision-block table, which the Go API test reads too.
+              - 'packages/envoy/internal/dispatch/api/testdata/**'
               - 'package.json'
               - 'bun.lock'
               - *bun_toolchain
