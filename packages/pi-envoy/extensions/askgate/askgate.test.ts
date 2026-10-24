@@ -1730,9 +1730,49 @@ console.log(JSON.stringify(args, null, 2));
       );
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the copy in docs)\n`));
-      // The directory comes from the command's own cd and then pwd, run as the dry run runs.
-      expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd");
+      // The directory comes from the command's own cd and then pwd -P, run as the dry run runs.
+      expect(g.dryRuns.map((run) => run.script)).toContain("cd docs >/dev/null && pwd -P");
       expect(g.dryRuns.every((run) => run.cwd === work && run.timeoutMs === 10_000)).toBe(true);
+    });
+    // The CLI resolves --path against its process.cwd(), the physical directory, so `..` from a
+    // symlinked directory leaves the link's target, not the link.
+    const real = path.join(work, "real");
+    fs.mkdirSync(path.join(real, "inner"), { recursive: true });
+    fs.writeFileSync(path.join(real, "brief.md"), `${BRIEF}(the copy beside the link's target)\n`);
+    fs.symlinkSync(path.join(real, "inner"), path.join(work, "link"));
+    test("(f) after a cd into a symlinked directory, ../ is read from the link target's parent, as the CLI reads it", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u9",
+        "cd link && dispatch artifact --issue DSP-1 --name brief.md --path ../brief.md"
+      );
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(
+        JSON.stringify(`${BRIEF}(the copy beside the link's target)\n`)
+      );
+    });
+    test("(g) a call whose own directory is a symlink reads ../ from the link target's parent too", async () => {
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash("u10", "dispatch artifact --issue DSP-1 --name brief.md --path ../brief.md", {
+        cwd: "link",
+      });
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(
+        JSON.stringify(`${BRIEF}(the copy beside the link's target)\n`)
+      );
+    });
+    test("(h) a directory whose name ends in a space keeps that space", async () => {
+      fs.mkdirSync(path.join(work, "spaced "), { recursive: true });
+      fs.writeFileSync(path.join(work, "spaced ", "brief.md"), `${BRIEF}(the spaced copy)\n`);
+      fs.mkdirSync(path.join(work, "spaced"), { recursive: true });
+      fs.writeFileSync(path.join(work, "spaced", "brief.md"), `${BRIEF}(the unspaced copy)\n`);
+      const g = bind({ env: STUB, cwd: work });
+      await g.bash(
+        "u11",
+        "cd 'spaced ' && dispatch artifact --issue DSP-1 --name brief.md --path brief.md"
+      );
+      expect(g.calls).toHaveLength(1);
+      expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the spaced copy)\n`));
     });
     test("(d) a --path the gate cannot read records error and the call runs", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });

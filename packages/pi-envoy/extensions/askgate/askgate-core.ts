@@ -21,8 +21,9 @@
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
 //     reviewed. An upload given with `--path` prints the path, not the text: the gate reads that
 //     file (`readFile`) and adds its text as `content`, so both forms reach the model alike, cut to
-//     the same 64 KB. A relative path resolves in the directory the command runs in; after its own
-//     `cd`, bash names that directory (the `cd`, then `pwd`, run as the dry run runs). A file the
+//     the same 64 KB. A relative path resolves where the CLI resolves it, against its
+//     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
+//     it (the `cd`, then `pwd -P`, run as the dry run runs). A file the
 //     gate cannot read is `error`, and the call runs. An upload is judged against failure 10 alone
 //     (askgate-upload.md), since a plan or a report is long by nature.
 //   - A `bash` call that holds a scoped `dispatch` write those rules cannot read — joined to
@@ -604,10 +605,11 @@ export interface ScopedCommand {
   /** A `dispatch artifact` upload of a markdown document, reviewed against failure 10 alone. */
   upload?: true;
   /**
-   * The command's own leading `cd` and then `pwd`: run where the dry run runs, it prints the
-   * directory the command reaches, against which an upload's relative `path` resolves.
+   * The command's own leading `cd`, if any, then `pwd -P`: run where the dry run runs, it prints
+   * the physical directory the command reaches, the CLI's `process.cwd()`, against which an
+   * upload's relative `path` resolves.
    */
-  cdScript?: string;
+  dirScript: string;
 }
 
 /** The `bash` command as a scoped `dispatch` call, or undefined for any other command. */
@@ -668,7 +670,7 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
     ...(rebuttal === undefined ? {} : { rebuttal }),
     readsFile,
     ...(upload ? { upload: true as const } : {}),
-    ...(cdEnd === undefined ? {} : { cdScript: `${command.slice(0, cdEnd)} >/dev/null && pwd` }),
+    dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
   };
 }
 
@@ -1736,13 +1738,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // its text as `content`, so the model sees one shape for both forms of the upload.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
         return { args };
-      // A relative path resolves where the command runs: after its own `cd`, which bash resolves
-      // (CDPATH included), so the gate asks bash for that directory rather than guessing it.
+      // A relative path resolves where the CLI runs, against its process.cwd(): the physical
+      // directory after the command's own `cd`, which bash resolves (CDPATH and symlinks included),
+      // so the gate asks bash for that directory rather than guessing it. Only the newline `pwd`
+      // ends its line with is removed: a directory's name may end in a blank.
       let base = cwd;
-      if (scoped.cdScript !== undefined) {
-        const reached = await stdoutOf(scoped.cdScript, `${scoped.label}'s cd`);
+      if (!path.isAbsolute(args.path)) {
+        const reached = await stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
         if (!("stdout" in reached)) return reached;
-        base = reached.stdout.trim();
+        base = reached.stdout.endsWith("\n") ? reached.stdout.slice(0, -1) : reached.stdout;
       }
       const file = path.resolve(base, args.path);
       let content: string | undefined;
