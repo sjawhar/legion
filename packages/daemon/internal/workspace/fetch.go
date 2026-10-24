@@ -130,8 +130,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	defer func() {
 		_ = credential.remove()
 	}()
-	quarantineRoot := filepath.Join(filepath.Dir(request.Feed), "feed-quarantine")
-	present, err := ownFeedRepository(feed, request.Repo, request.Clock.Now(), request.Log, quarantineRoot)
+	present, err := ownFeedRepository(feed, request.Repo, request.Clock.Now(), request.Log)
 	if err != nil {
 		return FetchReport{}, err
 	}

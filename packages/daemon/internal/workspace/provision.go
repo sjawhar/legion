@@ -62,10 +62,6 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := ensureRepoClone(ctx, run, WallClock{}, workspace.Clone, GitHubURL(request.Repo), request.DefaultBranch, source); err != nil {
 		return Workspace{}, err
 	}
-	quarantineRoot := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(source.feed))), "feed-quarantine")
-	if err := dissociateLegacyClone(ctx, run, workspace.Clone, source.feed, quarantineRoot, request.Log); err != nil {
-		return Workspace{}, err
-	}
 	if err := ensureFetchConfiguration(ctx, run, workspace.Clone, source); err != nil {
 		return Workspace{}, err
 	}

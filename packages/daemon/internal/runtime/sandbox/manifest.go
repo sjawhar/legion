@@ -134,11 +134,11 @@ func legionVolumeNames() []string {
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
 // each role container and the image probe's: an operator's mount may be neither at, under, nor
 // above one. AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this
-// deployment enrolls, GHConfigDir whether or not the pod is an issue's, and FeedDir and
-// FeedQuarantineDir, which TreeRoot already covers, are named for issue-pod subpath mounts.
+// deployment enrolls, GHConfigDir whether or not the pod is an issue's, and FeedDir, which TreeRoot
+// already covers, is named for the read-only mount every issue pod's role container carries there.
 func legionMountPaths() []string {
 	paths := []string{
-		TreeRoot, FeedDir, FeedQuarantineDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
+		TreeRoot, FeedDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
 		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir,
 	}
 	slices.Sort(paths)
