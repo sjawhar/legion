@@ -106,9 +106,11 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   wrapper around the versioned client, and it resolves because `perl-base` is in the image),
   `redis-cli` (from `redis-tools`: no
   repository of the project speaks Redis today, and it is carried anyway, at about a megabyte,
-  because a second image roll costs more than a megabyte), `sqlite3` (Oh My Pi's own session files
-  are SQLite databases, and a role reading its own session, or a repository's SQLite fixture, has
-  no other way to open one), `nc` (from `netcat-openbsd`, for the reachability check a role would
+  because a second image roll costs more than a megabyte), `sqlite3` (a repository's own SQLite
+  fixture or database has no other way to open from a shell, and Oh My Pi's own profile databases
+  under `~/.omp/profiles/legion` are SQLite as well; a role's session is not one of them — it is
+  `results.jsonl`, `state.json` and `title` under `XDG_STATE_HOME`, and the session store these
+  pods otherwise use is Postgres), `nc` (from `netcat-openbsd`, for the reachability check a role would
   otherwise write as an inline Python loop: the package ships `/usr/bin/nc.openbsd` and the `nc`
   name comes from the alternatives system rather than being a file of the package, so every gate
   asks for `nc` and never `nc.openbsd`), `dig` (from `bind9-dnsutils`, the package trixie's virtual
@@ -223,16 +225,30 @@ from ranges, where the warm run prints `3.2.4` at once. Work that needs the clos
 takes a project's own lockfile with `uv run` or `bun install` in a workspace, not a one-off runner
 line.
 
-A pinned run whose tool then installs something of its own — a browser download, a second toolchain
-under `$HOME` — is on the sanctioned side when both of these hold: what it writes lands under the
-issue's own volume through the documented variables, and after the command exits nothing else
-resolves differently. A browser download under a relocated browsers path passes both. It is the
-withheld capability when either fails — anything that writes into a system prefix, and anything
-that leaves a toolchain, shim or binary which a later launch or another role's process will resolve
-without asking for it. The test is resolution, not disk: a second toolchain under `$HOME` that only
-an explicit absolute path reaches is sanctioned; the same toolchain put where `PATH` finds it is
-operator setup, whoever typed the command. The three artefacts above are the whole of that line's
-ground. Disk is not: the issue's volume is 49 GiB with 2.5 GiB used and every cache already
+A pinned run whose tool then installs something of its own — an interpreter, a browser, a second
+toolchain — is on the sanctioned side when both of these hold: what it writes lands under the
+issue's own volume through one of the variables the runtime sets for a role container —
+`XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE` and
+`BUN_INSTALL_CACHE_DIR` (`roleEnvironment`), `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR`
+(`podkind.go`), but not `XDG_CONFIG_HOME`, which is the pod's shared in-memory volume — and after
+the command exits nothing else resolves differently. The interpreter `uv run` downloads for a
+project's `.python-version` passes both: it lands under `UV_PYTHON_INSTALL_DIR`
+(`/legion/uv/python/<issue>`), where the issue's next pod finds it. A browser download passes only
+when the role points that tool's own cache variable at a directory under one of those paths: the
+runtime sets no browser path, so an unset one leaves the download wherever the tool defaults.
+Where it lands is the cost. Under one of those variables it is on the issue's volume, outliving
+the pod and shared by the issue's roles; under `$HOME` (`/home/legion`, which no volume is mounted
+on) it is one copy per role and per pod, lost on the next relaunch, and charged to the gigabyte of
+ephemeral storage the container is admitted with — the charge `roleEnvironment` moved every cache
+off after GKE Autopilot evicted issue pods for it
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)) — so an install under `$HOME` fails the
+first condition whatever else it leaves. It is the withheld capability when either fails —
+anything that writes into a system prefix, and anything that leaves a toolchain, shim or binary
+which a later launch or another role's process will resolve without asking for it. Between two
+installs that land in the right place, the test is resolution, not disk: a second toolchain that
+only an explicit absolute path reaches is sanctioned; the same toolchain put where `PATH` finds it
+is operator setup, whoever typed the command. The three artefacts above are the whole of that
+line's ground. Disk is not: the issue's volume is 49 GiB with 5.2 GiB used and every cache already
 relocated onto it, and a sanctioned install is paid once per issue, on the issue's own disk, by the
 issue's roles together.
 

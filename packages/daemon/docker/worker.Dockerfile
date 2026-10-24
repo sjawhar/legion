@@ -493,8 +493,10 @@ ARG PI_CODEGRAPH_VERSION
 # the wrapper resolves.
 # redis-tools (redis-cli): no repository of the project speaks Redis today. It is carried anyway,
 # at about a megabyte, because a second image roll costs more than a megabyte.
-# sqlite3: Oh My Pi's session files are SQLite databases, and a role debugging its own session — or
-# a repository's SQLite fixture — has no other way to open one.
+# sqlite3: a repository's own SQLite fixture or database has no other way to open from a shell, and
+# Oh My Pi's own profile databases under ~/.omp/profiles/legion are SQLite too. A role's session is
+# not one of them: it is results.jsonl, state.json and title under XDG_STATE_HOME, and the session
+# store these pods otherwise use is Postgres.
 # netcat-openbsd (nc): a reachability check otherwise has to be written as an inline Python loop.
 # `nc` is not a file of the package: it ships /usr/bin/nc.openbsd, and the `nc` name comes from the
 # alternatives system, whose script runs as root during this build — so the checks below ask for

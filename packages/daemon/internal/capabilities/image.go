@@ -252,8 +252,9 @@ func pluginEnabled(lock, name string) (string, bool) {
 // local stack `bun run dispatch:local` (packages/dispatch/e2e/local-instance.ts) refuses to start
 // without psql on PATH, so a role whose image lacks psql cannot run the suite its own change owes.
 // redis-cli, sqlite3, nc and dig are the clients a role's own work needs and an unprivileged
-// container cannot apt-install for itself: a session's SQLite file, a reachability check, a name
-// that does not resolve.
+// container cannot apt-install for itself: a repository's own SQLite fixture or database (and Oh
+// My Pi's own profile databases, which are SQLite where a role's session is not), a reachability
+// check, a name that does not resolve.
 // A missing tool fails the publish naming the tool; a deployment that layers its own image on the
 // published one inherits the five; a deployment still pinning an older digest keeps the old list,
 // because the probe runs that image's own `legion`.
