@@ -460,7 +460,7 @@ jobs:
           bun pm pack --destination ../../out/pr-artifacts
           tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
         working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: opencode-legion-envoy-plugin-pr
           path: out/pr-artifacts/*.tgz
@@ -569,7 +569,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pi-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -630,7 +630,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-legion
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pi-legion-pr
           path: out/pr-artifacts/*.tgz
@@ -736,7 +736,7 @@ jobs:
         # unconsumed consumer, the `window.__dispatchDocument` inspection probe).
         run: bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
@@ -767,7 +767,7 @@ jobs:
       - name: Pack Claude Envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
         working-directory: packages/claude-envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: claude-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -864,7 +864,7 @@ jobs:
             tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
           done
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: legion-envoy-binaries-pr
           path: |
@@ -1204,7 +1204,7 @@ jobs:
       - name: Local end-to-end acceptance
         run: bash scripts/e2e-local.sh
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
