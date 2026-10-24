@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-110",
+  "completed": "2026-10-24T16:40:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-body-embed-limit.sh:49-50",
+      "description": "Fail-open, reviewer-demonstrated at c982e6a2: both declaration patterns capture `(\\d+)`, and `int(\"032000\")` is 32000 in Python while Go reads the same literal as octal 13312. A scratch tree holding the real script, `DISPATCH_BODY_MAX = 32000` and `maxInputChars = 032000` exits 0 with `body limit 32000 ... fits the embedder's 32000`, while the embedder truncates every body past 13,312 runes - the exact silent loss this check exists to stop. Confirmed against the Go toolchain: `const maxInputChars = 032000; fmt.Println(maxInputChars)` prints 13312. This is a hole in the gate the issue asks for (acceptance 1), and the script's own refusal text promises the opposite ('a number written another way (digit separators, hexadecimal, an expression)'), so it is not a Minor. Remedy: capture `(0|[1-9][0-9]*)` in BODY_PATTERN and EMBED_PATTERN, so a leading-zero numeral lands in the existing 'declares no <const> this check can read' refusal, plus one suite case pinning it."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-body-embed-limit.sh:114-128",
+      "description": "False refusal on a required job, reviewer-demonstrated at c982e6a2: `comment_block_above` reads only the unbroken run of lines above the declaration whose stripped form starts with `//`, `*` or `/*`. Three correct trees are refused with a remedy the file already satisfies - a `/* ... */` block whose body lines carry no `*` prefix (exit 1, 'the comment above DISPATCH_BODY_MAX (...:5) does not name maxInputChars ... write maxInputChars into the comment above DISPATCH_BODY_MAX'); a Go doc comment on the `const (` group rather than on the member; and a trailing same-line comment, which both declaration patterns explicitly accept via their `(?://.*)?$` tail, so the script reads a declaration shape whose cross-reference it then refuses. Fails closed, so no drift escapes, but the required `lint` job refuses a tree that satisfies the rule and prints an instruction already carried out. Remedy: keep walking upward past a non-comment line while inside an unterminated `/* ...` (stopping at the opening `/*`), and let `cross_reference` also read the declaration line's own trailing comment."
+    }
+  ],
+  "verified": {
+    "ci": "Read on GitHub, not from a handoff. main's required set is lint, typecheck, test, pr-title (ruleset 12331919; main carries no branch-protection required set). The branch's newest pull_request run has head 7eed5a0982b4f58436f3dcc17e4cae13d4f2340a; compare 7eed5a09...c982e6a2 is `ahead` by .legion/INFRA-110/implement.json and test.json alone, so that commit's checks stand for this code. All four required check-runs are completed/success there. envoy-go (not required) settled success after the implementer's single re-run.",
+    "threads": "gh api graphql reviewThreads(first:100) returned 0 nodes; no review of any kind on #2138 before this round. No bot thread to adjudicate.",
+    "e2e": "Both lines present in the live body: `E2E (implementer)` and `E2E (tester)`, each naming a surface, a command, an observation, head 7eed5a0982b4f58436f3dcc17e4cae13d4f2340a and a negative control.",
+    "thermo": "Pair run once at the reviewed head c982e6a2. thermonuclear-deep-review: APPROVE, 0 blocking, 2 Minor, a 15-tree fail-open analysis and the Security rows. thermonuclear-code-quality: CHANGES, on the error model. The reviewer reproduced both deep-review Minors itself and re-graded them (above); the quality finding is the fast-follow."
+  },
+  "fastFollow": "The script's error model: load() and declaration() return `... | None` and thread five `is not None` guards through the main flow, where every sibling in .github/scripts (check-zod-version.sh:47-49, check-bun-workspace-manifests.sh:24-25, check-gh-version.sh:26-28) ends an unreadable input with fatal() and accumulates only the findings a human wants listed together. The success print at :194-197 dereferences body.value and embed.value, which the declared types say may be None - safe today only because every None path records a problem and the script exits first, an invariant nothing type-checks in a heredoc. Folding in the same pass: load() catches FileNotFoundError and UnicodeDecodeError only, so a mode-000 file or a directory in place of a file ends in a traceback rather than an `::error file=...` line (catch OSError), and text.splitlines() splits on U+2028, U+0085, \\v and \\f, shifting every reported line number (split on \\n instead)."
+}
