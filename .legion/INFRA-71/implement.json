@@ -2,48 +2,56 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T16:05:00Z",
-  "round": "the tester's two failures, both inside the evidence passage this section added, plus the one CI re-run the architect scoped; nothing else touched",
+  "completed": "2026-10-24T17:20:00Z",
+  "round": "the reviewer's four, all in or about the evidence passage, plus the two stale lines of the pull request body; nothing else touched",
   "proof": [
     {
-      "criterion": "The tester's first failure — the section claimed the sequence's published last line is refused in this deployment. It is not: `kubectl get jobs,pods` runs and exits 0; it is asking for Services as well that is refused.",
-      "surface": "The live cluster from this role container, the published line run exactly as written and then with Services added.",
-      "command": "kubectl get jobs,pods ; kubectl get jobs,pods,svc ; kubectl auth can-i list jobs | list pods | list services | get services",
-      "observed": "`kubectl get jobs,pods` exits **0** and prints its table (twenty lines, not quoted: they are the namespace's other work). `kubectl get jobs,pods,svc` exits **1** with `Error from server (Forbidden): services is forbidden: … cannot list resource \"services\"` — the Services part alone. `list jobs` and `list pods` answer `yes`; `list services` and `get services` answer `no`. The clause now says the line runs as published and that adding Services is what is refused, because this identity may no more list a Service than create one.",
-      "headSha": "32dc3a0fcdc42081b2b11d1bba2ea13a55fdef15",
-      "negativeControl": "The refusal is the control for the claim: the same command with one more resource name changes the status from 0 to 1, which is the distinction the old clause collapsed. The grant matrix behind it is measured rather than inferred — `list` and `get` are asked separately, since this identity already proved they do not follow one another (`delete jobs` yes while `patch jobs` no)."
+      "criterion": "Finding 1 — the published `kubectl wait --for=condition=Ready pod -l job-name=<workload>` cannot be followed where the sequence puts it: the Job's pod does not exist the instant the apply returns, so it exits 1 at once.",
+      "surface": "The live cluster from this role container: the failing line reproduced, then the corrected pair driven twice against real Jobs built from the section's own manifest — once with no pause after the apply, once with the pause the Service steps would insert.",
+      "command": "kubectl wait --for=condition=Ready pod -l job-name=<nothing> --timeout=30s ; kubectl wait --for=create pod -l job-name=<nothing> --timeout=15s ; then for each of two Jobs: kubectl apply -f ; kubectl wait --for=create pod -l job-name=… --timeout=120s ; kubectl wait --for=condition=Ready pod -l job-name=… --timeout=300s ; kubectl logs --tail=1 ; kubectl delete job",
+      "observed": "Against a selector matching nothing the old line exits **1** immediately with `error: no matching resources found`, while `--for=create` polls and ends `timed out waiting for the condition` at its own timeout. The corrected pair, run A with **no pause** after the apply: create met at **1 s**, Ready met at **87 s** (a cold machine), both exit 0. Run B with a **10 s pause**: create met at 10 s, Ready at 10 s (the machine was warm), both exit 0, log line `database system is ready to accept connections`. The section publishes both waits now, and the evidence passage records that the single wait it published before exited 1 at once.",
+      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
+      "negativeControl": "The no-pause run is the control for the fix: a wait that only works where the gap is wide would pass run B and fail run A, so the two were driven in that order and the first was the one with nothing between the apply and the wait. The failing line is kept as a measurement rather than a memory: it is reproduced at this head, not quoted from the review."
     },
     {
-      "criterion": "The tester's second failure — the evidence-boundary passage listed creating the Job, the wait, the logs and the delete among the steps executed nowhere, while the tester had run all four here and the record saying so is in the same commit.",
-      "surface": "The live cluster from this role container: the section's own Job manifest, run for real at this head, not a dry run.",
-      "command": "kubectl apply -f <the section's Job, its placeholders filled> ; kubectl get job … -o jsonpath='{.metadata.uid}' ; kubectl wait --for=condition=Ready pod -l job-name=… ; kubectl logs -l job-name=… --tail=2 ; kubectl delete job … ; kubectl get jobs,pods",
-      "observed": "`job.batch/infra-71-impl-check created`; the uid is 36 characters; the pod reaches Ready in **79 s** (the tester measured 1 m 24 s on its own run); the log tail is the server's own `database system is ready to accept connections`; `job.batch \"infra-71-impl-check\" deleted`; and the last line shows nothing of it left. The passage now lists the Job half as executed — applied and created, uid read, Ready in about eighty seconds, log line read, deleted, nothing left — and names only the Service steps as unexecuted, refused rather than untried, with the reachability check against a real workload as the one step that depends on them.",
-      "headSha": "32dc3a0fcdc42081b2b11d1bba2ea13a55fdef15",
-      "negativeControl": "The Service step is the control that keeps the new claim honest: at the same head, `kubectl apply` of the section's Service still ends `Forbidden` on the read of the live object before any create is attempted, so the passage's remaining 'not executed' entry is measured in the same session as its 'executed' ones. Housekeeping measured too: the Job carried a fifteen-minute deadline and a five-minute ttl, was deleted by hand, and `kubectl get jobs,pods` shows nothing of mine; the namespace's other work was not touched and is quoted nowhere."
+      "criterion": "Finding 2 — the passage claimed a deliberate breakage of each rule was refused naming the rule, while the last rule is the reachability label, which the same section states in bold that admission does not enforce.",
+      "surface": "The section read against itself, and against the breakages actually measured.",
+      "command": "the bullet re-read beside the label bullet and beside the eight breakages of earlier rounds (deadlines, ttl, CPU, identity, runtime class, compute class, volume kind)",
+      "observed": "It reads `one deliberate breakage of each **enforced** rule, each refused naming the rule — the reachability label has no breakage to record, since admission does not check it, which is the whole of why that bullet is marked`. The two passages now say one thing, and the measurements match the claim exactly: every rule with a refusal has one recorded, and the rule without a refusal is named as such.",
+      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
+      "negativeControl": "The missing breakage is the control: there is no measurement for the label because there is nothing to measure, which is why the old sentence could not have been true of it. A reader who believed it would skip the one check this section exists to teach."
     },
     {
-      "criterion": "The architect's third point: CI red at the code head on `dispatch`, a Playwright case in a package this branch does not touch.",
-      "surface": "GitHub's own check runs and workflow run, read rather than reasoned.",
-      "command": "gh api repos/sjawhar/legion/commits/73f95290…/check-runs?per_page=100 ; gh run rerun 40082001430 --failed ; gh run view 40082001430",
-      "observed": "The lane was still red when I looked — not already green, so the instruction stood — and the re-run of its failed jobs was accepted and is in progress at this writing (`in_progress`; a second `gh run rerun` answers `cannot be rerun; This workflow is already running`, which is how I know the first took). Its result is on the pull request's checks at the code head; `dispatch` is not one of the base's four required checks, and the same lane is green at the previous code head, which differs by two documentation files.",
-      "headSha": "32dc3a0fcdc42081b2b11d1bba2ea13a55fdef15",
-      "negativeControl": "The re-run is a judgement about which head the failure belongs to, so the control is that head: the same lane was `success` at `0ca46259`, and the only change between the two commits is prose in `docs/kubernetes.md` and one row of `AGENTS.md` — nothing a Playwright case against a phone-width page can see."
+      "criterion": "Finding 3 — the passage recorded the Job half being run here without saying that two of this deployment's three gate answers are `no` and that the section's only bolded rule therefore said to submit nothing, and it called that run a transcript of lines one of which had failed.",
+      "surface": "The passage itself, and the bounds the run actually carried.",
+      "command": "the gate's three answers re-measured ; the Job manifests used for the two runs read back for their deadline, ttl and name ; kubectl get jobs,pods after the deletes",
+      "observed": "The gate answers `yes`, `no`, `no` here. The passage now carries a bullet of its own — *Submitted deliberately against the gate's own rule* — saying the run was made anyway to measure the half no Service gates, naming what bounded it (a fifteen-minute deadline and a five-minute cleanup window rather than admission's twelve and twenty-four hours, a name of its own, a delete by hand, and the last line showing nothing left) and saying it is not an exception anyone inherits. The transcript claim is fixed by finding 1 rather than argued: the first bullet records the two waits with their measurements and the failure of the single one, so what is called a transcript is a transcript of the lines as they now stand.",
+      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
+      "negativeControl": "Every bound the bullet claims is checkable by a reader against the manifest the section publishes: the deadline and ttl it names are smaller than the rules above allow, and `kubectl get jobs,pods` after each delete shows nothing of the run — which is the same command the sequence ends with."
+    },
+    {
+      "criterion": "Finding 4 — what has never run is the reachability check against a workload reachable by its Service name, not 'against a real workload', which the bullet above records being done.",
+      "surface": "The two bullets read against each other.",
+      "command": "the passage re-read: the executed bullet's reachability measurements beside the unexecuted bullet's claim",
+      "observed": "The unexecuted bullet reads `the reachability check against a workload reachable **by its Service name**`, which is the thing no run has reached, and no longer contradicts the bullet above it recording the block run against a listener, a refusing port and a dropped address.",
+      "headSha": "490e525bbaeecd0bb859c1ce4589c6797015ac99",
+      "negativeControl": "The contradiction is the control: before this change the two bullets could both be read as describing the same check, one as done and one as never run, which is exactly the kind of statement this passage exists to prevent."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md: the closing clause on the sequence's last line, and the evidence-boundary passage's two lists."
+    "docs/kubernetes.md: the sequence's wait pair, and the evidence passage's three bullets.",
+    "The pull request body (not the tree): the `Change` bullet now says three commands and why the third exists, and `Proven by` names this round's real run rather than a dry run."
   ],
   "trickyParts": [
-    "Both failures were in the passage written to tell a reader what the section's evidence is, and one of them understated that evidence. Understating is the same failure as overstating: a reader is left with a false picture of what has been run, in the section whose subject is that its account of its own evidence can be trusted."
+    "A wait that polls for the pod's existence would pass any test run with a pause between the apply and the wait, so the fix is measured with nothing between them first and with a pause second. The warm-machine run reaching Ready in 10 s is not evidence about the fix; the cold one at 87 s is the shape a reader will meet."
   ],
   "deviations": [
-    "Nothing beyond the architect's two clauses and the one CI re-run was touched. The four improvements are his, in dispatch://INFRA-215."
+    "Nothing beyond the reviewer's four and the two stale body lines was touched. The two risks the reviewer left unrequested are the architect's, on dispatch://INFRA-215."
   ],
   "openQuestions": [
-    "The `dispatch` lane's re-run had not settled when this handoff was written; if it repeats, it is the architect's to take to whoever owns that page, as he scoped it.",
-    "Specification acceptance 1 to 4 remain the live proof after a person applies dispatch://INFRA-206: the Service steps are refused here on the read, so no workload of this namespace has a name on the network yet."
+    "Specification acceptance 1 to 4 remain the live proof after a person applies dispatch://INFRA-206: the Service steps are refused here on the read, so nothing has yet given a workload of this namespace a name on the network."
   ],
   "discoveredComplexity": [
-    "The Job half of the sequence is executable here today and has now been run end to end three times — twice by the tester, once by me at this head. The boundary this section draws is therefore not between 'documented' and 'run' but between the Job half, which is a transcript, and the Service pair, which is a design."
+    "Three of this round's four were in the passage written to make the section's account of its own evidence trustworthy, and two of them were understatements or elisions rather than false claims about the cluster. The passage is the most load-bearing prose in the section and has needed the most correction, which is itself the argument for having it."
   ]
 }
