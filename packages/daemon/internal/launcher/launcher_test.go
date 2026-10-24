@@ -49,20 +49,28 @@ func TestLauncherChild(t *testing.T) {
 	os.Exit(0)
 }
 
-// rig is one launcher under test and the daemon end of its connection.
+// rig is one single-role launcher under test and the daemon end of its connection.
 type rig struct {
 	t        *testing.T
 	listener net.Listener
-	conn     net.Conn
-	reader   *bufio.Reader
-	writer   *shimwire.Writer
 	private  string
 	cancel   context.CancelFunc
 	result   chan error
-	hello    shimwire.LauncherHello
-	latest   shimwire.LauncherState
+	// roleConn is the daemon end of the role's current connection, which accept replaces.
+	*roleConn
 	// stderr is what the launcher and its children wrote to Config.Stderr.
 	stderr *lockedBuffer
+}
+
+// roleConn is the daemon end of one role's launcher connection: the frames it reads, the hello
+// that opened it and the last state the role reported on it.
+type roleConn struct {
+	t      *testing.T
+	conn   net.Conn
+	reader *bufio.Reader
+	writer *shimwire.Writer
+	hello  shimwire.LauncherHello
+	latest shimwire.LauncherState
 }
 
 // lockedBuffer is a bytes.Buffer the launcher and its children can write while a test reads it.
@@ -113,20 +121,47 @@ func newRig(t *testing.T) *rig {
 // accept takes the launcher's next connection through its hello, acknowledgement and state.
 func (g *rig) accept() shimwire.LauncherState {
 	g.t.Helper()
-	conn, err := g.listener.Accept()
+	hello := shimwire.LauncherHello{}
+	if g.roleConn != nil {
+		hello = g.hello
+	}
+	conn := acceptRole(g.t, g.listener)
+	if conn.hello.Token != "launcher-token" || conn.hello.Role != "tester" || conn.hello.PodUID != "pod-1" {
+		g.t.Fatalf("hello = %#v", conn.hello)
+	}
+	if hello.LauncherID != "" && conn.hello.LauncherID != hello.LauncherID {
+		g.t.Fatalf("reconnect hello is launcher %s, want %s again", conn.hello.LauncherID, hello.LauncherID)
+	}
+	g.roleConn = conn
+	return conn.acknowledge()
+}
+
+// acceptRole takes one launcher connection up to its hello: the daemon end of the role that
+// hello names, which has not been acknowledged yet.
+func acceptRole(t *testing.T, listener net.Listener) *roleConn {
+	t.Helper()
+	if tcp, ok := listener.(*net.TCPListener); ok {
+		if err := tcp.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conn, err := listener.Accept()
 	if err != nil {
-		g.t.Fatal(err)
+		t.Fatal(err)
 	}
-	g.t.Cleanup(func() { _ = conn.Close() })
-	g.conn, g.reader, g.writer = conn, bufio.NewReader(conn), shimwire.NewWriter(conn)
-	hello, ok := g.next().(shimwire.LauncherHello)
-	if !ok || hello.Token != "launcher-token" || hello.Role != "tester" || hello.PodUID != "pod-1" || hello.LauncherID == "" {
-		g.t.Fatalf("hello = %#v", hello)
+	t.Cleanup(func() { _ = conn.Close() })
+	c := &roleConn{t: t, conn: conn, reader: bufio.NewReader(conn), writer: shimwire.NewWriter(conn)}
+	hello, ok := c.next().(shimwire.LauncherHello)
+	if !ok || hello.Role == "" || hello.LauncherID == "" {
+		t.Fatalf("hello = %#v", hello)
 	}
-	if g.hello.LauncherID != "" && hello.LauncherID != g.hello.LauncherID {
-		g.t.Fatalf("reconnect hello is launcher %s, want %s again", hello.LauncherID, g.hello.LauncherID)
-	}
-	g.hello = hello
+	c.hello = hello
+	return c
+}
+
+// acknowledge admits the connection's hello and reads the launcher's first state on it.
+func (g *roleConn) acknowledge() shimwire.LauncherState {
+	g.t.Helper()
 	g.send(shimwire.LauncherHelloAck{})
 	state, ok := g.next().(shimwire.LauncherState)
 	if !ok {
@@ -135,7 +170,7 @@ func (g *rig) accept() shimwire.LauncherState {
 	return state
 }
 
-func (g *rig) next() shimwire.Frame {
+func (g *roleConn) next() shimwire.Frame {
 	g.t.Helper()
 	if err := g.conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		g.t.Fatal(err)
@@ -154,7 +189,7 @@ func (g *rig) next() shimwire.Frame {
 	return frame
 }
 
-func (g *rig) send(frame shimwire.Frame) {
+func (g *roleConn) send(frame shimwire.Frame) {
 	g.t.Helper()
 	if err := g.writer.WriteFrame(frame); err != nil {
 		g.t.Fatal(err)
@@ -162,7 +197,7 @@ func (g *rig) send(frame shimwire.Frame) {
 }
 
 // answer sends command and returns its answer, skipping state frames.
-func (g *rig) answer(command shimwire.Frame) shimwire.Frame {
+func (g *roleConn) answer(command shimwire.Frame) shimwire.Frame {
 	g.t.Helper()
 	g.send(command)
 	for {
@@ -173,7 +208,7 @@ func (g *rig) answer(command shimwire.Frame) shimwire.Frame {
 	}
 }
 
-func (g *rig) start(command shimwire.LauncherStart) shimwire.LauncherStartResult {
+func (g *roleConn) start(command shimwire.LauncherStart) shimwire.LauncherStartResult {
 	g.t.Helper()
 	result, ok := g.answer(command).(shimwire.LauncherStartResult)
 	if !ok {
@@ -182,7 +217,7 @@ func (g *rig) start(command shimwire.LauncherStart) shimwire.LauncherStartResult
 	return result
 }
 
-func (g *rig) stop(generation uint64) {
+func (g *roleConn) stop(generation uint64) {
 	g.t.Helper()
 	id := "stop-" + strconv.FormatUint(generation, 10)
 	if got, ok := g.answer(shimwire.LauncherStop{ID: id, Generation: generation, GraceMs: 1000}).(shimwire.LauncherStopResult); !ok || !got.OK || got.ID != id {
@@ -521,5 +556,248 @@ func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten(t
 	if logged := g.stderr.String(); !strings.Contains(logged, filepath.Join(dir, ".jj", "legion-created")) ||
 		!strings.Contains(logged, "the workspace is taken as not recreated") {
 		t.Errorf("the launcher logged %q, want the unreadable creation record named", logged)
+	}
+}
+
+// roleToken is the launcher token a roles directory holds for role.
+func roleToken(role string) string { return "launcher-token-" + role }
+
+// fleet is one multi-role launcher under test — an issue pod's one container, which serves every
+// resident role — and the daemon end of every role's connection.
+type fleet struct {
+	t        *testing.T
+	listener net.Listener
+	// rolesDir is the container-level per-role root, home the directory each role's own home
+	// overlay covers, and fixed the root its own directories are bound back under.
+	rolesDir, home, fixed string
+	cancel                context.CancelFunc
+	result                chan error
+	stderr                *lockedBuffer
+	conns                 map[string]*roleConn
+}
+
+// newFleet starts a launcher over a roles directory shaped as an issue pod's one container gives
+// it — every role's launcher token, gh bundle, private, state and agent-secrets directory — and
+// takes every role's connection through its hello, acknowledgement and state. A generation of
+// such a launcher runs in namespaces of its own, so a test that starts one calls
+// requireRoleNamespaces first.
+func newFleet(t *testing.T, grace time.Duration, roles ...string) *fleet {
+	t.Helper()
+	scratch := namespaceScratch(t)
+	f := &fleet{
+		t: t, rolesDir: filepath.Join(scratch, "roles"), home: filepath.Join(scratch, "home"),
+		fixed: filepath.Join(scratch, "fixed"), result: make(chan error, 1), stderr: &lockedBuffer{},
+		conns: map[string]*roleConn{},
+	}
+	for _, name := range []string{roleGHDir, rolePrivateDir, roleStateDir, roleAgentSecretsDir} {
+		if err := os.MkdirAll(filepath.Join(f.fixed, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(f.home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range roles {
+		for _, name := range []string{roleLauncherDir, roleGHDir, rolePrivateDir, roleStateDir, roleAgentSecretsDir} {
+			if err := os.MkdirAll(filepath.Join(f.rolesDir, role, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(f.rolesDir, role, roleLauncherDir, launcherTokenFile), []byte(roleToken(role)+"\n"), 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	useRoleLayout(t, f.home, f.fixed)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.listener = listener
+	t.Cleanup(func() { _ = listener.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	f.cancel = cancel
+	go func() {
+		f.result <- Run(ctx, Config{
+			Connect: "tcp://" + listener.Addr().String(), Sandbox: "legion-legion-legion-208", PodUID: "pod-1",
+			RolesDir: f.rolesDir, Roles: roles, Stdout: f.stderr, Stderr: f.stderr, StopGrace: grace,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-f.result:
+		case <-time.After(30 * time.Second):
+			t.Errorf("the launcher did not leave after its context ended; its log: %s", f.stderr.String())
+		}
+	})
+	for range roles {
+		conn := acceptRole(t, listener)
+		if _, seen := f.conns[conn.hello.Role]; seen {
+			t.Fatalf("role %s opened two connections", conn.hello.Role)
+		}
+		f.conns[conn.hello.Role] = conn
+	}
+	for _, conn := range f.conns {
+		conn.acknowledge()
+	}
+	return f
+}
+
+// role is the daemon end of role's connection.
+func (f *fleet) role(name string) *roleConn {
+	f.t.Helper()
+	conn, ok := f.conns[name]
+	if !ok {
+		f.t.Fatalf("role %s never connected", name)
+	}
+	return conn
+}
+
+// roleTmp is what the role wrote at /tmp/<name> inside its namespaces, as the container sees it:
+// its own temporary directory on the roles directory's disk volume.
+func (f *fleet) roleTmp(role, name string) string {
+	return filepath.Join(f.rolesDir, roleHomesDir, role, "tmp", name)
+}
+
+// awaitExit reads frames until the role reports generation's exit.
+func (g *roleConn) awaitExit(generation uint64) shimwire.LauncherExit {
+	g.t.Helper()
+	for g.latest.LastExit == nil || g.latest.LastExit.Generation != generation {
+		g.next()
+	}
+	return *g.latest.LastExit
+}
+
+// waitForRoleFile is path's content once the role writes it, naming the launcher's log — every
+// role's output, role-init's refusals among it — when it never does.
+func (f *fleet) waitForRoleFile(path string) string {
+	f.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if body, err := os.ReadFile(path); err == nil && len(body) > 0 {
+			return string(body)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.t.Fatalf("%s was never written; the launcher's log: %s", path, f.stderr.String())
+	return ""
+}
+
+// An issue pod's one container holds one authenticated connection per resident role, each with
+// that role's own launcher token read from that role's own directory, so the daemon tells the
+// roles apart on the worker stream exactly as one container per role did. Each role is its own
+// launcher: its id is its own and outlives its own reconnects, and one role's lost connection
+// leaves every other role serving.
+func TestAMultiRoleLauncherConnectsOncePerRoleWithThatRolesToken(t *testing.T) {
+	f := newFleet(t, 2*time.Second, "tester", "reviewer")
+	for _, role := range []string{"tester", "reviewer"} {
+		hello := f.role(role).hello
+		if hello.Token != roleToken(role) || hello.Sandbox != "legion-legion-legion-208" || hello.PodUID != "pod-1" {
+			t.Fatalf("role %s hello = %#v, want its own token for this sandbox and pod", role, hello)
+		}
+	}
+	if f.role("tester").hello.LauncherID == f.role("reviewer").hello.LauncherID {
+		t.Fatal("the two roles claimed one launcher id; each role's connection is its own launcher")
+	}
+
+	first := f.role("tester").hello.LauncherID
+	_ = f.role("tester").conn.Close()
+	again := acceptRole(t, f.listener)
+	if again.hello.Role != "tester" || again.hello.LauncherID != first || again.hello.Token != roleToken("tester") {
+		t.Fatalf("the reconnect hello is %#v, want tester as launcher %s again", again.hello, first)
+	}
+	again.acknowledge()
+	f.conns["tester"] = again
+	// The reviewer's connection carried on through the tester's: it still answers.
+	f.role("reviewer").stop(1)
+}
+
+// A stop reaches the role it names and nothing else: the stopped role's processes end, and every
+// other role's child keeps running in its own namespaces.
+func TestAStopOfOneRolesGenerationLeavesTheOtherRoleRunning(t *testing.T) {
+	requireRoleNamespaces(t)
+	f := newFleet(t, 10*time.Second, "tester", "reviewer")
+	const beating = `while :; do /bin/date +%s%N > /tmp/beat.tmp && /bin/mv /tmp/beat.tmp /tmp/beat; /bin/sleep 0.05; done`
+	for i, role := range []string{"tester", "reviewer"} {
+		got := f.role(role).start(shimwire.LauncherStart{
+			ID: "start-" + role, Generation: uint64(i + 1), Argv: []string{"/bin/sh", "-c", beating},
+		})
+		if !got.OK {
+			t.Fatalf("start of %s = %#v; the launcher's log: %s", role, got, f.stderr.String())
+		}
+		f.waitForRoleFile(f.roleTmp(role, "beat"))
+	}
+
+	f.role("tester").stop(1)
+	stopped := f.waitForRoleFile(f.roleTmp("tester", "beat"))
+	running := f.waitForRoleFile(f.roleTmp("reviewer", "beat"))
+	time.Sleep(500 * time.Millisecond)
+	if again := f.waitForRoleFile(f.roleTmp("tester", "beat")); again != stopped {
+		t.Fatalf("the tester's processes outlived its stop: its beat moved from %s to %s", stopped, again)
+	}
+	if again := f.waitForRoleFile(f.roleTmp("reviewer", "beat")); again == running {
+		t.Fatalf("the tester's stop ended the reviewer's child too: its beat stayed at %s", running)
+	}
+	f.role("reviewer").stop(2)
+}
+
+// A role's exit is the shim's own, not its namespace init's: the init reports the status it
+// waited on, so an exit code and a kill both reach the daemon as the role's.
+func TestARolesExitIsReportedWithTheShimsOwnStatus(t *testing.T) {
+	requireRoleNamespaces(t)
+	f := newFleet(t, 10*time.Second, "tester", "reviewer")
+	if got := f.role("tester").start(shimwire.LauncherStart{
+		ID: "start-tester", Generation: 1, Argv: []string{"/bin/sh", "-c", "exit 9"},
+	}); !got.OK {
+		t.Fatalf("start = %#v; the launcher's log: %s", got, f.stderr.String())
+	}
+	if exit := f.role("tester").awaitExit(1); exit.Code != 9 || exit.Signal != "" {
+		t.Fatalf("the tester's exit = %#v, want the shim's own code 9 and no signal; the launcher's log: %s", exit, f.stderr.String())
+	}
+	if got := f.role("reviewer").start(shimwire.LauncherStart{
+		ID: "start-reviewer", Generation: 1, Argv: []string{"/bin/sh", "-c", "kill -9 $$"},
+	}); !got.OK {
+		t.Fatalf("start = %#v; the launcher's log: %s", got, f.stderr.String())
+	}
+	if exit := f.role("reviewer").awaitExit(1); exit.Signal != "killed" {
+		t.Fatalf("the reviewer's exit = %#v, want the shim's own kill", exit)
+	}
+}
+
+// The container's SIGTERM stops every role at once, each given the whole stop grace its own
+// container had: both roles' handlers run to the end, and the launcher leaves in one grace rather
+// than one per role.
+func TestTheContainersStopEndsEveryRoleWithinOneStopGrace(t *testing.T) {
+	requireRoleNamespaces(t)
+	f := newFleet(t, 6*time.Second, "tester", "reviewer")
+	const handler = `trap '/bin/sleep 1.5; printf done > /tmp/finished; exit 0' TERM
+printf ready > /tmp/ready
+while :; do /bin/sleep 600 & wait; done
+`
+	for i, role := range []string{"tester", "reviewer"} {
+		got := f.role(role).start(shimwire.LauncherStart{
+			ID: "start-" + role, Generation: uint64(i + 1), Argv: []string{"/bin/sh", "-c", handler},
+		})
+		if !got.OK {
+			t.Fatalf("start of %s = %#v; the launcher's log: %s", role, got, f.stderr.String())
+		}
+		f.waitForRoleFile(f.roleTmp(role, "ready"))
+	}
+
+	started := time.Now()
+	f.cancel()
+	err := <-f.result
+	f.result <- err
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the launcher returned %v, want its context's end", err)
+	}
+	for _, role := range []string{"tester", "reviewer"} {
+		if body, readErr := os.ReadFile(f.roleTmp(role, "finished")); readErr != nil || string(body) != "done" {
+			t.Fatalf("role %s was cut short at the container's stop: %q, %v; the launcher's log: %s", role, body, readErr, f.stderr.String())
+		}
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("the container's stop took %s for two roles whose handlers take 1.5s each: the roles are stopped one after another, not together", elapsed)
 	}
 }

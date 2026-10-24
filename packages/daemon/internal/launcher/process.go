@@ -100,14 +100,28 @@ func (m *manager) cleanExitedGeneration() {
 	}
 }
 
+// signalChild reaches one generation. In the controller's pod the generation is a process group
+// of the container's own namespace, so the signal goes to the group. In an issue pod the
+// generation is the init of the role's own namespaces: the signal goes to it alone, which
+// forwards a stop to every process of the role and, killed, takes the whole namespace with it.
+func (m *manager) signalChild(active *child, sig syscall.Signal) error {
+	if !m.namespaced {
+		return signalGeneration(active.pid, sig)
+	}
+	if err := syscall.Kill(active.pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("signal role %s: %w", m.role, err)
+	}
+	return nil
+}
+
 func (m *manager) endGeneration(active *child, grace time.Duration) error {
-	if err := signalGeneration(active.pid, syscall.SIGTERM); err != nil {
+	if err := m.signalChild(active, syscall.SIGTERM); err != nil {
 		return err
 	}
 	select {
 	case <-active.done:
 	case <-time.After(grace):
-		if err := signalGeneration(active.pid, syscall.SIGKILL); err != nil {
+		if err := m.signalChild(active, syscall.SIGKILL); err != nil {
 			return err
 		}
 		<-active.done

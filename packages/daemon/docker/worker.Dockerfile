@@ -482,9 +482,15 @@ ARG PI_CODEGRAPH_VERSION
 # already brings util-linux into the base — and buys a build failure instead of a fleet-wide launch
 # failure the day a base drops it. Do not delete it as redundant.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
-# creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
+# creates a missing parent with its own --chown, so a runtime-user copy into /opt/legion would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
+# /var/run/legion/{gh,private,state,agent-secrets} are the empty, root-owned mount points an issue
+# pod's role-init binds each role's own directories back at (packages/daemon/internal/launcher,
+# roleinit_linux.go): inside a role's namespaces the role is the runtime user, which can create
+# nothing under the root-owned /var/run, so the image makes them. The controller's pod mounts its
+# volumes over the same paths, as it always has. The final step refuses an image where any is not
+# root's or is not empty.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git jq openssh-client python3 socat util-linux wget \
     && rm -rf /var/lib/apt/lists/* \
@@ -492,15 +498,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
-    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
+    && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin \
+    && install -d -m 0755 -o root -g root /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets
 # Pinned Bun: the binary the plugin stage packed with (oven/bun:${BUN_VERSION}-slim).
 COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-COPY --from=plugin --chown=legion:legion /out/pi-envoy /opt/legion/pi-envoy
-COPY --from=plugin --chown=legion:legion /out/pi-legion /opt/legion/pi-legion
+# The two plugins are root's like the rest of /opt/legion: every role of an issue pod loads them
+# from here, one container's filesystem, so a role that could write them could change the plugin
+# code its siblings load. The final step refuses an image where anything under them is not root's
+# or is writable by anyone else.
+COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
+COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
@@ -629,7 +641,10 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # directory holds (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
+# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy and
+# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the plugin code
+# its siblings load; the role mount points under /var/run/legion are root's, mode 0755 and empty;
+# and no file under /usr/lib/openssh or /usr/bin/ssh-agent
 # carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
 # ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
@@ -674,9 +689,15 @@ ARG LEGION_REVISION
 ARG PI_LEGION_VERSION
 ARG PI_ENVOY_VERSION
 RUN set -eu; \
-    for dir in /opt/legion /opt/legion/bin; do \
+    for dir in /opt/legion /opt/legion/bin /var/run/legion /var/run/legion/gh /var/run/legion/private \
+      /var/run/legion/state /var/run/legion/agent-secrets; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    for dir in /var/run/legion/gh /var/run/legion/private /var/run/legion/state /var/run/legion/agent-secrets; do \
+      test -z "$(ls -A "$dir")"; \
+    done; \
+    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
+    echo "plugin files not root's alone: ${plugins:-none}"; test -z "$plugins"; \
     stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \

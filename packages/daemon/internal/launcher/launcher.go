@@ -4,6 +4,7 @@
 package launcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -34,14 +35,21 @@ import (
 // ahead of the next turn (pi-legion, src/workspace-recreated.ts).
 const WorkspaceRecreatedVariable = "LEGION_WORKSPACE_RECREATED"
 
-// Config is the role-private launcher configuration. Token is read from the role-private
-// projected Secret before Run is called. PrivateDir is the role container's own memory-backed
-// directory, which no other container mounts: each generation's credentials live in a fresh
-// `g<generation>` directory under it for exactly that generation's lifetime.
+// Config is the launcher's configuration. The controller's pod names one role: Token, read from
+// its role-private projected Secret before Run is called, Role, and PrivateDir, that container's
+// own memory-backed directory, which no other container mounts. An issue pod's one container
+// names RolesDir and every resident role instead: the launcher reads each role's token from
+// <RolesDir>/<role>/launcher/LAUNCHER_TOKEN, writes that role's generations under
+// <RolesDir>/<role>/private, and starts each of them in namespaces of its own (role-init), so no
+// role reaches another's credentials, processes or files. Either way a generation's credentials
+// live in a fresh `g<generation>` directory for exactly that generation's lifetime.
 type Config struct {
 	Connect, Token, Sandbox, Role, PodUID, PrivateDir string
+	RolesDir                                          string
+	Roles                                             []string
 	Stdout, Stderr                                    io.Writer
-	// StopGrace is the container shutdown and natural-exit descendant cleanup budget.
+	// StopGrace is the container shutdown and natural-exit descendant cleanup budget. Every role
+	// of an issue pod's container is given it whole, since they stop together.
 	StopGrace time.Duration
 }
 
@@ -51,7 +59,8 @@ const reconnectDelay = time.Second
 
 // Run serves launcher commands until ctx ends. A stopped child is reported, never restarted by
 // the launcher: the daemon owns generations and decides whether a new generation should start.
-// Only ctx's end (the container's SIGTERM) stops the child the launcher owns.
+// Only ctx's end (the container's SIGTERM) stops the children the launcher owns, and in an issue
+// pod's container it stops every role's at once, each with the whole stop grace.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.StopGrace == 0 {
 		cfg.StopGrace = 30 * time.Second
@@ -66,23 +75,76 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	m := &manager{cfg: cfg, requests: map[string]request{}}
-	if os.Getpid() == 1 {
-		exits := make(chan os.Signal, 1)
-		signal.Notify(exits, syscall.SIGCHLD)
-		defer signal.Stop(exits)
-		go m.reapOrphans(ctx, exits)
+	managers, err := newManagers(cfg)
+	if err != nil {
+		return err
 	}
-	launcherID := randomID()
+	if cfg.RolesDir == "" {
+		m := managers[0]
+		// The controller's pod runs one role, whose processes are this PID namespace's: PID 1
+		// adopts the role's orphans and reaps them. An issue pod's roles each have a namespace
+		// of their own, where their own init does that, and this process has no child but those
+		// inits, which its managers wait on.
+		if os.Getpid() == 1 {
+			exits := make(chan os.Signal, 1)
+			signal.Notify(exits, syscall.SIGCHLD)
+			defer signal.Stop(exits)
+			go m.reapOrphans(ctx, exits)
+		}
+		return m.serveUntil(ctx, address)
+	}
+	var running sync.WaitGroup
+	for _, m := range managers {
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			_ = m.serveUntil(ctx, address)
+		}()
+	}
+	running.Wait()
+	return ctx.Err()
+}
+
+// newManagers is one manager per role the launcher serves, each with its own token, private
+// directory, launcher id and, in an issue pod's container, its own prefix in the container's log.
+func newManagers(cfg Config) ([]*manager, error) {
+	if cfg.RolesDir == "" {
+		return []*manager{{
+			cfg: cfg, role: cfg.Role, token: cfg.Token, private: cfg.PrivateDir, launcherID: randomID(),
+			stdout: cfg.Stdout, stderr: cfg.Stderr, requests: map[string]request{},
+		}}, nil
+	}
+	log := &roleLog{stdout: cfg.Stdout, stderr: cfg.Stderr}
+	managers := make([]*manager, 0, len(cfg.Roles))
+	for _, role := range cfg.Roles {
+		file := filepath.Join(cfg.RolesDir, role, roleLauncherDir, launcherTokenFile)
+		token, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("launcher: role %s launcher token: %v", role, err)
+		}
+		if strings.TrimSpace(string(token)) == "" {
+			return nil, fmt.Errorf("launcher: role %s launcher token %s is empty", role, file)
+		}
+		stdout, stderr := log.writers(role)
+		managers = append(managers, &manager{
+			cfg: cfg, role: role, token: strings.TrimSpace(string(token)), namespaced: true,
+			private: filepath.Join(cfg.RolesDir, role, rolePrivateDir), launcherID: randomID(),
+			stdout: stdout, stderr: stderr, requests: map[string]request{},
+		})
+	}
+	return managers, nil
+}
+
+// serveUntil serves one role's daemon connections until ctx ends, reconnecting between them, and
+// stops that role's child when it does.
+func (m *manager) serveUntil(ctx context.Context, address string) error {
 	for {
-		err := m.serve(ctx, address, launcherID)
+		err := m.serve(ctx, address)
 		if ctx.Err() != nil {
 			m.stopActive()
 			return ctx.Err()
 		}
-		if cfg.Stderr != nil {
-			fmt.Fprintf(cfg.Stderr, "launcher: daemon connection: %v; reconnecting\n", err)
-		}
+		m.logf("launcher: daemon connection: %v; reconnecting", err)
 		select {
 		case <-ctx.Done():
 			m.stopActive()
@@ -92,10 +154,18 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
+// logf writes one line of this role's log, behind its own prefix in an issue pod's container.
+func (m *manager) logf(format string, args ...any) {
+	if m.stderr == nil {
+		return
+	}
+	fmt.Fprintf(m.stderr, format+"\n", args...)
+}
+
 // serve is one authenticated daemon connection: hello, acknowledgement, the launcher's actual
 // state, then start and stop commands until the connection ends. The acknowledgement is logged as
 // one line, so a launcher the daemon accepted reads apart from one still dialing.
-func (m *manager) serve(ctx context.Context, address, launcherID string) error {
+func (m *manager) serve(ctx context.Context, address string) error {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", address, err)
@@ -105,7 +175,7 @@ func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 	defer stopClose()
 	writer := shimwire.NewWriter(conn)
 	if err := writer.WriteFrame(shimwire.LauncherHello{
-		Token: m.cfg.Token, Sandbox: m.cfg.Sandbox, Role: m.cfg.Role, PodUID: m.cfg.PodUID, LauncherID: launcherID,
+		Token: m.token, Sandbox: m.cfg.Sandbox, Role: m.role, PodUID: m.cfg.PodUID, LauncherID: m.launcherID,
 	}); err != nil {
 		return fmt.Errorf("hello: %w", err)
 	}
@@ -117,10 +187,8 @@ func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 	if _, ok := frame.(shimwire.LauncherHelloAck); !ok {
 		return fmt.Errorf("hello acknowledgement: got %T, want launcher_hello_ack", frame)
 	}
-	if m.cfg.Stderr != nil {
-		fmt.Fprintf(m.cfg.Stderr, "launcher: connected to the daemon at %s as launcher %s (sandbox %s, role %s, pod %s)\n",
-			address, launcherID, m.cfg.Sandbox, m.cfg.Role, m.cfg.PodUID)
-	}
+	m.logf("launcher: connected to the daemon at %s as launcher %s (sandbox %s, role %s, pod %s)",
+		address, m.launcherID, m.cfg.Sandbox, m.role, m.cfg.PodUID)
 	m.mu.Lock()
 	m.writer = writer
 	m.mu.Unlock()
@@ -154,20 +222,48 @@ func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 	}
 }
 
+// validate refuses a configuration that is neither of the launcher's two forms: the controller
+// pod's one role with its own token and private directory, or an issue pod's roles directory
+// holding every resident role's.
 func (c Config) validate() error {
 	switch {
 	case c.Connect == "":
 		return errors.New("launcher: no connect address")
-	case c.Token == "":
-		return errors.New("launcher: no token")
 	case c.Sandbox == "":
 		return errors.New("launcher: no sandbox")
-	case c.Role == "":
-		return errors.New("launcher: no role")
 	case c.PodUID == "":
 		return errors.New("launcher: no pod UID")
-	case !filepath.IsAbs(c.PrivateDir):
-		return fmt.Errorf("launcher: private directory %q is not absolute", c.PrivateDir)
+	}
+	if c.RolesDir == "" {
+		switch {
+		case c.Token == "":
+			return errors.New("launcher: no token")
+		case c.Role == "":
+			return errors.New("launcher: no role")
+		case len(c.Roles) != 0:
+			return errors.New("launcher: roles without a roles directory")
+		case !filepath.IsAbs(c.PrivateDir):
+			return fmt.Errorf("launcher: private directory %q is not absolute", c.PrivateDir)
+		}
+		return nil
+	}
+	switch {
+	case c.Token != "" || c.Role != "" || c.PrivateDir != "":
+		return errors.New("launcher: a roles directory holds every role's own token and private directory")
+	case len(c.Roles) == 0:
+		return errors.New("launcher: no roles")
+	case !filepath.IsAbs(c.RolesDir):
+		return fmt.Errorf("launcher: roles directory %q is not absolute", c.RolesDir)
+	}
+	seen := map[string]bool{}
+	for _, role := range c.Roles {
+		switch {
+		case role == "":
+			return errors.New("launcher: an empty role")
+		case seen[role]:
+			return fmt.Errorf("launcher: role %s twice", role)
+		}
+		seen[role] = true
 	}
 	return nil
 }
@@ -200,20 +296,34 @@ type request struct {
 	result shimwire.Frame
 }
 
+// child is the generation this role is running: in the controller's pod the shim itself, in an
+// issue pod the role-init that is the shim's own namespaces' init, with the pipe it reports the
+// shim's wait status on.
 type child struct {
 	generation uint64
 	pid        int
 	dir        string
+	status     *os.File
 	done       chan struct{}
 }
 
+// manager serves one role: its own daemon connection, its own launcher id, its own token and
+// private directory, its own child, and, in an issue pod's container, its own prefix in the log
+// and a namespace of its own for every generation it starts.
 type manager struct {
-	cfg      Config
-	writer   *shimwire.Writer
-	mu       sync.Mutex
-	child    *child
-	lastExit *shimwire.LauncherExit
-	requests map[string]request
+	cfg        Config
+	role       string
+	token      string
+	private    string
+	namespaced bool
+	launcherID string
+	stdout     io.Writer
+	stderr     io.Writer
+	writer     *shimwire.Writer
+	mu         sync.Mutex
+	child      *child
+	lastExit   *shimwire.LauncherExit
+	requests   map[string]request
 }
 
 // state reports the actual child to the current daemon connection, if one is up. A state change
@@ -262,7 +372,7 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	recreated := false
 	if command.ResumeFile != "" {
 		var err error
-		if recreated, err = resumable(env, command.ResumeFile, m.cfg.Stderr); err != nil {
+		if recreated, err = resumable(env, command.ResumeFile, m.stderr); err != nil {
 			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 			m.remember(command.ID, body, result)
 			return result
@@ -275,25 +385,28 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		m.remember(command.ID, body, result)
 		return result
 	}
-	cmd := exec.Command(command.Argv[0], command.Argv[1:]...)
-	cmd.Env = env
-	cmd.Stdout, cmd.Stderr = m.cfg.Stdout, m.cfg.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	process, err := m.command(command, env)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
+		m.remember(command.ID, body, result)
+		return result
+	}
 	// The orphan reaper must see this PID as the direct child before it can observe its exit.
 	m.mu.Lock()
-	if err := cmd.Start(); err != nil {
+	if err := process.start(); err != nil {
 		m.mu.Unlock()
 		_ = os.RemoveAll(dir)
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("start child: %v", err)}
 		m.remember(command.ID, body, result)
 		return result
 	}
-	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, dir: dir, status: process.status, done: make(chan struct{})}
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
 	m.mu.Unlock()
-	go m.wait(cmd, active)
+	go m.wait(process.cmd, active)
 	_ = m.state()
 	return result
 }
@@ -304,10 +417,40 @@ func (m *manager) remember(id string, body []byte, result shimwire.Frame) {
 	m.requests[id] = request{body: body, result: result}
 }
 
+// command is one generation's process: in an issue pod's container, role-init as the init of
+// this role's new user, mount, PID and IPC namespaces, with the pipe it reports the shim's own
+// wait status on; in the controller's pod, the shim itself in the container's own namespaces.
+func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProcess, error) {
+	if m.namespaced {
+		return newRoleProcess(RoleInitConfig{
+			RolesDir: m.cfg.RolesDir, Role: m.role, Home: roleHome, FixedRoot: roleFixedRoot, Argv: start.Argv,
+		}, env, m.stdout, m.stderr)
+	}
+	cmd := exec.Command(start.Argv[0], start.Argv[1:]...)
+	cmd.Env = env
+	cmd.Stdout, cmd.Stderr = m.stdout, m.stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return &roleProcess{cmd: cmd}, nil
+}
+
+// wait reports the generation's exit once its process is gone. A role's exit is the shim's own:
+// its namespace init reports the status it waited on, and only an init killed before the shim
+// ended — or one that never started it — reports its own.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
+	var reported *syscall.WaitStatus
+	if active.status != nil {
+		raw, _ := io.ReadAll(active.status)
+		_ = active.status.Close()
+		reported = parseStatus(raw)
+	}
 	err := cmd.Wait()
-	m.cleanExitedGeneration()
+	if !m.namespaced {
+		m.cleanExitedGeneration()
+	}
 	exit := exitOf(err, active.generation)
+	if reported != nil {
+		exit = exitOfStatus(*reported, active.generation)
+	}
 	m.mu.Lock()
 	if m.child == active {
 		m.child = nil
@@ -356,6 +499,9 @@ func (m *manager) stop(command shimwire.LauncherStop) shimwire.LauncherStopResul
 	return result
 }
 
+// stopActive ends this role's generation at the container's own stop. A failure there is this
+// role's alone in an issue pod's container: PID 1 serves every other role, so it is logged
+// rather than thrown, where the controller pod's single role still fails its container loudly.
 func (m *manager) stopActive() {
 	m.mu.Lock()
 	active := m.child
@@ -364,7 +510,10 @@ func (m *manager) stopActive() {
 		return
 	}
 	if err := m.endGeneration(active, m.cfg.StopGrace); err != nil {
-		panic(err)
+		if !m.namespaced {
+			panic(err)
+		}
+		m.logf("launcher: stop role %s: %v", m.role, err)
 	}
 }
 
@@ -381,16 +530,16 @@ func generationDir(private string, generation uint64) string {
 // following a link, so no credential is written anywhere but that directory. An error names the
 // file, never its bytes.
 func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
-	entries, err := os.ReadDir(m.cfg.PrivateDir)
+	entries, err := os.ReadDir(m.private)
 	if err != nil {
 		return "", fmt.Errorf("read the private directory: %v", err)
 	}
 	for _, entry := range entries {
-		if err := os.RemoveAll(filepath.Join(m.cfg.PrivateDir, entry.Name())); err != nil {
+		if err := os.RemoveAll(filepath.Join(m.private, entry.Name())); err != nil {
 			return "", fmt.Errorf("clear %s from the private directory: %v", entry.Name(), err)
 		}
 	}
-	dir := generationDir(m.cfg.PrivateDir, command.Generation)
+	dir := generationDir(m.private, command.Generation)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", fmt.Errorf("make credential directory for generation %d: %v", command.Generation, err)
 	}
@@ -408,6 +557,53 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+// roleLog is the one container log an issue pod's roles share: every line a role's launcher or
+// its child writes carries that role's name, since `kubectl logs` shows one log for the pod's
+// roles where one container per role showed six. Whole lines are written under one lock, so two
+// roles never interleave inside a line.
+type roleLog struct {
+	mu             sync.Mutex
+	stdout, stderr io.Writer
+}
+
+// writers are role's own stdout and stderr: nil where the launcher was given none, so a child
+// inherits the launcher's own descriptor rather than an empty pipe.
+func (l *roleLog) writers(role string) (stdout, stderr io.Writer) {
+	if l.stdout != nil {
+		stdout = &prefixWriter{log: l, out: l.stdout, prefix: role + ": "}
+	}
+	if l.stderr != nil {
+		stderr = &prefixWriter{log: l, out: l.stderr, prefix: role + ": "}
+	}
+	return stdout, stderr
+}
+
+// prefixWriter holds back a partial line until its newline arrives, so a prefix only ever
+// precedes the start of a line.
+type prefixWriter struct {
+	log     *roleLog
+	out     io.Writer
+	prefix  string
+	partial []byte
+}
+
+func (w *prefixWriter) Write(p []byte) (int, error) {
+	w.log.mu.Lock()
+	defer w.log.mu.Unlock()
+	w.partial = append(w.partial, p...)
+	for {
+		end := bytes.IndexByte(w.partial, '\n')
+		if end < 0 {
+			return len(p), nil
+		}
+		line := append([]byte(w.prefix), w.partial[:end+1]...)
+		w.partial = w.partial[end+1:]
+		if _, err := w.out.Write(line); err != nil {
+			return 0, err
+		}
+	}
 }
 
 // resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
