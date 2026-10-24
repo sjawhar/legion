@@ -97,7 +97,7 @@
   },
   "specDepartures": [
     {
-      "spec": "The specification names the cluster namespace literally, in its prose and in two of its acceptance commands (`kubectl -n builds get jobs,pods,svc` and `kubectl -n builds delete job <…>`).",
+      "spec": "The specification names the cluster namespace literally, in its prose and in two of its acceptance commands. (Redacted by the implementer on 2026-10-24: this field quoted those two commands with the name in them, which is a name of the private infrastructure and may not stand in this public tree; the departure needs only the sentence.)",
       "plan": "The guidance this repository ships names no namespace, compute class or admission policy: it uses the document's own placeholder convention and tells a role to read its own namespace from /var/run/secrets/kubernetes.io/serviceaccount/namespace, which is the namespace its kubectl already uses by default.",
       "evidence": "AGENTS.md:155 keeps every name of the private infrastructure out of this public tree — admission-policy names among them — and carves out only Legion's own names; .github/scripts/check-private-names.sh matches only the deployment repository's token, the company, private internal hosts and tailnet hosts, so it cannot see a namespace name and a green lint job is no evidence of compliance. docs/kubernetes.md:2477-2496 already writes <project>, <issue key lowercased> and <runtime.kubernetes.image> the same way. The acceptance's commands still run exactly as written, since the name they pass is the default.",
       "outcome": { "kind": "unchanged" }
