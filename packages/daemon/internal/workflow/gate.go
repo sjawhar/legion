@@ -40,6 +40,14 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err != nil {
 		return intake.Result{}, err
 	}
+	// A registration of the same document whose read of Dispatch is older than the gate's newest
+	// observation (a later artifact event applied first) carries nothing new and would roll the
+	// gate, and the changes request it records as told, back to that older read. It changes nothing.
+	if stored != nil && stored.ArtifactID == fact.ArtifactID && stored.LatestVersion > max(fact.Version, fact.DispatchVersion) {
+		e.logOnCommit(ctx, "workflow: a registration whose read predates the gate's newest version changes nothing", "issue", issue.Key,
+			"artifact", fact.ArtifactID, "version", fact.Version, "gate_version", stored.LatestVersion)
+		return intake.Result{}, nil
+	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
 	changesRequested := false
 	switch {

@@ -223,6 +223,13 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The version registered is the caller's; only Dispatch's read says the document has it. A
+	// version Dispatch does not show would record a gate no person's review can open.
+	if req.Version > approval.LatestVersion {
+		writeFailure(w, http.StatusConflict, "VERSION_NOT_IN_DISPATCH", fmt.Sprintf(
+			"Dispatch shows %s at version %d, not %d; register the version you requested approval of", artifactID, approval.LatestVersion, req.Version))
+		return
+	}
 	// A re-admitted root's architect registers its spec again, often at the same version: each
 	// generation's registration is its own fact. What this read found of the person's review travels
 	// with it, so a spec a person approved or asked changes of before the architect registered is

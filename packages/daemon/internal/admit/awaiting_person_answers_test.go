@@ -298,6 +298,14 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-other", Kind: intake.DispatchArtifactChangesRequested,
 					Version: 4, Reason: "name the rollback path", Seed: true}},
 			reasons: []string{"name the rollback path", "name the rollback path"}},
+		// A registration whose read saw v4 commits after a live v5 changes request was told: it
+		// rolls nothing back, so the seed's read of the v5 review tells nothing again.
+		{name: "a registration of an older version after a newer review was told", busy: true,
+			order: []intake.Fact{
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path"},
+				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4},
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Seed: true}},
+			reasons: []string{"name the rollback path"}},
 		{name: "a second review at the same version", order: []intake.Fact{changes, second},
 			reasons: []string{"name the rollback path", "and name who runs the restore"}},
 	} {
