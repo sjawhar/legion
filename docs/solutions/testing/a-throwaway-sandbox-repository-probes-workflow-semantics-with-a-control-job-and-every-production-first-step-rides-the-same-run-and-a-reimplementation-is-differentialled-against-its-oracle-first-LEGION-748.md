@@ -58,8 +58,12 @@ related_issues:
    image does not carry, and its route is a pinned runner rather than an extraction or a release
    binary: `uvx --from shellcheck-py@0.10.0.1 shellcheck --version` prints `ShellCheck - shell
    script analysis tool` and `version: 0.10.0`. It takes the `--from` form because the PyPI
-   distribution and the command have different names, which is the general Python form. The
-   current rule for anything the image lacks, and the line between a pinned run and the withheld
+   distribution and the command have different names, which is the general Python form. PyYAML
+   needs no install either and goes the same way, with one difference: it is a library, not a
+   command, so the form is `uv run --with pyyaml==6.0.2 --no-project python -c "import yaml;
+   print(yaml.__version__)"`, which prints `Installed 1 package in 12ms` and then `6.0.2` in
+   0.597 s wall, with the package available to the code the run executes. The current rule for
+   anything the image lacks, and the line between a pinned run and the withheld
    `operator-setup` capability, is `skills/legion-worker/references/tools.md`. What the item above
    records is what that pod carried then.
 

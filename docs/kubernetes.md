@@ -151,15 +151,17 @@ CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the
 
 The image carries the five clients above — `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — and for
 everything else the one documented step is the pinned form of the three package runners the image
-already has: `uvx`, `bunx` and `go run`. The two answer different halves of the question. The image
+already has: `uvx`, `bunx` and `go run`, plus `uv run --with` where what a role needs is a library
+rather than a command. The two answer different halves of the question. The image
 answers the tools a role may not arrange for itself — `apt` cannot write a system prefix in an
 unprivileged container, unpacking a package by hand works for some tools and not for others, and
 Legion rules that route out as the withheld `operator-setup` capability — while the runners answer
 the tools no image can anticipate.
 
 What decided it is the container, not the cost. Measured in a role container of a deployment: the
-role is an unprivileged user, `/usr/local/bin`, `/opt` and `/home` are read-only, and `apt-get`
-cannot take dpkg's lock even to download.
+role is an unprivileged user, `/usr/local/bin` and `/opt` are read-only, `/home` is read-only while
+`$HOME` (`/home/legion`) under it is writable, and `apt-get` cannot take dpkg's lock even to
+download.
 
 ```text
 $ id
@@ -170,11 +172,14 @@ E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are y
 ```
 
 So `apt` cannot write a system prefix in an unprivileged container. Unpacking a package's files
-under `$HOME` or onto the issue's disk is a separate question, and it works for some tools and not
-for others (the extraction row below), but Legion rules it out either way: an extraction prefix is
-the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`,
-ruling dispatch://LEGION-200). So the answer for a role is the image or a pinned runner, never an
-extraction, however much room its disk has. The five priced options and their verdicts:
+under that writable `$HOME` or onto the issue's disk is a separate question — it works for some
+tools and not for others (the extraction row below) — and what rules it out is not the filesystem
+but the line drawn below: an extraction prefix is the withheld `operator-setup` capability
+(`packages/daemon/internal/capabilities/capabilities.go`) for what it leaves every later process
+resolving, a verdict about resolution that would read the same in a container that did hand a role
+a writable `/usr/local/bin`, and that the room on the issue's disk does not touch. So the answer
+for a role is the image, a pinned runner, or `uv run --with` for a library, never an extraction.
+The five priced options and their verdicts:
 
 | option | the measurement | verdict |
 | :--- | :--- | :--- |
@@ -198,17 +203,38 @@ installing launch (`installBlock`, `packages/daemon/internal/runtime/sandbox/plu
 a pinned package at run time is something Legion does, not something it withholds.
 
 What the withheld row is about is a dependency the pod *carries*: one that outlives the command
-that created it, and that another process or a later launch then resolves differently because it is
-there. That is the test to apply to a new case. A pinned runner run leaves a cache entry addressed
-by its coordinate and version, and the same line next time resolves to the same bytes whether the
-cache was warm or cold, so nothing else on the pod resolves differently — the sanctioned side. An
-extraction prefix with `LD_LIBRARY_PATH` set changes what every later command in that shell, and
-every subagent inheriting the environment, resolves `psql` or its libraries to, on a prefix nothing
-records, pins or rebuilds — a dependency the pod carries, configured by the role, which is why the
-extraction row above is rejected even for the three clients that did run from it. A case these
-artefacts do not settle, such as a pinned run whose tool then installs something of its own outside
-the runner's cache (a browser download, a second toolchain under `$HOME`), is unsettled: it belongs
-with the issue's architect rather than with a rule invented here.
+that created it, and that a later launch or another role's process then resolves without asking for
+it. That is the test to apply to a new case, and it is about what a command leaves for other
+processes rather than about getting the same bytes twice. A pinned runner run leaves a cache entry
+addressed by its coordinate and version, which the next command reaches only by writing the same
+pin, so no other process's `PATH`, interpreter or library search changes — the sanctioned side, and
+the side a repository's own `uv sync` or `bun install` is on too, materialising what that project
+already declares into a directory a process reaches by asking for that project and no other way.
+An extraction prefix with `LD_LIBRARY_PATH` set changes what every later command in that shell, and
+every subagent inheriting the environment, resolves `psql` or its libraries to, asked for or not,
+on a prefix nothing records, pins or rebuilds — a dependency the pod carries, configured by the
+role, which is why the extraction row above is rejected even for the three clients that did run
+from it.
+
+What a pin binds is the named distribution at that version, not its dependency closure, which the
+runner resolves at run time: with `UV_CACHE_DIR` emptied, `uvx -v --from httpie@3.2.4 http
+--version` logs `Selecting: requests==2.34.2 [compatible]` and resolves `urllib3` and `certifi`
+from ranges, where the warm run prints `3.2.4` at once. Work that needs the closure pinned too
+takes a project's own lockfile with `uv run` or `bun install` in a workspace, not a one-off runner
+line.
+
+A pinned run whose tool then installs something of its own — a browser download, a second toolchain
+under `$HOME` — is on the sanctioned side when both of these hold: what it writes lands under the
+issue's own volume through the documented variables, and after the command exits nothing else
+resolves differently. A browser download under a relocated browsers path passes both. It is the
+withheld capability when either fails — anything that writes into a system prefix, and anything
+that leaves a toolchain, shim or binary which a later launch or another role's process will resolve
+without asking for it. The test is resolution, not disk: a second toolchain under `$HOME` that only
+an explicit absolute path reaches is sanctioned; the same toolchain put where `PATH` finds it is
+operator setup, whoever typed the command. The three artefacts above are the whole of that line's
+ground. Disk is not: the issue's volume is 49 GiB with 2.5 GiB used and every cache already
+relocated onto it, and a sanctioned install is paid once per issue, on the issue's own disk, by the
+issue's roles together.
 
 The pinned runner forms, as a role types them — the coordinate and its exact version both written
 out, never a bare name:
@@ -231,6 +257,15 @@ out, never a bare name:
   github.com/nats-io/natscli/nats@v99.99.99 --version` fails closed, exit 1, with `go: …: invalid
   version: unknown revision nats/v99.99.99`.
 
+A library rather than a command — a package a role's own code imports — is none of those three
+forms: it is `uv run --with <package>==<version> --no-project` ahead of the program being run,
+which keeps the run off whatever `pyproject.toml` sits above the working directory and takes a
+requirement specifier rather than a runner coordinate. `uv run --with pyyaml==6.0.2 --no-project
+python -c "import yaml; print(yaml.__version__)"` prints `Installed 1 package in 12ms` and then
+`6.0.2`, in 0.597 s wall. It is sanctioned for the reason a `uvx` run is: it fills `UV_CACHE_DIR`
+and leaves nothing another process resolves. A command runner asked for a library installs the
+project and then finds no executable (`uvx pyyaml@6.0.2 --version`, below).
+
 Why the version alone is not the rule: a pin has two halves, the coordinate and the version, and
 an unpinned command loses the first one. The coordinate comes from the project's own published
 installation instructions — its documentation site or its repository's README, reached
@@ -239,6 +274,9 @@ and that is the only step that establishes identity. `npm view <name> version de
 repository.url homepage` corroborates it and does no more than that: those are fields the publisher
 writes into its own `package.json`, which the registry does not verify, so a squatter closes the
 check by copying two strings and a legitimate package that sets no `homepage` reads like a squat.
+
+**A check whose evidence the subject controls is not a check.** That holds past npm: every line
+below the next prompt was written by the party whose identity is in question.
 
 ```text
 $ npm view biome version description repository.url homepage
@@ -255,27 +293,35 @@ Those answers are consistent with `@biomejs/biome` being the project and `biome`
 else's package; what establishes it is biomejs.dev, reached without npm's help, naming
 `@biomejs/biome` as what to install.
 
-What a registry can attest is narrower and stronger. npm verifies a provenance attestation when it
-is published, so it is the one part of an entry no publisher forges by writing a string:
+What a registry can attest is narrower than it looks. npm verifies a provenance attestation when it
+is published, so it is the one part of an entry no publisher forges by writing a string — but what
+it proves is build origin: the attestation binds the artifact to the repository and workflow that
+built it, and a squat published from its own public Actions workflow carries a genuine attestation
+of its own repository. It bears on identity only once a reader opens it and compares its subject
+repository with the repository the project's own documentation named:
 
 ```text
-$ npm view @biomejs/biome dist.attestations
-{
-  url: 'https://registry.npmjs.org/-/npm/v1/attestations/@biomejs%2fbiome@2.6.3',
-  provenance: { predicateType: 'https://slsa.dev/provenance/v1' }
-}
-$ npm view biome dist.attestations
+$ npm view @biomejs/biome dist.attestations.url
+https://registry.npmjs.org/-/npm/v1/attestations/@biomejs%2fbiome@2.6.3
+$ curl -s "$(npm view @biomejs/biome dist.attestations.url)" \
+    | jq -r '.attestations[] | select(.predicateType=="https://slsa.dev/provenance/v1") | .bundle.dsseEnvelope.payload' \
+    | base64 -d | jq -r '.predicate.buildDefinition.externalParameters.workflow.repository'
+https://github.com/biomejs/biome
 ```
 
-Present for the project and empty for the squatter — but most packages publish none, so an empty
-answer is no evidence of a squat. PyPI publishes attestations only for projects that release
-through a trusted publisher, and widely used tools do without: `https://pypi.org/pypi/ruff/0.14.0/json`
-carries no `provenance` on any of its files and
-`https://pypi.org/integrity/ruff/0.14.0/<file>/provenance` answers 404, so for a Python tool the
-project's own documentation is the whole of the check. A Go module path is a domain-scoped URL, so
-the coordinate is the repository path itself and is checked by going to it; `sum.golang.org` pins a
-published version's bytes, which stops them changing under a reader later and says nothing about
-whether the path was the right one.
+That is the SLSA v1 predicate's `buildDefinition.externalParameters.workflow`, which for
+`@biomejs/biome@2.6.3` reads `{"ref": "refs/heads/main", "repository":
+"https://github.com/biomejs/biome", "path": ".github/workflows/release.yml"}` — the repository
+biomejs.dev named, building on its own main branch. (In a worker's bash tool `jq` is the harness's
+builtin and a script gets `/usr/bin/jq`; either prints the same here.) The other limit is absence:
+most packages publish no provenance at all, so an empty `dist.attestations` is no evidence of a
+squat. PyPI publishes attestations only for projects that release through a trusted publisher, and
+widely used tools do without: `https://pypi.org/pypi/ruff/0.14.0/json` carries no `provenance` on
+any of its files and `https://pypi.org/integrity/ruff/0.14.0/<file>/provenance` answers 404, so for
+a Python tool the project's own documentation is the whole of the check. A Go module path is a
+domain-scoped URL, so the coordinate is the repository path itself and is checked by going to it;
+`sum.golang.org` pins a published version's bytes, which stops them changing under a reader later
+and says nothing about whether the path was the right one.
 
 Pinning the version while leaving the name alone runs the squatter at a version, obeying "pin the
 version" to the letter:
