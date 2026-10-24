@@ -123,8 +123,10 @@ type Broker struct {
 	login   atomic.Pointer[loginState] // most recent login: code, state
 	// credMu is held by whatever changes the held login and its machine file together: a login's
 	// save and install, a start's install, and a refresh from its request to its save and swap, so
-	// a refresh never races a login's install.
+	// a refresh never races a login's install. Every save of the machine file runs under it.
 	credMu sync.Mutex
+	// closed, set by Close under credMu, makes every later save of the machine file write nothing.
+	closed bool
 	// stateMu is held by every write of cred, login and dropped, and by LoginStatus while it reads
 	// the three, so login-status never pairs one moment's login with another's credential, and a
 	// drop is recorded with the clear that caused it. cred and login stay atomics so a reader of
@@ -631,12 +633,27 @@ func (b *Broker) newRetrySchedule() retrySchedule {
 	return retrySchedule{retry: b.refreshRetryOrDefault(), backoffStart: defaultRefreshBackoff, backoff: defaultRefreshBackoff}
 }
 
-// saveFile writes f to MachineFile (testSave in a test).
+// saveFile writes f to MachineFile (testSave in a test), and writes nothing after Close. Every
+// caller holds credMu.
 func (b *Broker) saveFile(f *MachineFile) error {
+	if b.closed {
+		return nil
+	}
 	if b.testSave != nil {
 		return b.testSave(f, b.MachineFile)
 	}
 	return f.Save(b.MachineFile)
+}
+
+// Close waits for whatever holds credMu (a save, or a refresh's token request, which ends with the
+// refresh loop's context), then makes every later save of the machine file write nothing, so a
+// caller can remove the file's directory while the refresh loop or an approved login's poll is
+// still finishing. A test's cleanup calls it; the helper never does, since a refresh answered
+// while the helper stops spends the old token, and the new one must reach the file.
+func (b *Broker) Close() {
+	b.credMu.Lock()
+	defer b.credMu.Unlock()
+	b.closed = true
 }
 
 // Logged when a rotated login's save fails: the file was removed (unsavedRemovedMsg), or the
