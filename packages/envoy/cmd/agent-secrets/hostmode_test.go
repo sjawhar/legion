@@ -116,7 +116,7 @@ func TestBuildSignerFallsBackToTheRuntimeDirDefaults(t *testing.T) {
 		t.Fatalf("the default key dir means file mode: %T %q", signer, id)
 	}
 
-	hostRuntime := t.TempDir()
+	hostRuntime := shortTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", hostRuntime)
 	sock := filepath.Join(hostRuntime, "agent-secrets", "helper.sock")
 	fakeHelperAt(t, sock, helper.Response{OK: true, Proof: "eyJ.fake.proof"})
@@ -190,7 +190,7 @@ func TestFileSignerMatchesWhatProofVerifyExpects(t *testing.T) {
 // socket, so it stays available on every platform this package's test binary is built for.
 func fakeHelper(t *testing.T, canned helper.Response) (string, <-chan helper.Request) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	return sock, fakeHelperAt(t, sock, canned)
 }
 
@@ -301,7 +301,7 @@ func TestRegisterWithoutExecExitsOneWhenWaitedButNotEnrolled(t *testing.T) {
 // ($XDG_RUNTIME_DIR/agent-secrets/helper.sock) with AGENT_SECRETS_HELPER_SOCK unset: a machine set
 // up by starting the helper with no settings registers its sessions without exporting the variable.
 func TestRegisterFindsTheHelperOnItsDefaultSocket(t *testing.T) {
-	runtimeDir := t.TempDir()
+	runtimeDir := shortTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
 	reqs := fakeHelperAt(t, filepath.Join(runtimeDir, "agent-secrets", "helper.sock"),
@@ -384,7 +384,7 @@ func TestRegisterExecWarnsWhenWaitedButNotEnrolled(t *testing.T) {
 // it — it is the launch-ordering case tmux-resurrect hits at boot.
 func TestRegisterExecWithoutHelperWarnsAndStillExecs(t *testing.T) {
 	cmd := exec.Command("go", "run", ".", "register", "--exec", "--", "sh", "-c", "echo ran")
-	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+filepath.Join(t.TempDir(), "absent.sock"))
+	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+filepath.Join(shortTempDir(t), "absent.sock"))
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -579,19 +579,27 @@ func TestIdentity(t *testing.T) {
 		}},
 		{name: "nothing listening", setup: func(t *testing.T, p paths) { staleSocketAt(t, p.sock) }, exit: 1, stderr: unreachable},
 		{name: "unit installed, no socket", setup: func(t *testing.T, p paths) { installHelperUnit(t, p.home) }, exit: 1, stderr: unreachable},
+		{name: "unit under XDG_CONFIG_HOME, no socket", setup: func(t *testing.T, p paths) {
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(p.home, "xdg"))
+			installHelperUnit(t, p.home)
+			if _, err := os.Stat(filepath.Join(p.home, "xdg", "systemd", "user", "agent-secrets-helper.service")); err != nil {
+				t.Fatal(err)
+			}
+		}, exit: 1, stderr: unreachable},
 		{name: "helper never answers", setup: func(t *testing.T, p paths) { silentHelperAt(t, p.sock) }, exit: 1, stderr: unreachable, slow: true},
 		{name: "nothing", setup: func(t *testing.T, p paths) {}, exit: 1, stderr: namedOnly},
 	}
 	for _, mode := range []string{"named", "defaults"} {
 		for _, tc := range cases {
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
-				runtime := t.TempDir()
+				runtime := shortTempDir(t)
 				p := paths{home: t.TempDir()}
 				t.Setenv("HOME", p.home)
+				t.Setenv("XDG_CONFIG_HOME", "")
 				t.Setenv("XDG_RUNTIME_DIR", runtime)
 				if mode == "named" {
 					p.keyDir = filepath.Join(t.TempDir(), "keys")
-					p.sock = filepath.Join(t.TempDir(), "h.sock")
+					p.sock = filepath.Join(shortTempDir(t), "h.sock")
 					t.Setenv("AGENT_SECRETS_KEY_DIR", p.keyDir)
 					t.Setenv("AGENT_SECRETS_HELPER_SOCK", p.sock)
 				} else {
@@ -686,11 +694,13 @@ func silentHelperAt(t *testing.T, sock string) {
 	})
 }
 
-// installHelperUnit writes the helper's user unit under home, the file whose presence says the
-// helper is installed on this machine.
+// installHelperUnit writes the helper's user unit where install writes it under home (the test
+// clears XDG_CONFIG_HOME), the file whose presence says the helper is installed on this machine.
 func installHelperUnit(t *testing.T, home string) {
 	t.Helper()
-	unit := filepath.Join(home, ".config", "systemd", "user", "agent-secrets-helper.service")
+	unit := helper.UnitPath(func(k string) string {
+		return map[string]string{"HOME": home, "XDG_CONFIG_HOME": os.Getenv("XDG_CONFIG_HOME")}[k]
+	})
 	if err := os.MkdirAll(filepath.Dir(unit), 0o700); err != nil {
 		t.Fatal(err)
 	}

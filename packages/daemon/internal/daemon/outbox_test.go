@@ -1703,6 +1703,36 @@ func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice
 	}
 }
 
+// A production check has no later wake after its implementer exhausts a failed launch. The
+// architect receives the launch failure immediately instead of waiting for the look's bound.
+func TestAProductionCheckLaunchFailureNotifiesTheArchitect(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	root := checkRoot()
+	putOutboxIssue(t, pool, records, root)
+	putProductionCheck(t, pool, records, openCheck(root, "a1b2c3d4"))
+	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
+	sup.deps.Limits.LaunchFailures = 1
+	runtime.ScriptResume(fake.SpawnResult{Err: errors.New("workspace-init could not fetch the clone")})
+	engine := workflow.New(records, workflow.Config{Project: root.Project, Repositories: testRepositories}, quietLogger())
+	active := &workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}
+	sup.OnTerminal(active.terminal)
+	_, _ = suspendedImplementer(t, sup, root, supervise.SuspendedByDaemon)
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), log: quietLogger(), now: time.Now}
+
+	if err := runner.execute(context.Background(), checkStart(t, root, 1)); err == nil {
+		t.Fatal("check start succeeded after the implementer's launch failed")
+	}
+	var kind, reason string
+	if err := pool.QueryRow(context.Background(), `select payload->>'kind', payload->>'reason'
+		from outbox where issue = $1 and kind = $2`, root.Key, string(record.OutboxKindNotice)).Scan(&kind, &reason); err != nil {
+		t.Fatalf("read the architect notice: %v", err)
+	}
+	if kind != "worker-died" || !strings.Contains(reason, "workspace-init could not fetch the clone") {
+		t.Fatalf("architect notice = kind %q, reason %q; want worker-died naming the launch failure", kind, reason)
+	}
+}
+
 func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	handler := &outboxFactHandler{}

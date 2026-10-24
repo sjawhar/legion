@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// 0050 adds awaiting_person and what it waits on. An issue the old daemon left in any phase
+// 0051 adds awaiting_person and what it waits on. An issue the old daemon left in any phase
 // migrates with no awaiting state and nobody's claim. Afterwards a root waits on exactly one of an
 // ask or a gate version, and only in that phase, and a held issue never waits.
-func TestAwaitingPersonArrivesWith0050AndItsShapeIsEnforced(t *testing.T) {
+func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 49)
+	migrateThrough(t, store, 50)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 1)`); err != nil {
@@ -30,7 +30,7 @@ func TestAwaitingPersonArrivesWith0050AndItsShapeIsEnforced(t *testing.T) {
 		t.Fatalf("read the migrated root: %v", err)
 	}
 	if claimedBy != "" || claimSeq != 0 || ask != nil || gateVersion != nil {
-		t.Fatalf("root after 0050 = claimed_by %q claim_seq %d ask %v gate %v, want no claim and no wait", claimedBy, claimSeq, ask, gateVersion)
+		t.Fatalf("root after 0051 = claimed_by %q claim_seq %d ask %v gate %v, want no claim and no wait", claimedBy, claimSeq, ask, gateVersion)
 	}
 
 	for _, accepted := range []string{

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net"
@@ -229,8 +230,9 @@ func gcpServedBy(f *fakeSecretManager, settings Settings) func(name string) Rere
 
 // useGCPIdentity makes gcpCredentials and gcpUserinfo answer kind/email for the rest of t, with no
 // network call. kind is the ADC JSON's "type" ("authorized_user" for a person's sign-in,
-// "service_account" for a key file); "" leaves the JSON empty, as a GCE/GKE metadata or workload
-// identity carries none.
+// "service_account" for a key file, "external_account" for a workload identity federation
+// credential such as a dev box's); "" leaves the JSON empty, as a GCE/GKE metadata-server identity
+// carries none.
 func useGCPIdentity(t *testing.T, kind, email string) {
 	t.Helper()
 	restoreCreds, restoreUserinfo := gcpCredentials, gcpUserinfo
@@ -320,38 +322,36 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	}
 }
 
-// TestGCPSecretCreateRefusesServiceAccount: a write under Application Default Credentials that
-// are not a person's `gcloud auth application-default login` (a service account's) is refused
-// before anything is written.
-func TestGCPSecretCreateRefusesServiceAccount(t *testing.T) {
-	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "service_account", "robot@acme-agent-infra.iam.gserviceaccount.com")
-	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
-	useStdin(t, "shh")
+// TestGCPSecretCreateRefusesAMachineIdentity: a write under Application Default Credentials that
+// are not a person's own Google Account sign-in - a service account key, a workload identity
+// federation credential (a dev box's own identity), or the metadata server's, which carries no
+// JSON - is refused before the value is read, before anything is written to Secret Manager, and
+// before the broker is asked to reread.
+func TestGCPSecretCreateRefusesAMachineIdentity(t *testing.T) {
+	for _, kind := range []string{"service_account", "external_account", ""} {
+		t.Run(cmp.Or(kind, "metadata server"), func(t *testing.T) {
+			fake := newFakeSecretManager()
+			startFakeSecretManager(t, fake)
+			useGCPIdentity(t, kind, "robot@acme-agent-infra.iam.gserviceaccount.com")
+			broker := startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
+			restore := secretStdin
+			secretStdin = failingStdin{t}
+			t.Cleanup(func() { secretStdin = restore })
 
-	_, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
-	if code != 1 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
-	}
-	if !strings.Contains(stderr, "not a person's sign-in") {
-		t.Fatalf("stderr: %q", stderr)
-	}
-}
-
-// TestGCPSecretCreateRefusesMetadataIdentity: ADC with no JSON at all (a GCE/GKE metadata-server
-// or workload identity) is refused the same way.
-func TestGCPSecretCreateRefusesMetadataIdentity(t *testing.T) {
-	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "", "robot@acme-agent-infra.iam.gserviceaccount.com")
-	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
-	useStdin(t, "shh")
-
-	_, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
-	if code != 1 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
-	}
-	if !strings.Contains(stderr, "not a person's sign-in") {
-		t.Fatalf("stderr: %q", stderr)
+			_, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
+			if code != 1 {
+				t.Fatalf("exit %d, stderr %q", code, stderr)
+			}
+			fake.mu.Lock()
+			written := len(fake.secrets)
+			fake.mu.Unlock()
+			if written != 0 {
+				t.Fatalf("Secret Manager holds %d secrets after a refused write", written)
+			}
+			if rereads, _ := broker.recorded(); len(rereads) != 0 {
+				t.Fatalf("rereads = %v after a refused write, want none", rereads)
+			}
+		})
 	}
 }
 

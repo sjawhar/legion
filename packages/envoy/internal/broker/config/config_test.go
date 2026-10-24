@@ -21,6 +21,7 @@ func validEnv() map[string]string {
 	return map[string]string{
 		"BROKER_DATABASE_URL":        "postgres://x",
 		"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
+		"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.internal.example/credentials/machine",
 		"BROKER_UI_TOKEN":            "ui-token",
 		"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
 		"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
@@ -33,6 +34,22 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	_, err := Load(env(e))
 	if err == nil || !strings.Contains(err.Error(), "BROKER_DATABASE_URL") {
 		t.Fatalf("expected BROKER_DATABASE_URL refusal, got %v", err)
+	}
+}
+
+// TestLoadRequiresMachineLoginURL: the page a person types a machine login's code into is
+// required, and must be an absolute http(s) URL, since the device grant names it to the machine.
+func TestLoadRequiresMachineLoginURL(t *testing.T) {
+	for _, v := range []string{"", "/credentials/machine", "dispatch.example/credentials/machine", "ftp://dispatch.example/x", "https:///x"} {
+		e := validEnv()
+		e["BROKER_MACHINE_LOGIN_URL"] = v
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MACHINE_LOGIN_URL") {
+			t.Errorf("Load(BROKER_MACHINE_LOGIN_URL=%q) = %v, want a refusal naming it", v, err)
+		}
+	}
+	cfg, err := Load(env(validEnv()))
+	if err != nil || cfg.MachineLoginURL != "https://dispatch.internal.example/credentials/machine" {
+		t.Fatalf("Load = (%q, %v), want the machine login URL", cfg.MachineLoginURL, err)
 	}
 }
 
@@ -96,7 +113,7 @@ func TestLoadReadsUITokenFileAheadOfValue(t *testing.T) {
 		t.Fatalf("token file must win: got %d-byte token, want the %d-byte file value", len(cfg.UIToken), len("tok-from-file"))
 	}
 	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 ||
-		cfg.LauncherCredentialSeconds != 604800 || cfg.SweepSeconds != 5 {
+		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 {
 		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
 			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
 	}

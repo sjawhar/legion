@@ -176,8 +176,8 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 	}
 }
 
-// agentMounts are the feed, read-only: the issue's clone keeps its objects there
-// (objects/info/alternates), and no agent writes what workspace-fetch, the token's holder, reads.
+// agentMounts expose the feed read-only, so no agent writes what workspace-fetch, the token's
+// holder, reads.
 func (issuePod) agentMounts() []corev1.VolumeMount { return []corev1.VolumeMount{readOnlyFeed()} }
 
 // agentEnv tells each agent its tree, issue and workspace, where its gh reads its credentials, and

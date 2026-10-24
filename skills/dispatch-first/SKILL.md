@@ -28,6 +28,7 @@ dispatch search --query 'reviewer threads OR review comments'
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`) where you rely on it. Do not ask again.
 - **Duplicate found:** keep the issue with the spec and the discussion, and copy over what only the duplicate has. Then close it: `dispatch issue-update --issue <KEY> --status done --reason 'Duplicate of dispatch://KEY.'`. If it has the `legion` label, or another session or a human holds its claim, comment on it with the survivor's name. Do not close it.
 - **Every ask and message stands alone:** the reader sees only that text. Put the facts, the options and your recommendation in it. Link what you cite (`dispatch://…`). Never write "see above" or "my earlier message".
+- **In a Legion session, a finding outside your own issue is never an issue you file.** A Legion role, and each of its subagents, opens a `dispatch ask` as `skill://legion-worker/references/findings.md` says, in place of filing above.
 
 ## Design in the spec
 

@@ -669,17 +669,27 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 		return intake.Result{}, nil
 	}
 	// The implementer's failure ends the look of its closed issue's production check, as its
-	// bound would: the look is the only work a done issue has for it. An issue in the workflow
-	// (one reopened inside its linger with a look still open at the reopen) takes the live-phase
-	// path below instead, where the failure holds the phase and is told; its stale look ends at
-	// the look's own bound (check_look), which endLookPending keeps for the run.
+	// bound would. Unlike an ordinary pending report, nobody remains to report the look or wait for
+	// the next wake, so the architect is told now with the persisted launch failure. An issue in the
+	// workflow (one reopened inside its linger with a look still open at the reopen) takes the
+	// live-phase path below instead, where the failure holds the phase and is told; its stale look
+	// ends at the look's own bound (check_look), which endLookPending keeps for the run.
 	if fact.Role == claim.RoleImplementer && !InWorkflow(*issue) {
 		check, err := e.store.ProductionCheck(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err
 		}
 		if check != nil && check.Open() && check.LookOpen {
-			return intake.Result{}, e.endLook(ctx, tx, check, "claim failed")
+			if err := e.endLook(ctx, tx, check, "claim failed"); err != nil {
+				return intake.Result{}, err
+			}
+			reason := fact.Reason
+			if reason == "" {
+				reason = "the implementer's claim failed before it reported the look"
+			}
+			return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{
+				Kind: "worker-died", Role: fact.Role, Reason: fmt.Sprintf("production check look %d lost its implementer: %s", check.Looks, reason),
+			})
 		}
 	}
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers || issue.Phase == phase.Done {

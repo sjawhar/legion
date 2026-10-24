@@ -1,4 +1,4 @@
--- 0050_awaiting_person.up.sql — a root waiting only on a person gives up its admission slot.
+-- 0051_awaiting_person.up.sql — a root waiting only on a person gives up its admission slot.
 --
 -- Phase `awaiting_person` is a root admitted tree whose design gate is closed on the spec version
 -- its architect registered, or whose architect opened a question on it: it holds no slot, and its

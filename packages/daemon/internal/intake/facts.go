@@ -537,10 +537,12 @@ func (f CloseRoot) Message() string {
 	return "Closed by its architect before its first phase: " + f.Reason
 }
 
-// ClaimFailed is the supervision terminal failure observation.
+// ClaimFailed is the supervision terminal failure observation. Reason is the persisted cause when
+// the supervisor has one, so workflow notices can say what failed after a daemon restart.
 type ClaimFailed struct {
-	Issue string
-	Role  claim.Role
+	Issue  string
+	Role   claim.Role
+	Reason string
 }
 
 func (ClaimFailed) isFact() {}

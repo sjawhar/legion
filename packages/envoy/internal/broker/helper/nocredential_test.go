@@ -30,12 +30,13 @@ func TestNoCredentialReasonNamesWhyTheHelperHoldsNone(t *testing.T) {
 		dropped     string
 		want        string
 	}{
-		{"never logged in since the start", "", false, "", "no machine login since the helper started; a restart discards the launcher credential"},
+		{"never logged in since the start", "", false, "", "no machine login since the helper started, and none kept on this machine"},
 		{"a login waiting for approval", "pending", false, "", "a machine login is waiting for a human to approve it"},
 		{"a login waiting for approval beside a dropped credential", "pending", true, dropExpired, "a machine login is waiting for a human to approve it"},
 		{"a denied login", "denied", false, "", "the most recent machine login was denied"},
 		{"a login nobody approved in time", "expired", false, "", "the most recent machine login expired before anyone approved it"},
 		{"dropped at its expiry", "expired", true, dropExpired, "the launcher credential reached its expiry"},
+		{"dropped when the broker refused its refresh", "expired", true, dropRefreshRefused, dropRefreshRefused},
 		{"dropped when the broker refused it", "expired", true, dropRefused, refusal},
 		{"refused, from a helper before credential_dropped", "expired", true, "", refusal},
 		{"a state from a newer helper", "revoked", false, "", "the most recent machine login is revoked"},
@@ -62,10 +63,10 @@ func waitForRecord(t *testing.T, out *syncBuffer, msg string) map[string]any {
 	}
 }
 
-// TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll: a restarted helper holds no launcher
-// credential, and a session it re-pins must revoke its prior enrollment before it enrolls again.
-// That revoke cannot run, and the helper says so at ERROR, naming the session, the prior
-// enrollment and why: no login since the start, since a restart discards the credential.
+// TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll: a restarted helper with no machine login
+// kept on disk holds no launcher credential, and a session it re-pins must revoke its prior
+// enrollment before it enrolls again. That revoke cannot run, and the helper says so at ERROR,
+// naming the session, the prior enrollment and why.
 func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	pid := recordPrior(t, state, "enr-prior")
@@ -78,7 +79,7 @@ func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
 	line := waitForRecord(t, &out, "session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets machine login, and have a human approve it")
 	for k, v := range map[string]any{
 		"level": "ERROR", "runtime_id": sess.RuntimeID, "enrollment_id": "enr-prior",
-		"why": "no machine login since the helper started; a restart discards the launcher credential",
+		"why": "no machine login since the helper started, and none kept on this machine",
 	} {
 		if line[k] != v {
 			t.Fatalf("the line for the re-pinned session: %s = %v; want %v (line %v)", k, line[k], v, line)
@@ -98,7 +99,7 @@ func TestASessionKeyTheHelperCannotEnrollIsAnError(t *testing.T) {
 	line := waitForRecord(t, &out, "session cannot enroll: the helper holds no launcher credential; run: agent-secrets machine login, and have a human approve it")
 	for k, v := range map[string]any{
 		"level": "ERROR", "runtime_id": "box-1",
-		"why": "no machine login since the helper started; a restart discards the launcher credential",
+		"why": "no machine login since the helper started, and none kept on this machine",
 	} {
 		if line[k] != v {
 			t.Fatalf("the line for the session key: %s = %v; want %v (line %v)", k, line[k], v, line)
@@ -188,7 +189,7 @@ func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh := &machineCredential{key: key, id: "lcred-fresh", gone: make(chan struct{})}
+	fresh := &machineCredential{key: key, id: "lcred-fresh", expiresAt: time.Now().Add(7 * 24 * time.Hour), gone: make(chan struct{})}
 	install := func() { b.installCredential(fresh, &loginState{State: "issued"}) }
 	hook.do.Store(&install)
 	r.fake.mu.Lock()
