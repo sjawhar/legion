@@ -1035,6 +1035,14 @@ describe("dispatchToolSpecs", () => {
       "dispatch_message",
       "keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside arrives as a user message: answer in the conversation, with no dispatch message.",
     ],
+    [
+      "dispatch_ask",
+      "Never create an issue to park a question: the question is an ask on the issue it concerns.",
+    ],
+    [
+      "dispatch_issue",
+      "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it.",
+    ],
   ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
     expect(specFor(name).description).toContain(rule);
   });

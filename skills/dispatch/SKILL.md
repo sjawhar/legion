@@ -14,7 +14,7 @@ Dispatch holds each issue's spec, asks, comments and documents. It is a record f
 
 ## Asks and ask blocks
 
-- A question about a design a document records is an ask block at the end of the section it concerns, at each phase:
+- A question about a design a document records is an ask block (a decision block) at the end of the section it concerns, at each phase:
 
 ```md
 :::ask{urgency="med"}

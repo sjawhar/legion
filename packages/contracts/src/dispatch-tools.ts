@@ -339,6 +339,7 @@ export const dispatchToolSpecs = [
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " +
       "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " +
       "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
+      "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -529,7 +530,8 @@ export const dispatchToolSpecs = [
       "end of the section it concerns), at every phase, approved spec or not; the block reaches " +
       "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " +
       "document is approved through dispatch request-approval. Do not use this tool for a status " +
-      "update or discussion; use dispatch message instead. " +
+      "update or discussion; use dispatch message instead. Never create an issue to park a " +
+      "question: the question is an ask on the issue it concerns. " +
       ASK_QUESTION_CONTRACT +
       " " +
       ASK_OPTIONS_CONTRACT +

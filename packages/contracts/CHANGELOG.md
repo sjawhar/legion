@@ -113,6 +113,9 @@
   open ask asks for clarification), `dispatch_doc_edit` (one replace per paragraph, then one
   insert, then a read back) and `dispatch_artifact` (never upload a document's own name to change
   it).
+- `dispatch ask --help` says never to create an issue to park a question, and `dispatch issue
+  --help` says to create a project only when a person asks for one, and that work across projects
+  goes in the project that owns most of it (INFRA-140).
 
 - `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
   broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
