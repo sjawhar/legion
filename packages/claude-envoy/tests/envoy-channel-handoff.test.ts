@@ -8,11 +8,15 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import {
+  readChosenTitleSync,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
+  sessionTitleFile,
+  writeChosenTitle,
   writeSessionHandoff,
 } from "../src/session-identity"
+import { sessionTitle } from "../src/session-title"
 import {
   deliveryRaw,
   directSubject,
@@ -150,6 +154,45 @@ test("registers the session's title, and a handoff re-registers under the new id
     expect(new Set(titles)).toEqual(new Set(["ses_old legion ses_old", "ses_new legion ses_new"]))
     // The dispatch command's title is written once per id, not on every heartbeat.
     expect(stamped).toEqual(["ses_old legion ses_old", "ses_new legion ses_new"])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a name chosen after the server started is what the next registration and stamp carry", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_one", "/tmp")
+  const titles: string[] = []
+  const stamped: string[] = []
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      titles.push(input.title ?? "")
+      return noInterest()
+    },
+  })
+  // The real title function over the real state directory, so this row exercises the precedence
+  // the server wires rather than a stub of it.
+  const title = sessionTitle({}, "/work/legion", undefined, undefined, (sessionId) =>
+    readChosenTitleSync(sessionTitleFile(stateDirectory, sessionId)),
+  )
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, {
+      client,
+      heartbeatMs: 25,
+      title,
+      stampTitle: (sessionId, value) => stamped.push(`${sessionId} ${value}`),
+    }),
+  )
+
+  try {
+    expect(titles[0]).toBe("legion ses_one")
+    await writeChosenTitle(sessionTitleFile(stateDirectory, "ses_one"), "review the listener")
+    await waitFor(
+      async () => titles.includes("review the listener"),
+      "a registration carrying the chosen name",
+    )
+    expect(stamped).toEqual(["ses_one legion ses_one", "ses_one review the listener"])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

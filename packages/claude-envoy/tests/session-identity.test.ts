@@ -1,14 +1,18 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   pruneStaleSessionHandoffs,
+  pruneStaleSessionTitles,
   readSessionHandoff,
   roleStateFile,
+  SESSION_TITLE_MAX_AGE_MS,
   SessionIdentity,
   sessionHandoffDirectory,
   sessionHandoffFile,
+  sessionTitleFile,
+  writeChosenTitle,
   writeSessionHandoff,
 } from "../src/session-identity"
 
@@ -46,6 +50,26 @@ test("pruning removes handoff directories whose Claude process is gone and keeps
     expect((await readdir(join(stateDirectory, "sessions"))).sort()).toEqual(
       [String(process.pid), "not-a-pid"].sort(),
     )
+  } finally {
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("pruning drops title files older than the age, keeps fresh ones, and tolerates no directory", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-titles-"))
+  try {
+    await pruneStaleSessionTitles(stateDirectory)
+
+    const fresh = sessionTitleFile(stateDirectory, "ses_fresh")
+    const old = sessionTitleFile(stateDirectory, "ses_old")
+    await writeChosenTitle(fresh, "review the listener")
+    await writeChosenTitle(old, "last month")
+    const past = new Date(Date.now() - SESSION_TITLE_MAX_AGE_MS - 60_000)
+    await utimes(old, past, past)
+
+    await pruneStaleSessionTitles(stateDirectory)
+
+    expect(await readdir(join(stateDirectory, "titles"))).toEqual(["ses_fresh"])
   } finally {
     await rm(stateDirectory, { recursive: true, force: true })
   }

@@ -1,4 +1,5 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { readFileSync } from "node:fs"
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { hasErrnoCode } from "@legion/envoy-client/errors"
 import { z } from "zod"
@@ -49,6 +50,36 @@ export function sessionHandoffFile(stateDirectory: string, claudePid: number): s
 /** Role state is keyed by session id so `claude --resume <id>` finds the role it held. */
 export function roleStateFile(stateDirectory: string, sessionId: string): string {
   return join(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`)
+}
+
+/** Title state is keyed by session id, like role state, so `claude --resume <id>` finds the name
+ *  the user gave that session and a `/clear`'s new id starts without one. */
+export function sessionTitleFile(stateDirectory: string, sessionId: string): string {
+  return join(stateDirectory, "titles", encodeURIComponent(sessionId))
+}
+
+export async function writeChosenTitle(file: string, title: string): Promise<void> {
+  await writeAtomicStateFile(file, `${title}\n`)
+}
+
+/** The session has no custom title any more: a rename can be undone, and the fallback returns. */
+export async function removeChosenTitle(file: string): Promise<void> {
+  await rm(file, { force: true })
+}
+
+/**
+ * The name a user gave the session, as recorded; undefined when the file cannot be read.
+ *
+ * Synchronous and never throwing, because the registration path reads it inside a
+ * `(sessionId: string) => string`: the title is cosmetic, so a failed read must leave the session
+ * on its fallback name rather than fail the registration that carries it.
+ */
+export function readChosenTitleSync(file: string): string | undefined {
+  try {
+    return readFileSync(file, "utf8")
+  } catch {
+    return undefined
+  }
 }
 
 /** The role a session held, from its role file; undefined when it has none. */
@@ -114,5 +145,34 @@ export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise
   for (const entry of entries) {
     if (!/^\d+$/.test(entry) || processExists(Number(entry))) continue
     await rm(join(sessions, entry), { recursive: true, force: true })
+  }
+}
+
+/** Thirty days: long enough that a session resumed weeks later still finds its name. */
+export const SESSION_TITLE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000
+
+/**
+ * Drop `titles/<session id>` files last written longer than `maxAgeMs` ago. Nothing else deletes a
+ * file keyed by session id — a session's id dies with it, unmourned — so without this the
+ * directory grows by one file per named session for ever.
+ */
+export async function pruneStaleSessionTitles(
+  stateDirectory: string,
+  now: number = Date.now(),
+  maxAgeMs: number = SESSION_TITLE_MAX_AGE_MS,
+): Promise<void> {
+  const titles = join(stateDirectory, "titles")
+  const entries = await readdir(titles).catch((error: unknown) => {
+    if (hasErrnoCode(error, "ENOENT")) return []
+    throw error
+  })
+  for (const entry of entries) {
+    const file = join(titles, entry)
+    const modified = await stat(file).then(
+      (stats) => stats.mtimeMs,
+      () => undefined,
+    )
+    if (modified === undefined || now - modified <= maxAgeMs) continue
+    await rm(file, { force: true })
   }
 }

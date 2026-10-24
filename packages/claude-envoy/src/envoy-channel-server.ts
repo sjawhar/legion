@@ -77,11 +77,14 @@ import {
 } from "./legion-tool"
 import {
   pruneStaleSessionHandoffs,
+  pruneStaleSessionTitles,
+  readChosenTitleSync,
   readPersistedRole,
   readSessionHandoff,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
+  sessionTitleFile,
   writePersistedRole,
 } from "./session-identity"
 import { type SessionTitle, sessionTitle } from "./session-title"
@@ -804,6 +807,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     await restoreRole()
   })
   await pruneStaleSessionHandoffs(options.stateDirectory)
+  await pruneStaleSessionTitles(options.stateDirectory)
   const heartbeatTimer = setInterval(() => {
     void heartbeat()
   }, options.heartbeatMs)
@@ -1005,6 +1009,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // The title every registration sends, and the one the `dispatch` command stamps on this
   // session's Dispatch writes. Registration stamps it; with Envoy or its inbound messages off,
   // nothing registers, so those paths stamp it once themselves.
+  // `CLAUDE_PLUGIN_DATA` is read here, rather than through `pluginStateDirectory` below, because
+  // that throws when it is unset and runs only after the Envoy-off return: a session with Envoy
+  // off and no plugin data must still serve.
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"])
   const title = sessionTitle(
     {
       ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
@@ -1012,6 +1020,12 @@ export async function runEnvoyChannelServer(): Promise<void> {
       TMUX_PANE: process.env["TMUX_PANE"],
     },
     directory,
+    undefined,
+    undefined,
+    (sessionId) =>
+      pluginData === undefined
+        ? undefined
+        : readChosenTitleSync(sessionTitleFile(pluginData, sessionId)),
   )
   const stampTitle = (sessionId: string, value: string): void => {
     writeSessionTitle(dispatchSessionDirectory(process.env, sessionId), value)

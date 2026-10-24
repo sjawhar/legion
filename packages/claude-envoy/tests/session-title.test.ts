@@ -79,6 +79,54 @@ test("a blank or invisible ENVOY_SESSION_TITLE falls through to tmux, asked of t
   }
 })
 
+test("the name the user gave the session stands alone, with no short id after it", () => {
+  const title = sessionTitle({}, "/work/legion", noTmux, ours, () => "review the listener")
+  expect(title(SESSION_ID)).toBe("review the listener")
+})
+
+test("ENVOY_SESSION_TITLE beats the chosen name, which is never even read", () => {
+  const title = sessionTitle(
+    { ENVOY_SESSION_TITLE: "pinned" },
+    "/work/legion",
+    noTmux,
+    ours,
+    () => {
+      throw new Error("the chosen name must not be read")
+    },
+  )
+  expect(title(SESSION_ID)).toBe("pinned")
+})
+
+test("a blank, invisible or missing chosen name falls through to the directory and short id", () => {
+  for (const blank of [undefined, "  ", "\u200b", "\u001b[31m\u001b[0m"]) {
+    const title = sessionTitle({}, "/work/legion", noTmux, ours, () => blank)
+    expect(title(SESSION_ID)).toBe("legion 3084299d")
+  }
+})
+
+test("a multi-line or colour-coded chosen name is put on one line", () => {
+  const title = sessionTitle(
+    {},
+    "/work/legion",
+    noTmux,
+    ours,
+    () => "\u001b[31mreview\n  the \u0007 listener\u001b[0m\n",
+  )
+  expect(title(SESSION_ID)).toBe("review the listener")
+})
+
+test("the chosen name is read on every call, so a rename reaches the next registration", () => {
+  let chosen: string | undefined
+  const title = sessionTitle({}, "/work/legion", noTmux, ours, () => chosen)
+  expect(title(SESSION_ID)).toBe("legion 3084299d")
+
+  chosen = "review the listener"
+
+  expect(title(SESSION_ID)).toBe("review the listener")
+  chosen = undefined
+  expect(title(SESSION_ID)).toBe("legion 3084299d")
+})
+
 test("the socket is TMUX up to its last two commas, so a path holding a comma still names it", () => {
   const tmux = tmuxAnswering("work", "review", "0")
   sessionTitle(

@@ -47660,7 +47660,8 @@ function claudeProjectDirectory(environment, fallback) {
 }
 
 // src/session-identity.ts
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { readFileSync as readFileSync5 } from "fs";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join4 } from "path";
 var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
 
@@ -47686,6 +47687,23 @@ function sessionHandoffFile(stateDirectory, claudePid) {
 }
 function roleStateFile(stateDirectory, sessionId) {
   return join4(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+}
+function sessionTitleFile(stateDirectory, sessionId) {
+  return join4(stateDirectory, "titles", encodeURIComponent(sessionId));
+}
+async function writeChosenTitle(file2, title) {
+  await writeAtomicStateFile(file2, `${title}
+`);
+}
+async function removeChosenTitle(file2) {
+  await rm(file2, { force: true });
+}
+function readChosenTitleSync(file2) {
+  try {
+    return readFileSync5(file2, "utf8");
+  } catch {
+    return;
+  }
 }
 async function readPersistedRole(roleFile) {
   try {
@@ -47741,6 +47759,24 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
     await rm(join4(sessions, entry), { recursive: true, force: true });
   }
 }
+var SESSION_TITLE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+async function pruneStaleSessionTitles(stateDirectory, now = Date.now(), maxAgeMs = SESSION_TITLE_MAX_AGE_MS) {
+  const titles = join4(stateDirectory, "titles");
+  const entries = await readdir(titles).catch((error48) => {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return [];
+    throw error48;
+  });
+  for (const entry of entries) {
+    const file2 = join4(titles, entry);
+    const modified = await stat(file2).then((stats) => stats.mtimeMs, () => {
+      return;
+    });
+    if (modified === undefined || now - modified <= maxAgeMs)
+      continue;
+    await rm(file2, { force: true });
+  }
+}
 
 // src/envoy-off.ts
 function inboundOffChannelSession(options) {
@@ -47788,7 +47824,7 @@ async function serveEnvoyOff(serverInfo, refusal) {
 }
 
 // src/legion-claim.ts
-import { readdir as readdir2, stat } from "fs/promises";
+import { readdir as readdir2, stat as stat2 } from "fs/promises";
 import { join as join5 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
@@ -47884,7 +47920,7 @@ async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
       const file2 = join5(projects, directory, name);
-      if (await stat(file2).then((info) => info.isFile(), () => false))
+      if (await stat2(file2).then((info) => info.isFile(), () => false))
         return file2;
     }
     await delay(pollMs, undefined, { signal });
@@ -48164,7 +48200,7 @@ async function executeLegionTool(runtime, input) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync5 } from "fs";
+import { readFileSync as readFileSync6 } from "fs";
 import { basename as basename3 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
@@ -48187,8 +48223,8 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat2 = readFileSync5(`/proc/${pid}/stat`, "utf8");
-      const parent2 = Number(stat2.slice(stat2.lastIndexOf(")") + 2).split(" ")[1]);
+      const stat3 = readFileSync6(`/proc/${pid}/stat`, "utf8");
+      const parent2 = Number(stat3.slice(stat3.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent2) ? parent2 : undefined;
     }
     const parent = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
@@ -48238,7 +48274,9 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, query = queryTmux, ownPane = (panePid) => isAncestor(panePid)) {
+function sessionTitle(environment, directory, query = queryTmux, ownPane = (panePid) => isAncestor(panePid), chosen = () => {
+  return;
+}) {
   const explicit = oneLine(configuredValue(environment.ENVOY_SESSION_TITLE) ?? "");
   if (visible(explicit))
     return () => explicit;
@@ -48248,7 +48286,10 @@ function sessionTitle(environment, directory, query = queryTmux, ownPane = (pane
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
   const directoryName = oneLine(basename3(directory) || directory);
   const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
-  return (sessionId) => `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  return (sessionId) => {
+    const own = oneLine(chosen(sessionId) ?? "");
+    return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  };
 }
 
 // src/envoy-channel-server.ts
@@ -48645,6 +48686,7 @@ async function startChannelSession(options) {
     await restoreRole();
   });
   await pruneStaleSessionHandoffs(options.stateDirectory);
+  await pruneStaleSessionTitles(options.stateDirectory);
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
@@ -48809,11 +48851,12 @@ async function runEnvoyChannelServer() {
     process.stderr.write(`envoy-channel: ${notice}
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
   const title = sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
-  }, directory);
+  }, directory, undefined, undefined, (sessionId) => pluginData === undefined ? undefined : readChosenTitleSync(sessionTitleFile(pluginData, sessionId)));
   const stampTitle = (sessionId, value) => {
     writeSessionTitle(sessionDirectory(process.env, sessionId), value);
   };

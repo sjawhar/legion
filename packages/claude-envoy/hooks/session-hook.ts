@@ -30,6 +30,13 @@
 // session that started with the skill keeps one copy, and one that started without it (opened
 // before this plugin version, or before Dispatch was configured) gets it. A plugin installed
 // without the skill file exits non-zero naming it, which Claude Code shows the user.
+//
+// session-title (every UserPromptSubmit): records the name the user gave the session, which
+// Claude Code hands a hook in `session_title` and gives the plugin nowhere else, so the channel
+// server can register it in place of its fallback name. It writes nothing to stdout and always
+// exits 0, even on a malformed payload: Claude Code adds a UserPromptSubmit hook's stdout to the
+// model's context and reads exit code 2 as a block of the prompt, and a cosmetic title must do
+// neither.
 
 import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -43,10 +50,24 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
-import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
+import {
+  removeChosenTitle,
+  sessionHandoffFile,
+  sessionTitleFile,
+  writeChosenTitle,
+  writeSessionHandoff,
+} from "../src/session-identity"
 
 const OPEN_ASKS_TIMEOUT_MS = 3_000
-const OpenAsksInput = z.object({ session_id: z.string().min(1), cwd: z.string().optional() })
+const OpenAsksInput = z.object({
+  session_id: z.string().min(1),
+  cwd: z.string().optional(),
+  session_title: z.string().optional(),
+})
+const SessionTitleInput = z.object({
+  session_id: z.string().min(1),
+  session_title: z.string().optional(),
+})
 const DispatchFirstInput = z.object({
   hook_event_name: z.enum(["SessionStart", "SubagentStart"]),
   cwd: z.string().optional(),
@@ -65,6 +86,20 @@ function appendOnce(envFile: string, line: string): void {
   if (written.split("\n").includes(line)) return
   const separator = written === "" || written.endsWith("\n") ? "" : "\n"
   appendFileSync(envFile, `${separator}${line}\n`)
+}
+
+/**
+ * Records the session's custom title under its session id, or removes the record when the session
+ * has none: an absent or blank `session_title` is how Claude Code says a rename was undone. The
+ * title is written as Claude Code gave it; `src/session-title.ts` cleans and judges it when it
+ * reads the record.
+ */
+async function recordChosenTitle(sessionId: string, title: string | undefined): Promise<void> {
+  const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
+  if (pluginData === undefined || pluginData.trim().length === 0) return
+  const file = sessionTitleFile(pluginData, sessionId)
+  if (title === undefined || title.trim().length === 0) await removeChosenTitle(file)
+  else await writeChosenTitle(file, title)
 }
 
 async function openAsks(raw: unknown): Promise<void> {
@@ -86,6 +121,11 @@ async function openAsks(raw: unknown): Promise<void> {
     } catch (error) {
       process.stderr.write(`envoy: could not record the session id — ${messageFor(error)}\n`)
     }
+  }
+  try {
+    await recordChosenTitle(input.session_id, input.session_title)
+  } catch (error) {
+    process.stderr.write(`envoy: could not record the session title — ${messageFor(error)}\n`)
   }
 
   const directory = claudeProjectDirectory(
@@ -146,12 +186,31 @@ function dispatchFirst(raw: unknown): void {
   )
 }
 
+/**
+ * The UserPromptSubmit mode. It reports a failure on stderr and exits 0 whatever happens,
+ * malformed input included: Claude Code reads this hook's exit code 2 as a block of the user's
+ * prompt, and its stdout as context for the model, so nothing here may write to stdout or fail.
+ */
+async function sessionTitleMode(raw: string): Promise<void> {
+  try {
+    const input = SessionTitleInput.parse(JSON.parse(raw))
+    await recordChosenTitle(input.session_id, input.session_title)
+  } catch (error) {
+    process.stderr.write(`envoy: could not record the session title — ${messageFor(error)}\n`)
+  }
+}
+
 const mode = process.argv[2]
-if (mode !== "open-asks" && mode !== "dispatch-first") {
+if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "session-title") {
   throw new Error(
-    `session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks or dispatch-first`,
+    `session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or session-title`,
   )
 }
-const input: unknown = JSON.parse(await Bun.stdin.text())
-if (mode === "open-asks") await openAsks(input)
-else dispatchFirst(input)
+const raw = await Bun.stdin.text()
+if (mode === "session-title") await sessionTitleMode(raw)
+else {
+  // The two older modes still fail loudly on a payload that is not JSON.
+  const input: unknown = JSON.parse(raw)
+  if (mode === "open-asks") await openAsks(input)
+  else dispatchFirst(input)
+}

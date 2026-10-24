@@ -46,7 +46,7 @@ var __export = (target, all) => {
 var __require = import.meta.require;
 
 // hooks/session-hook.ts
-import { appendFileSync, readFileSync as readFileSync4 } from "fs";
+import { appendFileSync, readFileSync as readFileSync5 } from "fs";
 import { join as join4 } from "path";
 
 // ../envoy-client/src/dispatch-execute.ts
@@ -19469,7 +19469,8 @@ function claudeProjectDirectory(environment, fallback) {
 }
 
 // src/session-identity.ts
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { readFileSync as readFileSync4 } from "fs";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join3 } from "path";
 var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
 
@@ -19495,6 +19496,23 @@ function sessionHandoffFile(stateDirectory, claudePid) {
 }
 function roleStateFile(stateDirectory, sessionId) {
   return join3(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+}
+function sessionTitleFile(stateDirectory, sessionId) {
+  return join3(stateDirectory, "titles", encodeURIComponent(sessionId));
+}
+async function writeChosenTitle(file2, title) {
+  await writeAtomicStateFile(file2, `${title}
+`);
+}
+async function removeChosenTitle(file2) {
+  await rm(file2, { force: true });
+}
+function readChosenTitleSync(file2) {
+  try {
+    return readFileSync4(file2, "utf8");
+  } catch {
+    return;
+  }
 }
 async function readPersistedRole(roleFile) {
   try {
@@ -19550,10 +19568,36 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
     await rm(join3(sessions, entry), { recursive: true, force: true });
   }
 }
+var SESSION_TITLE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+async function pruneStaleSessionTitles(stateDirectory, now = Date.now(), maxAgeMs = SESSION_TITLE_MAX_AGE_MS) {
+  const titles = join3(stateDirectory, "titles");
+  const entries = await readdir(titles).catch((error48) => {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return [];
+    throw error48;
+  });
+  for (const entry of entries) {
+    const file2 = join3(titles, entry);
+    const modified = await stat(file2).then((stats) => stats.mtimeMs, () => {
+      return;
+    });
+    if (modified === undefined || now - modified <= maxAgeMs)
+      continue;
+    await rm(file2, { force: true });
+  }
+}
 
 // hooks/session-hook.ts
 var OPEN_ASKS_TIMEOUT_MS = 3000;
-var OpenAsksInput = exports_external.object({ session_id: exports_external.string().min(1), cwd: exports_external.string().optional() });
+var OpenAsksInput = exports_external.object({
+  session_id: exports_external.string().min(1),
+  cwd: exports_external.string().optional(),
+  session_title: exports_external.string().optional()
+});
+var SessionTitleInput = exports_external.object({
+  session_id: exports_external.string().min(1),
+  session_title: exports_external.string().optional()
+});
 var DispatchFirstInput = exports_external.object({
   hook_event_name: exports_external.enum(["SessionStart", "SubagentStart"]),
   cwd: exports_external.string().optional()
@@ -19562,7 +19606,7 @@ var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
 function appendOnce(envFile, line) {
   let written = "";
   try {
-    written = readFileSync4(envFile, "utf8");
+    written = readFileSync5(envFile, "utf8");
   } catch (error48) {
     if (!hasErrnoCode(error48, "ENOENT"))
       throw error48;
@@ -19575,6 +19619,16 @@ function appendOnce(envFile, line) {
 `;
   appendFileSync(envFile, `${separator}${line}
 `);
+}
+async function recordChosenTitle(sessionId, title) {
+  const pluginData = process.env["CLAUDE_PLUGIN_DATA"];
+  if (pluginData === undefined || pluginData.trim().length === 0)
+    return;
+  const file2 = sessionTitleFile(pluginData, sessionId);
+  if (title === undefined || title.trim().length === 0)
+    await removeChosenTitle(file2);
+  else
+    await writeChosenTitle(file2, title);
 }
 async function openAsks(raw) {
   const input = OpenAsksInput.parse(raw);
@@ -19594,6 +19648,12 @@ async function openAsks(raw) {
       process.stderr.write(`envoy: could not record the session id \u2014 ${messageFor(error48)}
 `);
     }
+  }
+  try {
+    await recordChosenTitle(input.session_id, input.session_title);
+  } catch (error48) {
+    process.stderr.write(`envoy: could not record the session title \u2014 ${messageFor(error48)}
+`);
   }
   const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
   const { dispatch, warnings, missing } = sessionDispatchSettings(chosen, process.env, {
@@ -19637,12 +19697,26 @@ function dispatchFirst(raw) {
     }
   }));
 }
-var mode = process.argv[2];
-if (mode !== "open-asks" && mode !== "dispatch-first") {
-  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks or dispatch-first`);
+async function sessionTitleMode(raw) {
+  try {
+    const input = SessionTitleInput.parse(JSON.parse(raw));
+    await recordChosenTitle(input.session_id, input.session_title);
+  } catch (error48) {
+    process.stderr.write(`envoy: could not record the session title \u2014 ${messageFor(error48)}
+`);
+  }
 }
-var input = JSON.parse(await Bun.stdin.text());
-if (mode === "open-asks")
-  await openAsks(input);
-else
-  dispatchFirst(input);
+var mode = process.argv[2];
+if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "session-title") {
+  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or session-title`);
+}
+var raw = await Bun.stdin.text();
+if (mode === "session-title")
+  await sessionTitleMode(raw);
+else {
+  const input = JSON.parse(raw);
+  if (mode === "open-asks")
+    await openAsks(input);
+  else
+    dispatchFirst(input);
+}

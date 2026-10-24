@@ -119,6 +119,29 @@ test("reports an unreachable Dispatch as unavailable, still exits 0, and still r
   }
 })
 
+test("a SessionStart carrying a session title records it, and one carrying none removes it", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-title-"))
+  const pluginData = join(scratch, "plugin-data")
+  const titleFile = join(pluginData, "titles", "s-1")
+  try {
+    const named = await runHook(
+      { ...hookInput, session_title: "review the listener" },
+      { HOME: scratch, CLAUDE_PLUGIN_DATA: pluginData },
+    )
+
+    expect(named.exitCode).toBe(0)
+    expect(await readFile(titleFile, "utf8")).toBe("review the listener\n")
+
+    // The user undid the rename: Claude Code sends no session_title, and the record goes.
+    const unnamed = await runHook(hookInput, { HOME: scratch, CLAUDE_PLUGIN_DATA: pluginData })
+
+    expect(unnamed.exitCode).toBe(0)
+    expect(await readdir(join(pluginData, "titles"))).toEqual([])
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 test("adds nothing to context when Dispatch is not configured", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-off-"))
   try {
