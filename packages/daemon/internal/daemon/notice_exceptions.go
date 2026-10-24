@@ -89,9 +89,10 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 //
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
-// the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
-// A copy is due at once when copyDueAtOnce says so, and otherwise after the next of
-// noticeReholdDelays. It is queued again once per delay; the report of its last copy is logged
+// the row it copies (Notice.Published), so the listener's report of the copy names the original
+// row, and its role lane drops a copy that reaches the session the original reached within its
+// delivery caches. A copy is due at once when copyDueAtOnce says so, and otherwise after the next
+// of noticeReholdDelays. It is queued again once per delay; the report of its last copy is logged
 // and queues nothing. A report about another daemon's publish, another project, a role that is not
 // an architect, or anything but a notice changes nothing. The exception lane has no redelivery, so
 // a report that cannot be read is logged here and dropped. Each published copy of a row is queued
@@ -104,7 +105,8 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // behind the failed one, so it can arrive before the copy. A catch-up a newer one superseded
 // (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up. Nor is
 // a notice whose architect stopped with its finished tree (stoppedWithTree): nothing of the close
-// is sent to it. Those checks read the claim from memory, outside ApplyFact's lock, which the
+// is sent to it, and a person's spec decision such a notice reports goes to the controller instead
+// (parkDecision). Those checks read the claim from memory, outside ApplyFact's lock, which the
 // ready handler holds, so a copy can still lose the race to a ready; the notice executor checks
 // again when it runs the row.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
@@ -138,13 +140,18 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	}
 	held := r.supervisedClaim(reported.architect)
 	if !holdsRole(held) {
-		lingers, err := r.issueTreeLingers(ctx, issue)
+		root, lingers, err := r.issueTree(ctx, issue)
 		if err != nil {
 			return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
 		}
 		if stoppedWithTree(lingers, held) {
+			parked, err := r.parkDecision(ctx, issue, root, notice, exception.DedupeKey)
+			if err != nil {
+				return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
+			}
 			r.log.Info("outbox notice not re-held: its architect stopped with its finished tree",
 				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "state", held.State, "stopping", held.Stopping)
+			parked.log(r.log, "row", reported.row, "kind", notice.Kind, "issue", issue, "root", root)
 			return nil
 		}
 	}
@@ -199,22 +206,22 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	return nil
 }
 
-// issueTreeLingers says whether the tree of issue, as recorded, lingers or has closed. An issue
-// that is not recorded has no tree to finish.
-func (r *outbox) issueTreeLingers(ctx context.Context, issue string) (bool, error) {
-	lingers := false
-	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+// issueTree is the root of the tree of issue, as recorded, and whether that tree lingers or has
+// closed. An issue that is not recorded has no tree to finish.
+func (r *outbox) issueTree(ctx context.Context, issue string) (root string, lingers bool, err error) {
+	err = pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		recorded, err := r.records.Issue(ctx, tx, issue)
 		if err != nil || recorded == nil {
 			return err
 		}
+		root = recorded.Tree
 		lingers, err = record.TreeLingers(ctx, r.records, tx, recorded.Tree)
 		return err
 	})
 	if err != nil {
-		return false, fmt.Errorf("read the tree of %s: %w", issue, err)
+		return "", false, fmt.Errorf("read the tree of %s: %w", issue, err)
 	}
-	return lingers, nil
+	return root, lingers, nil
 }
 
 // catchUpSuperseded says whether a newer catch-up than catchUp exists for its architect: held, the

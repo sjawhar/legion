@@ -619,8 +619,9 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either, and, before any publish, a row whose architect stopped with its finished tree
-// (stoppedWithTree). A publish the listener accepts but then cannot forward, to a session that is
-// registered but no longer running, comes back as a role-lane exception and is queued again
+// (stoppedWithTree). A person's spec decision in either undelivered case goes to the controller
+// instead (parkDecision). A publish the listener accepts but then cannot forward, to a session that
+// is registered but no longer running, comes back as a role-lane exception and is queued again
 // (rehold, notice_exceptions.go) unless its architect stopped with its finished tree. The runner
 // executes a row it leased from memory, so a row deleted under its lease since (a catch-up a newer
 // ready dropped) is found gone in the tree's snapshot and finishes without a publish, and so does a
@@ -663,8 +664,14 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
 	if held := r.supervisedClaim(architect); stoppedWithTree(tree.root.Lingers(), held) {
+		_, key := payload.Published(row.ID)
+		parked, err := r.parkDecision(ctx, row.Issue, tree.root.Key, payload, key)
+		if err != nil {
+			return err
+		}
 		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", held.State, "stopping", held.Stopping)
+		parked.log(r.log, "row", row.ID, "kind", payload.Kind, "issue", row.Issue, "root", tree.root.Key)
 		return nil
 	}
 	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
@@ -679,8 +686,13 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}
 	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
+		parked, err := r.parkDecision(ctx, row.Issue, tree.root.Key, payload, key)
+		if err != nil {
+			return err
+		}
 		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
+		parked.log(r.log, "row", row.ID, "kind", payload.Kind, "issue", row.Issue, "root", tree.root.Key)
 		return nil
 	}
 	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
