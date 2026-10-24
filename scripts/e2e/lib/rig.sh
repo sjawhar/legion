@@ -45,8 +45,10 @@
 # what LEGION_GH_PATH ends up naming, one step removed from a pane's own PATH lookup, not instead
 # of it. jj has no such wrapper and keeps resolving through this directory directly. tmux needs it
 # for the daemon itself: the tmux runtime looks tmux up on the pane PATH at boot and runs it with
-# the pane environment's allow-list alone, where a dotfiles or mise shim's tmux finds mise's global
-# config untrusted and exits 1, so the daemon never starts its server.
+# the pane environment's allow-list alone. From a checkout under the operator's real HOME, a
+# dotfiles or mise shim's tmux finds that HOME's mise config as a parent directory's config,
+# untrusted under the daemon's own HOME, and exits 1. The daemon's boot reads that as a failed scrub
+# of its private server's environment, so boot refuses.
 real_bin_path() {
   local dest=$1 name target
   shift

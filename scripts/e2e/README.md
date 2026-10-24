@@ -66,7 +66,11 @@ bash scripts/e2e/stage1-skeleton.sh     # → "stage 1 e2e: PASS", exit 0
 ```
 
 Needs `go`, `docker`, `jq`, `curl`, `ss` and `tmux`. It builds the binary from the checkout
-(`packages/daemon/cmd/legion`), so it proves the tree you are standing in.
+(`packages/daemon/cmd/legion`), so it proves the tree you are standing in. When the first tmux on
+`PATH` is a script or mise itself, as on a devbox, the run's `PATH`, and so the daemon's, starts with
+the real binary that `mise which tmux` names in `packages/daemon`, the daemon's working directory
+([`real_bin_path`](#librigsh) says why). Such a devbox needs tmux pinned in mise. CI's tmux is the
+runner's apt binary, which the run leaves alone.
 
 The daemon supervises its agents under tmux, and it refuses to start without what a launch needs
 — tmux on `PATH`, an `operator_token_file`, and an OMP to run — and before anything else its
@@ -115,7 +119,10 @@ left holding the run's port.
 
 Every step is fatal and names its reason: no port to pick ([`lib/free-port.sh`](#libfree-portsh):
 `ss` missing or failing, or no room below the ephemeral range), the refusal that does not name its
-host, a `/healthz` that never answers, a state document that is not boot 1 with cap 4 and no
+host, a first tmux that is a script or mise itself while `mise which tmux` names no tmux
+(`real_bin_path` refuses), a daemon that exits before it answers `/healthz` (the run stops at once
+with its exit status),
+a `/healthz` that never answers, a state document that is not boot 1 with cap 4 and no
 issues, a registry without exactly one entry for this run, a `firstBootAt` that moved across the
 restart, a daemon that ignored a stop (SIGKILLed on the way out, so nothing holds the port) or
 exited non-zero on one. `stop_daemon` reads and judges the exit status, because `daemon.Run`
@@ -2388,7 +2395,8 @@ SIGPIPE.
 ## lib/rig.sh
 
 The host-side helpers a stage proof sources for its rig: bounded waits, ports, the processes the
-run starts, and their teardown. Stage 3 sources it.
+run starts, and their teardown. Stage 1, Stage 3, Stage 4b, the 4b.13b acceptance and the
+controller, Dispatch user-turn and Claude Code backend proofs source it.
 
 ```sh
 . "$root/scripts/e2e/lib/rig.sh"     # sourced, never run
@@ -2397,7 +2405,8 @@ run starts, and their teardown. Stage 3 sources it.
 The caller sets `root` (the checkout), `work` (the run's scratch directory: every process whose
 working directory or command line names it is the run's), `evidence` (each service started by
 `start_process` logs to `$evidence/logs/<name>.log`) and `timeout_hook` (empty, or a function a
-timed-out wait runs before it fails), and defines `note` and `fail`, which exits.
+timed-out wait runs before it fails), and defines `note` and `fail`, which exits. Stage 1 calls
+only `real_bin_path`, so it sets `root` and `work` and defines `fail` alone.
 
 | function | does |
 | :--- | :--- |
@@ -2409,7 +2418,7 @@ timed-out wait runs before it fails), and defines `note` and `fail`, which exits
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
 | `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
-| `real_bin_path DEST NAME…` | symlinks `DEST/NAME` to the real `NAME` binary `mise which NAME` resolves in the caller's own environment, for every `NAME`, and prints `DEST`: a devbox's own `jj` resolves through a shim chain that a pane's relocated `HOME` (`make_omp_home`) breaks, since mise has no pin for a directory whose global config a relocated `HOME` hides — `jj`'s own shim hands the call straight back to itself, exit 127. tmux breaks the same way for the daemon itself, which runs it with the pane environment's allow-list alone: a shimmed tmux finds mise's global config untrusted and exits 1, and the daemon never starts its server. Every `NAME` must resolve through the caller's own mise configuration; it refuses naming the tool if `mise which` fails. Stage 3 prepends `real_bin_path "$work/realbin" gh jj tmux` to the daemon's own PATH (`start_daemon`), which every pane inherits (`paneEnvAllowList`); Stage 2, the 4b.13b acceptance and the Claude Code backend proof, which do not call it, put a link to `mise which tmux` on their daemons' PATH the same way |
+| `real_bin_path DEST NAME…` | symlinks `DEST/NAME` to the real `NAME` binary `mise which NAME` resolves in the caller's own environment, for every `NAME`, and prints `DEST`: a devbox's own `jj` resolves through a shim chain that a pane's relocated `HOME` (`make_omp_home`) breaks, since mise has no pin for a directory whose global config a relocated `HOME` hides — `jj`'s own shim hands the call straight back to itself, exit 127. tmux also breaks for the daemon itself, which runs it with the pane environment's allow-list alone: from a checkout under the operator's real `HOME`, a shimmed tmux finds that `HOME`'s mise config as a parent directory's config, untrusted under the daemon's own `HOME`, and exits 1, which the daemon's boot reads as a failed scrub of its private server's environment, not as no server, so boot refuses. Every `NAME` must resolve through the caller's own mise configuration; it refuses naming the tool if `mise which` fails. Stage 3 prepends `real_bin_path "$work/realbin" gh jj tmux` to the daemon's own PATH (`start_daemon`), which every pane inherits (`paneEnvAllowList`); Stage 1 prepends `real_bin_path "$work/realbin" tmux` to its daemon's PATH when its first tmux is a script or mise itself, and keeps a real tmux binary, such as CI's apt tmux, otherwise; Stage 2, the 4b.13b acceptance and the Claude Code backend proof, which do not call it, put a link to `mise which tmux` on their daemons' PATH the same way |
 
 ## lib/omp-home.sh
 
@@ -2529,7 +2538,8 @@ dependencies must be installed (`bun install`).
 The vocabulary of a stage proof that drives Dispatch issues through the Go daemon's workflow with
 real agents: Dispatch, the daemon's state, each phase's worker, the smoke repository's pull request
 under the proof human, the handoffs the daemon accepted, the notices, and the negative controls.
-Stage 3 sources it after [`lib/rig.sh`](#librigsh).
+Stage 3, Stage 4b, the 4b.13b acceptance and the Claude Code backend proof source it after
+[`lib/rig.sh`](#librigsh).
 
 ```sh
 . "$root/scripts/e2e/lib/workflow.sh"     # sourced, never run
