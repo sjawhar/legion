@@ -26,3 +26,9 @@ alter table issues add constraint issues_awaiting_shape check (
 
 alter table issues add column claimed_by text not null default '';
 alter table issues add column claim_seq bigint not null default 0 check (claim_seq >= 0);
+
+-- design_gates.changes_requested_version is the document version a human last requested changes
+-- on, which the architect was told of then: a register_gate that reads the same request from
+-- Dispatch afterwards records it again without telling the architect a second time. An approval,
+-- and a newer document version, clear it.
+alter table design_gates add column changes_requested_version integer check (changes_requested_version > 0);

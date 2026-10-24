@@ -350,19 +350,31 @@ const (
 )
 
 // ApplyDesignGateEvent updates a registered gate from one artifact observation. Approval opens
-// only when it names the latest known version; a newer document version and changes request close it.
+// only when it names the latest known version; a newer document version and changes request close
+// it. A changes request is recorded by its version, and an approval or a newer version clears that
+// record, so the gate says which request the architect has already been told of.
 func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
+		gate.ChangesRequestedVersion = nil
 	}
 	switch kind {
 	case DesignGateApproved:
 		approved := version
 		gate.ApprovedVersion = &approved
+		gate.ChangesRequestedVersion = nil
 	case DesignGateChangesRequested:
 		gate.ApprovedVersion = nil
+		requested := version
+		gate.ChangesRequestedVersion = &requested
 	}
 	return gate
+}
+
+// DesignGateChangesTold reports whether the gate already records a human's changes request at
+// version, which the architect was told of when it was recorded.
+func DesignGateChangesTold(gate record.DesignGate, version int) bool {
+	return gate.ChangesRequestedVersion != nil && *gate.ChangesRequestedVersion == version
 }
 
 // DesignGateOpen reports whether a human approved the gate's current document version.

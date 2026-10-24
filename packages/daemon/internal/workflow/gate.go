@@ -19,14 +19,23 @@ import (
 // given before the architect registered is never left waiting on: an approval of the latest version
 // (ApprovedVersion) records the gate open, and the root keeps its slot and starts planning; a
 // changes request on it (ChangesRequestedVersion) records it closed with the architect told, and
-// the root keeps its slot at admitted to revise. A closed gate whose request Dispatch shows waiting
+// the root keeps its slot at admitted to revise. A root already waiting on that gate, which handed
+// its approval request back before registering the version anew, is answered by the registration
+// itself (answerRegisteredGate), since the event carrying that review finds the gate as the
+// registration left it and answers nothing. A closed gate whose request Dispatch shows waiting
 // on the agent (RequestWaitsOnAgent: a reply or a newer version since the request) starts no wait
-// either, since the person is not asked to act; the architect's hand-back of the request starts it.
+// either, since the person is not asked to act, and answers one the root already holds; the
+// architect's hand-back of the request starts it again.
 // The architect is told the version the gate opened at, which an approval carried to a later
-// version makes the later one.
+// version makes the later one, and a changes request the gate already records (told when it was
+// recorded) is not told a second time.
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	stored, err := e.store.Gate(ctx, tx, fact.Issue)
+	if err != nil {
 		return intake.Result{}, err
 	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
@@ -50,13 +59,23 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	}
 	switch {
 	case changesRequested:
+		if err := e.answerRegisteredGate(ctx, tx, fact.Issue, gate.LatestVersion, "changes_requested"); err != nil {
+			return intake.Result{}, err
+		}
+		if stored != nil && classify.DesignGateChangesTold(*stored, gate.LatestVersion) {
+			e.logOnCommit(ctx, "workflow: the registration read a changes request the architect was told of", "issue", issue.Key, "version", gate.LatestVersion)
+			return intake.Result{}, nil
+		}
 		return intake.Result{}, e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-changes-requested", Version: gate.LatestVersion, Reason: fact.ChangesReason})
 	case !classify.DesignGateOpen(gate) && fact.RequestWaitsOnAgent:
 		e.logOnCommit(ctx, "workflow: root keeps its admission slot, since its approval request waits on the agent", "issue", issue.Key, "version", gate.LatestVersion)
-		return intake.Result{}, nil
+		return intake.Result{}, e.answerRegisteredGate(ctx, tx, fact.Issue, gate.LatestVersion, "request_waits_on_agent")
 	case !classify.DesignGateOpen(gate):
 		return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{GateVersion: gate.LatestVersion},
 			fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
+	}
+	if err := e.answerRegisteredGate(ctx, tx, fact.Issue, gate.LatestVersion, "approved"); err != nil {
+		return intake.Result{}, err
 	}
 	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion}); err != nil {
 		return intake.Result{}, err
@@ -68,6 +87,27 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, err
 	}
 	return intake.Result{}, nil
+}
+
+// answerRegisteredGate records the person result a registration itself carries as the answer of a
+// root waiting on its design gate. register_gate reads Dispatch, so a person's approval or changes
+// request given between the architect's hand-back and that read arrives with the registration: it
+// leaves the gate open, or closed at that version, so the live event and the gate seed that follow
+// find the gate as the registration left it and answer nothing (applyArtifact answers a close that
+// opens the gate, a changes request or a newer version). Without this, nothing but another act by
+// the person would ever resume the root. A result below the version waited on is stale and answers
+// nothing; a later one carries the wait to its version, as a newer document version does.
+func (e *Engine) answerRegisteredGate(ctx context.Context, tx pgx.Tx, key string, version int, event string) error {
+	issue, err := e.store.Issue(ctx, tx, key)
+	if err != nil || issue == nil || !issue.AwaitingPerson() || issue.Awaiting.GateVersion == 0 ||
+		issue.Awaiting.AnsweredAt != nil || version < issue.Awaiting.GateVersion {
+		return err
+	}
+	issue.Awaiting.GateVersion = version
+	at := e.now()
+	issue.Awaiting.AnsweredAt = &at
+	e.logOnCommit(ctx, "workflow: a person answered a design gate before its registration", "issue", issue.Key, "version", version, "event", event)
+	return e.store.PutIssue(ctx, tx, *issue)
 }
 
 // dispatchArtifact applies an artifact event to the gates registered on that document: the root

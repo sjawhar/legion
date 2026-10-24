@@ -6,9 +6,11 @@ import (
 	"testing"
 )
 
-// 0051 adds awaiting_person and what it waits on. An issue the old daemon left in any phase
-// migrates with no awaiting state and nobody's claim. Afterwards a root waits on exactly one of an
-// ask or a gate version, and only in that phase, and a held issue never waits.
+// 0051 adds awaiting_person and what it waits on, and the gate column that records the changes
+// request the architect was told of. An issue the old daemon left in any phase migrates with no
+// awaiting state and nobody's claim, and a gate it left with no recorded request. Afterwards a
+// root waits on exactly one of an ask or a gate version, and only in that phase, and a held issue
+// never waits.
 func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -57,5 +59,34 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "check constraint") {
 			t.Fatalf("%s = %v, want a check constraint to refuse it", refused.why, err)
 		}
+	}
+}
+
+// An old gate migrates with no changes request recorded, and the column takes a version or
+// nothing, never zero.
+func TestTheGatesChangesRequestArrivesWith0051(t *testing.T) {
+	store := emptyStore(t)
+	ctx := context.Background()
+	migrateThrough(t, store, 50)
+	if _, err := store.Pool().Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version)
+		values ('LEGION-208', '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26', 4)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var requested *int
+	if err := store.Pool().QueryRow(ctx, `select changes_requested_version from design_gates where issue = 'LEGION-208'`).Scan(&requested); err != nil {
+		t.Fatalf("read the migrated gate: %v", err)
+	}
+	if requested != nil {
+		t.Fatalf("gate after 0051 = changes_requested_version %v, want none recorded", *requested)
+	}
+	if _, err := store.Pool().Exec(ctx, `update design_gates set changes_requested_version = 4 where issue = 'LEGION-208'`); err != nil {
+		t.Fatalf("record a changes request: %v, want it accepted", err)
+	}
+	_, err := store.Pool().Exec(ctx, `update design_gates set changes_requested_version = 0 where issue = 'LEGION-208'`)
+	if err == nil || !strings.Contains(err.Error(), "check constraint") {
+		t.Fatalf("a changes request at version zero = %v, want a check constraint to refuse it", err)
 	}
 }

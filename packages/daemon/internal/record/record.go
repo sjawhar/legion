@@ -430,12 +430,15 @@ const (
 	CheckNotRun CheckOutcome = "not_run"
 )
 
-// DesignGate records the current document version and the version a human approved, if any.
+// DesignGate records the current document version, the version a human approved, if any, and the
+// version a human last requested changes on, if any: the last says what the architect has already
+// been told, so a later registration reading the same request from Dispatch does not tell it twice.
 type DesignGate struct {
-	Issue           string
-	ArtifactID      string
-	LatestVersion   int
-	ApprovedVersion *int
+	Issue                   string
+	ArtifactID              string
+	LatestVersion           int
+	ApprovedVersion         *int
+	ChangesRequestedVersion *int
 }
 
 // Slot is an active admission slot.

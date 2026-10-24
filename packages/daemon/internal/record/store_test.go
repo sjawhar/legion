@@ -386,6 +386,42 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
+// A gate records the version a human requested changes on, so the registration that reads the
+// same request from Dispatch afterwards knows the architect was told of it. An approval of that
+// version clears the record.
+func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-209", Project: "LEGION", Title: "gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}
+	requested := 4
+	closed := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ChangesRequestedVersion: &requested}
+	approved := 4
+	opened := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ApprovedVersion: &approved}
+
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutGate(ctx, tx, closed))
+		got, err := records.Gate(ctx, tx, issue.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &closed) {
+			t.Fatalf("gate = %#v, want %#v", got, closed)
+		}
+		forArtifact, err := records.GatesForArtifact(ctx, tx, closed.ArtifactID)
+		must(t, err)
+		if !reflect.DeepEqual(forArtifact, []DesignGate{closed}) {
+			t.Fatalf("gates for artifact = %#v, want %#v", forArtifact, []DesignGate{closed})
+		}
+		must(t, records.PutGate(ctx, tx, opened))
+		got, err = records.Gate(ctx, tx, issue.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &opened) {
+			t.Fatalf("gate after an approval = %#v, want the changes request cleared", got)
+		}
+	})
+}
+
 // ClaimSession is the session claims records for the token (the workflow reads it for the
 // reviewer's claim to tell the reviewer's own review-App session from another's by the Legion
 // footer each carries). An unknown token answers "" and no error.

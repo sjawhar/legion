@@ -618,8 +618,9 @@ func scanProductionCheck(row scanner) (*ProductionCheck, error) {
 
 func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error) {
 	var gate DesignGate
-	err := tx.QueryRow(ctx, `select issue, artifact_id, latest_version, approved_version from design_gates where issue = $1`, issue).
-		Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion)
+	err := tx.QueryRow(ctx, `select issue, artifact_id, latest_version, approved_version, changes_requested_version
+		from design_gates where issue = $1`, issue).
+		Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion, &gate.ChangesRequestedVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -630,8 +631,8 @@ func (s *Postgres) Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGa
 }
 
 func (s *Postgres) GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error) {
-	rows, err := tx.Query(ctx, `select issue, artifact_id, latest_version, approved_version from design_gates
-		where artifact_id = $1 order by issue`, artifactID)
+	rows, err := tx.Query(ctx, `select issue, artifact_id, latest_version, approved_version, changes_requested_version
+		from design_gates where artifact_id = $1 order by issue`, artifactID)
 	if err != nil {
 		return nil, fmt.Errorf("list design gates for artifact %s: %w", artifactID, err)
 	}
@@ -639,7 +640,7 @@ func (s *Postgres) GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID s
 	var gates []DesignGate
 	for rows.Next() {
 		var gate DesignGate
-		if err := rows.Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion); err != nil {
+		if err := rows.Scan(&gate.Issue, &gate.ArtifactID, &gate.LatestVersion, &gate.ApprovedVersion, &gate.ChangesRequestedVersion); err != nil {
 			return nil, fmt.Errorf("scan design gate for artifact %s: %w", artifactID, err)
 		}
 		gates = append(gates, gate)
@@ -651,11 +652,12 @@ func (s *Postgres) GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID s
 }
 
 func (s *Postgres) PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error {
-	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version)
-		values ($1, $2, $3, $4)
+	_, err := tx.Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version, approved_version, changes_requested_version)
+		values ($1, $2, $3, $4, $5)
 		on conflict (issue) do update set artifact_id = excluded.artifact_id,
-		latest_version = excluded.latest_version, approved_version = excluded.approved_version`,
-		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion)
+		latest_version = excluded.latest_version, approved_version = excluded.approved_version,
+		changes_requested_version = excluded.changes_requested_version`,
+		gate.Issue, gate.ArtifactID, gate.LatestVersion, gate.ApprovedVersion, gate.ChangesRequestedVersion)
 	if err != nil {
 		return fmt.Errorf("put design gate for %s: %w", gate.Issue, err)
 	}

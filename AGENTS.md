@@ -248,7 +248,11 @@ enters `awaiting_person`, gives its admission slot back, and suspends its archit
 that turn. A registration Dispatch already shows approved at its latest version opens the gate at
 registration instead, and the root starts planning in its own slot; one Dispatch shows changes
 requested at its latest version keeps the slot with the architect told, and so does one whose
-approval request Dispatch shows waiting on the architect. Approval and `changes_requested` both
+approval request Dispatch shows waiting on the architect. A root that handed its request back and
+is already waiting is answered by the registration itself in each of those three cases, since the
+person's act reaches the daemon with it and the event that follows finds the gate as the
+registration left it. A changes request the gate already records, which the architect was told of
+when it was recorded, is not told again. Approval and `changes_requested` both
 answer that wait, and so does a person's reply on an ask of the root; a newer version also answers
 it because Dispatch then waits on the architect. Once a slot is free the architect resumes its own
 session with a task naming the answer; an open gate advances the root and its admitted children

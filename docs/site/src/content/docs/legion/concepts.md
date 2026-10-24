@@ -177,7 +177,9 @@ When the architect registers a closed gate while the root is at `admitted` and n
 or is held, the root enters `awaiting_person`, giving its slot to another root while the architect
 session waits. A spec you approved before the architect registered it opens the gate at
 registration, so the root starts planning in its own slot; one you asked changes of keeps its slot
-while the architect revises. Approval, changes requested and your reply in the approval request's
+while the architect revises. A review you give after the architect handed the request back, but
+before its registration reads Dispatch, arrives with that registration and returns the root to the
+waiting line, so your one act is never lost. Approval, changes requested and your reply in the approval request's
 thread resume that session; a later spec version also returns the root because the approval
 request now needs the architect. The architect then revises the spec and hands the request back to
 you, by requesting approval again or replying in its thread for you to act, which starts a new wait
