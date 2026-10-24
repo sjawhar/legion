@@ -48,8 +48,14 @@ A body's UTF-16 length is never less than its rune count, so a body at the cap i
 runes and nothing truncates today. This change left the two numbers equal with nothing linking
 them: the next raise of the body cap would have started truncating comment embeddings silently,
 degrading meaning search for the tail of a long comment with no error and no failing test. That
-link is now held by `.github/scripts/check-body-embed-limit.sh` (INFRA-110), which fails the build
-when `DISPATCH_BODY_MAX` passes `maxInputChars`, and each number's own site names the other.
+link is now half machine-held: `.github/scripts/check-body-embed-limit.sh` (INFRA-110) fails the
+build when `DISPATCH_BODY_MAX` exceeds `maxInputChars`, and requires one line of each package
+guide (`packages/contracts/AGENTS.md`, `packages/envoy/AGENTS.md`) to name both constants. The
+other half is held by a human: the declaration comments pairing the two constants -
+`maxInputChars`'s comment in `embed.go` and the `DISPATCH_BODY_MAX` JSDoc in `dispatch-tools.ts` -
+are confirmed at review, not by the check, because reading a comment out of a file cannot tell
+comment text from a `//` or `/*` inside a string literal without parsing the language, and a gate
+that can report agreement it has not established is worse than one that does not try.
 Anyone moving the body cap again still reads `embed.go` first.
 
 ## Evidence (INFRA-45, sjawhar/legion#2097)
