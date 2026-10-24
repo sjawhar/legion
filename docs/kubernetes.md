@@ -152,8 +152,10 @@ CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the
 The image carries the five clients above — `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — and for
 everything else the one documented step is the pinned form of the three package runners the image
 already has: `uvx`, `bunx` and `go run`. The two answer different halves of the question. The image
-answers the tools a non-root container can never fetch for itself; the runners answer the tools no
-image can anticipate.
+answers the tools a role may not arrange for itself — `apt` cannot write a system prefix in an
+unprivileged container, unpacking a package by hand works for some tools and not for others, and
+Legion rules that route out as the withheld `operator-setup` capability — while the runners answer
+the tools no image can anticipate.
 
 What decided it is the container, not the cost. Measured in a role container of a deployment: the
 role is an unprivileged user, `/usr/local/bin`, `/opt` and `/home` are read-only, and `apt-get`
@@ -167,10 +169,10 @@ E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission d
 E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?
 ```
 
-So `apt` cannot install into a system prefix here at all. Unpacking a package's files under `$HOME`
-or onto the issue's disk is a separate question, and it works for some tools and not for others
-(the extraction row below), but Legion rules it out either way: installing a tool for a role is the
-withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`,
+So `apt` cannot write a system prefix in an unprivileged container. Unpacking a package's files
+under `$HOME` or onto the issue's disk is a separate question, and it works for some tools and not
+for others (the extraction row below), but Legion rules it out either way: an extraction prefix is
+the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`,
 ruling dispatch://LEGION-200). So the answer for a role is the image or a pinned runner, never an
 extraction, however much room its disk has. The five priced options and their verdicts:
 
@@ -182,13 +184,43 @@ extraction, however much room its disk has. The five priced options and their ve
 | extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected**: it is the withheld `operator-setup` capability under any reading (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200), and it is fragile for exactly the client this change exists for |
 | `runtime.kubernetes.setup`, the operator-set command every role container runs before its agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
 
+Why a pinned runner is not that withheld capability, when `uvx`, `bunx --package` and `go run` each
+fetch a package and write into the caches the second row lists: three artefacts of this repository
+draw the line, rather than any reading of what the ruling intended. The image ships `uv` and `uvx`,
+`bun` with its `bunx` link and the Go toolchain deliberately
+(`packages/daemon/docker/worker.Dockerfile`), and the `toolchain` capability row grants them by
+name (`packages/daemon/internal/capabilities/capabilities.go`). The runtime relocates
+`UV_CACHE_DIR` (`podkind.go`) and `BUN_INSTALL_CACHE_DIR`, `GOCACHE` and `GOMODCACHE`
+(`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`) onto the issue's volume
+for the issue's roles to share, which is provisioning the caches a pinned run fills. And Legion
+itself renders a `bun add` under `/usr/bin/flock` into that shared bun install cache on every
+installing launch (`installBlock`, `packages/daemon/internal/runtime/sandbox/plugins.go`): fetching
+a pinned package at run time is something Legion does, not something it withholds.
+
+What the withheld row is about is a dependency the pod *carries*: one that outlives the command
+that created it, and that another process or a later launch then resolves differently because it is
+there. That is the test to apply to a new case. A pinned runner run leaves a cache entry addressed
+by its coordinate and version, and the same line next time resolves to the same bytes whether the
+cache was warm or cold, so nothing else on the pod resolves differently — the sanctioned side. An
+extraction prefix with `LD_LIBRARY_PATH` set changes what every later command in that shell, and
+every subagent inheriting the environment, resolves `psql` or its libraries to, on a prefix nothing
+records, pins or rebuilds — a dependency the pod carries, configured by the role, which is why the
+extraction row above is rejected even for the three clients that did run from it. A case these
+artefacts do not settle, such as a pinned run whose tool then installs something of its own outside
+the runner's cache (a browser download, a second toolchain under `$HOME`), is unsettled: it belongs
+with the issue's architect rather than with a rule invented here.
+
 The pinned runner forms, as a role types them — the coordinate and its exact version both written
 out, never a bare name:
 
-- `uvx <name>@<version>`, for a Python tool. `uvx ruff@0.14.0 --version` prints `ruff 0.14.0`, in
-  1.7 s with the uv cache empty and 0.15 s warm. A version that does not exist fails closed, exit
-  1, naming it: `uvx ruff@99.99.99 --version` prints `error: No solution found when resolving tool
-  dependencies … there is no version of ruff==99.99.99`.
+- `uvx --from <package>@<version> <command>`, for a Python tool, naming the distribution and the
+  command separately because they are usually different names: `uvx --from httpie@3.2.4 http
+  --version` prints `3.2.4`, and `uvx --from shellcheck-py@0.10.0.1 shellcheck --version` prints
+  `ShellCheck - shell script analysis tool` and `version: 0.10.0`. Where the project's own name is
+  its command's — checked, not assumed — the short `uvx <name>@<version>` runs it: `uvx ruff@0.14.0
+  --version` prints `ruff 0.14.0`, in 1.7 s with the uv cache empty and 0.15 s warm. A version that
+  does not exist fails closed, exit 1, naming it: `uvx ruff@99.99.99 --version` prints `error: No
+  solution found when resolving tool dependencies … there is no version of ruff==99.99.99`.
 - `bunx --package <name>@<version> <binary>`, for an npm tool, naming the package and the binary
   separately because they differ. `bunx --package @biomejs/biome@2.6.3 biome --version` prints
   `Version: 2.6.3`, in 0.3 s with bun's cache warm; `bunx --package @biomejs/biome@99.99.99 biome
@@ -200,10 +232,13 @@ out, never a bare name:
   version: unknown revision nats/v99.99.99`.
 
 Why the version alone is not the rule: a pin has two halves, the coordinate and the version, and
-an unpinned command loses the first one. The coordinate is the registry name the project itself
-publishes, scope and all, checked once before first use rather than assumed from the binary's name
-— `npm view <name> version description repository.url homepage`, whose answer for the real package
-names the project's own repository and site and whose answer for the squatter names neither:
+an unpinned command loses the first one. The coordinate comes from the project's own published
+installation instructions — its documentation site or its repository's README, reached
+independently of the registry rather than from the registry entry of a name guessed off a binary —
+and that is the only step that establishes identity. `npm view <name> version description
+repository.url homepage` corroborates it and does no more than that: those are fields the publisher
+writes into its own `package.json`, which the registry does not verify, so a squatter closes the
+check by copying two strings and a legitimate package that sets no `homepage` reads like a squat.
 
 ```text
 $ npm view biome version description repository.url homepage
@@ -215,6 +250,32 @@ description = 'Biome is a toolchain for the web: formatter, linter and more'
 repository.url = 'git+https://github.com/biomejs/biome.git'
 homepage = 'https://biomejs.dev'
 ```
+
+Those answers are consistent with `@biomejs/biome` being the project and `biome` being someone
+else's package; what establishes it is biomejs.dev, reached without npm's help, naming
+`@biomejs/biome` as what to install.
+
+What a registry can attest is narrower and stronger. npm verifies a provenance attestation when it
+is published, so it is the one part of an entry no publisher forges by writing a string:
+
+```text
+$ npm view @biomejs/biome dist.attestations
+{
+  url: 'https://registry.npmjs.org/-/npm/v1/attestations/@biomejs%2fbiome@2.6.3',
+  provenance: { predicateType: 'https://slsa.dev/provenance/v1' }
+}
+$ npm view biome dist.attestations
+```
+
+Present for the project and empty for the squatter — but most packages publish none, so an empty
+answer is no evidence of a squat. PyPI publishes attestations only for projects that release
+through a trusted publisher, and widely used tools do without: `https://pypi.org/pypi/ruff/0.14.0/json`
+carries no `provenance` on any of its files and
+`https://pypi.org/integrity/ruff/0.14.0/<file>/provenance` answers 404, so for a Python tool the
+project's own documentation is the whole of the check. A Go module path is a domain-scoped URL, so
+the coordinate is the repository path itself and is checked by going to it; `sum.golang.org` pins a
+published version's bytes, which stops them changing under a reader later and says nothing about
+whether the path was the right one.
 
 Pinning the version while leaving the name alone runs the squatter at a version, obeying "pin the
 version" to the letter:
@@ -228,13 +289,25 @@ $ bunx --package @biomejs/biome@2.6.3 biome --version
 Version: 2.6.3
 ```
 
-Each runner's syntax makes a different half easy to get wrong: `bunx`'s `--package <name>@<version>
-<binary>` form exists because the coordinate and the binary name differ, so a bare `bunx
-<binary>@<version>` is a coordinate nobody checked, while `uvx <name>@<version>` and `go run
-<module>@<version>` take the coordinate directly — a Go module path is a URL, so its identity is
-the path itself — and leave the version as the half to watch. Nothing in this repository refuses
-the unpinned command: no guard, no lint and no check stops a role typing a bare `bunx biome`. What
-this gives a role is a correct documented form and a tool that is already there, not a gate.
+No runner exempts a reader from the coordinate half; each syntax makes a different way of getting
+it wrong easy to type. `bunx <binary>@<version>` resolves the typed token as an npm package name,
+which is why `--package <name>@<version> <binary>` exists. `uvx <command>@<version>` does the same
+on PyPI and carries it one step further: uv resolves the token as the *project*, installs that
+project, and only then looks for a command of that name —
+
+```text
+$ uvx pyyaml@6.0.2 --version
+Installed 1 package in 23ms
+Package `pyyaml` does not provide any executables.
+```
+
+— which is what `uvx --help`'s own `--from <FROM>  Use the given package to provide the command`
+line is for, and why `uvx --from <package>@<version> <command>` is the general Python form above.
+`go run <module>@<version>` takes the coordinate as that domain-scoped URL, so an invented path
+usually fails to resolve rather than running someone else's code, but a path guessed from a
+binary's name is still a guess. Nothing in this repository refuses the unpinned command: no guard,
+no lint and no check stops a role typing a bare `bunx biome`. What this gives a role is a correct
+documented form and a tool that is already there, not a gate.
 
 The limit of the runners: a compiled tool with no ecosystem runner is an image change — a pull
 request against this repository — and it reaches a role only once a deployment pins the new digest,
@@ -251,8 +324,9 @@ them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
 tree with the two npm language servers is 66 MiB. The five client tools
-([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB of that
-total, measured like for like against this branch's own base: the head
+([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB — not a slice
+of that 22-layer figure, but a difference measured like for like between a later pair of builds,
+this branch's head and the base it forks from: the head
 `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision
 `afa29128061fc10dd6c6aa3755ba051b98b84e02`) is 24 layers and 1026.9 MiB (1,076,764,060 bytes)
 where the base it forks from, `:sha-92dbeea3d391` (revision

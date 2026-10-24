@@ -185,7 +185,9 @@ on the same repositories.
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
 (`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI, a general toolchain (git, jj, gh,
 Node, uv, the AWS CLI, kubectl) and the client tools a role's own work needs (`psql`, `redis-cli`,
-`sqlite3`, `nc`, `dig`), which an unprivileged container could not install for itself.
+`sqlite3`, `nc`, `dig`): `apt` cannot write a system prefix in an unprivileged container, unpacking
+one by hand works for some tools and not others, and Legion rules that route out as the withheld
+`operator-setup` capability.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,

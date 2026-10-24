@@ -52,12 +52,16 @@ related_issues:
    Debian packages extracted for OpenSSH, release binaries for jq and shellcheck) and tell every
    subagent to prepend `$HOME/.local/bin` to `PATH`, since a subagent's shell starts without
    it. A harness that needs them fails before its first case otherwise.
-   *2026-10-24:* the worker image carries `jq` and `ssh-keygen` as real binaries now, and the five
-   clients `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` with them, so the installs above are no
-   longer the step for those. Installing a tool under `$HOME/.local` is the withheld
-   `operator-setup` capability in any case, and the current rule for a tool the image lacks is
-   `skills/legion-worker/references/tools.md`: the image, or a pinned `uvx`, `bunx --package` or
-   `go run`. What the item records is what that pod carried then.
+   **Superseded 2026-10-24 (INFRA-221):** the worker image carries `jq`, `ssh` and `ssh-keygen` as
+   real binaries now, and the five clients `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` with
+   them, so for those the `$HOME/.local` installs above are no longer the step. `shellcheck` the
+   image does not carry, and its route is a pinned runner rather than an extraction or a release
+   binary: `uvx --from shellcheck-py@0.10.0.1 shellcheck --version` prints `ShellCheck - shell
+   script analysis tool` and `version: 0.10.0`. It takes the `--from` form because the PyPI
+   distribution and the command have different names, which is the general Python form. The
+   current rule for anything the image lacks, and the line between a pinned run and the withheld
+   `operator-setup` capability, is `skills/legion-worker/references/tools.md`. What the item above
+   records is what that pod carried then.
 
 ## Evidence
 
