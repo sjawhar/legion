@@ -2,44 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T09:55:00Z",
+  "completed": "2026-10-24T17:20:00Z",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
+  "important": 2,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/kubernetes.md:2649",
-      "description": "Inside the previous round's fixes. The sentence replacing the RBAC rule — \"this identity may not read Services either: `kubectl auth can-i get services` answers `no` wherever `create services` does\" — is measured only in deployments where the sequence never runs, and cannot hold where it does. `kubectl apply` is client-side by default (`--server-side=false`) and reads the live object before creating it: measured from this role container, applying the section's own Service ends `Error from server (Forbidden): error when retrieving current configuration of: … cannot get resource \"services\"` with no create attempted, while `kubectl create` of the same file is refused on `create`. So the Service step at :2607 needs `get services` as well as `create services` — which also means the gate's two `create` answers do not predict that the sequence completes: a deployment granting create without get passes the gate with two bare `yes`es and is refused at that step with the Job already submitted. Nothing is orphaned (the `delete` is unconditional and no `errexit` is set), so the cost is a wasted submission. Either state the measurement without the rule, or name both verbs and gate on them."
+      "file": "docs/kubernetes.md:2619",
+      "description": "An instruction that cannot be followed as published, and the architect's own required change. `kubectl wait --for=condition=Ready pod -l job-name=<workload> --timeout=300s` runs two lines after the Job is applied, when the Job's pod does not exist yet, and `kubectl wait` on a selector matching nothing refuses rather than waits. Reproduced from this role container: `error: no matching resources found`, exit 1, at once; `--for=create` against the same selector does wait (it polls to its timeout). The tester reproduced it twice against a real Job, with the pod appearing about five seconds later. Where the declarations are applied the preceding Service steps usually cover the race, so the failure is rare and reads to a role like a workload that never started — a section about diagnosing workloads whose second step misdiagnoses itself. Wait on the Job, or `--for=create` first, or retry the wait once; measured at the head, not reasoned."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:2673",
+      "description": "The evidence passage says the manifest went through admission \"together with one deliberate breakage of each rule, each refused naming the rule\". The last of those rules is the reachability label, which the same section says in bold admission does not enforce: a workload without it is admitted, started and silently unreachable. So that breakage cannot have been refused, and a reader who takes the bullet at its word concludes a missing label is caught at submission, skips the one check this section exists to teach, and then reads the silent timeout as a broken cluster. One word: each *enforced* rule."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:2527",
-      "description": "Inside the previous round's fixes, and this round's own two edits disagreeing. The label bullet says the symptom of the missing reachability label is \"the reachability check below never connecting and ending at its deadline, which is what tells it apart from a database still starting up\" — but both failure shapes never connect and both end at the deadline. What tells them apart is the exception class, which the paragraph eight lines below states correctly (a refusal is a server still starting, `never answered: TimeoutError` is the label). Measured here: a port refusing throughout ends `never answered: ConnectionRefusedError`, exit 1 at 60.1 s. A reader who meets that and acts on the bullet reads it as the label, which is the opposite of what the paragraph says. Distinct from dispatch://INFRA-215, which records that a persistent refusal has no reading of its own; this gives it the wrong one."
+      "file": "docs/kubernetes.md:2675",
+      "description": "Two claims in the passage whose whole purpose is the section's trustworthy account of itself. First, it records the Job half submitted \"here\", in a deployment where two of the gate's three answers are `no` and the section's one bolded rule says submit nothing — with no acknowledgement, so the rule reads as advisory or the author as not following it. Mark that run as the deliberate, bounded exception it was and name what made it safe (short deadline and ttl, the delete verified, `delete jobs` measured `yes` first). Second, the run is presented as a transcript of the published lines (\"everything above is a transcript\"), but the published wait line failed on that very run — the ~80 s Ready came from a re-issued wait, as the tester records. Fix it with the wait line itself."
     },
     {
       "severity": "minor",
-      "file": "docs/kubernetes.md:2529",
-      "description": "Inside the previous round's fixes. \"A role that sees it compares the labels on its own pod\" — the pod that must carry the reachability label is the workload's, which is what the bracketed command reads; the role's own pod is in the namespace Legion's pods run in, where this identity has no read at all (measured: `kubectl auth can-i get pods -n legion` and `list pods -n legion` both `no`). The implementer's handoff glosses it the same wrong way, so the prose is what misleads, not the command. One word."
-    },
-    {
-      "severity": "minor",
-      "file": ".legion/INFRA-71/implement.json:14",
-      "description": "This round's work, outside the code commit. The first proof's negative control claims \"every command the sequence still names is in the `yes` set above, and every one in the `no` set is gone from it\" — the sequence still names the Service `apply`, whose verbs (`create services`, `get services`) are both measured `no`, which the section itself says is refused here. Scope the claim to the diagnostic and read commands. The same round's test handoff says \"30 check runs\" at the code head where GitHub reports 40; 30 is that endpoint's default page size, and the substantive claim (all success or skipped) holds."
+      "file": "docs/kubernetes.md:2681",
+      "description": "The architect's second required change, and three words. The not-executed bullet says the reachability check \"against a real workload\" is written from the declarations, while the bullet above records that same block run against a real workload whose packets were dropped. What has never run is the check against a workload reachable **by its Service name**."
     }
   ],
   "verified": [
-    "All eight findings of the previous round are fixed, each checked by running it: the endpoints command is gone and the identity's refusal is quoted beside it; the naming clause says the second apply is refused rather than patching; the gate quotes exactly what a credential-less role gets, measured again here (exit 1, `The connection to the server localhost:8080 was refused - did you specify the right host or port?`); the gate now instructs rather than describes; the reachability block loops and names the two failure shapes apart; the bullets' preamble carries the exception; the Services line no longer asserts an RBAC rule; and all five test-phase `headSha` values resolve.",
-    "The published reachability block, run unedited under the image's python3: `answered` and exit 0 against a listener, and `never answered: ConnectionRefusedError`, exit 1 at 60.1 s against a port refusing throughout.",
-    "Every command the sequence names is within this identity's grant except the Service step, which the section says is refused: create/get/list/watch/delete jobs, get/list/watch pods and pods/log all yes; create and get services, get and list endpoints, patch and update jobs, create pods, and pods in Legion's own namespace all no.",
-    "CI at code head 0ca46259: 40 check runs, none unsuccessful at the read, the required lint, typecheck and test success; compare 0ca46259...64baceb1 is .legion/ only.",
-    "No name of the deployment's cluster is added anywhere in the delta, and none appears in the commit messages, the title or the body."
+    "The previous round's four findings are fixed, each checked by running it: `kubectl get jobs,pods` exits 0 here and `kubectl get jobs,pods,svc` exits 1 with `cannot list resource \"services\"`, which is what the rewritten paragraph now says; the gate asks the third verb and explains why it is not a duplicate; the label bullet names `TimeoutError` as the symptom, agreeing with the paragraph under the sequence; \"the workload's pod\" is explicit, and a role may not read its own (`get pods -n legion` → `no`).",
+    "CI at code head 32dc3a0f: the required lint, typecheck, test and pr-title all success; the non-required `dispatch` lane was still in progress at my read, having started at 16:00:25Z, and it touches no package this branch changes. compare 32dc3a0f...ad39d557 is .legion/ only.",
+    "No name of the deployment's cluster is added anywhere in the delta, the commit messages, the title or the body, and none of my own measurements quoting a refusal or a listing is reproduced where it would carry one."
   ],
-  "improvementsNotRequested": [
-    "A third outcome of the reachability step — an address that does not resolve — ends `never answered: gaierror`, which the paragraph does not name; it would mean the Service was never created.",
-    "The workload name is unique across projects but not across the six roles of one issue, which meet the same three consequences the naming clause warns about.",
-    "A copy-pasted sequence under `set -e` would stop above the delete; a `trap … EXIT` would make the gate's own warning structural rather than behavioural.",
-    "plan.json's citation of AGENTS.md:155 for the public-repository rule was true when written and is line 145 at this head."
+  "recordedNotRequested": [
+    "The gate's consequence overstates what a stopped sequence costs: `delete jobs` is granted beside `create jobs` and the sequence's `delete` is unconditional, so a Job submitted on fewer than three `yes`es is removable with one line the section does not give the role that stopped.",
+    "The `create services` yes / `get services` no cell is called a deployment whose declarations are not applied and is sent away by the gate, where its Service step would work as `kubectl create`; and the sentence introducing the third verb attributes to a create-allowed role a refusal measured from an identity holding neither verb. Nothing dispatch://INFRA-206 grants produces that cell.",
+    "The body's own `Change` bullet still says a role can tell in two commands, and `Proven by` still says a server-side dry run with nothing created; both are superseded by the three-verb gate and by this round's real Job run. The implementer's lines, not the reviewer's."
   ]
 }
