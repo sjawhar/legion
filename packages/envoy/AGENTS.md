@@ -2265,16 +2265,16 @@ two slots, so the binary is never rolled back past it once a slotted enrollment 
 An enrollment's kind is `session` (an agent session on a machine its person logged in: the
 helper's own, or a key a launcher such as agentbox brings through the helper's
 `enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
-The broker and helper still meet the other's old shape until every running client is on this
-release, and each fallback names its removal condition at its definition: the broker records an old
-helper's `host`/`box` as `session` and logs `an enrollment named a legacy kind`
-(`api/handlers_enroll.go`, `legacyKinds`: gone after 30 days of no such line from the production
-broker); and the helper asks an older broker, which answers `session` `400 INVALID_KIND`, once more
-as `host` or `box` (`helper/broker.go`, `enroll`: gone once the production broker records
-`session`). The CLI and helper speak only the kind-free pair: the helper answers `enroll-box` and
-`unenroll-box`, the ops of a CLI before legion-envoy 10, `BAD_REQUEST unknown op <op>`; the CLI
-asks a helper nothing else; and `enroll` takes no `--kind`, so agentbox's `--kind box` is a usage
-error (exit 2).
+`POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise): the `host`
+and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in.
+No reader of stored data needs them: the `enrollments` kind constraint admits only the two, and a
+record body that predates 0012 keeps its `box`/`host` as text its id hashes, which
+`record.ParseBody` reads without checking the kind. The helper still asks an older broker, which
+answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
+gone once the production broker records `session`). The CLI and helper speak only the kind-free
+pair: the helper answers `enroll-box` and `unenroll-box`, the ops of a CLI before legion-envoy 10,
+`BAD_REQUEST unknown op <op>`; the CLI asks a helper nothing else; and `enroll` takes no `--kind`,
+so `--kind box` is a usage error (exit 2) naming the flag.
 `enroll.Service.verifyPodToken` verifies a pod's projected token (issuer, audience, signature,
 expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
 `POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the

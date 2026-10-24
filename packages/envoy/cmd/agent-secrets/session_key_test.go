@@ -60,8 +60,9 @@ func drainOps(reqs <-chan helper.Request) []string {
 }
 
 // TestEnrollHelperAsksForASessionKey: enroll --helper asks the helper's enroll-session-key and
-// unenroll --helper asks unenroll-session-key. --kind is no flag of enroll's: agentbox's
-// `--kind box`, in either spelling, is a usage error, asking the helper nothing.
+// unenroll --helper asks unenroll-session-key. --kind is no flag of enroll's: `--kind box`, which
+// an agentbox before legion-envoy 10 passed, is a usage error in either spelling naming the flag,
+// asking the helper nothing.
 func TestEnrollHelperAsksForASessionKey(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	lease := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)

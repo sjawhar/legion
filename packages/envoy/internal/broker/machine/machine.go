@@ -137,7 +137,9 @@ func (s *Service) verifyLauncherRequest(ctx context.Context, compact string, now
 // is (record.ErrRequestInvalid otherwise). The jti, like the record, is written in that
 // transaction (Replay reads it from ctx), so a login holds the one pooled connection its
 // transaction took and never waits for another, and a refused login leaves no jti behind. The
-// record's code is the user code; the machine polls with its device code.
+// record's code is the user code; the machine polls with its device code. The record also carries
+// the request object, its approver, the credential lifetime an approval mints (CredentialLifetime),
+// the policy version, and an expiry PendingTTL after now.
 func (s *Service) LoginDevice(ctx context.Context, form url.Values, userCode string) error {
 	tx, ok := oauthstore.TxFrom(ctx)
 	if !ok {
@@ -145,23 +147,29 @@ func (s *Service) LoginDevice(ctx context.Context, form url.Values, userCode str
 	}
 	now := time.Now()
 	compact := form.Get("request")
-	approver, err := s.verifyPersonLogin(ctx, compact, now, func(obj record.RequestObject) error {
-		if form.Get("dpop_jkt") != obj.Thumbprint {
-			return fmt.Errorf("%w: dpop_jkt is not the request object's key thumbprint", record.ErrRequestInvalid)
-		}
-		return nil
-	})
+	approver, err := s.verifyPersonLogin(ctx, compact, now, form.Get("dpop_jkt"))
 	if err != nil {
 		return err
 	}
-	return s.insertRecord(ctx, tx, compact, approver, userCode, now)
+	body := record.Body{
+		Request:         compact,
+		Approver:        approver,
+		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
+		LifetimeSeconds: new(int(s.CredentialLifetime.Seconds())),
+		RulesVersion:    s.Policy.Get().Version,
+		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
+		Code:            userCode,
+	}
+	_, err = tx.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
+		body.ID(), body.Canonical(), body.Approver, body.Code, body.ExpiresAt)
+	return err
 }
 
 // verifyPersonLogin verifies a person's machine login request object at now (verifyLauncherRequest)
 // and answers the approver its login_hint names. A request naming a service is
-// ErrServiceLogsInWithToken, and one naming no person, or record.AnyoneApprover, is
-// record.ErrRequestInvalid; check, when set, runs after those and before the jti is recorded.
-func (s *Service) verifyPersonLogin(ctx context.Context, compact string, now time.Time, check func(record.RequestObject) error) (approver string, err error) {
+// ErrServiceLogsInWithToken, and one naming no person, or record.AnyoneApprover, or whose key
+// thumbprint is not dpopJKT, is record.ErrRequestInvalid, each checked before the jti is recorded.
+func (s *Service) verifyPersonLogin(ctx context.Context, compact string, now time.Time, dpopJKT string) (approver string, err error) {
 	_, err = s.verifyLauncherRequest(ctx, compact, now, func(obj record.RequestObject) error {
 		if obj.Service() != "" {
 			return ErrServiceLogsInWithToken
@@ -173,30 +181,12 @@ func (s *Service) verifyPersonLogin(ctx context.Context, compact string, now tim
 		if approver == record.AnyoneApprover {
 			return fmt.Errorf("%w: a person's machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
 		}
-		if check != nil {
-			return check(obj)
+		if dpopJKT != obj.Thumbprint {
+			return fmt.Errorf("%w: dpop_jkt is not the request object's key thumbprint", record.ErrRequestInvalid)
 		}
 		return nil
 	})
 	return approver, err
-}
-
-// insertRecord writes a person's machine login record in tx: the request object, its approver,
-// lifetime (CredentialLifetime, the credential lifetime an approval mints), the policy version,
-// code, and an expiry PendingTTL after now.
-func (s *Service) insertRecord(ctx context.Context, tx pgx.Tx, compact, approver, code string, now time.Time) error {
-	body := record.Body{
-		Request:         compact,
-		Approver:        approver,
-		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
-		LifetimeSeconds: new(int(s.CredentialLifetime.Seconds())),
-		RulesVersion:    s.Policy.Get().Version,
-		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
-		Code:            code,
-	}
-	_, err := tx.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
-		body.ID(), body.Canonical(), body.Approver, body.Code, body.ExpiresAt)
-	return err
 }
 
 // ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
@@ -212,7 +202,7 @@ func (s *Service) insertRecord(ctx context.Context, tx pgx.Tx, compact, approver
 // row lock before anything is minted, so a second decision, one racing the first and one after
 // expiry all answer the same way. Approval mints the
 // credential — bound to the request object's own key (thumbprint and embedded JWK), with the lifetime
-// its record names (insertRecord) counted from the decision — in the same transaction that records the
+// its record names (LoginDevice) counted from the decision — in the same transaction that records the
 // decision, so a crash between the two never orphans a credential no decision names. A key that
 // already holds a live credential under another record is ErrKeyHoldsLiveCredential, and the
 // record stays pending.
