@@ -143,3 +143,32 @@ test("the skip-checks recipe writes two empty lines before the trailer, everywhe
     .map((file) => path.relative(REPO_ROOT, file));
   expect(short).toEqual([]);
 });
+
+// Whether retro's push carries that trailer was once stated three ways that disagreed: a rule keyed
+// to the paths a push touched, an exception list that named retro's removal commit, and a reason
+// that held only while retro also wrote a learning (INFRA-149). A retro with nothing to write took
+// the path rule, so the commit that merges arrived with no check runs, which a base branch that
+// requires a check blocks while Legion carries the earlier code head's verdict and reads the head as
+// green. One sentence now replaces all three, and an edit that un-states it in any of the four texts
+// must fail a lane here rather than pass with every required check green. Counted per file and never
+// against a composed prompt: the composed implementer prompt carries the sentence twice, from
+// `roles/implementer.md` and from `go/worker-common.md`. The whole sentence is counted literally, so
+// a reworded half cannot satisfy it. The `packages/claude-envoy/legion/` mirror needs no pin of its
+// own; `packages/claude-envoy/tests/legion-plugin-fresh.test.ts` fails when it drifts from these.
+test("one sentence states that retro's push never carries the trailer, in each text that states it", () => {
+  const rule =
+    "Retro's push never carries the line, whatever paths it touches, because it is the last " +
+    "push before the merge and a base that requires a check will not merge a head whose checks " +
+    "never ran.";
+  const texts = [
+    path.join(staged, "legion-worker/SKILL.md"),
+    path.join(staged, "legion-retro/SKILL.md"),
+    path.join(promptsRoot, "go/worker-common.md"),
+    path.join(promptsRoot, "roles/implementer.md"),
+  ];
+  const counts = texts.map((file) => ({
+    file: path.relative(REPO_ROOT, file),
+    found: readFileSync(file, "utf8").split(rule).length - 1,
+  }));
+  expect(counts).toEqual(texts.map((file) => ({ file: path.relative(REPO_ROOT, file), found: 1 })));
+});
