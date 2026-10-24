@@ -122,7 +122,6 @@ import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { registerAskGate } from "./askgate/askgate";
-import type { Pi as AskGatePi } from "./askgate/askgate-core";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -2804,10 +2803,7 @@ export default function envoyExtension(pi: PiApi): void {
   // call; it waits for the modules the gate loads (`registerAskGate`).
   if (askgateOn && CONFIG_FILE.path !== null) {
     const configFile = CONFIG_FILE.path;
-    // The host's `pi.on` takes every event name; `PiApi` types only the events this entry uses,
-    // and the gate also listens for `tool_execution_end`.
-    const host = pi as unknown as AskGatePi;
-    askgateLoad = registerAskGate(host, { configFile, logger }).catch((error: unknown) => {
+    askgateLoad = registerAskGate(pi, { configFile, logger }).catch((error: unknown) => {
       const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
       logger.warn(notice);
       askgateNotices.push(notice);

@@ -17,6 +17,7 @@
 // model only.
 import * as fs from "node:fs";
 import * as os from "node:os";
+import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { RetryFallbackResolutionContext } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -92,7 +93,7 @@ type ToolCallHandler = (event: ToolCallEvent, ctx: GateCtx) => Promise<ToolCallR
  * the gate would review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
  * The returned promise settles with the load and rejects with its error, for the caller's notice.
  */
-export function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> {
+export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
   const loading = loadAskGate(pi, host);
   // A rejection is handled here and by the caller's notice; never an unhandled one.
   const gate: Promise<ToolCallHandler> = loading.then(
@@ -102,7 +103,9 @@ export function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> {
       return async (event, ctx) => refuse(event, ctx);
     }
   );
-  pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx) => (await gate)(event, ctx));
+  // The host's context carries every member GateCtx reads; PiApi types only those the Envoy entry
+  // reads, so the handler takes it as the core's type.
+  pi.on("tool_call", async (event, ctx) => (await gate)(event, ctx as unknown as GateCtx));
   return loading.then(() => undefined);
 }
 
@@ -111,7 +114,7 @@ export function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> {
  * handler kept back, which it returns: every other event, and `appendEntry`, reach the real `pi`.
  * Rejects when a module does not load or the core refuses to bind.
  */
-async function loadAskGate(pi: Pi, host: AskGateHost): Promise<ToolCallHandler> {
+async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandler> {
   // String-literal imports: the host's loader resolves only these (see the head of this file).
   const [
     { completeSimple, retryTransientCompletion },
@@ -241,12 +244,13 @@ async function loadAskGate(pi: Pi, host: AskGateHost): Promise<ToolCallHandler> 
   };
 
   // The core binds to a `pi` that keeps its tool_call handler, which the one registered above
-  // runs, and passes every other event, and appendEntry, to the real `pi`.
+  // runs, and passes every other event, and appendEntry, to the real `pi`. The core names its
+  // events as strings, each one in PiEventContract, and types its handlers' events itself.
   let handler: ToolCallHandler | undefined;
   const wrapped: Pi = {
     on: (event, listener) => {
       if (event === "tool_call") handler = listener as unknown as ToolCallHandler;
-      else pi.on(event, listener);
+      else pi.on(event as keyof PiEventContract, listener as unknown as () => Promise<void>);
     },
     appendEntry: (customType, data) => pi.appendEntry(customType, data),
   };

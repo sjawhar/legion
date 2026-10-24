@@ -6,10 +6,10 @@
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
 //   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`: the
-//     head rules of the plugin that ships the CLI, copied, with the program taken by a literal
-//     path to `dispatch` as well as by name, plus AskGate's two harmless wrappers, one leading
-//     `cd <path> &&` with a path the shell does not expand and one `2>&1` at the end of its first
-//     line, before or after a here-document opener)
+//     head rules of `@legion/pi-shared/shell-command`, kept here on purpose with AskGate's own
+//     additions: the program taken by a literal path to `dispatch` as well as by name, and two
+//     harmless wrappers, one leading `cd <path> &&` with a path the shell does not expand and one
+//     `2>&1` at the end of its first line, before or after a here-document opener)
 //     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
 //     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
@@ -22,8 +22,9 @@
 //     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
 //     reviewed. An upload given with `--path` prints the path, not the text: the gate reads that
-//     file (`readFile`) and adds its text as `content`, so both forms reach the model alike, cut to
-//     the same 64 KB. A relative path resolves where the CLI resolves it, against its
+//     file (`readFile`) and adds its text as `content`, so both forms reach the model alike. The
+//     arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of it.
+//     A relative path resolves where the CLI resolves it, against its
 //     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
 //     it (the `cd`, then `pwd -P`, run as the dry run runs). A file the
 //     gate cannot read is `error`, and the call runs. An upload is judged against failure 10 alone
@@ -362,12 +363,15 @@ export function scopedDevice(toolName: string, input: Input): boolean {
   );
 }
 
-// Where a `dispatch` command's own text ends: `headLine`, `headScan` and their helpers below are the
-// rules @sjawhar/pi-envoy applies (`packages/pi-shared/src/shell-command.ts` in sjawhar/legion),
-// copied because this extension cannot import the plugin; keep the two in step. A conservative
-// character scan, not a shell parser: whatever it cannot reason about is no `dispatch` command.
-// Whitespace is bash's blanks, space and tab, never JavaScript's `\s`, which also takes a no-break
-// space that bash reads as part of a word.
+// Where a `dispatch` command's own text ends: `headLine`, `headScan` and their helpers below start
+// from the rules `@legion/pi-shared/shell-command` applies (`dispatchCommandHead` there, which the
+// Envoy entry uses to tell a dispatch-only call), and differ from them on purpose: the gate also
+// reads a literal path to `dispatch` and the two wrappers below, and must read exactly the text
+// the command sends, while the plugin's rule only has to tell a dispatch-only call from work. So
+// the two are separate, and a change to one is checked against the other. A conservative character
+// scan, not a shell parser: whatever it cannot reason about is no `dispatch` command. Whitespace is
+// bash's blanks, space and tab, never JavaScript's `\s`, which also takes a no-break space that
+// bash reads as part of a word.
 
 /** The one here-document a command's first line may end with, opened with a quoted delimiter so
  * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
@@ -1375,7 +1379,7 @@ function renderUnreadable({ label, program }: UnreadableCommand): string {
 export function loadFailureGate(
   error: unknown,
   deps: Pick<Deps, "env" | "configFile">,
-  pi: Pi
+  pi: Pick<Pi, "appendEntry">
 ): (event: ToolCallEvent, ctx: GateCtx) => ToolCallResult {
   const message = messageOf(error);
   const reason = `AskGate did not send this call: it reviews each Dispatch write before it posts, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
