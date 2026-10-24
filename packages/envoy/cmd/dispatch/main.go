@@ -79,6 +79,10 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
+	// EditNoticeQuiet is how long a document stays quiet after a person's last settled version
+	// before its edit notice goes, zero for the document service's own 30 s; only
+	// DISPATCH_TEST_EDIT_NOTICE_QUIET, under the test hooks, sets it.
+	EditNoticeQuiet time.Duration
 	// OIDCIssuer and OIDCAudience configure verification of projected
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
@@ -257,11 +261,12 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:     database,
-		Events:    broker,
-		Identity:  requestIdentity,
-		ServerURL: serverURL,
-		Settle:    boot.SettleDelay,
+		Store:           database,
+		Events:          broker,
+		Identity:        requestIdentity,
+		ServerURL:       serverURL,
+		Settle:          boot.SettleDelay,
+		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
@@ -596,6 +601,16 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_SETTLE_DELAY=%q (expected a positive Go duration)", raw)
 		}
 		boot.SettleDelay = delay
+	}
+	if raw := strings.TrimSpace(env.get("DISPATCH_TEST_EDIT_NOTICE_QUIET")); raw != "" {
+		if !boot.TestHooksEnabled {
+			return bootConfig{}, errors.New("DISPATCH_TEST_HOOKS=1 required with DISPATCH_TEST_EDIT_NOTICE_QUIET")
+		}
+		quiet, err := time.ParseDuration(raw)
+		if err != nil || quiet <= 0 {
+			return bootConfig{}, fmt.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", raw)
+		}
+		boot.EditNoticeQuiet = quiet
 	}
 	identityMode := strings.TrimSpace(env.get("DISPATCH_IDENTITY"))
 	if err := checkSignInSettings(boot, identityMode); err != nil {

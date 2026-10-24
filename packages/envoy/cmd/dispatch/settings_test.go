@@ -1247,6 +1247,21 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_TEST_SETTLE_DELAY": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
 		},
+		"DISPATCH_TEST_EDIT_NOTICE_QUIET": func(t *testing.T) {
+			const shortQuiet = 3 * time.Second
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_TEST_HOOKS":             "1",
+				"DISPATCH_TEST_EDIT_NOTICE_QUIET": shortQuiet.String(),
+			})
+			if boot.EditNoticeQuiet != shortQuiet {
+				t.Errorf("DISPATCH_TEST_EDIT_NOTICE_QUIET: EditNoticeQuiet = %v, want %v", boot.EditNoticeQuiet, shortQuiet)
+			}
+			for _, invalid := range []string{"not-a-duration", "-1s", "0s"} {
+				refusedWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1", "DISPATCH_TEST_EDIT_NOTICE_QUIET": invalid},
+					fmt.Sprintf("DISPATCH_TEST_EDIT_NOTICE_QUIET=%q (expected a positive Go duration)", invalid))
+			}
+			refusedWith(t, map[string]string{"DISPATCH_TEST_EDIT_NOTICE_QUIET": "1s"}, "DISPATCH_TEST_HOOKS=1 required")
+		},
 	}
 	for _, row := range settings {
 		test, ok := cases[row.Name]
