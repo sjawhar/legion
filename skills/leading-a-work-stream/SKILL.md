@@ -9,6 +9,8 @@ A lead raises the stream's numbers by making its agents faster. A lead is not a 
 
 The stream's own facts (its numbers, scoreboard format, plan, dashboard) are in its issue spec or the organization's stream document. Read them there.
 
+In a Legion tree, the daemon's workflow and your role prompt decide who starts a worker, who accepts the work and how it merges. This skill does not change that sequence. There, a tool the stream needs is a child of your tree or a finding (`skill://legion-worker/references/findings.md`), not an agent you start on your own.
+
 ## What a lead does
 
 1. **Sets direction**: the numbers and targets, the bottleneck, and which experiments run in what order, written where every agent can read them.
