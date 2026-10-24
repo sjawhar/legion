@@ -79,6 +79,12 @@
 
 ### Changed
 
+- The notice after a primary spec with no ask block reads: "This spec holds no ask blocks. A person
+  does not watch your chat. They see that you need them only through an open ask or a spec that
+  waits for their approval. If the design needs a person's choice, add an ask block. If it does not,
+  request approval with `dispatch request-approval`." (INFRA-140). The notice for a typed-block
+  opening stored as text cites the `dispatch-writing-specs` skill, "Questions". A test holds each
+  skill section a notice cites to a heading of that skill.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions say what an Oh My Pi session keeps:
   unsubscribe keeps the subscriptions another plugin holds for the session's role, and a move to a
   different role is refused while any are held. A host without such subscriptions behaves as

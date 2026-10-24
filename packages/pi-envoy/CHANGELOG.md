@@ -46,6 +46,30 @@
 
 ### Changed
 
+- Three Dispatch skills ship, under 2,000 words together (INFRA-140), from four skills and the
+  dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
+  `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
+  spec's seven parts (Summary, Problem, Goals and non-goals, Requirements, Design, Decisions,
+  Acceptance), the rules for text a person reads, which questions go to a person, the check before
+  each version, where the agent records its own decisions, and the plan as the issue's `plan.md`
+  written with superpowers' `writing-plans`. `dispatch-first` says which of the three to read
+  before which step, and that a person sees an agent's need only through an ask or an approval
+  request. `dispatch` keeps only what `dispatch <command> --help` does not say: its `references/`
+  directory goes, and the rules about one command moved into that command's help. These rules
+  are gone: keep a person's words in the spec, write a decision quoted and dated, a first version
+  holds only what the person settled, ask in stages, "density is the problem, not length", and
+  "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
+  reach 2,000 words.
+- `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
+  only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
+  such changes into one version. Any other fix goes in the plan or a comment, so the person is not
+  asked to approve the spec again for a small change.
+- The `dispatch` command's notice after a primary spec with no ask block says that a person does
+  not watch the session's chat and sees its need only through an open ask or a spec that waits for
+  approval (INFRA-140). The notice for a typed-block opening stored as text cites
+  `dispatch-writing-specs`, "Questions". `dispatch issue --spec` and `dispatch doc-edit` point at
+  `skill://dispatch-writing-specs`.
+
 - The `dispatch`, `dispatch-first` and `dispatch-brainstorming` skills are rewritten shorter
   (the dispatch skill and its references from about 20,300 words to 9,400), with detail moved to
   references and `dispatch <command> --help`; a blind comparison of old and new text on each

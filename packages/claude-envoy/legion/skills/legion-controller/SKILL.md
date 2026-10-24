@@ -339,8 +339,8 @@ While you are registered, the daemon's `tick` gives you a turn at least every
 `dispatch read`, and post when its `Events:` show no `message.created` from today.
 
 **What.** One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters,
-since it is a report rather than a log of the day, written as `skill://dispatch`'s "Writing for
-the human" says: every issue by its key and title, every pull request by its URL.
+since it is a report rather than a log of the day, written as `skill://dispatch-writing-specs`'s "Rules for
+the text" say: every issue by its key and title, every pull request by its URL.
 
 - **Finished.** `dispatch issues --project <PROJECT> --status done --updated-since <the
   previous report's time, or 24 hours ago> --limit 250`, read every page, and keep the issues
@@ -394,7 +394,7 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
 - **Controller state is disposable.** Do not reconstruct or preserve local controller
   bookkeeping between turns.
 - **Write for a human.** Every `dispatch comment`, `dispatch message`, and `dispatch ask` you
-  post follows `skill://dispatch`'s "Writing for the human" rules: plain sentences, every
+  post follows `skill://dispatch-writing-specs`'s "Rules for the text": plain sentences, every
   identifier expanded on first use, no coined shorthand. A triage note that reads like a log
   line is not a triage note.
 

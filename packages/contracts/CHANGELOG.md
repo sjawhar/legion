@@ -106,6 +106,14 @@
 
 ### Changed
 
+- `dispatch_issue`'s `spec` and `dispatch_doc_edit` point at `skill://dispatch-writing-specs` in
+  place of the dispatch skill's "Writing a spec" (INFRA-140). Four descriptions take a rule the
+  dispatch skill's references held, so `dispatch <command> --help` prints it: `dispatch_resolve_ask`
+  (which kind to use, and that resolving records no decision), `dispatch_comment` (a reply under an
+  open ask asks for clarification), `dispatch_doc_edit` (one replace per paragraph, then one
+  insert, then a read back) and `dispatch_artifact` (never upload a document's own name to change
+  it).
+
 - `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
   broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
   `POST /api/v1/.../comments` and `POST /api/v1/broadcasts` accept, generated into Go as

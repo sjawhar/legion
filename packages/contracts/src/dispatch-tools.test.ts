@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
@@ -969,23 +969,91 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  test("points dispatch_issue's spec and dispatch_doc_edit at a section the Dispatch skill has", () => {
+  test("points dispatch_issue's spec and dispatch_doc_edit at the skill that writes specs", () => {
     const issue = dispatchToolSpecs.find((spec) => spec.name === "dispatch_issue");
     const documentEdit = dispatchToolSpecs.find((spec) => spec.name === "dispatch_doc_edit");
     if (!issue || !documentEdit) throw new Error("missing spec-writing tools");
     const issueArguments = issue.arguments(schemaApi) as unknown as {
       spec: z.ZodOptional<z.ZodString>;
     };
-    const headings = dispatchSkillHeadings();
+    const repoRoot = resolve(import.meta.dir, "../../..");
 
     for (const [tool, description] of [
       ["dispatch_issue spec", issueArguments.spec.unwrap().description ?? ""],
       ["dispatch_doc_edit", documentEdit.description],
     ] as const) {
-      const section = description.match(/the "([^"]+)" section of skill:\/\/dispatch/u)?.[1];
-      if (section === undefined) throw new Error(`${tool} names no section of skill://dispatch`);
-      expect(headings, tool).toContain(section);
+      const skills = [...description.matchAll(/skill:\/\/([a-z0-9-]+)/gu)].map(([, name]) => name);
+      expect(skills, tool).toEqual(["dispatch-writing-specs"]);
     }
+    expect(existsSync(resolve(repoRoot, "skills/dispatch-writing-specs/SKILL.md"))).toBe(true);
+  });
+
+  // Contract C1 of INFRA-140: the Dispatch skill keeps the headings code and other skills cite.
+  test("the Dispatch skill keeps every heading code and other skills cite", () => {
+    expect(dispatchSkillHeadings()).toEqual(
+      expect.arrayContaining([
+        "Asks and ask blocks",
+        "Issue status is yours to move",
+        "Choosing what to work on",
+        "Close what you opened",
+        "Structure over stream",
+        "Architecture components",
+        "References",
+        "Setup and the HTTP API",
+      ])
+    );
+  });
+
+  // Rules the Dispatch skill's references held move into the one command each is about, where
+  // `dispatch <command> --help` prints them (INFRA-140, rule 3 of its cut).
+  test.each([
+    [
+      "dispatch_resolve_ask",
+      "Use retracted for an ask a newer one replaces or the design made moot, resolved for one whose answer you found; an answered ask cannot be resolved, and resolving records no decision by a person.",
+    ],
+    [
+      "dispatch_comment",
+      "A reply under an open ask asks for clarification, not an answer: answer it with reply_to_ask, or reword the ask with dispatch edit-ask, rather than opening a second ask.",
+    ],
+    [
+      "dispatch_doc_edit",
+      "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards.",
+    ],
+    [
+      "dispatch_artifact",
+      "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version.",
+    ],
+    [
+      "dispatch_ask",
+      "Measure what you can first, and put the measurement and the size of the population it covers in the question; drop an option that cannot fix most of that population, never offer it cut down, and keep an option not to act (Hold). Set urgency high when your work halts on the answer, and keep working on everything else.",
+    ],
+    [
+      "dispatch_issue_update",
+      "Never reassign an issue a person holds to get a faster answer: who holds it is their call.",
+    ],
+    [
+      "dispatch_message",
+      "keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside arrives as a user message: answer in the conversation, with no dispatch message.",
+    ],
+  ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
+    expect(specFor(name).description).toContain(rule);
+  });
+
+  test.each([
+    ["dispatch_issue", "assignee", "Set it only when a person said who owns the issue."],
+    [
+      "dispatch_read",
+      "ref",
+      "dispatch://PROJECT/artifact/<slug>[@vN], and its /ask/<id> and /comment/<id>; or the dashboard URL of one.",
+    ],
+  ])("%s's %s flag help holds the rule moved from the skill", (name, field, rule) => {
+    const fields = specFor(name).arguments(schemaApi) as unknown as Record<
+      string,
+      { description?: string; unwrap?: () => { description?: string } }
+    >;
+    const argument = fields[field];
+    const description = argument?.description ?? argument?.unwrap?.().description ?? "";
+    expect(description).toContain(rule);
   });
 
   test("dispatch_follow takes a full ask id and follow or unfollow, nothing else", () => {

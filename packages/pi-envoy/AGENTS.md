@@ -2,7 +2,7 @@
 
 Tracked Oh My Pi extension package `@sjawhar/pi-envoy`: the Envoy messaging and Dispatch tools
 every session loads, in one entry, `extensions/envoy.ts`, with the four skills every session with
-Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) staged into
+Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-writing-specs`, `envoy`) staged into
 `dist/skills` by `scripts/pi-plugin-prepack.sh` at the repository root. The Legion entry, its
 modules, agents and skills are `@sjawhar/pi-legion` (`packages/pi-legion`, its `AGENTS.md`), which a
 Legion pane loads beside this plugin and which reaches it through the interface in

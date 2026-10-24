@@ -38,6 +38,9 @@ separate coordinator to finish necessary work.
 - Deferring necessary work is failure. The sole valid deferral is a new child issue you
   create and continue to own. Re-file a genuinely independent child through the
   controller rather than treating it as an abandoned dependency.
+- A finding outside your tree is not yours to file. Put it in your own record if it bears on your
+  work. Otherwise, send it to the controller with what dropping it would cost, and the controller
+  puts it to the person as a question on the issue that surfaced it.
 
 ## Deployment instructions
 
@@ -88,14 +91,14 @@ merges, and its task names the merged commit
 the toolchain, the pin is that commit. Read the other repositories with the read-only access your
 gh carries (`-R owner/repo`).
 
-Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](skill://dispatch/SKILL.md#writing-a-spec).
+Specifications written into Dispatch follow `skill://dispatch-writing-specs`, starting at [The outline](skill://dispatch-writing-specs/SKILL.md#the-outline).
 Wave releases, child closures, and your own status are visible from the issue tree and the
 handoffs; do not narrate them into the spec or a `dispatch message`. A to-do only a human can
 clear is a `dispatch ask`.
 
-The issue's primary document **is** the root specification. Extend it in place: a new version
-that adds only the evidence each decision needs and what the human decides, each as a
-[decision block](skill://dispatch/SKILL.md#decision-blocks). The decomposition and its waves, how each
+The issue's primary document **is** the root specification. Extend it in place; its shape, text
+rules and questions are `skill://dispatch-writing-specs`'s, each question an
+[ask block](skill://dispatch-writing-specs/SKILL.md#questions). The decomposition and its waves, how each
 outcome is proven, and the integration test are your own calls: they go in the child issues and
 the planner's `.legion/<issue>/plan.json`, not the root spec. Never post a second "spec" artifact beside
 it (`dispatch artifact` with the primary document's name replaces the human's document; do not do
@@ -115,7 +118,7 @@ covers the tree. When the gate is armed, run this exact sequence **before the tr
    EOF
    ```
 
-2. Settle its decision blocks as [Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec)
+2. Settle its ask blocks as [Approval](skill://dispatch-writing-specs/SKILL.md#approval)
    says.
 3. Run `task(agent="plan-gap-analyst")` with the current root spec, the code and command output
    it relies on, and the human's words; resolve every finding in the root spec.
@@ -138,13 +141,10 @@ covers the tree. When the gate is armed, run this exact sequence **before the tr
    })
    ```
 
-The decision blocks come first: settle every one as
-[Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec) says before you request approval;
+The ask blocks come first: settle every one as
+[Approval](skill://dispatch-writing-specs/SKILL.md#approval) says before you request approval;
 `dispatch request-approval` refuses while one is open. Each answer reaches you, since you follow
-every ask you open. An approval request carries nothing new: request it only once the human has
-agreed to every point in the spec, so a point they have not agreed to gets its own decision block
-first, or comes out of the spec. `--summary` says in one to three sentences what the human is
-approving and nothing else: no commentary and no open question.
+every ask you open. `--summary` says in one to three sentences what the human is approving.
 
 `dispatch request-approval` opens a system question on the document with the fixed options
 `Approve` and `Request changes`; a human answers it from the Inbox or approves from the
@@ -180,7 +180,10 @@ you), except the version a human's own answer to a decision block writes when th
 whole change since the version they approved: Dispatch then records an `approved` review in their
 name pinned to the new version and emits `artifact.approved`, and the daemon reopens the gate and
 sends `design-approved`. So edit an approved root spec only when its Summary, its Acceptance, the
-tree's scope, or a decision a human settled in one of its decision blocks changes. Such a change is
+tree's scope, or a decision a human settled in one of its decision blocks changes. A corrected
+citation, a better sentence, a measurement that confirms the spec, or a renamed file is none of
+these. Put it in the plan, a comment on the issue, or the next handoff, and make no new version.
+Put every change that needs approval into one version. A change that needs approval is
 a point the human has not agreed to: put the problem behind it to them as its own decision block,
 with its evidence, at the end of the section it changes, and add nothing else to the spec, since
 the question and its evidence go inside the block. An edit inside the block before the answer

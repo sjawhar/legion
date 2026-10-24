@@ -33,8 +33,8 @@ controller-actionable re-filing work, not a reason to abandon it.
 ## Gates and waves
 
 Extend the issue's own primary document in place as the specification (never a second "spec"
-artifact), written in plain words for a reader who has not seen the code (`skill://dispatch`'s
-"Writing for the human" rules), before anything else: the daemon runs this child's phases from its
+artifact), written as `skill://dispatch-writing-specs` says ("The outline" and "Rules for the
+text"), before anything else: the daemon runs this child's phases from its
 release under an open root gate, so its planner may already be reading it. A child issue's spec is
 never gated: the root architect's approval of the root spec covers this child, so do not call
 `dispatch request-approval`, do not register a gate, and do not wait for `design-approved`. During a

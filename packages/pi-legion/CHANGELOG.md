@@ -7,6 +7,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- A ninth Legion skill, `leading-a-work-stream`: what a lead of a team of agents does and does not
+  do, who decides which steps, check-ins, and a new rule that a lead proves its facts about its
+  own stream with a command and its output, not a reading. It is the dotfiles skill of the same
+  name, copied with that rule added; the rule's cause was a lead that reported five of its six
+  agents as not live, from a session list that was cut in the middle.
+
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
@@ -65,6 +71,22 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 
 ### Changed
+
+- `legion-architect`, `legion-worker` and `legion-controller` point to
+  `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and
+  the rules for text a person reads, and `legion-architect` drops its own copy of those rules. The
+  controller's board-rank link points to `skill://dispatch/SKILL.md#setup-and-the-http-api`. A
+  daemon role prompt now names `skill://dispatch-writing-specs`, so the daemon's boot gate refuses
+  a `@sjawhar/pi-envoy` released before it: install the pi-envoy of the same release.
+- `legion-architect`: a finding outside the architect's tree is not its to file. It goes in the
+  architect's own record when it bears on the work; otherwise the architect sends it to the
+  controller with what dropping it would cost, and the controller puts it to the person as a
+  question on the issue that surfaced it.
+- `legion-architect`: after approval, a corrected citation, a better sentence, a measurement that
+  confirms the spec or a renamed file makes no new version of the root spec. It goes in the plan, a
+  comment on the issue or the next handoff, and every change that needs approval goes into one
+  version, so the person approves the spec again only when scope, acceptance or their decision
+  changes.
 
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
