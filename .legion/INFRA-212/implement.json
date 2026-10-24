@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-212",
+  "completed": "2026-10-24T21:03:00Z",
+  "proof": [
+    {
+      "criterion": "AC2 — each value documented in \"Anatomy of a Sandbox pod\" matches a running role container, and each name documented as never set is unset there.",
+      "surface": "The live implementer role container of this issue's own Agent Sandbox pod (hostname legion-infra-infra-212), which is both a pod the Go daemon built and the place the runbook's reader stands in.",
+      "command": "for n in LEGION_STATE_DIR GH_CONFIG_DIR DISPATCH_TOKEN_FILE ENVOY_TOKEN_FILE LEGION_BOOT_TOKEN_FILE LEGION_WORKSPACE; do printf '%s=%s\\n' \"$n\" \"$(printenv \"$n\")\"; done; printenv PATH | cut -d: -f1; for n in LEGION_GRANT_FILE LEGION_CREDENTIAL_HELPER LEGION_ROOT_WORKSPACE LEGION_TERMINATION_GRACE_SECONDS; do printenv \"$n\" >/dev/null; echo \"$n exit=$?\"; done",
+      "observed": "LEGION_STATE_DIR=/var/run/legion/state; GH_CONFIG_DIR=/var/run/legion/gh/sjawhar; DISPATCH_TOKEN_FILE=/var/run/legion/private/g1/DISPATCH_TOKEN; ENVOY_TOKEN_FILE=/var/run/legion/private/g1/ENVOY_TOKEN; LEGION_BOOT_TOKEN_FILE=/var/run/legion/private/g1/LEGION_BOOT_TOKEN; LEGION_WORKSPACE=/legion/workspaces/sjawhar/legion/infra-212; first PATH field /opt/legion/bin. Each equals the documented pattern with this pod's own <owner>=sjawhar, <repo>=legion, <key-lower>=infra-212, <generation>=1. LEGION_GRANT_FILE, LEGION_CREDENTIAL_HELPER, LEGION_ROOT_WORKSPACE and LEGION_TERMINATION_GRACE_SECONDS each exit 1, as the table's \"the runtime sets it in no container\" says.",
+      "headSha": "698ba655be51880eb74a39a8bb59403f4cd74c2f",
+      "negativeControl": "printenv LEGION_STATE_DIR exits 0 and prints /var/run/legion/state, not the /legion the retired table gives, while printenv LEGION_GRANT_FILE exits 1: the check separates a set name from an unset one rather than failing on both, so the four exit-1 results are evidence and not a broken command."
+    },
+    {
+      "criterion": "AC1 — the live section carries all eleven names with their values or their absence, in the agreed placeholders, and its new table renders as a table on GitHub rather than as a paragraph.",
+      "surface": "GitHub's own markdown renderer, the surface every reader of this file on github.com meets.",
+      "command": "awk '/^### Anatomy of a Sandbox pod$/,/^### The repository cache$/' docs/kubernetes.md > /tmp/sec.md && gh api -X POST /markdown -f mode=markdown -F text=@/tmp/sec.md | grep -c '<table'",
+      "observed": "1 <table> with 12 <tr> (header plus the eleven names, in the order PATH, GH_CONFIG_DIR, LEGION_GRANT_FILE, LEGION_STATE_DIR, LEGION_CREDENTIAL_HELPER, DISPATCH_TOKEN_FILE, LEGION_ROOT_WORKSPACE, LEGION_WORKSPACE, LEGION_BOOT_TOKEN_FILE, LEGION_TERMINATION_GRACE_SECONDS, ENVOY_TOKEN_FILE). Every placeholder survives inside its code span, rendered as &lt;owner&gt;, &lt;repo&gt;, &lt;key-lower&gt;, &lt;generation&gt; rather than being swallowed as an HTML tag.",
+      "headSha": "698ba655be51880eb74a39a8bb59403f4cd74c2f",
+      "negativeControl": "The same render of the same section with the table's delimiter row (| :--- | :--- | :--- |) deleted returns 0 <table>. The plan's own proposed control — deleting the blank line between the paragraph and the table — does NOT work: GitHub's cmark-gfm table extension lets a table interrupt a paragraph, and that render still returns 1 <table> with 12 rows. Recorded in deviations."
+    },
+    {
+      "criterion": "AC4 — each of the six retired subsections opens with its line, every table inside them carries the note directly above it, and \"Operator configuration\" and its network-shares table carry none.",
+      "surface": "GitHub's markdown renderer over the retired section, plus the file read as a reader reads it.",
+      "command": "awk '/^## Kubernetes runtime \\(TypeScript daemon\\)$/,/^## The controller$/' docs/kubernetes.md > /tmp/retired.md && gh api -X POST /markdown -f mode=markdown -F text=@/tmp/retired.md | grep -c '<table'; plus a read of the line above each delimiter row and of the first non-blank line under each of the six headings",
+      "observed": "6 <table> in the 679-line range: the five retired ones (profiles, role->profile, volumes and mounts, the retired env table, RBAC verbs) each preceded by \"This table is the retired TypeScript daemon's; for the pods Legion runs today see [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).\" and a blank line, and the network-shares table preceded by its own prose (\"A volume may also be an existing network share…\") and no note. All six subsections — Configuration, Cutting over an instance from tmux to pods, Anatomy of a pod, The providers Secret, Contract discipline, RBAC the daemon needs — open with a line naming the retired daemon and pointing at the live section; the four whose subject is not pod anatomy carry a second pointer at their live counterpart.",
+      "headSha": "698ba655be51880eb74a39a8bb59403f4cd74c2f",
+      "negativeControl": "The network-shares table is in the same rendered range and carries no note, so the check distinguishes a noted table from an unnoted one rather than reporting every table noted."
+    },
+    {
+      "criterion": "AC5 and AC6 — neither the runbook's third line nor the retired section's opening schedules the section's removal with packages/daemon at Stage 7, no heading is renamed or removed, and all seventeen repository pointers at \"Operator configuration\" still resolve.",
+      "surface": "The repository at the pushed head, compared with the branch's base, and the file's own anchor graph computed GitHub's way.",
+      "command": "grep -n 'Stage 7' docs/kubernetes.md; jj file show -r 'legion/INFRA-212@origin' docs/kubernetes.md | grep '^#' > /tmp/h.base && grep '^#' docs/kubernetes.md > /tmp/h.head && diff /tmp/h.base /tmp/h.head; a throwaway python slug checker over every ](#…) target; grep -rn 'operator-configuration|Operator configuration' over *.md *.go *.yaml *.yml *.ts outside node_modules and docs/site; cd packages/daemon && go test -count=1 ./internal/config/...",
+      "observed": "'Stage 7' matches nothing. The heading diff is empty: 50 heading slugs before and after, none renamed, moved or removed. All 107 in-file anchors resolve, 0 unresolved, and no '-1' anchor was written. The pointer grep is 20 lines against the base's 18 — the two added are this change's own (the retired opening's mention and the providers-Secret note), and the thirteen pointers outside the runbook are untouched. go test ./internal/config/... ok, so the configuration-load refusal that quotes the heading still passes its assertion.",
+      "headSha": "698ba655be51880eb74a39a8bb59403f4cd74c2f",
+      "negativeControl": "Fed the same slug checker a copy of the file with '### Anatomy of a Sandbox pod' renamed, it reports 28 unresolved anchors; with '### Operator configuration' renamed, 5. So the 0 it reports on the real head is the check working, not the check finding nothing to look at."
+    }
+  ],
+  "filesChanged": [
+    "docs/kubernetes.md — \"Anatomy of a Sandbox pod\" gains the role agent's environment (a paragraph on whose environment it is, an eleven-row table, the placeholder and controller sentences); the gh/git paragraph below it is folded; the retired section's opening, its six subsections' opening lines, the five tables inside them and the runbook's third prose line are marked or corrected."
+  ],
+  "trickyParts": [
+    "The eleven values are the role's AGENT process's environment, not its container's: a role container's own pod spec carries POD_UID alone (testdata/golden/worker.json gives each of the six role containers env of POD_UID alone), and launchEnvironment (manifest.go) splits the rendered environment into the kubelet-resolved entries and the plain NAME=value pairs that travel in the daemon's start command to legion launcher and so to the agent (launcherCommand, launcher.go). The section says so, because written the spec's way it would be false of kubectl exec.",
+    "### Configuration and ### Contract discipline each exist twice in this file, so a bare #configuration or #contract-discipline resolves to the Go daemon's heading. Every link this change adds points at a live heading; none needs or uses a '-1' slug.",
+    "packages/pi-legion/src/skills-guard.test.ts fails on five phrasings anywhere in docs/kubernetes.md ('no GitHub credential', 'never reads GitHub', 'has no App', 'cannot read GitHub', 'holds no repository credential'). The table says 'the runtime sets it in no container' instead; the lane is green.",
+    "GitHub's renderer allows a table to interrupt a paragraph, so the blank line before a table is not what makes it render. The five notes are written with the blank line anyway; the check that catches a broken table is the delimiter row, not the blank line."
+  ],
+  "deviations": [
+    "The plan's AC1 negative control (render the note-plus-table with its blank line removed, expect no <table>) is false of GitHub's renderer: cmark-gfm's table extension lets a table interrupt a paragraph, and that render returns 1 <table> with 12 rows. Replaced with a control that does discriminate: deleting the table's delimiter row returns 0 <table>. Nothing in the document changed because of it — every note still has its blank line.",
+    "The plan's AC3 expected-count list is met exactly (/var/run/legion/gh/ 1, /opt/legion/bin 2, LEGION_CREDENTIAL_HELPER 1, 'grant file' 1), with each match read: the one /var/run/legion/gh/ is the table row, the two /opt/legion/bin are the PATH row and the legion gh wrapper's own path, LEGION_CREDENTIAL_HELPER is the table row, and 'grant file' is the folded prose's pointer at the table.",
+    "The three plan departures recorded in plan.json (the agent process rather than the container; the second pointer on four of the six opening lines; the retired opening naming Operator configuration and Network shares as the exception) are implemented as the plan wrote them."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Line 5 of the runbook also named `packages/daemon` as the TypeScript daemon's own directory, which is the Go module's now. The rewrite drops that parenthetical as well as the Stage 7 clause, so neither sentence names a live path for the retired daemon."
+  ]
+}
