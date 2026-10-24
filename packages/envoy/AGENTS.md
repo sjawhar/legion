@@ -2385,12 +2385,15 @@ SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub
 recorded on every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read
 back by `policy.ParseKindSource`), so a kind change ends a live grant. `policy.Kinds`, `ValidKind`,
 `ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant
-is and how a `github-owners` list reads, which the loader and `agent-secrets secret` both apply. A
-`github-app` secret whose `github-owners` names no account is refused `github-owners-missing`.
+is and how a `github-owners` list reads, and `policy.GitHubOwnersFor` (with `KindNeedsGitHubOwners`)
+the one statement of which kind needs owners, which the loader, `policytest.KindSecret` and
+`agent-secrets secret` create and retag all apply. A `github-app` secret whose `github-owners`
+names no account is refused `github-owners-missing`.
 `Secret.MaxGrant` is a `time.Duration` (0: none) and `Secret.GitHubOwners` the lowercased, sorted
-list as one string, so a `Secret` compares equal to an unchanged reread of itself. A release passes
-the current policy's owners to the minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint`
-asks GitHub for no token for an installation on an account they do not list.
+list as one string, so a `Secret` compares equal to an unchanged reread of itself. `Values` takes
+one policy snapshot for its re-check and passes the same snapshot's owners to the minter in a
+`secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an installation on
+an account they do not list.
 `policy.TagRollbackGuard` and `RollbackGuardValue` (`mint-service-account: kind-secret`) are what
 `agent-secrets secret` writes beside every kind, so a broker of legion-envoy-v13.19.0 to the
 release before kinds refuses the secret (`mint-target-malformed`) rather than serve its stored key;
@@ -2563,11 +2566,16 @@ and each backend writes a map it does not read into (`create(tags)`, `setTags`, 
 AWS `create` writes on the settings' key with those tags and no `ClientRequestToken` (the SDK sets
 one). A `retag` is one write: it either sets tags or removes them, never both, and refuses `none`
 beside another change before any read or write, so a refused call never leaves it half applied.
+Before it writes, create and retag apply the github-owners rule to the kind and owners the secret
+will hold (`checkGitHubOwnersFor`), so neither writes a `github-app` secret without owners, and the
+backend refuses a tag value its store does not take (`refuseTagValues`: on AWS a `github-owners`
+list, since AWS tag values hold no comma, so there it names one account; nothing on GCP).
 One that sets tags describes the secret and sends owner and tier in one `TagResource`, plus `kind`
 (with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM
 condition on the request's tags sees them;
 one that removes tags (`--kind none`, which also removes the rollback guard, `--github-owners
-none`, `--max-grant none`) reads nothing and is one `UntagResource` of those keys. On
+none`, `--max-grant none`) is one `UntagResource` of those keys, and reads the secret's tags first
+only for `--github-owners none`. On
 `AccessDenied` for a retag that sets tags on a
 secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows

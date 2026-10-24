@@ -68,7 +68,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err != nil {
 		return nil, nil, err
 	}
-	if set := m.Policy.Get(); policyVersion != set.Version || anyServiceOwned(set, granted) {
+	// One snapshot of the policy serves both the re-check and the minters' inputs, so a release
+	// mints for the github-owners the grant was just checked against, never a later read's.
+	set := m.Policy.Get()
+	if policyVersion != set.Version || anyServiceOwned(set, granted) {
 		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
 		if err != nil {
 			return nil, nil, err
@@ -87,7 +90,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	values := map[string]string{}
 	released := []string{}
 	for _, g := range granted {
-		value, err := m.release(ctx, g)
+		value, err := m.release(ctx, g, set.Secrets[g.name].GitHubOwnerLogins())
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 		}
@@ -106,12 +109,13 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 
 // release is one granted name's value. A stored secret reads its frozen source. A kind source
 // reads its frozen store source the same way, through the store's own Read (on Secret Manager
-// its deletion verdict is cached for 30 s, as for every secret), then passes that value, with the
-// current policy's github-owners of the name, to the kind's minter and returns only what the
-// minter makes. The owners come from the current policy, not the request, so a list narrowed
-// after a grant holds at the grant's next release. A deleted secret stops releasing once the
-// policy drops it: `agent-secrets secret delete` rereads the name at once.
-func (m *Machine) release(ctx context.Context, g requestedSecret) (string, error) {
+// its deletion verdict is cached for 30 s, as for every secret), then passes that value, with
+// owners, to the kind's minter and returns only what the minter makes. owners is the name's
+// github-owners in the policy snapshot Values checked the grant against, so a list narrowed after
+// a grant holds at the grant's next release, and a name that snapshot does not serve gets none,
+// which the github-app minter refuses. A deleted secret stops releasing once the policy drops it:
+// `agent-secrets secret delete` rereads the name at once.
+func (m *Machine) release(ctx context.Context, g requestedSecret, owners []string) (string, error) {
 	kind, source, minted, err := policy.ParseKindSource(g.source)
 	if err != nil {
 		return "", fmt.Errorf("secret %s: %w", g.name, err)
@@ -127,7 +131,7 @@ func (m *Machine) release(ctx context.Context, g requestedSecret) (string, error
 	if err != nil {
 		return "", err
 	}
-	token, err := mint(ctx, secrets.MintRequest{Value: value, GitHubOwners: m.Policy.Get().Secrets[g.name].GitHubOwnerLogins()})
+	token, err := mint(ctx, secrets.MintRequest{Value: value, GitHubOwners: owners})
 	if err != nil {
 		// The minter's error names its class and why, never the stored value or a token, so the
 		// line is safe to log; the session sees the same words as MINT_FAILED.

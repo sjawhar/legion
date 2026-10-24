@@ -219,10 +219,8 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 		if !ValidKind(kind) {
 			return Secret{}, ReasonKindUnknown, nil
 		}
-		if kind == KindGitHubApp {
-			if s.GitHubOwners, err = ParseGitHubOwners(ls.Tags[TagGitHubOwners]); err != nil {
-				return Secret{}, ReasonGitHubOwnersMissing, nil
-			}
+		if s.GitHubOwners, err = GitHubOwnersFor(kind, ls.Tags[TagGitHubOwners]); err != nil {
+			return Secret{}, ReasonGitHubOwnersMissing, nil
 		}
 		s.Source = KindSource(kind, ls.Source)
 	}

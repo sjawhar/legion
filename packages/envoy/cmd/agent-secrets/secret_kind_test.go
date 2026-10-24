@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/smithy-go"
 
@@ -20,12 +21,12 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	useAWS(t, local, testAccount, adaSignIn)
 	useStdin(t, "stored-value")
 
-	stdout, stderr, code := runSecret("create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "Ada, acme-org", "--max-grant", "1h")
+	stdout, stderr, code := runSecret("create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "Acme-Org", "--max-grant", "1h")
 	if code != 0 {
 		t.Fatalf("create: exit %d, stderr %q", code, stderr)
 	}
 	tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags)
-	if tags[policy.TagKind] != policy.KindGitHubApp || tags[policy.TagMaxGrant] != "1h" || tags[policy.TagGitHubOwners] != "acme-org,ada" {
+	if tags[policy.TagKind] != policy.KindGitHubApp || tags[policy.TagMaxGrant] != "1h" || tags[policy.TagGitHubOwners] != "acme-org" {
 		t.Fatalf("create tags = %v, want kind, github-owners as the broker reads them, and max-grant", tags)
 	}
 	if tags[policy.TagRollbackGuard] != policy.RollbackGuardValue {
@@ -36,7 +37,7 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	}
 
 	stdout, stderr, code = runSecret("show", "APP_KEY")
-	if code != 0 || !strings.Contains(stdout, "kind: github-app") || !strings.Contains(stdout, "github_owners: acme-org,ada") || !strings.Contains(stdout, "max_grant: 1h") {
+	if code != 0 || !strings.Contains(stdout, "kind: github-app") || !strings.Contains(stdout, "github_owners: acme-org") || !strings.Contains(stdout, "max_grant: 1h") {
 		t.Fatalf("show: exit %d stdout %q stderr %q; want kind, github owners and max-grant", code, stdout, stderr)
 	}
 	stdout, stderr, code = runSecret("list")
@@ -99,7 +100,11 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 		t.Fatalf("list: exit %d stdout %q stderr %q; want kind and max-grant", code, stdout, stderr)
 	}
 	for _, kind := range []string{policy.KindGitHubApp, policy.KindGoogleLogin} {
-		if _, stderr, code = runSecret("retag", "LOGIN_KEY", "--kind", kind); code != 0 {
+		args := []string{"retag", "LOGIN_KEY", "--kind", kind}
+		if policy.KindNeedsGitHubOwners(kind) {
+			args = append(args, "--github-owners", "Ada, acme-org")
+		}
+		if _, stderr, code = runSecret(args...); code != 0 {
 			t.Fatalf("retag %s: exit %d, stderr %q", kind, code, stderr)
 		}
 		fake.mu.Lock()
@@ -109,6 +114,11 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 			t.Fatalf("retag %s annotations = %v, want new kind and retained annotations", kind, annotations)
 		}
 	}
+	fake.mu.Lock()
+	if got := fake.secrets[id].secret.GetAnnotations()[policy.TagGitHubOwners]; got != "acme-org,ada" {
+		t.Errorf("github-owners after the round trip = %q, want the comma list GCP keeps: acme-org,ada", got)
+	}
+	fake.mu.Unlock()
 	if _, stderr, code = runSecret("retag", "LOGIN_KEY", "--kind", "none"); code != 0 {
 		t.Fatalf("retag none: exit %d, stderr %q", code, stderr)
 	}
@@ -143,6 +153,112 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 		if code != exitUsageError {
 			t.Fatalf("%v: exit %d stderr %q; want usage error", args, code, stderr)
 		}
+	}
+}
+
+// TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing: the github-owners rule
+// (policy.GitHubOwnersFor) holds on retag as on create, against the kind and owners the secret
+// will hold once the write lands, on both stores, so a retag never writes a github-app secret the
+// broker then refuses as github-owners-missing.
+func TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing(t *testing.T) {
+	refusals := [][]string{
+		{"retag", "PLAIN_KEY", "--kind", policy.KindGitHubApp},
+		{"retag", "APP_KEY", "--github-owners", "none"},
+		{"retag", "PLAIN_KEY", "--github-owners", "ada"},
+	}
+	t.Run("aws", func(t *testing.T) {
+		local := secrets.NewLocal(policytest.Secret("PLAIN_KEY", "ada@example.com", policy.TierAgent, "value"), kindTaggedSecret("APP_KEY"))
+		startSecretBroker(t, servedBy(local))
+		writes := &countingTagWrites{Local: local}
+		useAWS(t, writes, testAccount, adaSignIn)
+		for _, args := range refusals {
+			_, stderr, code := runSecret(args...)
+			if code != exitUsageError || !strings.Contains(stderr, "github") {
+				t.Fatalf("%v: exit %d stderr %q; want a usage error naming the github-owners rule", args, code, stderr)
+			}
+		}
+		if writes.tags != 0 || writes.untags != 0 {
+			t.Fatalf("refused retags made %d TagResource and %d UntagResource calls, want none", writes.tags, writes.untags)
+		}
+		if _, stderr, code := runSecret("retag", "PLAIN_KEY", "--kind", policy.KindGitHubApp, "--github-owners", "ada"); code != 0 {
+			t.Fatalf("retag to github-app with owners: exit %d stderr %q", code, stderr)
+		}
+		if tags := secrets.TagMap(describe(t, local, "PLAIN_KEY").Tags); tags[policy.TagKind] != policy.KindGitHubApp || tags[policy.TagGitHubOwners] != "ada" {
+			t.Fatalf("tags = %v, want github-app with owner ada", tags)
+		}
+		if _, stderr, code := runSecret("retag", "APP_KEY", "--kind", "none", "--github-owners", "none"); code != 0 {
+			t.Fatalf("removing the kind and its owners together: exit %d stderr %q", code, stderr)
+		}
+	})
+	t.Run("gcp", func(t *testing.T) {
+		fake := newFakeSecretManager()
+		startFakeSecretManager(t, fake)
+		useGCPIdentity(t, "authorized_user", "ada@example.com")
+		settings := gcpTestSettings()
+		startSecretBrokerWith(t, settings, gcpServedBy(fake, settings))
+		for _, args := range [][]string{
+			{"create", "PLAIN_KEY", "--owner", "me", "--tier", "agent"},
+			{"create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "acme-org, ada"},
+		} {
+			useStdin(t, "stored-value")
+			if _, stderr, code := runSecret(args...); code != 0 {
+				t.Fatalf("%v: exit %d stderr %q", args, code, stderr)
+			}
+		}
+		annotations := func() map[string]map[string]string {
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			held := map[string]map[string]string{}
+			for id, secret := range fake.secrets {
+				held[id] = maps.Clone(secret.secret.GetAnnotations())
+			}
+			return held
+		}
+		before := annotations()
+		for _, args := range refusals {
+			_, stderr, code := runSecret(args...)
+			if code != exitUsageError || !strings.Contains(stderr, "github") {
+				t.Fatalf("%v: exit %d stderr %q; want a usage error naming the github-owners rule", args, code, stderr)
+			}
+		}
+		after := annotations()
+		for id := range before {
+			if !maps.Equal(after[id], before[id]) {
+				t.Fatalf("annotations of %s after refused retags = %v, want unchanged %v", id, after[id], before[id])
+			}
+		}
+	})
+}
+
+// TestAMultiOwnerGitHubOwnersIsRefusedOnAWSBeforeAnyWrite: AWS's tag values hold no comma, which a
+// github-owners list of several accounts needs, so the AWS backend refuses one before it creates or
+// tags anything; a single owner is written. GCP takes the list (TestSecretKindAndMaxGrantOnGCP).
+func TestAMultiOwnerGitHubOwnersIsRefusedOnAWSBeforeAnyWrite(t *testing.T) {
+	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
+	startSecretBroker(t, servedBy(local))
+	writes := &countingTagWrites{Local: local}
+	useAWS(t, writes, testAccount, adaSignIn)
+	useStdin(t, "stored-value")
+	for _, args := range [][]string{
+		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "acme-org,ada"},
+		{"retag", "APP_KEY", "--github-owners", "acme-org, ada"},
+	} {
+		_, stderr, code := runSecret(args...)
+		if code != exitUsageError || !strings.Contains(stderr, "2 accounts") || !strings.Contains(stderr, "no comma") {
+			t.Fatalf("%v: exit %d stderr %q; want a usage error naming the two accounts and AWS's comma limit", args, code, stderr)
+		}
+	}
+	if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
+		t.Fatal("the refused create made NEW_KEY")
+	}
+	if writes.tags != 0 {
+		t.Fatalf("the refused retag made %d TagResource calls, want none", writes.tags)
+	}
+	if _, stderr, code := runSecret("retag", "APP_KEY", "--github-owners", "Ada"); code != 0 {
+		t.Fatalf("retag to one owner: exit %d stderr %q", code, stderr)
+	}
+	if tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags); tags[policy.TagGitHubOwners] != "ada" {
+		t.Fatalf("tags = %v, want github-owners ada", tags)
 	}
 }
 

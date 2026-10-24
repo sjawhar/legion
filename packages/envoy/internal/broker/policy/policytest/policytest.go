@@ -41,12 +41,13 @@ func Secret(name, owner, tier, value string) secrets.LocalSecret {
 const FixtureGitHubOwners = "acme,ada"
 
 // KindSecret is Secret with a kind tag: a secret whose release the broker mints from value. A
-// github-app secret also carries github-owners (FixtureGitHubOwners), without which the policy
-// refuses it; a test of that refusal deletes the tag.
+// kind that needs github-owners (policy.KindNeedsGitHubOwners) also carries them
+// (FixtureGitHubOwners), without which the policy refuses it; a test of that refusal deletes the
+// tag.
 func KindSecret(name, owner, tier, kind, value string) secrets.LocalSecret {
 	secret := Secret(name, owner, tier, value)
 	secret.Tags[policy.TagKind] = kind
-	if kind == policy.KindGitHubApp {
+	if policy.KindNeedsGitHubOwners(kind) {
 		secret.Tags[policy.TagGitHubOwners] = FixtureGitHubOwners
 	}
 	return secret

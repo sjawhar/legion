@@ -359,12 +359,18 @@ func (b *gcpBackend) set(ctx context.Context, slug, value string) error {
 	return err
 }
 
-func (b *gcpBackend) currentTags(ctx context.Context, slug string) (owner, tier string, err error) {
+func (b *gcpBackend) currentTags(ctx context.Context, slug string) (map[string]string, error) {
 	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-	return secret.GetAnnotations()[policy.TagOwner], secret.GetAnnotations()[policy.TagTier], nil
+	return maps.Clone(secret.GetAnnotations()), nil
+}
+
+// refuseTagValues refuses nothing: Secret Manager's annotations take any value, a github-owners
+// list separated by commas among them.
+func (b *gcpBackend) refuseTagValues(map[string]string) error {
+	return nil
 }
 
 // setTags writes tags into the secret's annotations, and removeTags deletes keys from them, each in

@@ -93,12 +93,11 @@ func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 		if installation.SuspendedAt != nil {
 			continue
 		}
+		// An account with neither a login nor a slug names nothing github-owners can list, so the
+		// owners filter leaves it out like any unlisted account.
 		owner := installation.Account.Login
 		if owner == "" {
 			owner = installation.Account.Slug
-		}
-		if owner == "" {
-			return "", fmt.Errorf("%w: github app %s installation %d names no account", ErrMintUpstream, secret.AppID, installation.ID)
 		}
 		if !slices.Contains(req.GitHubOwners, strings.ToLower(owner)) {
 			continue

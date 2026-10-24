@@ -87,7 +87,9 @@ On a machine whose Application Default Credentials are its own identity, the sam
   writes `mint-service-account: kind-secret`, which makes an earlier broker refuse the secret
   rather than serve its stored key.
 - **`--github-owners`** is required with `--kind github-app`, and refused with any other kind. It
-  lists the GitHub accounts the broker mints installation tokens for, separated by commas.
+  lists the GitHub accounts the broker mints installation tokens for, separated by commas. On the
+  AWS store it names one account, since AWS tag values hold no comma; the CLI refuses a list there
+  before it writes anything.
 - **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
   It must be a duration of at least one second.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
@@ -262,6 +264,8 @@ secret missing an owner or tier tag, name that tag too.
 `--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant. A
 removal is a retag of its own: it changes no other tag, so the cloud refusing it leaves the secret
 as it was. A retag that names `none` beside another change is refused before it writes anything.
+So is a retag that would leave a `github-app` secret without `--github-owners`, as the broker would
+then refuse to serve it, and one that names `--github-owners` on a secret of another kind.
 Run the removal and the other change as two retags:
 
 ```console

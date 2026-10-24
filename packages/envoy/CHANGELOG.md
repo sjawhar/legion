@@ -113,7 +113,9 @@
   `agent-secrets secret create` takes `--kind`, `--github-owners` and `--max-grant`, and `secret
   retag` takes `--kind`, `--github-owners LOGINS|none` and `--max-grant DURATION|none`. A retag
   either sets tags or removes them (`none`), in one write, so a refused write leaves the secret as
-  it was. A retag that names `none` beside another change exits 2 before it writes anything.
+  it was. A retag that names `none` beside another change exits 2 before it writes anything, and
+  so does a create or retag that would leave a `github-app` secret without `github-owners`. On the
+  AWS store `--github-owners` names one account, since AWS tag values hold no comma.
 
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the

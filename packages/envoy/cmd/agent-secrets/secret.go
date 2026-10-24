@@ -387,9 +387,14 @@ type secretBackend interface {
 	// create makes the secret holding value with tags, which always hold owner and tier.
 	create(ctx context.Context, slug string, tags map[string]string, value string) error
 	set(ctx context.Context, slug, value string) error
-	// currentTags answers the secret's current owner and tier, for retag to fill in a tag it did
-	// not receive.
-	currentTags(ctx context.Context, slug string) (owner, tier string, err error)
+	// currentTags answers the secret's current tags (AWS tags, or Secret Manager annotations), for
+	// retag to fill in owner or tier it did not receive and to judge the github-owners rule
+	// against the kind and owners the secret will hold.
+	currentTags(ctx context.Context, slug string) (map[string]string, error)
+	// refuseTagValues refuses, before any write, a tag value this store does not take: AWS's tag
+	// values hold no comma, so a github-owners value there names one account. nil on GCP, whose
+	// annotations take any value.
+	refuseTagValues(tags map[string]string) error
 	// setTags writes tags onto the secret in one call and leaves every other tag as it is.
 	setTags(ctx context.Context, slug string, tags map[string]string) error
 	// removeTags removes keys from the secret in one call and leaves every other tag as it is.
@@ -720,8 +725,8 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err == nil {
 		*githubOwners, err = checkGitHubOwners(*githubOwners, false)
 	}
-	if err == nil && (*kind == policy.KindGitHubApp) != (*githubOwners != "") {
-		err = usageErr{errors.New("--kind github-app and --github-owners go together: the broker refuses a github-app secret that names no GitHub owners")}
+	if err == nil {
+		err = checkGitHubOwnersFor(*kind, *githubOwners, *githubOwners != "")
 	}
 	if err == nil {
 		err = checkMaxGrant(*maxGrant, false)
@@ -738,6 +743,10 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
+	tags := optionalTags(*kind, *githubOwners, *maxGrant)
+	if err := s.backend.refuseTagValues(tags); err != nil {
+		return secretFail(stderr, form, err)
+	}
 	command := []string{"secret", "create", name, "--owner", *owner, "--tier", *tier}
 	if *kind != "" {
 		command = append(command, "--kind", *kind)
@@ -752,7 +761,6 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	tags := optionalTags(*kind, *githubOwners, *maxGrant)
 	tags[policy.TagOwner], tags[policy.TagTier] = ownerValue, *tier
 	if err := s.backend.create(s.ctx, slug, tags, value); err != nil {
 		return secretFail(stderr, form, err)
@@ -796,11 +804,14 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 // retag
 // ---------------------------------------------------------------------------
 
-// cmdSecretRetag changes a secret's owner, tier, kind or max grant, in one cloud write. A retag
-// that names none (--kind none, --max-grant none) removes those tags and does nothing else; any
-// other retag sets tags. A retag that does both is refused before anything is read or written: AWS
-// removes tags only with UntagResource, so it would be two calls, and a refused second call would
-// leave it half applied.
+// cmdSecretRetag changes a secret's owner, tier, kind, GitHub owners or max grant, in one cloud
+// write. A retag that names none (--kind none, --github-owners none, --max-grant none) removes
+// those tags and does nothing else; --kind none also removes the rollback guard written with the
+// kind. Any other retag sets tags. A retag that does both is refused before anything is read or
+// written: AWS removes tags only with UntagResource, so it would be two calls, and a refused second
+// call would leave it half applied. A retag that would leave a github-app secret without GitHub
+// owners, or name owners for a kind that does not read them, is refused before any write
+// (checkGitHubOwnersFor), against the kind and owners the secret holds once the write lands.
 //
 // A retag that sets tags always sends owner and tier, re-sending the one not named as the secret
 // holds it: on AWS, the deployment repository's IAM policy that lets a person tag their own secret
@@ -861,17 +872,33 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	defer s.Close()
 	if len(remove) > 0 {
+		// Only removing the GitHub owners can leave a secret the broker refuses, so only that
+		// removal reads the tags the secret holds first.
+		if *newGitHubOwners == tagNone {
+			current, err := s.backend.currentTags(s.ctx, slug)
+			if err != nil {
+				return secretFail(stderr, form, err)
+			}
+			kind := current[policy.TagKind]
+			if *newKind == tagNone {
+				kind = ""
+			}
+			if err := checkGitHubOwnersFor(kind, "", false); err != nil {
+				return secretFail(stderr, form, err)
+			}
+		}
 		if err := s.backend.removeTags(s.ctx, slug, remove); err != nil {
 			return secretFail(stderr, form, err)
 		}
 		fmt.Fprintf(stdout, "retagged %s (removed %s)\n", name, strings.Join(remove, ", "))
 		return rereadAfter(s, stdout, stderr, form, name, true, nil)
 	}
-	curOwner, curTier, err := s.backend.currentTags(s.ctx, slug)
+	current, err := s.backend.currentTags(s.ctx, slug)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	owner, tier := curOwner, curTier
+	curOwner := current[policy.TagOwner]
+	owner, tier := curOwner, current[policy.TagTier]
 	if *newOwner != "" {
 		if owner, err = ownerTag(*newOwner, email); err != nil {
 			return secretFail(stderr, form, err)
@@ -882,6 +909,19 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	if owner == "" || tier == "" {
 		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
+	}
+	kind, owners := current[policy.TagKind], current[policy.TagGitHubOwners]
+	if *newKind != "" {
+		kind = *newKind
+	}
+	if *newGitHubOwners != "" {
+		owners = *newGitHubOwners
+	}
+	if err := checkGitHubOwnersFor(kind, owners, *newGitHubOwners != ""); err != nil {
+		return secretFail(stderr, form, err)
+	}
+	if err := s.backend.refuseTagValues(set); err != nil {
+		return secretFail(stderr, form, err)
 	}
 	set[policy.TagOwner], set[policy.TagTier] = owner, tier
 	if err := s.backend.setTags(s.ctx, slug, set); err != nil {

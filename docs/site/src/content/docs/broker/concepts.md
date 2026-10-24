@@ -165,9 +165,9 @@ marked with tags or annotations:
   `google-login` for a Google authorized-user login. A secret with a kind must have a current value.
 - **`github-owners`** is required on a `github-app` secret, and read on no other kind. It lists
   the GitHub accounts the broker mints installation tokens for, separated by commas and compared
-  without regard to case. A public App can be installed by any account, so an installation on an
-  account the list does not name gets no token. A `github-app` secret without the tag is refused
-  `github-owners-missing`.
+  without regard to case; an AWS tag value holds no comma, so on that store it names one account.
+  A public App can be installed by any account, so an installation on an account the list does not
+  name gets no token. A `github-app` secret without the tag is refused `github-owners-missing`.
 - **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
   secret must use `--ttl` no longer than the tag.
 - **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value

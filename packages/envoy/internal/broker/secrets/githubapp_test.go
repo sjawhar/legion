@@ -405,3 +405,46 @@ func TestGitHubAppMintLeavesOutAnAccountItsOwnersDoNotList(t *testing.T) {
 		t.Fatalf("Mint with no github-owners = %v, want refused", err)
 	}
 }
+
+// TestGitHubAppMintSkipsAnInstallationThatNamesNoAccount: an installation whose account carries
+// neither a login nor a slug names no account github-owners can list, so it is left out like any
+// unlisted installation, and the listed owners still mint: one outsider's malformed installation
+// never fails the whole release.
+func TestGitHubAppMintSkipsAnInstallationThatNamesNoAccount(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 1, "account": map[string]string{}},
+				{"id": 2, "account": map[string]string{"login": "ada"}},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			asked = append(asked, r.URL.Path)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "token-" + r.URL.Path, "expires_at": "2026-10-23T13:00:00Z"})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	value, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "ada"))
+	if err != nil {
+		t.Fatalf("Mint beside an installation that names no account: %v", err)
+	}
+	var got mintedGitHubApp
+	if err := json.Unmarshal([]byte(value), &got); err != nil {
+		t.Fatalf("Mint output: %v", err)
+	}
+	if _, ok := got.Installations["ada"]; !ok || len(got.Installations) != 1 {
+		t.Fatalf("Mint installations = %v, want ada alone", got.Installations)
+	}
+	if !slices.Equal(asked, []string{"/app/installations/2/access_tokens"}) {
+		t.Fatalf("token requests = %v, want ada's alone", asked)
+	}
+}

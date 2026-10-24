@@ -119,6 +119,24 @@ func ParseGitHubOwners(raw string) (string, error) {
 	return strings.Join(owners, ","), nil
 }
 
+// KindNeedsGitHubOwners reports whether a secret of kind must carry a github-owners tag naming at
+// least one account. Only a github-app secret reads the tag.
+func KindNeedsGitHubOwners(kind string) bool {
+	return kind == KindGitHubApp
+}
+
+// GitHubOwnersFor is the github-owners rule every reader and writer of a secret's tags applies:
+// the loader, and `agent-secrets secret create` and `retag` before they write. For a kind that
+// needs owners (KindNeedsGitHubOwners) it answers ParseGitHubOwners of raw, and
+// ErrGitHubOwnersMissing when raw names no account; for any other kind the tag is not read, and it
+// answers "".
+func GitHubOwnersFor(kind, raw string) (string, error) {
+	if !KindNeedsGitHubOwners(kind) {
+		return "", nil
+	}
+	return ParseGitHubOwners(raw)
+}
+
 // KindSource is the Source of a kind secret: its kind frozen beside the store's own source.
 // A store's source never starts with KindSourcePrefix (an AWS source starts with "arn:", a
 // Secret Manager one with "projects/").

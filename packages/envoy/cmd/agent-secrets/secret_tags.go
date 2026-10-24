@@ -65,6 +65,25 @@ func checkGitHubOwners(owners string, orNone bool) (string, error) {
 	return parsed, nil
 }
 
+// checkGitHubOwnersFor applies the broker's github-owners rule (policy.GitHubOwnersFor) to the
+// kind and owners a secret will hold once a write lands, so create and retag refuse, before any
+// write, a github-app secret the broker would then refuse as github-owners-missing. named says the
+// command itself named --github-owners: owners named for a kind that does not read them are
+// refused too, since the broker would ignore them, while owners the secret already holds are left
+// alone whatever its kind becomes.
+func checkGitHubOwnersFor(kind, owners string, named bool) error {
+	if !policy.KindNeedsGitHubOwners(kind) {
+		if named {
+			return usageErr{fmt.Errorf("--github-owners is read only on a %s secret, and this one's kind is %q", policy.KindGitHubApp, kind)}
+		}
+		return nil
+	}
+	if _, err := policy.GitHubOwnersFor(kind, owners); err != nil {
+		return usageErr{fmt.Errorf("a %s secret needs --github-owners naming at least one GitHub account, or the broker refuses it as %s", kind, policy.ReasonGitHubOwnersMissing)}
+	}
+	return nil
+}
+
 // optionalTags is the kind, github-owners and max-grant tags the flags set: each flag's value
 // when it names one, and nothing for one left unset or set to none. A kind brings the rollback
 // guard with it (policy.TagRollbackGuard), so a broker from before kinds refuses the secret rather
