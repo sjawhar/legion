@@ -23,23 +23,28 @@ Check this list first: each of these is on your `PATH` now, and needs no runner.
 
 ## Why a sixth is an image change, not an install
 
-Your container is an unprivileged user with no writable system prefix: `/usr/local/bin`, `/opt` and
-`/home` are read-only, and `apt-get` cannot take dpkg's lock even to download.
+Your container is an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
+are read-only, `/home` is read-only too, and `apt-get` cannot take dpkg's lock even to download.
+`$HOME` — `/home/legion`, the one writable directory under that read-only `/home` — is yours to
+write.
 
 ```text
 $ apt-get install -d -y postgresql-client
 E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)
 ```
 
-Unpacking files under `$HOME` or the issue's disk is a different question, and on the mechanics the
-answer is not a flat no: `redis-cli`, `sqlite3` and `dig` did run from an extraction prefix with
-`LD_LIBRARY_PATH` set, and `psql` did not — Debian's `/usr/bin/psql` is a Perl wrapper that loads
-`PgCommon.pm` through Perl's own search path, which no extraction prefix is on. Legion rules the
-attempt out whichever way it would have gone: an extraction prefix is the withheld `operator-setup`
-capability (next section). So the answer for a role is never an extraction, however much room the
-issue's disk has: for everything the five do not cover, the one documented step is a pinned run
-through one of the three package runners the image already carries, and a tool no runner reaches is
-an image change ("When no runner reaches it", below).
+So that writable `$HOME`, and the issue's disk, are where an install for yourself would go, and on
+the mechanics the answer is not a flat no: `redis-cli`, `sqlite3` and `dig` did run from an
+extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not — Debian's
+`/usr/bin/psql` is a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no
+extraction prefix is on. What rules the attempt out is not the filesystem but the next section's
+ruling: an extraction prefix is the withheld `operator-setup` capability, for what it leaves every
+later process resolving. That verdict is about resolution, so it reads the same in a container that
+does hand you a writable `/usr/local/bin`, and the room on the issue's disk does not touch it
+either. For everything the five do not cover, the one documented step is a pinned run through one
+of the three package runners the image already carries — plus `uv run --with` when what you need is
+a library rather than a command — and a tool no runner reaches is an image change ("When no runner
+reaches it", below).
 
 ## What the withheld capability is, and what it is not
 
@@ -64,31 +69,47 @@ three artefacts in this repository are what draw the line — not a claim about 
   package at run time is something Legion does, not something it withholds.
 
 So the withheld row is about a dependency **the pod carries**: something that outlives the command
-that created it, and that another process or a later launch then resolves *differently* because it
-is there. That last clause is the test to apply to a new case — after your command exits, does
-anything else resolve differently?
+that created it, and that a later launch or another role's process then resolves *without asking
+for it*. That last clause is the test to apply to a new case — after your command exits, what does
+something else now resolve that it never named?
 
-- A pinned runner run: no. `uvx --from httpie@3.2.4 http --version` leaves a cache entry addressed
-  by that coordinate and that version; the same line next time gets the same bytes whether the
-  cache was warm or cold, and nothing else on the pod resolves anything differently for it. That is
-  the sanctioned side, and it is the side the three forms below are on.
-- An extraction prefix: yes. Unpacking Debian packages under `$HOME` and exporting
-  `LD_LIBRARY_PATH` changes what every later command in that shell — and every subagent that
-  inherits the environment — resolves `psql` or its libraries to, on a prefix nothing records,
-  pins or rebuilds. That is a dependency the pod carries, configured by the role, which is why the
-  extraction option is rejected (`docs/kubernetes.md`, the extraction row of the options table)
-  even for the three clients that did run from it.
+- A pinned runner run: nothing. `uvx --from httpie@3.2.4 http --version` leaves a cache entry
+  addressed by that coordinate and that version, which the next command reaches only by writing the
+  same pin; no `PATH`, no interpreter and no library search of any other process changes. That is
+  the sanctioned side, and it is the side the forms below are on.
+- A repository's own dependency set: nothing either, which is why the caches are provisioned at
+  all. `uv sync` or `bun install` in your workspace materialises what that project already
+  declares, into that project's own directory, which a process reaches by asking for that project
+  and no other way — and the runtime puts `UV_PYTHON_INSTALL_DIR` and the workspace itself on the
+  issue's volume exactly so a later pod reuses it.
+- An extraction prefix: everything in reach of it. Unpacking Debian packages under `$HOME` and
+  exporting `LD_LIBRARY_PATH` changes what every later command in that shell — and every subagent
+  that inherits the environment — resolves `psql` or its libraries to, asked for or not, on a
+  prefix nothing records, pins or rebuilds. That is a dependency the pod carries, configured by the
+  role, which is why the extraction option is rejected (`docs/kubernetes.md`, the extraction row of
+  the options table) even for the three clients that did run from it.
 
-A repository's own dependency set is on the sanctioned side too, for the same reason the caches
-are: `uv sync` or `bun install` in your workspace materialises what that project already declares,
-and the runtime puts `UV_PYTHON_INSTALL_DIR` and the workspace itself on the issue's volume exactly
-so a later pod reuses it.
+The test is about what a command leaves for other processes, never about getting the same bytes
+twice — because a pinned line does not promise the same bytes. What a pin binds is the named
+distribution at that version; its dependency closure is resolved when the command runs. With
+`UV_CACHE_DIR` emptied, `uvx -v --from httpie@3.2.4 http --version` logs `Selecting:
+requests==2.34.2 [compatible]` and resolves `urllib3` and `certifi` from ranges, where the warm run
+prints `3.2.4` at once off the cache that first run filled. When your work needs the closure pinned
+too — a comparison that has to hold across days or across pods — that is a project's own lockfile
+with `uv run` or `bun install` in a workspace, not a one-off runner line.
 
-What the artefacts do not settle: a pinned runner run whose *tool* then installs something of its
-own outside the runner's cache — a browser download, a second toolchain under `$HOME`. The command
-is the sanctioned form and what it leaves behind is not, and no capability row or runtime provision
-covers it either way. Treat that as unsettled and ask the architect that owns your issue, rather
-than reading either half of it as the rule.
+A pinned run whose tool then installs something of its own — a browser download, a second toolchain
+under `$HOME` — is on the sanctioned side when both of these hold: what it writes lands under the
+issue's own volume through the documented variables, and after the command exits nothing else
+resolves differently. A browser download under a relocated browsers path passes both. It is the
+withheld capability when either fails — anything that writes into a system prefix, and anything
+that leaves a toolchain, shim or binary which a later launch or another role's process will resolve
+without asking for it. The test is resolution, not disk: a second toolchain under `$HOME` that only
+an explicit absolute path reaches is sanctioned; the same toolchain put where `PATH` finds it is
+operator setup, whoever typed the command. The three artefacts above are the whole of that line's
+ground. Disk is not: the issue's volume is 49 GiB with 2.5 GiB used and every cache already
+relocated onto it, and a sanctioned install is paid once per issue, on the issue's own disk, by the
+issue's roles together.
 
 ## The three pinned runner forms
 
@@ -111,6 +132,26 @@ than reading either half of it as the rule.
   github.com/nats-io/natscli/nats@v99.99.99 --version` fails closed, exit 1, with
   `go: github.com/nats-io/natscli/nats@v99.99.99: invalid version: unknown revision nats/v99.99.99`.
 
+## When you need a library, not a command
+
+The three forms above run somebody else's command. When what you need is a package available to
+code of your own — PyYAML to read a file, not a CLI — the form is `uv run --with
+<package>==<version> --no-project` ahead of the program you are running:
+
+```text
+$ uv run --with pyyaml==6.0.2 --no-project python -c "import yaml; print(yaml.__version__)"
+Installed 1 package in 12ms
+6.0.2
+```
+
+That whole run is 0.597 s wall, the install included. `--no-project` keeps it off whatever
+`pyproject.toml` happens to sit above your working directory, so it behaves the same wherever you
+type it, and `--with` takes a requirement specifier (`==<version>`), not a runner coordinate
+(`@<version>`). It is on the sanctioned side for the same reason a `uvx` run is: it fills
+`UV_CACHE_DIR` and leaves nothing another process resolves. Reaching for a command runner instead
+is the mistake the next section's `uvx pyyaml@6.0.2 --version` shows — uv installs the project and
+then finds no executable, because a library has none to find.
+
 ## Always write the exact coordinate and the exact version
 
 A pin has two halves, and a runner resolves what you asked for only when both are right:
@@ -131,6 +172,9 @@ reads what the publisher put in its own `package.json`. npm verifies none of it:
 this check by copying two strings, and a legitimate package that sets no `homepage` reads like a
 squat. Evidence, never proof.
 
+**A check whose evidence the subject controls is not a check.** Carry that past npm: every line
+below the next prompt was written by the party whose identity is in question.
+
 ```text
 $ npm view biome version description repository.url homepage
 version = '0.3.3'
@@ -147,19 +191,30 @@ someone else's package. What settles it is biomejs.dev telling you to install `@
 the site you reached without npm's help.
 
 **What a registry can attest.** npm verifies a provenance attestation when it is published, so it
-is the one part of an entry a publisher cannot forge by writing a string:
+is the one part of an entry a publisher cannot forge by writing a string. What it proves is *build
+origin*: the attestation binds the artifact to the repository and workflow that built it. Presence
+is not identity — a squat published from its own public Actions workflow carries a genuine
+attestation of its own repository — so the check is to read whose build it names, and compare that
+with the repository the project's own documentation gave you:
 
 ```text
-$ npm view @biomejs/biome dist.attestations
-{
-  url: 'https://registry.npmjs.org/-/npm/v1/attestations/@biomejs%2fbiome@2.6.3',
-  provenance: { predicateType: 'https://slsa.dev/provenance/v1' }
-}
-$ npm view biome dist.attestations
+$ npm view @biomejs/biome dist.attestations.url
+https://registry.npmjs.org/-/npm/v1/attestations/@biomejs%2fbiome@2.6.3
+$ curl -s "$(npm view @biomejs/biome dist.attestations.url)" \
+    | jq -r '.attestations[] | select(.predicateType=="https://slsa.dev/provenance/v1") | .bundle.dsseEnvelope.payload' \
+    | base64 -d | jq -r '.predicate.buildDefinition.externalParameters.workflow.repository'
+https://github.com/biomejs/biome
 ```
 
-Present for the project, empty for the squatter. Its limit runs the other way: most packages
-publish no provenance at all, so an empty answer is not evidence of a squat.
+That field is the SLSA v1 predicate's `buildDefinition.externalParameters.workflow`, which here
+reads `{"ref": "refs/heads/main", "repository": "https://github.com/biomejs/biome", "path":
+".github/workflows/release.yml"}` — the repository biomejs.dev sent you to, building on its own
+main branch. The comparison is what makes the attestation worth anything: on its own it says only
+that *some* repository built these bytes. (`jq` in your bash tool is the harness's builtin, and a
+script gets `/usr/bin/jq`; both print this.)
+
+Its limit runs the other way: most packages publish no provenance at all — `npm view biome
+dist.attestations` prints nothing — so an absent attestation is no evidence of a squat.
 
 PyPI publishes attestations only for projects that release through a trusted publisher, and widely
 used tools do without: for `ruff 0.14.0`, `https://pypi.org/pypi/ruff/0.14.0/json` carries no
