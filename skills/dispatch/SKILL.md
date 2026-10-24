@@ -98,6 +98,8 @@ Outside Legion, the session doing the work moves its issue and the children it o
 
 A design decision a document records is a decision block in it, at every phase, approved or not. A block in an approved document makes the approval stale until its answer. A Legion phase worker sends the decision to its architect (`skill://legion-worker`). A to-do or permission only a human can give, or a decision with no document, is a `dispatch ask`. The gates apply to both.
 
+In a Legion session, a role or any of its subagents that finds a problem outside its own issue never files an issue for it (the issue creation in [Your owner](#your-owner) included). It opens a `dispatch ask` as `skill://legion-worker/references/findings.md` says, on the issue that reference names. That overrides "Ask on your own issue" in gate 1, and gate 4's rule to ask nothing beside what the human asked for.
+
 ### Before you ask
 
 1. **Does it need the human's authority, taste or risk appetite?** Your lane decides schema shapes, field names and migration internals. Decide them in the plan or code, not in the spec. Settle a two-lane contract over Envoy, with no ask. A halt condition passes the gate. That is an IAM change, deleting or exposing production data, or anything that reaches a customer. Ask on your own issue.

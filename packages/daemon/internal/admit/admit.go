@@ -158,9 +158,10 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
-			// An issue in todo that nobody handed to Legion is a candidate for the controller's
-			// walk, which otherwise runs only at its start and when a slot frees. The notice waits
-			// todoWakeDelay, so the events of one edit burst find it pending and fold into it.
+			// An issue in todo that nobody handed to Legion wakes the controller while a slot stands
+			// free; the controller takes nothing for it, since only a person hands Legion work
+			// (skill://legion-controller, "Free slots"). The notice waits todoWakeDelay, so the
+			// events of one edit burst find it pending and fold into it.
 			free, err := a.slotFree(ctx, tx)
 			if err != nil || !free {
 				return nil, err
@@ -203,10 +204,11 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 }
 
 // wakeForFreeSlot wakes the controller when this transaction released a slot that promotion left
-// free: a tree finished or left the workflow and no waiting root took its place, so the controller
-// picks the next root to hand to Legion (skill://legion-controller). It is one `slot-free` notice
-// on the first issue whose slot was released, under the same rules as every walk wake: a slot
-// free by slotFree, a registered controller, none already unsent (wakeController).
+// free: a tree finished or left the workflow and no waiting root took its place. The controller
+// names the free slot in its summary and takes no issue for it (skill://legion-controller, "Free
+// slots"). It is one `slot-free` notice on the first issue whose slot was released, under the same
+// rules as every slot wake: a slot free by slotFree, a registered controller, none already unsent
+// (wakeController).
 func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []string) error {
 	if len(released) == 0 {
 		return nil
@@ -223,8 +225,9 @@ func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []s
 // burst of edits is one wake rather than one a poll.
 const todoWakeDelay = 30 * time.Second
 
-// slotFree says whether an admission slot stands free for the controller to fill: fewer slots in
-// use than the cap, counting a slot a waiting root will take as taken.
+// slotFree says whether an admission slot stands free: fewer slots in use than the cap, counting a
+// slot a waiting root will take as taken. The controller is woken about it and takes nothing for
+// it; only a person hands Legion work (skill://legion-controller, "Free slots").
 func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if a.cap <= 0 {
 		return false, nil
