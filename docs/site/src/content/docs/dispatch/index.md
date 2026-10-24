@@ -63,3 +63,5 @@ you have not read it.
 - [Documents](/legion/dispatch/documents/): specs, versions, comments, suggestions, and decisions.
 - [Agents](/legion/dispatch/agents/): messaging agents, broadcasts, and the live view.
 - [Keyboard shortcuts](/legion/dispatch/keyboard/): every shortcut, by page.
+- [Dispatch in Claude](/legion/dispatch/claude-skill/): a skill that lets Claude, in Claude in
+  Chrome or on claude.ai, walk you through all of this.
