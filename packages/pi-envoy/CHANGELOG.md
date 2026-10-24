@@ -60,6 +60,10 @@
   holds only what the person settled, ask in stages, "density is the problem, not length", and
   "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
   reach 2,000 words.
+- `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
+  only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
+  such changes into one version. Any other fix goes in the plan or a comment, so the person is not
+  asked to approve the spec again for a small change.
 - The `dispatch` command's notice after a primary spec with no ask block says that a person does
   not watch the session's chat and sees its need only through an open ask or a spec that waits for
   approval (INFRA-140). The notice for a typed-block opening stored as text cites

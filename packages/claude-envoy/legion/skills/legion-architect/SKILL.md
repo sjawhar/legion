@@ -180,7 +180,10 @@ you), except the version a human's own answer to a decision block writes when th
 whole change since the version they approved: Dispatch then records an `approved` review in their
 name pinned to the new version and emits `artifact.approved`, and the daemon reopens the gate and
 sends `design-approved`. So edit an approved root spec only when its Summary, its Acceptance, the
-tree's scope, or a decision a human settled in one of its decision blocks changes. Such a change is
+tree's scope, or a decision a human settled in one of its decision blocks changes. A corrected
+citation, a better sentence, a measurement that confirms the spec, or a renamed file is none of
+these. Put it in the plan, a comment on the issue, or the next handoff, and make no new version.
+Put every change that needs approval into one version. A change that needs approval is
 a point the human has not agreed to: put the problem behind it to them as its own decision block,
 with its evidence, at the end of the section it changes, and add nothing else to the spec, since
 the question and its evidence go inside the block. An edit inside the block before the answer

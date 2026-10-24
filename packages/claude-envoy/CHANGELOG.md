@@ -88,7 +88,8 @@
   `dist/envoy-channel.js`, `dist/session-hook.js`) prints the new notice after a primary spec with
   no ask block: a person does not watch the session's chat, and sees its need only through an open
   ask or a spec that waits for approval. `dispatch issue --spec` and `dispatch doc-edit` point at
-  `skill://dispatch-writing-specs`.
+  `skill://dispatch-writing-specs`. After approval, `dispatch-writing-specs` makes a new version only
+  for a change to scope, acceptance, cost, risk or a person's decision, all in one version.
 
 - The bundled Dispatch tools (`dist/dispatch.js`, `dist/envoy-channel.js`, `dist/session-hook.js`)
   carry the 32,000-character body limit, up from 2,000 (INFRA-45): the `comment`, `suggest` and

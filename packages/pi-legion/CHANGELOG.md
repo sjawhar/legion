@@ -82,6 +82,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   architect's own record when it bears on the work; otherwise the architect sends it to the
   controller with what dropping it would cost, and the controller puts it to the person as a
   question on the issue that surfaced it.
+- `legion-architect`: after approval, a corrected citation, a better sentence, a measurement that
+  confirms the spec or a renamed file makes no new version of the root spec. It goes in the plan, a
+  comment on the issue or the next handoff, and every change that needs approval goes into one
+  version, so the person approves the spec again only when scope, acceptance or their decision
+  changes.
 
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
