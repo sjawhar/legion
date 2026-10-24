@@ -1,8 +1,12 @@
 package secrets
 
 import (
+	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 )
 
@@ -12,14 +16,16 @@ import (
 const mintResponseLimit = 1 << 20
 
 // mintStatusError is an upstream answer whose status is not the one the call wanted. It wraps
-// ErrMintRefused for a 4xx and ErrMintUpstream for anything else.
+// ErrMintRefused for a 4xx and ErrMintUpstream for anything else. It names the numeric status
+// alone: an upstream's reason phrase is its own text, which a malformed or hostile answer can fill
+// with what the request sent.
 type mintStatusError struct {
-	what, who, status string
-	code              int
+	what, who string
+	code      int
 }
 
 func (e *mintStatusError) Error() string {
-	return fmt.Sprintf("%s: %s returned %s", e.what, e.who, e.status)
+	return fmt.Sprintf("%s: %s answered HTTP %d", e.what, e.who, e.code)
 }
 
 func (e *mintStatusError) Unwrap() error {
@@ -30,28 +36,57 @@ func (e *mintStatusError) Unwrap() error {
 }
 
 // mintCall sends request with client (http.DefaultClient when nil) and reads at most
-// mintResponseLimit of its answer. what names the call and who the upstream in its errors, none
-// of which quotes the request or the answer. A status other than want is a *mintStatusError,
-// returned with the body, so a caller can read the upstream's own reason; every other failure
-// wraps ErrMintUpstream.
+// mintResponseLimit of its answer. what names the call and who the upstream in its errors. No error
+// quotes the request, the answer or the transport's own text: Go's HTTP client quotes a malformed
+// status line, and a status line or body can echo the credential the request carried, so a failed
+// call is named by its class alone (transportFailure). A status other than want is a
+// *mintStatusError, returned with the body, so a caller can read the upstream's own reason from it;
+// every other failure wraps ErrMintUpstream.
 func mintCall(client *http.Client, request *http.Request, what, who string, want int) ([]byte, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrMintUpstream, what, err)
+		return nil, fmt.Errorf("%w: %s: %s %s", ErrMintUpstream, what, who, transportFailure(request.Context(), err))
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, mintResponseLimit+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: read %s: %w", ErrMintUpstream, what, err)
+		return nil, fmt.Errorf("%w: read %s: %s %s", ErrMintUpstream, what, who, transportFailure(request.Context(), err))
 	}
 	if len(body) > mintResponseLimit {
 		return nil, fmt.Errorf("%w: %s: %s answered more than %d bytes", ErrMintUpstream, what, who, mintResponseLimit)
 	}
 	if response.StatusCode != want {
-		return body, &mintStatusError{what: what, who: who, status: response.Status, code: response.StatusCode}
+		return body, &mintStatusError{what: what, who: who, code: response.StatusCode}
 	}
 	return body, nil
+}
+
+// transportFailure names the class of a failed call or body read, never its text: the request was
+// cancelled or ran out of time, the upstream's name did not resolve, it could not be reached, its
+// TLS handshake failed, or its answer ended early. Any other failure, such as a status line that is
+// not HTTP, "gave no usable HTTP answer".
+func transportFailure(ctx context.Context, err error) string {
+	var dns *net.DNSError
+	var op *net.OpError
+	var certificate *tls.CertificateVerificationError
+	var record tls.RecordHeaderError
+	var timeout interface{ Timeout() bool }
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled):
+		return "was cancelled before it answered"
+	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeout) && timeout.Timeout():
+		return "did not answer in time"
+	case errors.As(err, &dns):
+		return "could not be resolved"
+	case errors.As(err, &certificate) || errors.As(err, &record):
+		return "failed its TLS handshake"
+	case errors.As(err, &op):
+		return "could not be reached"
+	case errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF):
+		return "ended its answer early"
+	}
+	return "gave no usable HTTP answer"
 }

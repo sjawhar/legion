@@ -35,6 +35,21 @@ type googleTokenError struct {
 	Subtype string `json:"error_subtype"`
 }
 
+// googleReauthSubtypes are the invalid_grant subtypes Google answers for a login that must sign in
+// again to prove itself, the two google-auth-library-python's reauth.py names. A refusal names
+// one of them, or "unknown" for any other value: the subtype is Google's own text, and an answer
+// that echoed the refresh token there must not reach the session or the log.
+var googleReauthSubtypes = map[string]bool{"invalid_rapt": true, "rapt_required": true}
+
+// googleSubtype is subtype as a refusal names it: itself when googleReauthSubtypes holds it,
+// "unknown" otherwise.
+func googleSubtype(subtype string) string {
+	if googleReauthSubtypes[subtype] {
+		return subtype
+	}
+	return "unknown"
+}
+
 // Mint returns the bare Google access token. It never puts a stored credential or returned token
 // in an error, and every error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
 func (m GoogleLogin) Mint(ctx context.Context, req MintRequest) (string, error) {
@@ -68,7 +83,7 @@ func (m GoogleLogin) Mint(ctx context.Context, req MintRequest) (string, error) 
 		var tokenError googleTokenError
 		if json.Unmarshal(payload, &tokenError) == nil && tokenError.Code == "invalid_grant" {
 			if tokenError.Subtype != "" {
-				return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (%s)", ErrMintRefused, tokenError.Subtype)
+				return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (%s)", ErrMintRefused, googleSubtype(tokenError.Subtype))
 			}
 			return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant", ErrMintRefused)
 		}
