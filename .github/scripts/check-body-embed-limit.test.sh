@@ -236,6 +236,70 @@ check "exits 1" "$(is "$status" 1)"
 check "names the site that must name the other" \
   "$(contains "$out" 'the comment above maxInputChars (packages/envoy/internal/dispatch/embed/embed.go:5) does not name DISPATCH_BODY_MAX')"
 
+echo "case: a /* ... */ block whose body lines carry no leading *"
+root=$(fixture block-comment)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+export const DISPATCH_TITLE_MAX = 200;
+
+/*
+  The longest body the server accepts, in UTF-16 code units. It must never exceed the embedder's
+  maxInputChars (packages/envoy/internal/dispatch/embed/embed.go).
+*/
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "reads the whole block, not its closing line alone" \
+  "$(contains "$out" 'body limit 14500 (packages/contracts/src/dispatch-tools.ts:7) fits the embedder.s 19000')"
+
+echo "case: a Go doc comment written on the const ( group, not on its one member"
+root=$(fixture group-doc-comment)
+cat > "$root/packages/envoy/internal/dispatch/embed/embed.go" <<'GO'
+package embed
+
+// The longest text handed to the model, in runes; DISPATCH_BODY_MAX
+// (packages/contracts/src/dispatch-tools.ts) must never exceed it.
+const (
+	maxInputChars = 19000
+)
+GO
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "reads the group's doc comment as its member's" \
+  "$(contains "$out" 'fits the embedder.s 19000 (packages/envoy/internal/dispatch/embed/embed.go:6), and each names the other')"
+
+echo "case: a trailing same-line comment on each declaration, with none above either"
+root=$(fixture trailing-comment)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+export const DISPATCH_BODY_MAX = 14500; // never past maxInputChars (embed.go)
+TS
+cat > "$root/packages/envoy/internal/dispatch/embed/embed.go" <<'GO'
+package embed
+
+const (
+	maxInputChars = 19000 // bounds DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts)
+)
+GO
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "credits the comment the declaration patterns already accept" \
+  "$(contains "$out" 'body limit 14500 (packages/contracts/src/dispatch-tools.ts:1) fits the embedder.s 19000 (packages/envoy/internal/dispatch/embed/embed.go:4), and each names the other')"
+
+echo "case: a /* ... */ block that does not name maxInputChars"
+root=$(fixture block-comment-no-xref)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+/*
+  The longest body the server accepts, in UTF-16 code units.
+*/
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the site that must name the other" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:4) does not name maxInputChars')"
+check "says what to write there" \
+  "$(contains "$out" 'write maxInputChars into the comment above DISPATCH_BODY_MAX')"
+
 echo "case: contracts/AGENTS.md names each constant on a different line"
 root=$(fixture contracts-agents)
 cat > "$root/packages/contracts/AGENTS.md" <<'MD'

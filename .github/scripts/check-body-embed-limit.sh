@@ -111,17 +111,33 @@ def declaration(path: str, lines: list[str], const: str, pattern: str) -> Declar
     return Declaration(int(match.group(1)), number)
 
 
-def comment_block_above(lines: list[str], line_number: int) -> str:
-    """The unbroken run of comment lines directly above the declaration: `//` lines, or a
-    `/** ... */` block."""
+def attached_comment(lines: list[str], line_number: int) -> str:
+    """Every comment the declaration carries: the trailing comment on its own line (the patterns
+    admit nothing but `//...` after the number), and the unbroken run of comment lines directly
+    above it - `//` lines, and a `/* ... */` block taken whole, however its inner lines are
+    written. A `const (` opener is transparent, so a Go doc comment written on a one-member group
+    reaches its member. Anything else - a blank line, another declaration, code - ends the run."""
     block: list[str] = []
+    declaration = lines[line_number - 1]
+    trailing = declaration.find("//")
+    if trailing >= 0:
+        block.append(declaration[trailing:])
     index = line_number - 2
     while index >= 0:
         stripped = lines[index].strip()
-        if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
+        if stripped == "const (":
+            index -= 1
+            continue
+        if stripped.endswith("*/"):
+            while index >= 0:
+                stripped = lines[index].strip()
+                block.append(stripped)
+                index -= 1
+                if stripped.startswith("/*"):
+                    break
+            continue
+        if stripped.startswith("//"):
             block.append(stripped)
-            if stripped.startswith("/*"):
-                break
             index -= 1
             continue
         break
@@ -129,7 +145,7 @@ def comment_block_above(lines: list[str], line_number: int) -> str:
 
 
 def cross_reference(path: str, lines: list[str], line: int, const: str, other: str) -> None:
-    if other in comment_block_above(lines, line):
+    if other in attached_comment(lines, line):
         return
     where = f"the comment above {const} ({path}:{line})"
     problem(
