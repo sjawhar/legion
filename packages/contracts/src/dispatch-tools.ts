@@ -205,7 +205,10 @@ export const ASK_QUESTION_MAX = 800;
  * Longest comment, comment edit, message and broadcast body the Dispatch server accepts, in
  * UTF-16 code units. Generated into Go as `contracts.DispatchBodyMax`, which the server enforces,
  * and as `dispatch.MessageBodyLimit` for the Legion daemon, whose `record.MessagePostLimit`
- * subtracts its outbox marker from it.
+ * subtracts its outbox marker from it. Never raise it past `maxInputChars` in
+ * `packages/envoy/internal/dispatch/embed/embed.go`, the length at which a comment or message
+ * body is embedded: past it a body's tail is dropped from search by meaning with no error, and
+ * `.github/scripts/check-body-embed-limit.sh` fails the build.
  */
 export const DISPATCH_BODY_MAX = 32000;
 

@@ -45,10 +45,12 @@ exceeds it.
 
 `embed.maxInputChars` is 32,000 **runes** and `DISPATCH_BODY_MAX` is now 32,000 **UTF-16 units**.
 A body's UTF-16 length is never less than its rune count, so a body at the cap is at most 32,000
-runes and nothing truncates today. The two numbers are now equal, with nothing linking them: the
-next raise of the body cap starts truncating comment embeddings silently, degrading meaning search
-for the tail of a long comment with no error and no failing test. Anyone moving the body cap again
-reads `embed.go` first.
+runes and nothing truncates today. This change left the two numbers equal with nothing linking
+them: the next raise of the body cap would have started truncating comment embeddings silently,
+degrading meaning search for the tail of a long comment with no error and no failing test. That
+link is now held by `.github/scripts/check-body-embed-limit.sh` (INFRA-110), which fails the build
+when `DISPATCH_BODY_MAX` passes `maxInputChars`, and each number's own site names the other.
+Anyone moving the body cap again still reads `embed.go` first.
 
 ## Evidence (INFRA-45, sjawhar/legion#2097)
 
