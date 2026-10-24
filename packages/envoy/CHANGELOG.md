@@ -103,7 +103,8 @@
   installation tokens for every installation of the GitHub App that is not suspended.
   `google-login` releases contain a Google access token. A kind secret holds its key or refresh
   token as a current value, which the broker never returns, and a mint GitHub or Google refuses
-  is `502 MINT_FAILED` with their reason. `max-grant` limits a request's `--ttl`; a missing or
+  is `502 MINT_FAILED` with their reason, logged at ERROR as `broker: mint failed` with the
+  secret's name, kind and the failure's class. `max-grant` limits a request's `--ttl`; a missing or
   longer lifetime is `400 GRANT_REQUIRES_LIFETIME`, and a `max-grant` set or lowered later ends a
   longer live grant (`GRANT_NOT_LIVE`) and refuses approval of a longer pending request
   (`NOT_APPROVER`). `BROKER_MINT_TARGETS` is removed and the broker refuses it when it is set.

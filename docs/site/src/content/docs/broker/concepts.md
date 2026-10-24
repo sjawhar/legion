@@ -250,8 +250,9 @@ one, so none of its versions carries the `AWSCURRENT` label). A request for a se
 refused `UNKNOWN_SECRET` before anyone is asked to approve it, and a live grant of it releases
 nothing until the broker serves the secret again.
 
-The policy's **version** is the SHA-256 of every served secret's name, owner, tier, source, kind
-and max grant, recorded on every request.
+The policy's **version** is the SHA-256 of every served secret's name, owner, tier, source and max
+grant, recorded on every request. A kind secret's source names its kind, so a kind change moves the
+version too.
 
 ## Requests and grants
 
@@ -269,10 +270,12 @@ reason of at most 400 characters. The broker evaluates every name
   GitHub App value holds an App identifier and private key. Its release returns a JSON object with
   one installation token for each installation of the App that is not suspended. A Google login
   value holds an `authorized_user` refresh-token credential. Its release returns a bare access
-  token. The broker reads the stored value for every release. It never returns the stored App key
-  or refresh token. A deleted kind secret therefore stops releasing at once. A release GitHub or
-  Google refuses, such as a Google login that needs a new sign-in, is refused `MINT_FAILED` with
-  their reason.
+  token. The broker reads the stored value for each release, as it reads any secret, and mints from
+  it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client
+  keeps the release until its `expires_at` rather than asking again for each use. A deleted kind
+  secret stops releasing as any deleted secret does. A release GitHub or Google refuses, such as a
+  Google login that needs a new sign-in, is refused `MINT_FAILED` with their reason, and the broker
+  logs it for its operator.
 - A secret with `max-grant` needs `--ttl` no longer than that duration. A request with no `--ttl`,
   or a longer one, is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
   `max-grant` set or lowered later holds what came before it to the new bound: a live grant that
