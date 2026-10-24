@@ -236,10 +236,10 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 The broker writes no secret. A person creates, changes and deletes agent secrets with
 `agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/)), which calls
 the store itself under that person's own cloud sign-in - AWS, their own IAM Identity Center
-sign-in; GCP, their own Application Default Credentials, refusing a service account's - so that
-cloud's own IAM is what decides who may change which secret, and with the tags (AWS) or
-annotations (GCP), who gets it. The CLI asks the broker only for its settings (`GET
-/v1/settings`) and, after each write, for a reread. Before anything else it refuses, on AWS, a
+sign-in; GCP, their own Application Default Credentials, refusing any but a person's own Google
+Account sign-in - so that cloud's own IAM is what decides who may change which secret, and with
+the tags (AWS) or annotations (GCP), who gets it. The CLI asks the broker only for its settings
+(`GET /v1/settings`) and, after each write, for a reread. Before anything else it refuses, on AWS, a
 sign-in in another account than the agent-secrets key's (GCP needs no equivalent: every GCP call
 already names the project explicitly, so the API itself refuses one in another project), and for
 a write any sign-in but a person's own; those checks are the CLI's, and the cloud's IAM is the
