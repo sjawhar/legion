@@ -1023,8 +1023,37 @@ describe("dispatchToolSpecs", () => {
       "dispatch_artifact",
       "Never upload a document's own name to change it (spec.md replaces the spec whole); edit it with dispatch doc-edit. Uploading the same name again makes its next version.",
     ],
+    [
+      "dispatch_ask",
+      "Measure what you can first, and put the measurement and the size of the population it covers in the question; drop an option that cannot fix most of that population, never offer it cut down, and keep an option not to act (Hold). Set urgency high when your work halts on the answer, and keep working on everything else.",
+    ],
+    [
+      "dispatch_issue_update",
+      "Never reassign an issue a person holds to get a faster answer: who holds it is their call.",
+    ],
+    [
+      "dispatch_message",
+      "keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside arrives as a user message: answer in the conversation, with no dispatch message.",
+    ],
   ])("%s's description, which --help prints, holds the rule moved from the skill", (name, rule) => {
     expect(specFor(name).description).toContain(rule);
+  });
+
+  test.each([
+    ["dispatch_issue", "assignee", "Set it only when a person said who owns the issue."],
+    [
+      "dispatch_read",
+      "ref",
+      "dispatch://PROJECT/artifact/<slug>[@vN], and its /ask/<id> and /comment/<id>; or the dashboard URL of one.",
+    ],
+  ])("%s's %s flag help holds the rule moved from the skill", (name, field, rule) => {
+    const fields = specFor(name).arguments(schemaApi) as unknown as Record<
+      string,
+      { description?: string; unwrap?: () => { description?: string } }
+    >;
+    const argument = fields[field];
+    const description = argument?.description ?? argument?.unwrap?.().description ?? "";
+    expect(description).toContain(rule);
   });
 
   test("dispatch_follow takes a full ask id and follow or unfollow, nothing else", () => {

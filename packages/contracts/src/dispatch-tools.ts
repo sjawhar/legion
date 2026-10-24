@@ -371,7 +371,7 @@ export const dispatchToolSpecs = [
       assignee: z
         .string()
         .describe(
-          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned."
+          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned. Set it only when a person said who owns the issue."
         )
         .optional(),
       components: componentsArgument(z).optional(),
@@ -407,7 +407,8 @@ export const dispatchToolSpecs = [
       "link (so a link can move to the issue that replaced it); everything else, priority " +
       "included, waits for the reopen. " +
       "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
-      "settable here. At least one " +
+      "settable here. Never reassign an issue a person holds to get a faster answer: who holds it " +
+      "is their call. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -531,7 +532,10 @@ export const dispatchToolSpecs = [
       ASK_OPTIONS_CONTRACT +
       " For an action only a human can perform, state what it changes and risks as constraints. " +
       "Anything that requires a human to do, including a credential or grant renewal, is an ask, " +
-      "never a message. " +
+      "never a message. Measure what you can first, and put the measurement and the size of the " +
+      "population it covers in the question; drop an option that cannot fix most of that " +
+      "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " +
+      "when your work halts on the answer, and keep working on everything else. " +
       "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
       `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` +
@@ -822,7 +826,10 @@ export const dispatchToolSpecs = [
       "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " +
       "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
       "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " +
-      "that conversation back. Every other message names its issue. " +
+      "that conversation back. " +
+      "Every other message names its issue; keep --issue whenever the frame you answer gave one. A BTW, Aside or Steer " +
+      "frame carries a reply_with command: answer with it, on that issue. On Oh My Pi an Agents-page Send or Aside " +
+      "arrives as a user message: answer in the conversation, with no dispatch message. " +
       `Body is at most ${DISPATCH_BODY_MAX} characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z
@@ -1133,7 +1140,15 @@ export const dispatchToolSpecs = [
           "Document artifact id, slug, or filename: one of the issue's, or a project document."
         )
         .optional(),
-      ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      ref: z
+        .string()
+        .describe(
+          "Optional dispatch:// reference: dispatch://KEY, dispatch://KEY/spec, " +
+            "dispatch://KEY/artifact/<slug>[@vN], dispatch://KEY/ask/<id>, dispatch://KEY/comment/<id>, " +
+            "dispatch://KEY/message/<id>, dispatch://PROJECT/artifact/<slug>[@vN], and its " +
+            "/ask/<id> and /comment/<id>; or the dashboard URL of one."
+        )
+        .optional(),
       message: z
         .string()
         .describe(

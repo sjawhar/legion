@@ -10,7 +10,6 @@ Dispatch holds each issue's spec, asks, comments and documents. It is a record f
 - Use the `dispatch` command; the HTTP API is only for what no command does. `dispatch <command> --help` gives each command's rules, limits and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`). Give object and list fields as JSON.
 - Exit 1 means Dispatch refused, 2 a usage error. A refusal lists each problem and what to fix: fix them all, then call once.
-- File work only in a project `dispatch projects` lists, never one from the environment.
 - `DOC_SERVICE_UNAVAILABLE` means the document is reloading and nothing was written. Wait a few seconds and repeat the call.
 
 ## Asks and ask blocks
@@ -30,7 +29,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 - An ask stands alone: its view does not show the issue's comments.
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask again in a new block.
-- A person's reply to an open ask asks you to clarify: answer with `dispatch comment --reply-to-ask`. Use `--turn agent` for a note that needs nothing from them.
+- Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
 - When an answer's option and its typed text disagree, the text is the answer.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
 - An ask reaches the issue's assignee. On an unassigned issue, name who must answer.
@@ -61,7 +60,7 @@ Outside Legion, claim your issue (`dispatch claim`) and move it and the children
 
 ## Architecture components
 
-Attach each architectural issue to the components it changes (`--components-json`), the root before you decompose it. Use `"mode":"none"` only for work that is not architectural, with a reason. Change code and `.dispatch/architecture/<id>.md` in the same review.
+Attach each architectural issue to the components it changes (`--components-json`), the root before you decompose it. Change code and `.dispatch/architecture/<id>.md` in the same review.
 
 ## References
 
@@ -78,7 +77,7 @@ dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
 ```
 
-A bare id or filename is not a reference. An ask or comment id can be a unique prefix of 8 hex characters or more.
+A bare id or filename is not a reference. An id can be a unique prefix of 8 hex characters.
 
 ## Setup and the HTTP API
 

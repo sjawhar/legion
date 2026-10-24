@@ -48,10 +48,30 @@ queue or hold outcome and route it to the live owner named by the deployment's r
 or use a GitHub credential from the controller. Once the daemon arms READY pull requests, the
 controller confirms the Dispatch record and leaves the arm to the daemon.
 
+## The owner audit
+
+At each pass, run `dispatch issues --project <KEY> --priority 0 --priority 1 --limit 250` and read
+every page. These shapes show up only when you run the check:
+
+- Each unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone builds it,
+  or it closes. Rows in flight or claimed are not staffed again.
+- A close that says the defect cannot happen cites the code that prevents it. Without one, the
+  issue is unread, not foreclosed.
+- **Unstaffed work:** a plan or measurement exists, and nobody builds it.
+- **Unrecorded delivery:** a merged pull request names an issue not yet in `testing` or `done`.
+  Check it live, then move it.
+- **Unrecorded practice:** someone does the issue's work by hand more than once; your own messages
+  show it. Fix the status.
+- **Unreachable route:** list it with `dispatch issues --project <KEY> --route-status no_holder
+  --limit 250`, whatever its priority. A route is unowned only when two reads at least ten minutes
+  apart both list it, since a restarting session is absent for minutes. Then staff the role,
+  route the issue to a live holder, or clear the route and assign it. `unknown` means the listener
+  did not answer.
+
 ## Recovering stopped-session work
 
-Treat a session route as stopped only after the owner audit's two `no_holder` reads at least ten
-minutes apart. Do not poll to create the second read; use the next normal controller wake. Confirm
+Treat a session route as stopped only after the owner audit's two `no_holder` reads (above), at
+least ten minutes apart. Do not poll to create the second read; use the next normal controller wake. Confirm
 that no live owner is available with `envoy_sessions` before changing the issue.
 
 For work that the plan or its handoff says moves to Legion when its session stops, preserve its
