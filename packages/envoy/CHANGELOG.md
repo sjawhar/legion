@@ -26,9 +26,7 @@
   a copied machine file's key enrolls nothing more. The token endpoint checks each DPoP proof
   against `BROKER_PUBLIC_URL`, never the request's `Host` or `X-Forwarded-*` headers, accepts a
   proof within `BROKER_PROOF_SKEW_SECONDS` of the broker's clock, and spends a per-address rate
-  limit bucket of its own (429 `RATE_LIMITED` with `Retry-After`). A login through the earlier
-  `POST /v1/launcher-credentials` route, which cannot refresh, keeps its seven-day credential, or
-  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter. The provider's device codes, tokens,
+  limit bucket of its own (429 `RATE_LIMITED` with `Retry-After`). The provider's device codes, tokens,
   DPoP proofs and nonces and its HMAC secret live in the tables migration 0016 creates. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
   its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
   logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
@@ -506,6 +504,20 @@
 
 ### Changed
 
+- **Breaking:** the secrets broker serves a person's machine login only through the OAuth device
+  grant. `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
+  the login helpers before legion-envoy 14 used, answer `404`, and migration 0017 drops their
+  `machine_login_polls` table. A broker of the release before this one still boots on the
+  migrated database, its two removed routes answering 500. Dispatch's routes are unchanged:
+  `GET /v1/launcher-credentials`, `POST /v1/launcher-credentials/{id}/revoke-by-approver`,
+  `POST /v1/machine-logins/lookup` and the record decisions, as is the Legion daemon's
+  `POST /v1/launcher-credentials/token`. A login such a route opened and left pending is still
+  decided by its code; its machine learns nothing of it and logs in again.
+- **Breaking:** `agent-secrets-helper` answers `enroll-box` and `unenroll-box`, the ops of an
+  `agent-secrets` before legion-envoy 10, `BAD_REQUEST unknown op`; `agent-secrets enroll` and
+  `unenroll` ask only `enroll-session-key` and `unenroll-session-key`, never falling back to a
+  helper before legion-envoy 10; and `agent-secrets enroll` takes no `--kind`, so
+  `--kind box` exits 2.
 - **Breaking:** the secrets broker needs `BROKER_MACHINE_LOGIN_URL`, the absolute http(s) URL of
   Dispatch's machine-login page (`https://<dispatch>/credentials/machine`), and refuses to start
   without it. The device authorization answer's `verification_uri` names that page, where the
@@ -513,9 +525,7 @@
 - **Breaking:** `agent-secrets-helper` logs a machine in only through the broker's OAuth routes
   (`POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`), so it needs a secrets
   broker of this release: against an earlier broker, `agent-secrets machine login` fails. Upgrade
-  the broker before the helpers. The broker still serves `POST /v1/launcher-credentials` and
-  `GET /v1/launcher-credentials/{pending}` for helpers from earlier releases, whose logins it never
-  refreshes.
+  the broker before the helpers.
 - `BROKER_LAUNCHER_CREDENTIAL_SECONDS` defaults to 2592000 (30 days), up from 604800 (7 days), and
   is how long a machine login lasts without a refresh: an approval mints its credential for that
   long, and each refresh moves its expiry to that long from then. Its maximum stays 2592000.
@@ -766,15 +776,8 @@
   answered with that request and `coalesced: true`. Wait for the named request to be decided, or
   `agent-secrets cancel` it and ask again.
 - The helper's `enroll-box` and `unenroll-box` ops are `enroll-session-key` and
-  `unenroll-session-key`, which name no kind, and `agent-secrets enroll --helper` needs no `--kind`.
-  Every older client keeps working: the helper still answers `enroll-box` and `unenroll-box`, from
-  an `agent-secrets` before this release, as the new pair, logging `a client asked a legacy op`;
-  this `agent-secrets` asks a helper before this release, which answers
-  `unknown op enroll-session-key`, its `enroll-box` and `unenroll-box` instead, saying so on
-  stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
-  until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
-  naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
-  refused for that first, whatever `--kind` it carries, as before.
+  `unenroll-session-key`, which name no kind, and `agent-secrets enroll --helper` takes no
+  `--kind`. An `enroll` without `--helper` is refused for that first, as before.
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not

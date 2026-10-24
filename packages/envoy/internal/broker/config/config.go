@@ -142,8 +142,6 @@ type Config struct {
 	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login lasts without a refresh. An
 	// approval mints its credential for this long, and each refresh moves its expiry to this long
 	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
-	// A login through the earlier route (POST /v1/launcher-credentials), which cannot refresh,
-	// lasts seven days or this, whichever is shorter.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.

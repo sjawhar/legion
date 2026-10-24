@@ -21,9 +21,8 @@ import (
 )
 
 // Request is the client's one line. Op is register, sign, sign-request, sign-launcher,
-// unregister, sessions, login, login-status, enroll-session-key or unenroll-session-key; an older
-// CLI's enroll-box and unenroll-box are answered as the last two (oldCLISessionKeyOps). A field
-// the helper does not read is ignored, so that CLI's "kind" costs nothing.
+// unregister, sessions, login, login-status, enroll-session-key or unenroll-session-key; any other
+// op is answered BAD_REQUEST, `unknown op <op>`. A field the helper does not read is ignored.
 type Request struct {
 	Op              string   `json:"op"`
 	Method          string   `json:"method,omitempty"`           // sign, sign-launcher: the HTTP method of the broker call

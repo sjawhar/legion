@@ -126,11 +126,9 @@ credential, so a box keeps working after the machine's credential expires, and t
 expired login, marked as expired with sessions still running, until its last session ends. Whoever
 approved a person's machine login is its operator. A lapsed or revoked login means logging the
 machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
-a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). The broker also
-serves the login helpers from earlier releases use, `POST /v1/launcher-credentials` and its poll
-`GET /v1/launcher-credentials/{pending}`: it mints the same credential but no refresh token, so
-that login lapses seven days after its approval, or `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after it
-when that is shorter. A service's login has no
+a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A machine logs in
+through the device grant alone: the broker answers the earlier `POST /v1/launcher-credentials`
+login and its poll `404`. A service's login has no
 operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
 ends every pod it enrolled at once: a service login a person approved through a code before
 services logged in with their tokens, until it expires, and a service's token login, which names no
