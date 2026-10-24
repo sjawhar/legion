@@ -325,6 +325,27 @@ check "names the site that must name the other" \
 check "says what to write there" \
   "$(contains "$out" 'write maxInputChars into the comment above DISPATCH_BODY_MAX')"
 
+echo "case: a // comment line that ends with */ above the declaration"
+# RED (tester, round 2): `attached_comment` tests `stripped.endswith("*/")` before
+# `stripped.startswith("//")`, so an ordinary `//` line whose text happens to end with `*/`
+# is taken for a block comment's closing line. The walk then consumes upward looking for an
+# opening `/*`, and when the file holds none it credits every line above the declaration -
+# here a `maxInputChars` mention on line 1 that is attached to nothing. The declaration's own
+# comment names nothing about the embedder, so this tree must be refused.
+root=$(fixture starslash-comment)
+cat > "$root/packages/contracts/src/dispatch-tools.ts" <<'TS'
+// History: maxInputChars was named here once, and this line documents nothing below it.
+export const DISPATCH_TITLE_MAX = 200;
+
+// The longest body the server accepts, in UTF-16 code units.
+// The deprecated spelling of this comment was a block: /* in UTF-16 units */
+export const DISPATCH_BODY_MAX = 14500;
+TS
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "does not credit a mention attached to nothing far above" \
+  "$(contains "$out" 'the comment above DISPATCH_BODY_MAX (packages/contracts/src/dispatch-tools.ts:6) does not name maxInputChars')"
+
 echo "case: contracts/AGENTS.md names each constant on a different line"
 root=$(fixture contracts-agents)
 cat > "$root/packages/contracts/AGENTS.md" <<'MD'
