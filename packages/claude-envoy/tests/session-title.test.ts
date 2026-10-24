@@ -311,8 +311,8 @@ test.skipIf(!hasTmux)(
       const pid = execFileSync("tmux", ["-S", socket, "display-message", "-p", "#{pid}"], {
         encoding: "utf8",
       }).trim()
-      // A child of its own with no TMUX, LANG, LC_ALL or LC_CTYPE: tmux prints a tab as `_` only to
-      // such a client, and this process's own environment may have either.
+      // A child of its own with no TMUX, LANG, LC_ALL or LC_CTYPE: tmux prints a tab as `_` to a
+      // client with neither TMUX nor a UTF-8 locale, and this process's own environment may have one.
       const source = join(import.meta.dir, "../src/session-title.ts")
       const child = Bun.spawnSync(
         [
