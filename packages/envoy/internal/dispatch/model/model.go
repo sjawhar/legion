@@ -535,6 +535,22 @@ type ArtifactReviewEventPayload struct {
 	AskID      *string `json:"ask_id"`
 }
 
+// ArtifactHumanEditedEventPayload is the payload of artifact.human_edited, which Dispatch appends
+// once a document has been quiet for a while after a person's settled browser edit: the versions
+// the quiet window spans (FromVersion is the one before the window's first person's version,
+// ToVersion the window's last person's version), the people who wrote them, and the unified diff
+// of the two versions' stored markdown, cut at its last line end within 4,096 bytes, with
+// DiffTruncated saying it was cut.
+type ArtifactHumanEditedEventPayload struct {
+	ArtifactID    string   `json:"artifact_id"`
+	Name          string   `json:"name"`
+	FromVersion   int      `json:"from_version"`
+	ToVersion     int      `json:"to_version"`
+	Editors       []string `json:"editors"`
+	Diff          string   `json:"diff"`
+	DiffTruncated bool     `json:"diff_truncated"`
+}
+
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
 // lists a table block's rows and cells; nil for every other block.
 type ArtifactBlock struct {

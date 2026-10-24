@@ -3,12 +3,17 @@ package docs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // defaultEditNoticeQuiet is how long a document stays quiet after a person's last settled version
@@ -69,4 +74,173 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 		return fmt.Errorf("open edit notice: %w", err)
 	}
 	return nil
+}
+
+// editNoticeLease names the lease one sweep runs under, editNoticeInterval the sweep's period and
+// its ticker's, editNoticeBatch the most due notices one sweep sends, and editNoticeDiffBytes the
+// most a notice's diff holds. A notice is due at most editNoticeInterval before a sweep sends it,
+// so a person's edit reaches its sessions within the quiet time plus five seconds.
+const (
+	editNoticeLease     = "edit-notices"
+	editNoticeInterval  = 5 * time.Second
+	editNoticeBatch     = 20
+	editNoticeDiffBytes = 4096
+)
+
+// dueEditNotices lists the documents whose quiet window has ended, oldest first. It is read with no
+// lock: each id is claimed on its own, under its owner's lock, by dueEditNotice.
+const dueEditNotices = `
+	select artifact_id::text from document_edit_notices
+	where due_at <= now() order by due_at limit $1`
+
+// dueEditNotice claims one due notice by deleting it. A settlement that moved the window on since
+// the unlocked read leaves it not due, and another process's sweep that sent it leaves no row: in
+// both the delete returns nothing and this sweep sends nothing.
+const dueEditNotice = `
+	delete from document_edit_notices where artifact_id = $1 and due_at <= now()
+	returning from_version, to_version, editors, last_editor`
+
+// RunEditNotices sends each document's edit notice once its quiet window ends: one
+// artifact.human_edited event, which reaches the sessions the document credits and its issue's
+// route (outbox.publishAuthorRoutes). It sweeps at start and every editNoticeInterval until ctx
+// ends, under the edit-notices lease, so one process sweeps a period however many serve the
+// database. The window is a row, not a timer, so a notice still pending when a process stops is
+// sent by the next sweep of any process.
+func (s *Service) RunEditNotices(ctx context.Context, leases duty.Leases) {
+	ctx = store.WithTransactionTracking(ctx)
+	for {
+		duty.Exclusive(ctx, leases, editNoticeLease, editNoticeInterval, func(ctx context.Context) {
+			sent, err := s.sendDueEditNotices(ctx)
+			if err != nil && ctx.Err() == nil {
+				slog.Error("dispatch: send edit notices", "error", err)
+			}
+			if sent > 0 {
+				slog.Info("dispatch: sent edit notices", "notices", sent)
+			}
+		})
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(editNoticeInterval):
+		}
+	}
+}
+
+// sendDueEditNotices sends up to editNoticeBatch due notices, each in a transaction of its own, and
+// reports how many it sent. A notice it cannot send is logged and left due for the next sweep, so
+// one document never holds back the others; err is the read of the due ids alone.
+func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
+	ctx = store.WithTransactionTracking(ctx)
+	rows, err := s.store.Pool.Query(ctx, dueEditNotices, editNoticeBatch)
+	if err != nil {
+		return 0, fmt.Errorf("list due edit notices: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, fmt.Errorf("list due edit notices: %w", err)
+	}
+	if s.afterEditNoticeIDs != nil {
+		s.afterEditNoticeIDs(ids)
+	}
+	sent := 0
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return sent, nil
+		}
+		ok, err := s.sendEditNotice(ctx, id)
+		if err != nil {
+			slog.Error("dispatch: send an edit notice", "artifact", id, "error", err)
+			continue
+		}
+		if ok {
+			sent++
+		}
+	}
+	return sent, nil
+}
+
+// sendEditNotice claims artifactID's due notice and appends its artifact.human_edited event in one
+// transaction, then publishes the event once it commits, and reports whether it sent one. It takes
+// the locks in the settlement's order: the document owner's (lockArtifactOwner), then the notice
+// row, which the settlement writes after its version (recordEditNotice), then the events' own
+// (events.Broker.Append, which takes the owner's lock again and the commit-order lock). No
+// statement here locks `for update`.
+//
+// A document deleted since the unlocked read has taken its notice with it (on delete cascade), and
+// one whose issue has closed takes no more edits: either way nothing is sent, and a closed issue's
+// notice is dropped.
+func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, error) {
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin edit notice transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	owner, open, err := lockArtifactOwner(ctx, tx, artifactID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var payload model.ArtifactHumanEditedEventPayload
+	var editors, lastEditor []byte
+	err = tx.QueryRow(ctx, dueEditNotice, artifactID).Scan(&payload.FromVersion, &payload.ToVersion, &editors, &lastEditor)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("claim edit notice: %w", err)
+	}
+	if !open {
+		return false, tx.Commit(ctx)
+	}
+	if err := json.Unmarshal(editors, &payload.Editors); err != nil {
+		return false, fmt.Errorf("decode edit notice editors: %w", err)
+	}
+	var actor model.Actor
+	if err := json.Unmarshal(lastEditor, &actor); err != nil {
+		return false, fmt.Errorf("decode edit notice last editor: %w", err)
+	}
+	before, beforeFound, err := editNoticeVersionMarkdown(ctx, tx, artifactID, payload.FromVersion)
+	if err != nil {
+		return false, err
+	}
+	after, afterFound, err := editNoticeVersionMarkdown(ctx, tx, artifactID, payload.ToVersion)
+	if err != nil {
+		return false, err
+	}
+	if beforeFound && afterFound {
+		payload.Diff, payload.DiffTruncated = text.UnifiedDiffCut(before, after, editNoticeDiffBytes)
+	}
+	payload.ArtifactID = artifactID
+	payload.Name = owner.Name
+	event := model.Event{IssueKey: owner.IssueKey, Type: "artifact.human_edited", Actor: actor, Payload: payload}
+	if owner.IssueKey == nil {
+		event.ArtifactID = &artifactID
+	}
+	appended, err := s.events.Append(ctx, tx, event)
+	if err != nil {
+		return false, fmt.Errorf("append edit notice: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit edit notice: %w", err)
+	}
+	s.events.Publish(appended)
+	return true, nil
+}
+
+// editNoticeVersionMarkdown reads the markdown of artifactID's version number, and reports whether that
+// version is stored: a rebuild can leave a notice naming a version that is not.
+func editNoticeVersionMarkdown(ctx context.Context, tx pgx.Tx, artifactID string, number int) (string, bool, error) {
+	var markdown string
+	err := tx.QueryRow(ctx, `
+		select coalesce(markdown, '') from artifact_versions where artifact_id = $1 and number = $2
+	`, artifactID, number).Scan(&markdown)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read document version %d: %w", number, err)
+	}
+	return markdown, true, nil
 }
