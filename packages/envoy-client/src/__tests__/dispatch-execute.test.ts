@@ -16,6 +16,7 @@ import {
 } from "@legion/contracts";
 import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { z } from "zod";
+import { cliRefusals } from "../dispatch-cli";
 import type { ExecFn } from "../dispatch-cwd";
 import {
   type DispatchToolResult,
@@ -5001,6 +5002,8 @@ describe("executeDispatchTool", () => {
       // but its line no longer sends the agent to doc-edit, since an answered block already
       // carries its own record and needs no restatement.
       expect(lines[4]).toContain('"Question of b-4?" (block b-4, ask ask-b-4)');
+      // The CLI prints this refusal as it is: a transcript reader finds it, naming the command.
+      expect(cliRefusals(refusal)).toEqual([{ line: lines[0], command: "request-approval" }]);
       expect(lines[4]).toContain("answered but still open in version 4");
       expect(lines[4]).not.toContain("doc-edit");
       expect(refusal).toContain("even when a human asked for it");
@@ -5298,6 +5301,8 @@ describe("executeDispatchTool", () => {
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
           "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
         ]);
+        const [line] = (await outcome).split("\n");
+        expect(cliRefusals(await outcome)).toEqual([{ line, command: "doc-edit" }]);
         expect(reads).toEqual([
           "/api/v1/artifacts/artifact-42/blocks",
           "/api/v1/issues/DSP-42/asks?state=open",

@@ -10,10 +10,12 @@
 //   score.ts runs <runs dir> [<scenario>]
 //     One row per run, then counts per scenario and label, and a legend saying what each count
 //     is. Each scenario's rule is on the function that scores it: askOnMessage,
-//     measureBeforeAsk, testerProof, brainstormSurface. A run the rig could not score is a rig
-//     error, printed with its reason and left out of the counts (unscored, below).
+//     measureBeforeAsk, testerProof, brainstormSurface, and specRow for spec-writing and
+//     spec-rewrite. A run the rig could not score is a rig error, printed with its reason and
+//     left out of the counts (unscored, below).
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 import { z } from "zod";
 import {
   CheckableFile,
@@ -507,13 +509,13 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   return { run, scenario: "tester-proof", label, pass, ref, notes: notes.join(" ") };
 }
 
-// spec-writing and spec-rewrite (INFRA-140 plan, Task 1.3, "Scores"). A run is a design
-// conversation between a fresh agent and a person stand-in on the run's own issue. Its directory
-// holds what rig.sh, seed.ts and judge.ts recorded: the source (source/), the turns (turns.txt,
-// state-<turn>.json), the captured issue (spec.md, spec-versions/, agent-asks.json,
+// spec-writing and spec-rewrite: how a fresh agent writes a design spec with a person. A run is a
+// design conversation between a fresh agent and a person stand-in on the run's own issue. Its
+// directory holds what rig.sh, seed.ts and judge.ts recorded: the source (source/), the turns
+// (turns.txt, state-<turn>.json), the captured issue (spec.md, spec-versions/, agent-asks.json,
 // agent-texts.json, documents/, plan.md) and the judges' answers (faults.json and the rest).
 
-/** Contract C2: the spec's `##` headings, exactly and in this order. */
+/** The outline every spec must follow: its `##` headings, exactly and in this order. */
 export const OUTLINE = [
   "Summary",
   "Problem",
@@ -798,6 +800,15 @@ function writesSpec(call: DispatchCall, fixture: SpecFixture, text: string): boo
     );
   return false;
 }
+/** Whether a tool result holds a refusal the dispatch CLI printed for one of `calls`
+ * (`cliRefusals`, the CLI's own reader of its refusal lines), which a pipe does not hide the way
+ * it hides the CLI's exit: a usage refusal, or a `was not called` line naming one of the calls'
+ * commands. */
+function cliRefusal(calls: DispatchCall[], text: string): boolean {
+  return cliRefusals(text).some(
+    (refusal) => refusal.command === null || calls.some((call) => call.command === refusal.command)
+  );
+}
 /** The skill file a tool call reads, if any: a `read` of a skill:// target or of a file under a
  * `skills/<name>/` directory, or a shell command that names one. A `dispatch` call or a `task`
  * assignment that names a skill reads nothing. */
@@ -951,7 +962,7 @@ function blank(text: string, pattern: RegExp): string {
   return text.replace(pattern, (hit) => hit.replace(/[^\n]/g, " "));
 }
 const withoutFences = (text: string) => blank(text, /^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm);
-/** outline: what keeps a spec from contract C2. Its `##` headings are exactly OUTLINE's, in order.
+/** outline: what keeps a spec from the outline. Its `##` headings are exactly OUTLINE's, in order.
  * It holds a requirement and a check. Each `**R<n>.**` paragraph names its source after `From:`,
  * and each `**A<n>.**` paragraph names at least one `R<n>`. */
 function outlineProblems(spec: string): string[] {
@@ -1163,9 +1174,10 @@ const indented = (text: string, depth = 6) =>
     .map((line) => `${" ".repeat(depth)}${line}`)
     .join("\n");
 
-/** spec-writing and spec-rewrite: one row per run, from the INFRA-140 plan's "Scores" (Task 1.3).
+/** spec-writing and spec-rewrite: one row per run, with the eight scores below.
  * The row passes when its eight scores pass; `judged` gives the judges' counts, which pass or fail
- * nothing here (Task 2.6 holds each one to its own condition).
+ * nothing here: the acceptance run of the skills that replace dispatch-brainstorming holds each
+ * count to its own bound.
  *   - outline: outlineProblems finds nothing.
  *   - checked: the transcript holds at least one spec write (writesSpec: a write Dispatch made of
  *     the run's own primary spec), a spec-only check (specWork) came before every one, the first
@@ -1229,16 +1241,24 @@ function specRow(
     details.push(`finding of check ${row.check} neither fixed nor recorded: ${row.finding}`);
 
   const refused: string[] = [];
-  for (const [place, step] of all.entries()) {
+  /** Whether a step's dispatch call was refused: its tool failed (for `bash`, with exit 1 or 2), or
+   * its result holds a refusal the dispatch CLI printed itself, which a pipe can hide the exit of. */
+  const refusedCall = (step: Step): boolean => {
     const outcome = results.get(step.id);
     const calls = dispatchCalls(step);
-    if (calls.length === 0 || outcome === undefined || !outcome.failed) continue;
-    if (step.tool === "bash" && outcome.exit !== 1 && outcome.exit !== 2) continue;
+    if (calls.length === 0 || outcome === undefined) return false;
+    if (cliRefusal(calls, outcome.text)) return true;
+    return outcome.failed && (step.tool !== "bash" || outcome.exit === 1 || outcome.exit === 2);
+  };
+  for (const [place, step] of all.entries()) {
+    const outcome = results.get(step.id);
+    if (outcome === undefined || !refusedCall(step)) continue;
+    const calls = dispatchCalls(step);
     let read: string | undefined;
     let fixed = false;
     for (const next of all.slice(place + 1)) {
       if (dispatchCalls(next).length === 0) read ??= skillRead(next);
-      else if (results.get(next.id)?.failed === false) {
+      else if (results.get(next.id)?.failed === false && !refusedCall(next)) {
         fixed = true;
         break;
       }
@@ -1494,7 +1514,8 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}`
     );
   }
-  // A1: for each source and label, the median fault count of its spec runs (faults.json).
+  // For each source and label, the median fault count of its spec runs (faults.json): the count
+  // that compares two versions of the skills on the same source.
   const specKeys = [
     ...new Set(
       rows.flatMap((row) =>

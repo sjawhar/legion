@@ -193,6 +193,11 @@
 
 ### Added
 
+- `dispatch-cli` exports `cliRefusals(text)`, which lists each refusal line the `dispatch` CLI
+  printed in `text`, with the command a `was not called` line names (null for a usage refusal).
+  It reads the CLI's output as a transcript holds it, so a refusal counts when a pipe hid the
+  CLI's exit. A warning, the note that the session's state was not written, and the notice of a
+  file that is not read are not refusals. pi-legion's skill-scenario scorer reads refusals with it.
 - `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
   repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
   `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the

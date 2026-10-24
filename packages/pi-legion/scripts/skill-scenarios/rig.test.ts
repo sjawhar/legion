@@ -1,8 +1,21 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { scriptFunctions } from "../../../../scripts/e2e/lib/script-functions";
+
+// Every test here runs rig.sh and its stand-ins as real processes. On a loaded machine one test
+// takes longer than bun's 5 s default (the eight-turn conversation took 11 s), so each test gets
+// one minute.
+setDefaultTimeout(60_000);
 
 // rig.sh's install_model_route, run with the checkout's real installers: the route a label's
 // profile reaches Anthropic by, picked by LEGION_E2E_MODEL_ROUTE.
@@ -412,7 +425,7 @@ judge_ts() {
   const approved = "The person approved the spec of LWEVAL-2.";
 
   // Catches: a loop that answers before it reads the state, continues without --continue (a second
-  // session), skips the stand-in, or sends another prompt than the plan's.
+  // session), skips the stand-in, or sends another prompt than the three the rig.sh header gives.
   test("asks, then an approval: answer, continue, approve, continue once more, stop", () => {
     const { code, calls, read } = conversation([{ asks: 2 }, { approval: true }, {}]);
     expect(code).toBe(0);
@@ -432,8 +445,8 @@ judge_ts() {
     expect(read("out-2.txt")).toBe("output of spec-writing-s1-1 --continue\nexit=0\n");
   });
 
-  // Catches: a loop that answers the open asks when an approval request is open too (the plan's
-  // order puts the approval first).
+  // Catches: a loop that answers the open asks when an approval request is open too (the rig.sh
+  // header's order puts the approval first).
   test("an open approval request goes before open asks", () => {
     const { calls } = conversation([{ asks: 1, approval: true }, {}]);
     expect(calls.slice(1, 3)).toEqual([
@@ -662,6 +675,41 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     expect(judge("ste", freshDir("judging-empty")).stderr.toString()).toContain(
       "has no prompt.txt"
     );
+  });
+
+  // Catches: a judge profile whose built-from records an empty commit line when the rig's root is
+  // no checkout, so a judge's model run cannot be traced to the code that built it.
+  test("fails, naming the rig's root, when the root is no checkout", () => {
+    const top = freshDir("judge-root");
+    const scripts = path.join(top, "packages/pi-legion/scripts/skill-scenarios");
+    mkdirSync(scripts, { recursive: true });
+    writeFileSync(path.join(scripts, "rig.sh"), readFileSync(path.join(import.meta.dir, "rig.sh")));
+    for (const file of [".omp-pin", "skills/asd-ste100/SKILL.md"]) {
+      mkdirSync(path.dirname(path.join(top, file)), { recursive: true });
+      writeFileSync(path.join(top, file), readFileSync(path.join(root, file)));
+    }
+    mkdirSync(path.join(top, "scripts/e2e"), { recursive: true });
+    cpSync(path.join(root, "scripts/e2e/lib"), path.join(top, "scripts/e2e/lib"), {
+      recursive: true,
+    });
+    const rootWork = freshDir("judge-root-work");
+    const result = Bun.spawnSync(
+      ["bash", path.join(scripts, "rig.sh"), "judge-omp", "ste", promptDir()],
+      {
+        env: {
+          ...childEnv,
+          PATH: `${bin}:${childEnv.PATH}`,
+          USER: "rig",
+          SKILL_SCENARIOS_WORK: rootWork,
+          LEGION_E2E_MODEL_ROUTE: "key-file",
+          LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
+          GIT_CEILING_DIRECTORIES: path.dirname(top),
+        },
+      }
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain(`cannot read the commit of ${top} with jj or git`);
+    expect(existsSync(path.join(rootWork, "judge-profiles/ready"))).toBe(false);
   });
 });
 // A spec run's plan row reads skill://writing-plans, which only a label built with

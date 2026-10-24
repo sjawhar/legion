@@ -18,14 +18,14 @@
  * each value with `&`, `<` and `>` escaped). The model answers one line per question, `<id>: yes`
  * or `<id>: no`, and the answer is parsed as that judge parses it: the first of yes/true or
  * no/false in the line wins. A yes is chance 1 and a no is chance 0. A chance above 0.5 is yes.
- * The plan fixes temperature 0 and a forced tool `record_labels`. This model refuses both with a
- * 400 (`temperature` is deprecated, and tool_choice types `tool` and `any` are not supported), and
- * the baseline judge used neither: it sent thinking off (`between_tools` for this model) and no
- * sampling setting. A reply that does not answer every question is asked for again. The key goes
- * in the `x-api-key` header. --key-file is a 0600 file that holds an Anthropic key, read again for
- * each call, and the call goes to https://api.anthropic.com. --key-command is a program that
- * prints the gateway key, run again for each call, and the call goes to <gateway>/v1/messages. A
- * 429 or 5xx answer is tried again after a wait.
+ * The labeller's design asked for temperature 0 and a forced tool `record_labels`. This model
+ * refuses both with a 400 (`temperature` is deprecated, and tool_choice types `tool` and `any` are
+ * not supported), and the baseline judge used neither: it sent thinking off (`between_tools` for
+ * this model) and no sampling setting. A reply that does not answer every question is asked for
+ * again. The key goes in the `x-api-key` header. --key-file is a 0600 file that holds an Anthropic
+ * key, read again for each call, and the call goes to https://api.anthropic.com. --key-command is a
+ * program that prints the gateway key, run again for each call, and the call goes to
+ * <gateway>/v1/messages. A 429 or 5xx answer is tried again after a wait.
  *
  * It writes <out>/labels.jsonl: one row for each comment that got its label, oldest first. Stdout
  * gets the counts. Stdout names no person and quotes no comment, so a pull request can carry it as

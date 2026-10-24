@@ -69,9 +69,9 @@
 #                   message and comment as a message by the person alice, and each answered ask as
 #                   an ask another agent opened and alice answered, all in time order (seed.ts
 #                   spec-writing). The run is a conversation with a person stand-in, run_spec (below).
-#                   Judged by judge.ts, scored by specWriting.
+#                   Judged by judge.ts, scored by specRow.
 #   spec-rewrite    The same, on an issue whose spec is the source's old spec, with a prompt that
-#                   asks for the change the newest message names. Scored by specRewrite.
+#                   asks for the change the newest message names. Scored by specRow.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
 # whose skills state it. So every comparison carries an ablate label: a checkout of the head with
@@ -849,12 +849,13 @@ run_spec() {
 # user skill, this checkout's skills/asd-ste100. `bare` holds none. The first judge-omp call builds
 # both, and every other call waits on the same lock, so parallel calls are safe.
 judge_profiles() {
-  local dir=$work/judge-profiles kind P
+  local dir=$work/judge-profiles kind P commit
   mkdir -p "$dir"
   exec 9>"$dir.lock"
   flock 9
   if [ ! -f "$dir/ready" ]; then
     [ -f "$root/skills/asd-ste100/SKILL.md" ] || fail "$root has no skills/asd-ste100, the judge's one skill"
+    commit=$(checkout_commit "$root") || fail "cannot read the commit of $root with jj or git"
     for kind in ste bare; do
       P=$dir/$kind
       rm -rf "$P"
@@ -872,7 +873,7 @@ judge_profiles() {
     cp "$root/.omp-pin" "$dir/pin"
     {
       printf 'model %s\nthinking %s\npin %s\n' "$judge_model" "$judge_thinking" "$(<"$dir/pin")"
-      printf 'commit %s\n' "$(checkout_commit "$root")"
+      printf 'commit %s\n' "$commit"
       printf 'asd-ste100 %s\n' "$(cd "$root/skills/asd-ste100" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
     } >"$dir/built-from"
     touch "$dir/ready"

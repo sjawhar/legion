@@ -54,6 +54,48 @@ function stateWriteFailed(problem: string): string {
   return `${STATE_WRITE_FAILED} could not be written: ${problem}`;
 }
 
+/** A line that refuses a call before it reaches Dispatch, each at the start of the line:
+ *  `dispatch <command> was not called: …` (exit 1, `ToolInputError` and the refusals
+ *  `executeDispatchTool` makes before a write), or a usage refusal (exit 2), which is `dispatch: `
+ *  and its reason. The CLI's other `dispatch: ` lines refuse nothing: a result's warning
+ *  (`dispatch: warning: `), the note that the session's state was not written
+ *  (STATE_WRITE_FAILED), and the notice of a file that is not read, printed beside a result. */
+const NOT_CALLED = /^dispatch ([a-z][a-z-]*) was not called: /;
+const NOT_A_REFUSAL = [
+  "dispatch: warning: ",
+  STATE_WRITE_FAILED,
+  // readEnvoyConfig's warnings: the OpenCode-era `.opencode/envoy.json` beside a checkout.
+  /^dispatch: \S+ is not read(?:: | for this profile| under | and is on another filesystem )/,
+];
+
+export interface CliRefusal {
+  /** The refusal's first line. */
+  readonly line: string;
+  /** The command a `was not called` line names; null for a usage refusal, which names none. */
+  readonly command: string | null;
+}
+
+/**
+ * Each refusal the dispatch CLI printed in `text`, by its first line: what a reader of the CLI's
+ * output (an agent's transcript, where a pipe can hide the exit) needs to tell a refused call from
+ * one Dispatch answered. A line counts only at the start of a line of `text`.
+ */
+export function cliRefusals(text: string): CliRefusal[] {
+  const found: CliRefusal[] = [];
+  for (const line of text.split("\n")) {
+    const command = NOT_CALLED.exec(line)?.[1];
+    if (command !== undefined) {
+      found.push({ line, command });
+      continue;
+    }
+    if (!line.startsWith("dispatch: ")) continue;
+    if (NOT_A_REFUSAL.some((ok) => (typeof ok === "string" ? line.startsWith(ok) : ok.test(line))))
+      continue;
+    found.push({ line, command: null });
+  }
+  return found;
+}
+
 /** How long a result waits on the listener for the session's subscriptions, after the write
  *  itself has landed: one attempt, no retry, since the read is best effort. */
 const SUBSCRIPTIONS_TIMEOUT_MS = 1_500;

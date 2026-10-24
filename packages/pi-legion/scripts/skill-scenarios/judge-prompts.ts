@@ -2,7 +2,8 @@
 // answer of each. judge.ts writes each prompt to prompt.txt in a directory that holds only that
 // prompt's inputs, starts a fresh `omp -p` there (rig.sh judge-omp) and validates the answer with
 // the schema. Each prompt names the one file the judge writes. These texts were written before
-// any run: never change one to make a result appear (INFRA-140 plan, Task 1.3 Step 5).
+// any run: never change one to make a result appear. A change that corrects a fact is recorded,
+// with its old and new text, in the pull request that makes it.
 import path from "node:path";
 import { z } from "zod";
 

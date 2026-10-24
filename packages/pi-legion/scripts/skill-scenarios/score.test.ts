@@ -515,6 +515,78 @@ specRun("spec-writing-head-6", {
     finish
   ),
 });
+// Refusals the dispatch CLI printed itself, through a pipe that hid the exit (bash exit 0, no
+// isError). Each text is the real CLI's: an argument check's (exit 1 unpiped) and a usage
+// refusal's (exit 2 unpiped). The CLI's other `dispatch:` lines, a warning and a note that it kept
+// no record of a call Dispatch took, refuse nothing.
+const pipedRefusal =
+  "dispatch doc-edit was not called: 1 problem\n- --precondition-json is not JSON: JSON Parse error: Unterminated string";
+const piped = sh(
+  "x2",
+  'dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json --precondition-json \'{"document":"sha\' 2>&1 | head -20',
+  0,
+  pipedRefusal
+);
+const offRefusal =
+  "dispatch: no envoy.json at /home/agent/.config/legion/envoy.json: Dispatch is off";
+const pipedOff = sh(
+  "x4",
+  "dispatch ask --issue LWEVAL-7 --question 'Which name? Recommendation: Ada.' 2>&1 | tee ask.log",
+  0,
+  offRefusal
+);
+const warned = sh(
+  "x3",
+  "dispatch read --issue LWEVAL-7 2>&1 | head -40",
+  0,
+  "dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so LWEVAL-7's repository is unknown; upgrade the server\nTitle: Greeting\ndispatch: Dispatch took the call, but this session's state could not be written: EACCES"
+);
+// A piped refusal fixed from its text alone; then a warned call and a skill read, which refuse
+// nothing.
+specRun("spec-writing-head-23", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    piped,
+    askStep,
+    warned,
+    readOf("r3", "skill://dispatch"),
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A piped refusal fixed only after a read of a skill file.
+specRun("spec-writing-head-24", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    piped,
+    readOf("r3", "skill://dispatch"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A piped refusal whose next dispatch call is a piped usage refusal: that call fixes nothing, so
+// both are fixed only after the skill read.
+specRun("spec-writing-head-25", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    piped,
+    pipedOff,
+    readOf("r3", "skill://dispatch"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // One fault.
 specRun("spec-writing-head-7", {
   judges: { "faults.json": faultsFile({ "A term that nobody explained": 1 }) },
@@ -936,6 +1008,21 @@ test("refusals: a refused dispatch call must be fixed with no skill read before 
   expect(scoresOf("spec-writing-head-6")).toEqual({ ...allPass, refusals: "false" });
   expect(rowOf("spec-writing-head-6")).toContain(refusal);
   expect(rowOf("spec-writing-head-6")).toContain("skill://dispatch");
+});
+
+test("refusals: the CLI's own refusal text counts when a pipe hid the exit", () => {
+  // Fixed from the refusal's text alone; a warned call refuses nothing.
+  expect(scoresOf("spec-writing-head-23")).toEqual(allPass);
+  // Fixed only after a skill read: the row prints the refusal's text and the read.
+  expect(scoresOf("spec-writing-head-24")).toEqual({ ...allPass, refusals: "false" });
+  expect(rowOf("spec-writing-head-24")).toContain("dispatch doc-edit was not called: 1 problem");
+  expect(rowOf("spec-writing-head-24")).toContain("then read skill://dispatch");
+  // A piped usage refusal is no fix of the refusal before it, and is a refusal of its own.
+  expect(scoresOf("spec-writing-head-25")).toEqual({ ...allPass, refusals: "false" });
+  const row = rowOf("spec-writing-head-25");
+  expect(row).toContain("dispatch doc-edit was not called: 1 problem");
+  expect(row).toContain(offRefusal);
+  expect(row.split("then read skill://dispatch").length - 1).toBe(2);
 });
 
 test("judged: a judge file with one fault counts one", () => {

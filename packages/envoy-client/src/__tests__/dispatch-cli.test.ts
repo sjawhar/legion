@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
 import { DISPATCH_BODY_MAX, PROJECT_KEY_RULE } from "@legion/contracts";
-import { fitOutput, runDispatchCli } from "../dispatch-cli";
+import { cliRefusals, fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
 
@@ -1171,6 +1171,111 @@ describe("the dispatch CLI's subscription note", () => {
     const { code } = await run(["projects"], withListener);
     expect(code).toBe(0);
     expect(requests.some((request) => request.path.startsWith("/v1/interests/"))).toBe(false);
+  });
+});
+
+// A reader of a transcript, the skill-scenario scorer among them, finds a refusal the CLI printed
+// even when a pipe hid its exit: each path below is the real CLI's, and its first line is the one
+// refusal cliRefusals reads. The CLI's other `dispatch:` lines refuse nothing.
+describe("cliRefusals", () => {
+  const fromFile = { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined };
+  /** The one refusal `stdout` holds: its first line, and the command it names. */
+  const refusal = (stdout: string, command: string | null) => [
+    { line: stdout.split("\n")[0], command },
+  ];
+
+  test("an argument check's refusal names its command, in the call and in its dry run (exit 1)", async () => {
+    for (const argv of [
+      ["message", "--issue", "DSP-1", "--isue", "X"],
+      ["issue-update", "--status", "done"],
+      ["issue-update", "--status", "done", "--dry-run"],
+    ]) {
+      const { code, stdout } = await run(argv, omp);
+      expect(code, argv.join(" ")).toBe(1);
+      expect(cliRefusals(stdout), argv.join(" ")).toEqual(refusal(stdout, argv[0] ?? ""));
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("each usage refusal is a refusal of no command (exit 2)", async () => {
+    const off = join(stateDir, "off.json");
+    writeFileSync(off, JSON.stringify({ dispatch: { enabled: false } }));
+    const cases: [string, readonly string[], Record<string, string | undefined>][] = [
+      ["unknown command", ["frobnicate"], omp],
+      ["no host", ["projects"], { DISPATCH_SESSION_ID: "ses-1" }],
+      ["another host", ["projects"], { DISPATCH_HOST: "vim", DISPATCH_SESSION_ID: "ses-1" }],
+      ["no omp session", ["projects"], { DISPATCH_HOST: "omp" }],
+      ["no Claude Code session", ["projects"], { DISPATCH_HOST: "claude" }],
+      ["a session id of two segments", ["projects"], { ...omp, DISPATCH_SESSION_ID: "a/b" }],
+      ["a relative ENVOY_CONFIG_FILE", ["projects"], { ...fromFile, ENVOY_CONFIG_FILE: "e.json" }],
+      ["a relative XDG_CONFIG_HOME", ["projects"], { ...fromFile, XDG_CONFIG_HOME: "rel" }],
+      ["no envoy.json", ["projects"], fromFile],
+      ["a file that turns Dispatch off", ["projects"], { ...fromFile, ENVOY_CONFIG_FILE: off }],
+      ["DISPATCH_URL with no token", ["projects"], { ...omp, DISPATCH_TOKEN: undefined }],
+    ];
+    for (const [name, argv, env] of cases) {
+      const { code, stdout } = await run(argv, env);
+      expect(code, name).toBe(2);
+      expect(stdout, name).toStartWith("dispatch: ");
+      expect(cliRefusals(stdout), name).toEqual(refusal(stdout, null));
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("a session state the CLI cannot read is a refusal (exit 2)", async () => {
+    const corrupt = join(stateDir, "sessions", "ses-1");
+    mkdirSync(corrupt, { recursive: true });
+    writeFileSync(join(corrupt, "state.json"), "{not json");
+    const unreadable = await run(["projects"], omp);
+    expect(unreadable.code).toBe(2);
+    expect(cliRefusals(unreadable.stdout)).toEqual(refusal(unreadable.stdout, null));
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    writeFileSync(join(stateDir, "sessions"), "a file where the directory goes");
+    const unlisted = await run(["projects"], omp);
+    expect(unlisted.code).toBe(2);
+    expect(unlisted.stdout).toStartWith("dispatch: ENOTDIR: ");
+    expect(cliRefusals(unlisted.stdout)).toEqual(refusal(unlisted.stdout, null));
+    expect(requests).toEqual([]);
+  });
+
+  test("a warning, the note that the state was not written, and a moved file's notice refuse nothing", async () => {
+    const warned = await run(["read", "--issue", "DSP-3"], omp);
+    expect(warned.code).toBe(0);
+    expect(warned.stderr).toStartWith("dispatch: warning: ");
+    expect(cliRefusals(`${warned.stderr}${warned.stdout}`)).toEqual([]);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    mkdirSync(join(stateDir, "sessions", "ses-1", "results.jsonl"), { recursive: true });
+    const unrecorded = await run(["message", "--issue", "DSP-1", "--body", "x"], omp);
+    expect(unrecorded.code).toBe(0);
+    expect(unrecorded.stdout).toContain("\ndispatch: Dispatch took the call, but this session's");
+    expect(cliRefusals(unrecorded.stdout)).toEqual([]);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    mkdirSync(join(stateDir, ".config", "legion"), { recursive: true });
+    writeFileSync(
+      join(stateDir, ".config", "legion", "envoy.json"),
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: `http://127.0.0.1:${server.port}`, token: "t" },
+      })
+    );
+    mkdirSync(join(stateDir, ".opencode"), { recursive: true });
+    writeFileSync(join(stateDir, ".opencode", "envoy.json"), "{}");
+    const moved = await run(["projects"], fromFile);
+    expect(moved.code).toBe(0);
+    expect(moved.stdout).toStartWith("dispatch: ");
+    expect(cliRefusals(moved.stdout)).toEqual([]);
+  });
+
+  test("help, a dry run's arguments, and a refusal quoted inside a line refuse nothing", async () => {
+    const help = await run(["doc-edit", "--help"], omp);
+    const dry = await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
+    for (const { code, stdout } of [help, dry]) {
+      expect(code).toBe(0);
+      expect(cliRefusals(stdout)).toEqual([]);
+    }
+    expect(cliRefusals("It said: dispatch message was not called: 1 problem")).toEqual([]);
   });
 });
 
