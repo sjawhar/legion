@@ -267,9 +267,10 @@ test.skipIf(!hasTmux)(
       const pid = execFileSync("tmux", ["-S", socket, "display-message", "-p", "#{pid}"], {
         encoding: "utf8",
       }).trim()
+      // `-u`, as queryTmux passes it: with neither TMUX nor a UTF-8 locale, tmux prints tabs as `_`.
       const [pane = "", panePid = ""] = execFileSync(
         "tmux",
-        ["-S", socket, "display-message", "-p", "#{pane_id}\t#{pane_pid}"],
+        ["-u", "-S", socket, "display-message", "-p", "#{pane_id}\t#{pane_pid}"],
         { encoding: "utf8" },
       )
         .trim()
@@ -277,7 +278,7 @@ test.skipIf(!hasTmux)(
       // Unbounded, unlike queryTmux: a loaded machine can take tmux past one second, and this
       // test is about reading the real server's answer, not the bound.
       const unbounded: TmuxQuery = (at, target, format) =>
-        execFileSync("tmux", ["-S", at, "display-message", "-p", "-t", target, format], {
+        execFileSync("tmux", ["-u", "-S", at, "display-message", "-p", "-t", target, format], {
           encoding: "utf8",
         })
       expect(
@@ -290,6 +291,38 @@ test.skipIf(!hasTmux)(
       expect(
         tmuxPaneTitle(socket, pid, pane, (candidate) => candidate === "1", unbounded),
       ).toBeUndefined()
+    } finally {
+      execFileSync("tmux", ["-S", socket, "kill-server"])
+      rmSync(directory, { recursive: true, force: true })
+    }
+  },
+)
+
+test.skipIf(!hasTmux)(
+  "queryTmux keeps the tabs between fields when its process has neither TMUX nor a UTF-8 locale",
+  () => {
+    const directory = mkdtempSync(join(tmpdir(), "title-tmux-"))
+    const socket = join(directory, "tmux.sock")
+    execFileSync("tmux", ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", "probe"])
+    try {
+      const pane = execFileSync("tmux", ["-S", socket, "display-message", "-p", "#{pane_id}"], {
+        encoding: "utf8",
+      }).trim()
+      const pid = execFileSync("tmux", ["-S", socket, "display-message", "-p", "#{pid}"], {
+        encoding: "utf8",
+      }).trim()
+      // A child of its own with no TMUX, LANG, LC_ALL or LC_CTYPE: tmux prints a tab as `_` only to
+      // such a client, and this process's own environment may have either.
+      const source = join(import.meta.dir, "../src/session-title.ts")
+      const child = Bun.spawnSync(
+        [
+          process.execPath,
+          "-e",
+          `import { queryTmux } from ${JSON.stringify(source)}; process.stdout.write(JSON.stringify(queryTmux(${JSON.stringify(socket)}, ${JSON.stringify(pane)}, "#{session_name}\\t#{pid}")))`,
+        ],
+        { env: { PATH: process.env["PATH"] ?? "", HOME: process.env["HOME"] ?? "" } },
+      )
+      expect(child.stdout.toString()).toBe(JSON.stringify(`probe\t${pid}\n`))
     } finally {
       execFileSync("tmux", ["-S", socket, "kill-server"])
       rmSync(directory, { recursive: true, force: true })

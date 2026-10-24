@@ -48191,7 +48191,7 @@ function isAncestor(candidate, pid = process.pid) {
 }
 function queryTmux(socket, pane, format) {
   try {
-    const answer = execFileSync("tmux", ["-S", socket, "display-message", "-p", "-t", pane, format], {
+    const answer = execFileSync("tmux", ["-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: TMUX_TIMEOUT_MS,

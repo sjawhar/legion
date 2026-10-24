@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
+  the calling process's environment: tmux printed the tabs as `_` to a process with neither `TMUX`
+  nor a UTF-8 locale, and the answer read as one field. A Claude Code session in a tmux pane has
+  `TMUX`, so its title was not affected; the real-tmux test, which ran tmux with neither, failed in
+  such an environment and now passes.
+
 - The README and Dispatch's Agents page guide say to restart Claude Code once after its first
   launch on a new profile and to check that its banner says the channel is loaded: a first launch
   can come up with `--channels ignored` (all four new profiles tried whose key came only from an
