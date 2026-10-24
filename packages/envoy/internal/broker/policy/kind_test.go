@@ -3,6 +3,8 @@ package policy_test
 import (
 	"context"
 	"errors"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -195,5 +197,91 @@ func TestEmptyKindIsAPlainSecret(t *testing.T) {
 	}
 	if got := set.Secrets["EMPTY_KIND"]; got.Source != secrets.LocalARN(policytest.ID("EMPTY_KIND")) {
 		t.Fatalf("EMPTY_KIND = %+v, want plain stored source", got)
+	}
+}
+
+// TestAGitHubAppSecretWithoutOwnersIsRefused: a public App can be installed by any account, so a
+// github-app secret names the accounts the broker mints for, and one that names none, by a missing
+// tag or a tag of only commas and spaces, is refused github-owners-missing rather than served.
+func TestAGitHubAppSecretWithoutOwnersIsRefused(t *testing.T) {
+	for name, owners := range map[string]*string{"missing": nil, "empty": new(" , ,")} {
+		t.Run(name, func(t *testing.T) {
+			logged := policytest.CaptureLog(t)
+			secret := kindSecret("APP_KEY", policy.KindGitHubApp, "value")
+			delete(secret.Tags, policy.TagGitHubOwners)
+			if owners != nil {
+				secret.Tags[policy.TagGitHubOwners] = *owners
+			}
+			set, err := policytest.Loader(secrets.NewLocal(secret)).Load(context.Background())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if _, ok := set.Secrets["APP_KEY"]; ok {
+				t.Fatal("Load served a github-app secret naming no github-owners")
+			}
+			if !strings.Contains(logged.String(), policy.ReasonGitHubOwnersMissing) {
+				t.Fatalf("log %q does not name %q", logged.String(), policy.ReasonGitHubOwnersMissing)
+			}
+		})
+	}
+}
+
+// TestGitHubOwnersAreReadWithoutRegardToCase: one list in two spellings is one policy, and a
+// google-login secret carries no owners whatever its tags say.
+func TestGitHubOwnersAreReadWithoutRegardToCase(t *testing.T) {
+	load := func(owners string) *policy.Set {
+		t.Helper()
+		secret := kindSecret("APP_KEY", policy.KindGitHubApp, "value")
+		secret.Tags[policy.TagGitHubOwners] = owners
+		login := kindSecret("LOGIN_KEY", policy.KindGoogleLogin, "value")
+		login.Tags[policy.TagGitHubOwners] = "ignored"
+		set, err := policytest.Loader(secrets.NewLocal(secret, login)).Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		return set
+	}
+	first, second := load("Acme-Org, ada"), load("ADA,acme-org,ada")
+	if got := first.Secrets["APP_KEY"].GitHubOwnerLogins(); !slices.Equal(got, []string{"acme-org", "ada"}) {
+		t.Fatalf("GitHubOwnerLogins = %v, want [acme-org ada]", got)
+	}
+	if first.Version != second.Version {
+		t.Fatal("two spellings of one github-owners list made two policy versions")
+	}
+	if got := first.Secrets["LOGIN_KEY"].GitHubOwners; got != "" {
+		t.Fatalf("google-login GitHubOwners = %q, want none", got)
+	}
+	if narrowed := load("ada"); narrowed.Version == first.Version {
+		t.Fatal("narrowing github-owners left the policy version unchanged")
+	}
+}
+
+// legacyMintTargetPattern is the mint-service-account rule of the brokers before kinds, copied
+// from legion-envoy-v13.19.0 through 313fdc221's policy/load.go: a broker of that range refuses a
+// secret whose tag does not match it as mint-target-malformed, before anything else it decides.
+var legacyMintTargetPattern = regexp.MustCompile(`^[a-z0-9-]{6,30}@[a-z0-9-]+\.iam\.gserviceaccount\.com$`)
+
+// TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere: the value agent-secrets writes
+// beside a kind fails the earlier brokers' rule, so they refuse a kind secret rather than serve its
+// stored key, while this broker serves the secret as the kind it is and never reads the tag.
+func TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere(t *testing.T) {
+	if legacyMintTargetPattern.MatchString(policy.RollbackGuardValue) {
+		t.Fatalf("RollbackGuardValue %q matches the earlier brokers' mint-service-account rule, so they would mint for it", policy.RollbackGuardValue)
+	}
+	for _, kind := range policy.Kinds {
+		secret := kindSecret("GUARDED_KEY", kind, "value")
+		secret.Tags[policy.TagRollbackGuard] = policy.RollbackGuardValue
+		guarded, err := policytest.Loader(secrets.NewLocal(secret)).Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		delete(secret.Tags, policy.TagRollbackGuard)
+		bare, err := policytest.Loader(secrets.NewLocal(secret)).Load(context.Background())
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if guarded.Secrets["GUARDED_KEY"] != bare.Secrets["GUARDED_KEY"] || guarded.Version != bare.Version {
+			t.Fatalf("%s: the rollback guard changed what this broker serves: %+v against %+v", kind, guarded.Secrets["GUARDED_KEY"], bare.Secrets["GUARDED_KEY"])
+		}
 	}
 }

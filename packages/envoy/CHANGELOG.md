@@ -100,18 +100,20 @@
   --deny-self-hosted-runners` accepts an image only when a run on `main` built it. `latest` is a
   separate index with no attestation; pin the `<commit>` image its revision annotation names.
 - The secrets broker mints releases by each secret's `kind` tag. `github-app` releases contain
-  installation tokens for every installation of the GitHub App that is not suspended.
-  `google-login` releases contain a Google access token. A kind secret holds its key or refresh
+  installation tokens for every installation of the GitHub App that is not suspended and is on an
+  account the secret's `github-owners` tag lists; a `github-app` secret without that tag is refused
+  `github-owners-missing`, since anyone can install a public App. `google-login` releases contain
+  a Google access token. A kind secret holds its key or refresh
   token as a current value, which the broker never returns, and a mint GitHub or Google refuses
   is `502 MINT_FAILED` with their reason, logged at ERROR as `broker: mint failed` with the
   secret's name, kind and the failure's class. `max-grant` limits a request's `--ttl`; a missing or
   longer lifetime is `400 GRANT_REQUIRES_LIFETIME`, and a `max-grant` set or lowered later ends a
   longer live grant (`GRANT_NOT_LIVE`) and refuses approval of a longer pending request
   (`NOT_APPROVER`). `BROKER_MINT_TARGETS` is removed and the broker refuses it when it is set.
-  `agent-secrets secret create` takes `--kind` and `--max-grant`, and `secret retag` takes
-  `--kind` and `--max-grant DURATION|none`. A retag either sets tags or removes them (`none`), in
-  one write, so a refused write leaves the secret as it was. A retag that names `none` beside
-  another change exits 2 before it writes anything.
+  `agent-secrets secret create` takes `--kind`, `--github-owners` and `--max-grant`, and `secret
+  retag` takes `--kind`, `--github-owners LOGINS|none` and `--max-grant DURATION|none`. A retag
+  either sets tags or removes them (`none`), in one write, so a refused write leaves the secret as
+  it was. A retag that names `none` beside another change exits 2 before it writes anything.
 
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the
@@ -513,6 +515,14 @@
 
 ### Changed
 
+- **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
+  never back past this release. A broker before kinds reads no `kind` tag and would serve the
+  secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes
+  `mint-service-account: kind-secret` beside every kind, which every broker from
+  legion-envoy-v13.19.0 up to this release refuses as `mint-target-malformed`, and `retag --kind
+  none` removes it with the kind. A broker older than legion-envoy-v13.19.0 reads no such tag and
+  serves the value, and so does every earlier broker for a kind secret written without the tag. To
+  go back anyway, first disable every kind secret's versions.
 - **Breaking:** the secrets broker needs `BROKER_MACHINE_LOGIN_URL`, the absolute http(s) URL of
   Dispatch's machine-login page (`https://<dispatch>/credentials/machine`), and refuses to start
   without it. The device authorization answer's `verification_uri` names that page, where the

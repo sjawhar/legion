@@ -2,6 +2,14 @@ package secrets
 
 import "errors"
 
+// MintRequest is one release's input to a minter (GitHubApp.Mint, GoogleLogin.Mint): the secret's
+// stored value, and the policy's facts about it a minter needs. GitHubOwners is a github-app
+// secret's github-owners tag as lowercase logins; every other kind leaves it nil.
+type MintRequest struct {
+	Value        string
+	GitHubOwners []string
+}
+
 // The classes of a minter's failure (GitHubApp.Mint, GoogleLogin.Mint). Every error a minter
 // returns wraps exactly one, so the broker's log names the class an operator acts on without
 // reading the message, which never holds the stored value or a token.

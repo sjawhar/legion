@@ -23,7 +23,7 @@ func TestGoogleLoginMintExchangesRefreshToken(t *testing.T) {
 	defer server.Close()
 	value := `{"type":"authorized_user","client_id":"client-id","client_secret":"client-secret","refresh_token":"refresh-token"}`
 
-	got, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), value)
+	got, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), secrets.MintRequest{Value: value})
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestGoogleLoginMintNamesInvalidRaptWithoutLeakingCredentials(t *testing.T) 
 	defer server.Close()
 	value := `{"type":"authorized_user","client_id":"client-id","client_secret":"client-secret","refresh_token":"refresh-token"}`
 
-	_, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), value)
+	_, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), secrets.MintRequest{Value: value})
 	if err == nil || !strings.Contains(err.Error(), "invalid_rapt") || secrets.MintErrorClass(err) != "refused" {
 		t.Fatalf("Mint error = %v (class %s), want invalid_rapt, refused", err, secrets.MintErrorClass(err))
 	}
@@ -59,11 +59,11 @@ func TestGoogleLoginMintNamesAGoogleOutageAsUpstream(t *testing.T) {
 	}))
 	defer server.Close()
 	value := `{"type":"authorized_user","client_id":"client-id","client_secret":"client-secret","refresh_token":"refresh-token"}`
-	_, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), value)
+	_, err := (secrets.GoogleLogin{TokenURL: server.URL, HTTP: server.Client()}).Mint(t.Context(), secrets.MintRequest{Value: value})
 	if secrets.MintErrorClass(err) != "upstream" || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("Mint against a Google 503 = %v (class %s), want upstream naming 503", err, secrets.MintErrorClass(err))
 	}
-	if _, err := (secrets.GoogleLogin{}).Mint(t.Context(), `{"type":"service_account"}`); secrets.MintErrorClass(err) != "stored-value" {
+	if _, err := (secrets.GoogleLogin{}).Mint(t.Context(), secrets.MintRequest{Value: `{"type":"service_account"}`}); secrets.MintErrorClass(err) != "stored-value" {
 		t.Fatalf("Mint of a service-account value = %v, want stored-value", err)
 	}
 }

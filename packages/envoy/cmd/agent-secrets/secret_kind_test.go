@@ -20,21 +20,24 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	useAWS(t, local, testAccount, adaSignIn)
 	useStdin(t, "stored-value")
 
-	stdout, stderr, code := runSecret("create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--max-grant", "1h")
+	stdout, stderr, code := runSecret("create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "Ada, acme-org", "--max-grant", "1h")
 	if code != 0 {
 		t.Fatalf("create: exit %d, stderr %q", code, stderr)
 	}
 	tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags)
-	if tags[policy.TagKind] != policy.KindGitHubApp || tags[policy.TagMaxGrant] != "1h" {
-		t.Fatalf("create tags = %v, want kind and max-grant", tags)
+	if tags[policy.TagKind] != policy.KindGitHubApp || tags[policy.TagMaxGrant] != "1h" || tags[policy.TagGitHubOwners] != "acme-org,ada" {
+		t.Fatalf("create tags = %v, want kind, github-owners as the broker reads them, and max-grant", tags)
+	}
+	if tags[policy.TagRollbackGuard] != policy.RollbackGuardValue {
+		t.Fatalf("create tags = %v, want the rollback guard beside the kind", tags)
 	}
 	if !strings.Contains(stdout, "broker: serving APP_KEY") {
 		t.Fatalf("create stdout %q does not name the broker result", stdout)
 	}
 
 	stdout, stderr, code = runSecret("show", "APP_KEY")
-	if code != 0 || !strings.Contains(stdout, "kind: github-app") || !strings.Contains(stdout, "max_grant: 1h") {
-		t.Fatalf("show: exit %d stdout %q stderr %q; want kind and max-grant", code, stdout, stderr)
+	if code != 0 || !strings.Contains(stdout, "kind: github-app") || !strings.Contains(stdout, "github_owners: acme-org,ada") || !strings.Contains(stdout, "max_grant: 1h") {
+		t.Fatalf("show: exit %d stdout %q stderr %q; want kind, github owners and max-grant", code, stdout, stderr)
 	}
 	stdout, stderr, code = runSecret("list")
 	if code != 0 || !strings.Contains(stdout, "KIND") || !strings.Contains(stdout, "MAX_GRANT") || !strings.Contains(stdout, "github-app") || !strings.Contains(stdout, "1h") {
@@ -47,8 +50,8 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 			t.Fatalf("retag %s: exit %d, stderr %q", kind, code, stderr)
 		}
 		tags = secrets.TagMap(describe(t, local, "APP_KEY").Tags)
-		if tags[policy.TagKind] != kind || tags[policy.TagMaxGrant] != "1h" || tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierAgent {
-			t.Fatalf("retag %s tags = %v, want new kind and retained tags", kind, tags)
+		if tags[policy.TagKind] != kind || tags[policy.TagMaxGrant] != "1h" || tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierAgent || tags[policy.TagRollbackGuard] != policy.RollbackGuardValue {
+			t.Fatalf("retag %s tags = %v, want new kind, the rollback guard and retained tags", kind, tags)
 		}
 	}
 	_, stderr, code = runSecret("retag", "APP_KEY", "--kind", "none")
@@ -58,6 +61,9 @@ func TestSecretKindAndMaxGrantOnAWS(t *testing.T) {
 	tags = secrets.TagMap(describe(t, local, "APP_KEY").Tags)
 	if _, ok := tags[policy.TagKind]; ok || tags[policy.TagMaxGrant] != "1h" {
 		t.Fatalf("retag none tags = %v, want removed kind and retained max-grant", tags)
+	}
+	if _, ok := tags[policy.TagRollbackGuard]; ok {
+		t.Fatalf("retag none tags = %v, want the rollback guard removed with the kind", tags)
 	}
 }
 
@@ -77,8 +83,11 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 	fake.mu.Lock()
 	annotations := fake.secrets[id].secret.GetAnnotations()
 	fake.mu.Unlock()
-	if annotations[policy.TagKind] != policy.KindGoogleLogin || annotations[policy.TagMaxGrant] != "30m" {
-		t.Fatalf("create annotations = %v, want kind and max-grant", annotations)
+	if annotations[policy.TagKind] != policy.KindGoogleLogin || annotations[policy.TagMaxGrant] != "30m" || annotations[policy.TagRollbackGuard] != policy.RollbackGuardValue {
+		t.Fatalf("create annotations = %v, want kind, max-grant and the rollback guard", annotations)
+	}
+	if _, ok := annotations[policy.TagGitHubOwners]; ok {
+		t.Fatalf("create annotations = %v, want no github-owners on a google-login secret", annotations)
 	}
 
 	stdout, stderr, code := runSecret("show", "LOGIN_KEY")
@@ -109,6 +118,9 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 	if _, ok := annotations[policy.TagKind]; ok || annotations[policy.TagMaxGrant] != "30m" {
 		t.Fatalf("retag none annotations = %v, want removed kind and retained max-grant", annotations)
 	}
+	if _, ok := annotations[policy.TagRollbackGuard]; ok {
+		t.Fatalf("retag none annotations = %v, want the rollback guard removed with the kind", annotations)
+	}
 }
 
 func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
@@ -121,6 +133,11 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 		{"retag", "HELD_KEY", "--kind", "other"},
 		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--max-grant", "soon"},
 		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--max-grant", "500ms"},
+		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp},
+		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", " , "},
+		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleLogin, "--github-owners", "ada"},
+		{"retag", "HELD_KEY", "--github-owners", " , "},
+		{"retag", "HELD_KEY", "--github-owners", "none", "--tier", "human"},
 	} {
 		_, stderr, code := runSecret(args...)
 		if code != exitUsageError {
@@ -199,7 +216,7 @@ func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 
 	writes.refuseUntag = false
 	stdout, stderr, code := runSecret("retag", "APP_KEY", "--kind", "none", "--max-grant", "none")
-	if code != 0 || !strings.Contains(stdout, "removed kind, max-grant") {
+	if code != 0 || !strings.Contains(stdout, "removed kind, mint-service-account, max-grant") {
 		t.Fatalf("removal: exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
 	if writes.tags != 0 || writes.untags != 2 || writes.describes != 0 {

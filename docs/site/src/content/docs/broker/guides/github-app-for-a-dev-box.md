@@ -59,13 +59,23 @@ accounts install a public App. Install it only on the accounts that the box must
 Do these steps for each account that the box must use. If you do not own an organization, GitHub
 sends your request to its owners. An owner must approve the request before the box can use the App.
 
-The broker returns one token for each installation that is not suspended.
+## Tell the administrator which accounts the box uses
+
+The broker makes tokens only for the accounts that the secret's `github-owners` tag lists. Anyone
+can install a public App. The tag stops a token for an account that you did not choose.
+
+You cannot change the tag. The deployment sets it when it creates your secret. Send the
+administrator the account names where you installed the App. Ask them to add any account that the
+deployment does not list.
+
+The broker returns one token for each installation that is not suspended, on an account that the
+tag lists. An installation on any other account gets no token.
 
 ## Store the App key
 
 The deployment creates an empty secret named `GITHUB_APP_<PERSON>`, with the `kind: github-app`
-tag. Your access lets you set its value. Sign in to your Google Cloud Application Default
-Credentials before you set its value.
+and `github-owners` tags. Your access lets you set its value. Sign in to your Google Cloud
+Application Default Credentials before you set its value.
 
 Build `app-key.json` from the App ID and the private key file that GitHub gave you. A PEM key
 spans several lines, which JSON must escape, so let `jq` write the file. Do not paste the key into

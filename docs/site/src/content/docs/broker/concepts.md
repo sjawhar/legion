@@ -163,8 +163,16 @@ marked with tags or annotations:
 - **`tier`** is `agent` or `human`.
 - **`kind`** is absent for a stored secret. It is `github-app` for a GitHub App key, or
   `google-login` for a Google authorized-user login. A secret with a kind must have a current value.
+- **`github-owners`** is required on a `github-app` secret, and read on no other kind. It lists
+  the GitHub accounts the broker mints installation tokens for, separated by commas and compared
+  without regard to case. A public App can be installed by any account, so an installation on an
+  account the list does not name gets no token. A `github-app` secret without the tag is refused
+  `github-owners-missing`.
 - **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
   secret must use `--ttl` no longer than the tag.
+- **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
+  `kind-secret`, and this broker never reads it. It makes the brokers before kinds, from
+  legion-envoy-v13.19.0 on, refuse a kind secret rather than serve its stored key.
 
 In Secret Manager these fields are annotations rather than labels because a label's value cannot
 hold an email (`@` and `.` are outside its alphabet), and the broker compares the owner with a
@@ -268,7 +276,8 @@ reason of at most 400 characters. The broker evaluates every name
   `MIXED_APPROVERS`; request them separately.
 - A **kind secret** has `kind=github-app` or `kind=google-login` and a current stored value. A
   GitHub App value holds an App identifier and private key. Its release returns a JSON object with
-  one installation token for each installation of the App that is not suspended. A Google login
+  one installation token for each installation of the App that is not suspended and is on an
+  account its `github-owners` tag lists. A Google login
   value holds an `authorized_user` refresh-token credential. Its release returns a bare access
   token. The broker reads the stored value for each release, as it reads any secret, and mints from
   it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client

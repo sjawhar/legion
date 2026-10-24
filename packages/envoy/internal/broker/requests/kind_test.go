@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,7 +40,7 @@ func TestAgentKindSecretIsGrantedAtOnceAndMintsForEachRelease(t *testing.T) {
 	retag(t, machine, requestKindSecret("GITHUB_APP_KEY", policy.KindGitHubApp, policy.TierAgent, ""))
 	calls := 0
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(context.Context, string) (string, error) {
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) {
 			calls++
 			return "minted-token-" + string(rune('0'+calls)), nil
 		},
@@ -60,11 +61,47 @@ func TestAgentKindSecretIsGrantedAtOnceAndMintsForEachRelease(t *testing.T) {
 	}
 }
 
+// TestAGitHubAppReleaseMintsForTheOwnersThePolicyServesNow: the minter gets the github-owners the
+// current policy serves for the name, not the list the request was decided under, so a list
+// narrowed after a grant holds at the grant's next release.
+func TestAGitHubAppReleaseMintsForTheOwnersThePolicyServesNow(t *testing.T) {
+	machine, enrollmentID, key, _ := newFixture(t)
+	secret := requestKindSecret("APP_KEY", policy.KindGitHubApp, policy.TierAgent, "")
+	retag(t, machine, secret)
+	var got []string
+	machine.Minters = map[string]Minter{
+		policy.KindGitHubApp: func(_ context.Context, req secrets.MintRequest) (string, error) {
+			got = req.GitHubOwners
+			return "minted", nil
+		},
+	}
+	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read App key", "APP_KEY"), "")
+	if err != nil || request.GrantID == nil {
+		t.Fatalf("Create = %+v, %v", request, err)
+	}
+	if _, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID); err != nil {
+		t.Fatalf("Values: %v", err)
+	}
+	if want := strings.Split(policytest.FixtureGitHubOwners, ","); !slices.Equal(got, want) {
+		t.Fatalf("minter's GitHubOwners = %v, want %v", got, want)
+	}
+	narrowed := secret
+	narrowed.Tags = maps.Clone(secret.Tags)
+	narrowed.Tags[policy.TagGitHubOwners] = "ada"
+	retag(t, machine, narrowed)
+	if _, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID); err != nil {
+		t.Fatalf("Values after narrowing github-owners: %v", err)
+	}
+	if !slices.Equal(got, []string{"ada"}) {
+		t.Fatalf("minter's GitHubOwners after narrowing = %v, want [ada]", got)
+	}
+}
+
 func TestHumanKindSecretWaitsForApprovalThenMints(t *testing.T) {
 	machine, enrollmentID, key, approver := newFixture(t)
 	retag(t, machine, requestKindSecret("GOOGLE_LOGIN_KEY", policy.KindGoogleLogin, policy.TierHuman, ""))
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, string) (string, error) { return "access-token", nil },
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
 	}
 
 	request, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read login", "GOOGLE_LOGIN_KEY"), "")
@@ -118,7 +155,7 @@ func TestPlainToKindRetagEndsTheGrant(t *testing.T) {
 	retag(t, machine, plain)
 	calls := 0
 	machine.Minters = map[string]Minter{
-		policy.KindGitHubApp: func(context.Context, string) (string, error) { calls++; return "minted", nil },
+		policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) { calls++; return "minted", nil },
 	}
 	first, err := machine.Create(t.Context(), enrollmentID, signRequest(t, machine, key, "read", "PLAIN_TO_KIND"), "")
 	if err != nil || first.GrantID == nil {
@@ -127,6 +164,7 @@ func TestPlainToKindRetagEndsTheGrant(t *testing.T) {
 	kind := plain
 	kind.Tags = maps.Clone(plain.Tags)
 	kind.Tags[policy.TagKind] = policy.KindGitHubApp
+	kind.Tags[policy.TagGitHubOwners] = policytest.FixtureGitHubOwners
 	retag(t, machine, kind)
 	if values, _, err := machine.Values(t.Context(), *first.GrantID, enrollmentID); !errors.Is(err, ErrGrantNotLive) || values != nil || calls != 0 {
 		t.Fatalf("Values after plain-to-kind retag = %v, %v after %d mints; want ErrGrantNotLive", values, err, calls)
@@ -142,7 +180,7 @@ func TestDeletedKindSecretStopsReleasing(t *testing.T) {
 	retag(t, machine, requestKindSecret("DELETE_KIND_KEY", policy.KindGoogleLogin, policy.TierAgent, ""))
 	calls := 0
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, string) (string, error) {
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
 			calls++
 			return "access-token", nil
 		},
@@ -176,11 +214,11 @@ func TestKindRetagEndsTheGrantAndPreventsReuse(t *testing.T) {
 			retag(t, machine, secret)
 			calls := 0
 			machine.Minters = map[string]Minter{
-				policy.KindGitHubApp: func(context.Context, string) (string, error) {
+				policy.KindGitHubApp: func(context.Context, secrets.MintRequest) (string, error) {
 					calls++
 					return "minted-token", nil
 				},
-				policy.KindGoogleLogin: func(context.Context, string) (string, error) {
+				policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
 					calls++
 					return "access-token", nil
 				},
@@ -220,7 +258,7 @@ func TestKindSecretWithoutAMinterDoesNotReleaseItsStoredValue(t *testing.T) {
 func TestAMaxGrantAddedLaterBoundsLiveGrantsAndPendingApprovals(t *testing.T) {
 	machine, enrollmentID, key, approver := newFixture(t)
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, string) (string, error) { return "access-token", nil },
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) { return "access-token", nil },
 	}
 	retag(t, machine,
 		requestKindSecret("AGENT_LOGIN", policy.KindGoogleLogin, policy.TierAgent, ""),
@@ -257,7 +295,7 @@ func TestAFailedMintIsNamedAndReleasesNothing(t *testing.T) {
 	machine, enrollmentID, key, _ := newFixture(t)
 	retag(t, machine, requestKindSecret("LAPSED_LOGIN", policy.KindGoogleLogin, policy.TierAgent, ""))
 	machine.Minters = map[string]Minter{
-		policy.KindGoogleLogin: func(context.Context, string) (string, error) {
+		policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
 			return "", errors.New("Google login needs a new sign-in: invalid_grant (invalid_rapt)")
 		},
 	}

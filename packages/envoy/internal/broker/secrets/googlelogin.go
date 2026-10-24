@@ -37,12 +37,12 @@ type googleTokenError struct {
 
 // Mint returns the bare Google access token. It never puts a stored credential or returned token
 // in an error, and every error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
-func (m GoogleLogin) Mint(ctx context.Context, value string) (string, error) {
+func (m GoogleLogin) Mint(ctx context.Context, req MintRequest) (string, error) {
 	const what = "refresh Google login"
 	var secret googleLoginSecret
 	// encoding/json's syntax errors quote the offending byte, so neither decode wraps its error:
 	// the stored credential and Google's answer both hold secrets.
-	if json.Unmarshal([]byte(value), &secret) != nil {
+	if json.Unmarshal([]byte(req.Value), &secret) != nil {
 		return "", fmt.Errorf("%w: decode Google login secret: not a JSON object of its fields", ErrMintStoredValue)
 	}
 	if secret.Type != "authorized_user" || secret.ClientID == "" || secret.ClientSecret == "" || secret.RefreshToken == "" {

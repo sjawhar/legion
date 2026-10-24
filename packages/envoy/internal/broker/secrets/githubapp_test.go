@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -42,6 +43,11 @@ func githubAppValue(t *testing.T, appID string, key *rsa.PrivateKey) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+// mintFor is a release of value for owners, the github-owners tag's lowercase logins.
+func mintFor(value string, owners ...string) secrets.MintRequest {
+	return secrets.MintRequest{Value: value, GitHubOwners: owners}
 }
 
 func verifyAppJWT(t *testing.T, authorization string, public *rsa.PublicKey, appID string, now time.Time) {
@@ -124,7 +130,11 @@ func TestGitHubAppMintSignsJWTAndFollowsPagination(t *testing.T) {
 	}))
 	defer server.Close()
 
-	value, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client(), Now: func() time.Time { return now }}).Mint(t.Context(), githubAppValue(t, appID, key))
+	owners := []string{"second-owner", "third-owner"}
+	for index := 1; index <= 100; index++ {
+		owners = append(owners, fmt.Sprintf("owner-%03d", index))
+	}
+	value, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client(), Now: func() time.Time { return now }}).Mint(t.Context(), mintFor(githubAppValue(t, appID, key), owners...))
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -156,7 +166,7 @@ func TestGitHubAppMintRefusesAppWithoutInstallations(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err = (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), githubAppValue(t, "123456", key))
+	_, err = (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "acme"))
 	if err == nil || !strings.Contains(err.Error(), "github app 123456 has no installation") {
 		t.Fatalf("Mint error = %v, want no-installation error", err)
 	}
@@ -202,7 +212,7 @@ func TestGitHubAppMintSkipsSuspendedInstallations(t *testing.T) {
 			}))
 			defer server.Close()
 
-			value, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), githubAppValue(t, "123456", key))
+			value, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "active-owner", "suspended-owner"))
 			if len(tc.want) == 0 {
 				if err == nil || !strings.Contains(err.Error(), "github app 123456 has no installation") {
 					t.Fatalf("Mint = %q, %v; want no-installation error", value, err)
@@ -239,7 +249,7 @@ func TestGitHubAppMintNeverLeaksKeyOnFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err = (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), value)
+	_, err = (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(value, "acme"))
 	if err == nil {
 		t.Fatal("Mint succeeded after a GitHub 401")
 	}
@@ -250,7 +260,7 @@ func TestGitHubAppMintNeverLeaksKeyOnFailure(t *testing.T) {
 
 func TestGitHubAppMintRejectsCorruptKeyWithoutLeakingIt(t *testing.T) {
 	value := `{"app_id":"123456","private_key":"-----BEGIN RSA PRIVATE KEY-----\nprivate-material\n-----END RSA PRIVATE KEY-----"}`
-	_, err := (secrets.GitHubApp{}).Mint(t.Context(), value)
+	_, err := (secrets.GitHubApp{}).Mint(t.Context(), mintFor(value, "acme"))
 	if err == nil || strings.Contains(err.Error(), "private-material") || strings.Contains(err.Error(), "PRIVATE KEY") {
 		t.Fatalf("Mint corrupt key = %v, want a parse error without key material", err)
 	}
@@ -281,7 +291,7 @@ func TestGitHubAppMintAcceptsPKCS8Key(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	if _, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), string(value)); err != nil {
+	if _, err := (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(string(value), "owner")); err != nil {
 		t.Fatalf("Mint PKCS8 = %v", err)
 	}
 }
@@ -313,7 +323,7 @@ func TestGitHubAppMintNamesTheClassOfEachFailure(t *testing.T) {
 		"GitHub cannot be reached": {secrets.GitHubApp{Base: "http://127.0.0.1:1"}, githubAppValue(t, "1", key), "upstream"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := tc.app.Mint(t.Context(), tc.value)
+			_, err := tc.app.Mint(t.Context(), mintFor(tc.value, "acme"))
 			if got := secrets.MintErrorClass(err); err == nil || got != tc.class {
 				t.Fatalf("Mint = %v (class %s); want class %s", err, got, tc.class)
 			}
@@ -333,8 +343,65 @@ func TestGitHubAppMintRefusesAnAnswerPastItsCap(t *testing.T) {
 		_, _ = w.Write(bytes.Repeat([]byte(" "), 2<<20))
 	}))
 	defer server.Close()
-	_, err = (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), githubAppValue(t, "1", key))
+	_, err = (secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}).Mint(t.Context(), mintFor(githubAppValue(t, "1", key), "acme"))
 	if !errors.Is(err, secrets.ErrMintUpstream) || !strings.Contains(err.Error(), "more than 1048576 bytes") {
 		t.Fatalf("Mint against an endless answer = %v; want ErrMintUpstream naming the cap", err)
+	}
+}
+
+// TestGitHubAppMintLeavesOutAnAccountItsOwnersDoNotList: a public App can be installed on any
+// account, so Mint asks GitHub for a token only for an installation on an account github-owners
+// lists, matched without regard to case, and leaves out every other installation without a
+// request for it. An App installed only on accounts the list does not name mints nothing.
+func TestGitHubAppMintLeavesOutAnAccountItsOwnersDoNotList(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 1, "account": map[string]string{"login": "Acme-Org"}},
+				{"id": 2, "account": map[string]string{"login": "outsider"}},
+				{"id": 3, "account": map[string]string{"login": "ada"}},
+			})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			asked = append(asked, r.URL.Path)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "token-" + r.URL.Path, "expires_at": "2026-10-23T13:00:00Z"})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	app := secrets.GitHubApp{Base: server.URL, HTTP: server.Client()}
+
+	value, err := app.Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "acme-org", "ada"))
+	if err != nil {
+		t.Fatalf("Mint: %v", err)
+	}
+	var got mintedGitHubApp
+	if err := json.Unmarshal([]byte(value), &got); err != nil {
+		t.Fatalf("Mint output: %v", err)
+	}
+	if _, ok := got.Installations["outsider"]; ok || len(got.Installations) != 2 {
+		t.Fatalf("Mint installations = %v, want Acme-Org and ada only", got.Installations)
+	}
+	if _, ok := got.Installations["Acme-Org"]; !ok {
+		t.Fatalf("Mint installations = %v, want Acme-Org matched without regard to case", got.Installations)
+	}
+	if len(asked) != 2 || slices.Contains(asked, "/app/installations/2/access_tokens") {
+		t.Fatalf("token requests = %v, want none for the outsider's installation", asked)
+	}
+
+	_, err = app.Mint(t.Context(), mintFor(githubAppValue(t, "123456", key), "nobody-installed"))
+	if secrets.MintErrorClass(err) != "refused" || !strings.Contains(err.Error(), "github-owners") {
+		t.Fatalf("Mint with no listed installation = %v, want refused naming github-owners", err)
+	}
+	_, err = app.Mint(t.Context(), mintFor(githubAppValue(t, "123456", key)))
+	if secrets.MintErrorClass(err) != "refused" {
+		t.Fatalf("Mint with no github-owners = %v, want refused", err)
 	}
 }

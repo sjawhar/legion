@@ -48,12 +48,12 @@ func init() {
 			"List every agent secret under your own cloud sign-in: its owner, tier, kind, max grant,\nwhether it has a value, and deletion details."}, cmdSecretList},
 		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
 			"Print an agent secret's owner, tier, kind, max grant, dates and versions. Never print its\nvalue."}, cmdSecretShow},
-		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--kind github-app|google-login|none] [--max-grant DURATION] [--profile P]",
+		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--kind github-app|google-login|none] [--github-owners LOGINS] [--max-grant DURATION] [--profile P]",
 			"Create an agent secret under your own cloud sign-in. Then ask the broker to serve it. Read\nits value from standard input, or type it at a prompt with echo off."}, cmdSecretCreate},
 		{command{"secret set", "agent-secrets secret set NAME [--profile P]",
 			"Set a new agent-secret value under your own cloud sign-in. Then ask the broker to serve it.\nRead the value from standard input, or type it at a prompt with echo off."}, cmdSecretSet},
-		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--kind github-app|google-login|none] [--max-grant DURATION|none] [--profile P]",
-			"Change an agent secret's owner, tier, kind or max grant under your own cloud sign-in. Then\nask the broker to reread it. none removes a kind or max grant, in a retag of its own. An\nadministrator changes a shared secret's owner and tier."}, cmdSecretRetag},
+		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--kind github-app|google-login|none] [--github-owners LOGINS|none] [--max-grant DURATION|none] [--profile P]",
+			"Change an agent secret's owner, tier, kind, GitHub owners or max grant under your own cloud\nsign-in. Then ask the broker to reread it. none removes a kind, GitHub owners or max grant, in a\nretag of its own. An administrator changes a shared secret's owner and tier."}, cmdSecretRetag},
 		{command{"secret delete", "agent-secrets secret delete NAME [--profile P]",
 			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own cloud\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
 		{command{"secret restore", "agent-secrets secret restore NAME [--profile P]",
@@ -158,7 +158,7 @@ func secretFail(stderr io.Writer, form string, err error) int {
 }
 
 // secretFlagValues are the secret forms' flags that take a value.
-var secretFlagValues = map[string]bool{"owner": true, "tier": true, "kind": true, "max-grant": true, "profile": true}
+var secretFlagValues = map[string]bool{"owner": true, "tier": true, "kind": true, "github-owners": true, "max-grant": true, "profile": true}
 
 // secretFlags is form's flag set with --profile, which every secret form takes but only the AWS
 // backend uses (GCP uses your Application Default Credentials instead; a non-empty --profile
@@ -196,7 +196,7 @@ func checkOwnerTier(owner, tier string) error {
 	return nil
 }
 
-// tagNone is the value of --kind and --max-grant that removes the tag.
+// tagNone is the value of --kind, --github-owners and --max-grant that removes the tag.
 const tagNone = "none"
 
 // checkKind is --kind's rule: a kind the broker mints (policy.ValidKind), or none.
@@ -219,14 +219,33 @@ func checkMaxGrant(maxGrant string, orNone bool) error {
 	return nil
 }
 
-// optionalTags is the kind and max-grant tags the flags set: each flag's value when it names one,
-// and nothing for one left unset or set to none.
-func optionalTags(kind, maxGrant string) map[string]string {
+// checkGitHubOwners is --github-owners' rule, the broker's own (policy.ParseGitHubOwners): GitHub
+// account logins separated by commas, or none where orNone allows it. It answers the list as the
+// broker reads it, lowercased and sorted, so the tag is written as it will be served.
+func checkGitHubOwners(owners string, orNone bool) (string, error) {
+	if owners == "" || (orNone && owners == tagNone) {
+		return owners, nil
+	}
+	parsed, err := policy.ParseGitHubOwners(owners)
+	if err != nil {
+		return "", usageErr{fmt.Errorf("--github-owners: %w", err)}
+	}
+	return parsed, nil
+}
+
+// optionalTags is the kind, github-owners and max-grant tags the flags set: each flag's value
+// when it names one, and nothing for one left unset or set to none. A kind brings the rollback
+// guard with it (policy.TagRollbackGuard), so a broker from before kinds refuses the secret rather
+// than serve its stored key or refresh token.
+func optionalTags(kind, githubOwners, maxGrant string) map[string]string {
 	tags := map[string]string{}
-	for key, value := range map[string]string{policy.TagKind: kind, policy.TagMaxGrant: maxGrant} {
+	for key, value := range map[string]string{policy.TagKind: kind, policy.TagGitHubOwners: githubOwners, policy.TagMaxGrant: maxGrant} {
 		if value != "" && value != tagNone {
 			tags[key] = value
 		}
+	}
+	if _, kinded := tags[policy.TagKind]; kinded {
+		tags[policy.TagRollbackGuard] = policy.RollbackGuardValue
 	}
 	return tags
 }
@@ -609,7 +628,9 @@ type secretView struct {
 	Owner      string `json:"owner"`
 	Tier       string `json:"tier"`
 	Kind       string `json:"kind"`
-	MaxGrant   string `json:"max_grant"`
+	// GitHubOwners is a github-app secret's github-owners tag, the accounts the broker mints for.
+	GitHubOwners string `json:"github_owners"`
+	MaxGrant     string `json:"max_grant"`
 	// HasValue is whether it holds a current, servable version (AWS: a version carries AWSCURRENT;
 	// GCP: versions/latest is ENABLED), so the broker can release a value.
 	HasValue bool `json:"has_value"`
@@ -722,8 +743,8 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	fmt.Fprintf(stdout, "name: %s\nsecret_name: %s\nowner: %s\ntier: %s\nkind: %s\nmax_grant: %s\ncreated: %s\nlast_changed: %s\n",
-		view.Name, view.SecretName, orDash(view.Owner), orDash(view.Tier), orDash(view.Kind), orDash(view.MaxGrant), formatTime(view.Created), formatTime(view.LastChanged))
+	fmt.Fprintf(stdout, "name: %s\nsecret_name: %s\nowner: %s\ntier: %s\nkind: %s\ngithub_owners: %s\nmax_grant: %s\ncreated: %s\nlast_changed: %s\n",
+		view.Name, view.SecretName, orDash(view.Owner), orDash(view.Tier), orDash(view.Kind), orDash(view.GitHubOwners), orDash(view.MaxGrant), formatTime(view.Created), formatTime(view.LastChanged))
 	switch {
 	case view.EarliestPurge != nil:
 		fmt.Fprintf(stdout, "deleted: %s\nearliest_purge: %s (the deletion plus Secrets Manager's %d-day minimum recovery window: restorable at least until then; the window the delete chose may be longer)\n",
@@ -756,6 +777,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	owner := flags.String("owner", "", "me (your email, from your AWS or Google sign-in) or shared")
 	tier := flags.String("tier", "", "agent (its owner's agents use it without asking) or human (a person approves each use)")
 	kind := flags.String("kind", "", "github-app, google-login or none (the default)")
+	githubOwners := flags.String("github-owners", "", "the GitHub accounts a github-app secret mints for, separated by commas")
 	maxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -769,6 +791,12 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	}
 	if err == nil {
 		err = checkKind(*kind)
+	}
+	if err == nil {
+		*githubOwners, err = checkGitHubOwners(*githubOwners, false)
+	}
+	if err == nil && (*kind == policy.KindGitHubApp) != (*githubOwners != "") {
+		err = usageErr{errors.New("--kind github-app and --github-owners go together: the broker refuses a github-app secret that names no GitHub owners")}
 	}
 	if err == nil {
 		err = checkMaxGrant(*maxGrant, false)
@@ -789,6 +817,9 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if *kind != "" {
 		command = append(command, "--kind", *kind)
 	}
+	if *githubOwners != "" {
+		command = append(command, "--github-owners", *githubOwners)
+	}
 	if *maxGrant != "" {
 		command = append(command, "--max-grant", *maxGrant)
 	}
@@ -796,7 +827,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	tags := optionalTags(*kind, *maxGrant)
+	tags := optionalTags(*kind, *githubOwners, *maxGrant)
 	tags[policy.TagOwner], tags[policy.TagTier] = ownerValue, *tier
 	if err := s.backend.create(s.ctx, slug, tags, value); err != nil {
 		return secretFail(stderr, form, err)
@@ -860,13 +891,14 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	newOwner := flags.String("owner", "", "the new owner: me (your email, from your AWS or Google sign-in) or shared")
 	newTier := flags.String("tier", "", "the new tier: agent or human")
 	newKind := flags.String("kind", "", "github-app, google-login or none")
+	newGitHubOwners := flags.String("github-owners", "", "the GitHub accounts a github-app secret mints for, separated by commas, or none")
 	newMaxGrant := flags.String("max-grant", "", "the longest grant duration this secret allows, or none")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	name, slug, err := secretName(positional)
-	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newMaxGrant == "" {
-		err = usageErr{errors.New("--owner, --tier, --kind, --max-grant or a combination is required")}
+	if err == nil && *newOwner == "" && *newTier == "" && *newKind == "" && *newGitHubOwners == "" && *newMaxGrant == "" {
+		err = usageErr{errors.New("--owner, --tier, --kind, --github-owners, --max-grant or a combination is required")}
 	}
 	if err == nil {
 		err = checkOwnerTier(*newOwner, *newTier)
@@ -875,16 +907,23 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 		err = checkKind(*newKind)
 	}
 	if err == nil {
+		*newGitHubOwners, err = checkGitHubOwners(*newGitHubOwners, true)
+	}
+	if err == nil {
 		err = checkMaxGrant(*newMaxGrant, true)
 	}
 	var remove []string
 	if *newKind == tagNone {
-		remove = append(remove, policy.TagKind)
+		// The rollback guard goes with the kind: a stored secret is safe on every broker.
+		remove = append(remove, policy.TagKind, policy.TagRollbackGuard)
+	}
+	if *newGitHubOwners == tagNone {
+		remove = append(remove, policy.TagGitHubOwners)
 	}
 	if *newMaxGrant == tagNone {
 		remove = append(remove, policy.TagMaxGrant)
 	}
-	set := optionalTags(*newKind, *newMaxGrant)
+	set := optionalTags(*newKind, *newGitHubOwners, *newMaxGrant)
 	if err == nil && len(remove) > 0 && (*newOwner != "" || *newTier != "" || len(set) > 0) {
 		err = usageErr{errors.New("none removes a tag in a retag of its own: run the removal and the other changes as two retags")}
 	}

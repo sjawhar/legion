@@ -40,15 +40,29 @@ const (
 	// TagKind selects the token type a secret mints on release. An absent or empty tag leaves the
 	// secret's stored value unchanged.
 	TagKind = "kind"
-	// KindGitHubApp mints one installation token for every installation of the stored GitHub App.
+	// KindGitHubApp mints one installation token for every installation of the stored GitHub App
+	// on an account its TagGitHubOwners lists.
 	KindGitHubApp = "github-app"
 	// KindGoogleLogin exchanges the stored authorized-user refresh token for an access token.
 	KindGoogleLogin = "google-login"
 	// TagMaxGrant bounds a request's signed grant lifetime for this secret (ParseMaxGrant).
 	TagMaxGrant = "max-grant"
+	// TagGitHubOwners lists the GitHub accounts a github-app secret mints installation tokens for
+	// (ParseGitHubOwners). A github-app secret without it is refused, since a public App can be
+	// installed by any account, and an installation on an account it does not list gets no token.
+	TagGitHubOwners = "github-owners"
 	// KindSourcePrefix opens the Source of a kind secret (KindSource). The kind and store source
 	// are frozen into a request, so changing or clearing the kind ends every live grant.
 	KindSourcePrefix = "mint:"
+	// TagRollbackGuard and RollbackGuardValue are the tag `agent-secrets secret` writes beside every
+	// kind, and the value it writes. This broker never reads the tag. Brokers from
+	// legion-envoy-v13.19.0 to the release before kinds read it as the service account a secret
+	// mints for, and refuse a value that is not a service account's email (mint-target-malformed),
+	// so a rollback to one of them refuses a kind secret rather than serving its stored App key or
+	// refresh token. Brokers older than legion-envoy-v13.19.0 read no such tag and serve it; never
+	// run one against a store that holds kind secrets.
+	TagRollbackGuard   = "mint-service-account"
+	RollbackGuardValue = "kind-secret"
 	// OwnerShared is the owner value of a secret nobody owns alone.
 	OwnerShared = "shared"
 	// TierAgent is a secret its owner's agents use without asking.
@@ -83,6 +97,26 @@ func ParseMaxGrant(raw string) (time.Duration, error) {
 		return 0, ErrMaxGrantMalformed
 	}
 	return maxGrant, nil
+}
+
+// ErrGitHubOwnersMissing is a github-owners tag that names no account.
+var ErrGitHubOwnersMissing = errors.New("github-owners names at least one GitHub account")
+
+// ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by commas, compared
+// without regard to case. It answers them lowercased, sorted and joined by commas, so a Secret
+// holding them stays comparable and two spellings of one list are one policy.
+func ParseGitHubOwners(raw string) (string, error) {
+	var owners []string
+	for _, owner := range strings.Split(raw, ",") {
+		if owner = strings.ToLower(strings.TrimSpace(owner)); owner != "" && !slices.Contains(owners, owner) {
+			owners = append(owners, owner)
+		}
+	}
+	if len(owners) == 0 {
+		return "", ErrGitHubOwnersMissing
+	}
+	slices.Sort(owners)
+	return strings.Join(owners, ","), nil
 }
 
 // KindSource is the Source of a kind secret: its kind frozen beside the store's own source.
@@ -143,8 +177,19 @@ type Secret struct {
 	// MaxGrant is the greatest grant lifetime a request may sign for this secret, or 0 when it sets
 	// none (ParseMaxGrant refuses anything under a second). A value, never a pointer, so a Secret
 	// compares equal to an unchanged reread of itself (Current.RefreshOne).
-	MaxGrant  time.Duration
-	ownership ownerKind
+	MaxGrant time.Duration
+	// GitHubOwners is a github-app secret's github-owners tag as ParseGitHubOwners answers it, and
+	// "" for every other secret. A string, not a slice, for the same reason as MaxGrant.
+	GitHubOwners string
+	ownership    ownerKind
+}
+
+// GitHubOwnerLogins is GitHubOwners as a list of lowercase logins, nil when it is "".
+func (secret Secret) GitHubOwnerLogins() []string {
+	if secret.GitHubOwners == "" {
+		return nil
+	}
+	return strings.Split(secret.GitHubOwners, ",")
 }
 
 // approver is who decides an approval request for secret: anyone signed in to Dispatch for a
@@ -158,20 +203,21 @@ func (secret Secret) approver() string {
 
 // Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
-	// Version is the SHA-256 of every served secret's name, owner, tier, source and max-grant:
-	// equal versions are equal policies. A request records the version it was decided under, so a
-	// live grant is re-evaluated only once the policy changed.
+	// Version is the SHA-256 of every served secret's name, owner, tier, source, max-grant and
+	// github-owners: equal versions are equal policies. A request records the version it was decided
+	// under, so a live grant is re-evaluated only once the policy changed.
 	Version string
 	Secrets map[string]Secret
 }
 
 // NewSet builds the one Set shape both Load and the single-name merges produce, keeping secrets
-// (keyed by Name) as its Secrets. A secret with no max-grant writes the pre-kind digest bytes,
-// "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind is in its Source); one with a
-// max-grant adds it as a fifth field. Entries are ascending by the secret's name in the store
-// (the slug) — the exact order Load wrote before NewSet existed, so deployed plain-secret digests
-// do not shift. (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is
-// 0x5F, so "a-b" < "a0" as slugs but "A0" < "A_B" as Names.)
+// (keyed by Name) as its Secrets. A secret with no max-grant and no github-owners writes the
+// pre-kind digest bytes, "<Name>\t<Owner>\t<Tier>\t<Source>\n" (a kind secret's kind is in its
+// Source); one with either adds both, as a fifth field (time.Duration's form, 0s for none) and a
+// sixth (empty for none). Entries are ascending by the secret's name in the store (the slug) —
+// the exact order Load wrote before NewSet existed, so deployed plain-secret digests do not shift.
+// (Sorting by the uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so "a-b" <
+// "a0" as slugs but "A0" < "A_B" as Names.)
 func NewSet(secrets map[string]Secret) *Set {
 	type bySlug struct {
 		slug   string
@@ -184,11 +230,11 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		if s.secret.MaxGrant == 0 {
+		if s.secret.MaxGrant == 0 && s.secret.GitHubOwners == "" {
 			fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
 			continue
 		}
-		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant)
+		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source, s.secret.MaxGrant, s.secret.GitHubOwners)
 	}
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }

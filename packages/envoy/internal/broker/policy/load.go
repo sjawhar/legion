@@ -52,6 +52,10 @@ const (
 	// ReasonMaxGrantMalformed: max-grant is not a Go duration of at least one second
 	// (ParseMaxGrant).
 	ReasonMaxGrantMalformed = "max-grant-malformed"
+	// ReasonGitHubOwnersMissing: a github-app secret has no github-owners tag, or one that names no
+	// account (ParseGitHubOwners). A public App can be installed on any account, so the broker mints
+	// only for the accounts the deployment lists.
+	ReasonGitHubOwnersMissing = "github-owners-missing"
 )
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
@@ -214,6 +218,11 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 	if kind := ls.Tags[TagKind]; kind != "" {
 		if !ValidKind(kind) {
 			return Secret{}, ReasonKindUnknown, nil
+		}
+		if kind == KindGitHubApp {
+			if s.GitHubOwners, err = ParseGitHubOwners(ls.Tags[TagGitHubOwners]); err != nil {
+				return Secret{}, ReasonGitHubOwnersMissing, nil
+			}
 		}
 		s.Source = KindSource(kind, ls.Source)
 	}

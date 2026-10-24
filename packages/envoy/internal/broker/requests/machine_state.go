@@ -131,9 +131,10 @@ type Decision struct {
 	GrantID   string
 }
 
-// Minter makes one release of a kind secret from its stored value (secrets.GitHubApp.Mint,
-// secrets.GoogleLogin.Mint). Its error never holds the stored value or a token.
-type Minter func(ctx context.Context, value string) (string, error)
+// Minter makes one release of a kind secret from its stored value and the policy's facts about it
+// (secrets.GitHubApp.Mint, secrets.GoogleLogin.Mint). Its error never holds the stored value or a
+// token.
+type Minter func(ctx context.Context, req secrets.MintRequest) (string, error)
 
 type Machine struct {
 	Store      *store.Store

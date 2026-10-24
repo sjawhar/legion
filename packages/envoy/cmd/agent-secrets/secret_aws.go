@@ -177,7 +177,7 @@ func (b *awsBackend) list(ctx context.Context) ([]secretView, error) {
 			views = append(views, secretView{
 				Name: b.displayName(id), SecretName: id,
 				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-				Kind: tags[policy.TagKind], MaxGrant: tags[policy.TagMaxGrant],
+				Kind: tags[policy.TagKind], GitHubOwners: tags[policy.TagGitHubOwners], MaxGrant: tags[policy.TagMaxGrant],
 				HasValue: secrets.HasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
 				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
@@ -196,7 +196,7 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	return secretView{
 		Name: b.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
 		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-		Kind: tags[policy.TagKind], MaxGrant: tags[policy.TagMaxGrant],
+		Kind: tags[policy.TagKind], GitHubOwners: tags[policy.TagGitHubOwners], MaxGrant: tags[policy.TagMaxGrant],
 		HasValue: secrets.HasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
 		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),

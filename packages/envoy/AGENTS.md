@@ -2381,12 +2381,20 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier, source and max grant, is recorded on
-every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read back by
-`policy.ParseKindSource`), so a kind change ends a live grant. `policy.Kinds`, `ValidKind` and
-`ParseMaxGrant` are the one statement of which kinds exist and what a max grant is, which the
-loader and `agent-secrets secret` both apply, and `Secret.MaxGrant` is a `time.Duration` (0: none)
-so a `Secret` compares equal to an unchanged reread of itself.
+SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub owners, is
+recorded on every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read
+back by `policy.ParseKindSource`), so a kind change ends a live grant. `policy.Kinds`, `ValidKind`,
+`ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant
+is and how a `github-owners` list reads, which the loader and `agent-secrets secret` both apply. A
+`github-app` secret whose `github-owners` names no account is refused `github-owners-missing`.
+`Secret.MaxGrant` is a `time.Duration` (0: none) and `Secret.GitHubOwners` the lowercased, sorted
+list as one string, so a `Secret` compares equal to an unchanged reread of itself. A release passes
+the current policy's owners to the minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint`
+asks GitHub for no token for an installation on an account they do not list.
+`policy.TagRollbackGuard` and `RollbackGuardValue` (`mint-service-account: kind-secret`) are what
+`agent-secrets secret` writes beside every kind, so a broker of legion-envoy-v13.19.0 to the
+release before kinds refuses the secret (`mint-target-malformed`) rather than serve its stored key;
+this broker never reads the tag (`TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere`).
 A live grant is re-checked once the version moves, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
@@ -2539,16 +2547,19 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-`secret.go` builds the one tag map a write sends, owner and tier plus `kind` and `max-grant` when
-the command names them, under the broker's own rules (`policy.ValidKind`, `policy.ParseMaxGrant`),
+`secret.go` builds the one tag map a write sends (`optionalTags`), owner and tier plus `kind`,
+`github-owners` and `max-grant` when the command names them, and the rollback guard beside a kind,
+under the broker's own rules (`policy.ValidKind`, `policy.ParseGitHubOwners`, `policy.ParseMaxGrant`),
 and each backend writes a map it does not read into (`create(tags)`, `setTags`, `removeTags`).
 AWS `create` writes on the settings' key with those tags and no `ClientRequestToken` (the SDK sets
 one). A `retag` is one write: it either sets tags or removes them, never both, and refuses `none`
 beside another change before any read or write, so a refused call never leaves it half applied.
 One that sets tags describes the secret and sends owner and tier in one `TagResource`, plus `kind`
-and `max-grant` when the command sets them, so an IAM condition on the request's tags sees them;
-one that removes tags (`--kind none`, `--max-grant none`) reads nothing and is one
-`UntagResource` of those keys. On `AccessDenied` for a retag that sets tags on a
+(with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM
+condition on the request's tags sees them;
+one that removes tags (`--kind none`, which also removes the rollback guard, `--github-owners
+none`, `--max-grant none`) reads nothing and is one `UntagResource` of those keys. On
+`AccessDenied` for a retag that sets tags on a
 secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day

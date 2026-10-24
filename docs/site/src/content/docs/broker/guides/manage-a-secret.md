@@ -61,7 +61,11 @@ broker: serving DEMO_DEPLOY_TOKEN
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
 - **`--kind`** is optional. Use `github-app` for a GitHub App key and `google-login` for an
-  authorized-user Google login. Use `none`, or omit the flag, for a stored secret.
+  authorized-user Google login. Use `none`, or omit the flag, for a stored secret. A kind also
+  writes `mint-service-account: kind-secret`, which makes an earlier broker refuse the secret
+  rather than serve its stored key.
+- **`--github-owners`** is required with `--kind github-app`, and refused with any other kind. It
+  lists the GitHub accounts the broker mints installation tokens for, separated by commas.
 - **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
   It must be a duration of at least one second.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
@@ -224,15 +228,16 @@ retagged DEMO_DEPLOY_TOKEN (owner=ada@example.com, tier=human)
 broker: serving DEMO_DEPLOY_TOKEN
 ```
 
-Name `--owner`, `--tier`, `--kind`, `--max-grant` or a combination. A retag that sets tags reads
-the owner and tier tags the secret holds and sends both in one request. On AWS, this lets an IAM
-condition inspect both tags. Every other tag or annotation stays as it is. For a secret missing an
-owner or tier tag, name that tag too.
+Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant` or a combination. A retag that
+sets tags reads the owner and tier tags the secret holds and sends both in one request. On AWS,
+this lets an IAM condition inspect both tags. Every other tag or annotation stays as it is. For a
+secret missing an owner or tier tag, name that tag too.
 
-`--kind none` removes the kind tag and `--max-grant none` removes the max grant. A removal is a
-retag of its own: it changes no other tag, so the cloud refusing it leaves the secret as it was.
-A retag that names `none` beside another change is refused before it writes anything. Run the
-removal and the other change as two retags:
+`--kind none` removes the kind tag and the `mint-service-account` tag written with it,
+`--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant. A
+removal is a retag of its own: it changes no other tag, so the cloud refusing it leaves the secret
+as it was. A retag that names `none` beside another change is refused before it writes anything.
+Run the removal and the other change as two retags:
 
 ```console
 $ agent-secrets secret retag DEMO_LOGIN --max-grant none

@@ -201,7 +201,7 @@ func (b *gcpBackend) viewOf(ctx context.Context, secret *secretmanagerpb.Secret)
 	view := secretView{
 		Name: b.displayName(secret.GetName()), SecretName: secret.GetName(),
 		Owner: secret.GetAnnotations()[policy.TagOwner], Tier: secret.GetAnnotations()[policy.TagTier],
-		Kind: secret.GetAnnotations()[policy.TagKind], MaxGrant: secret.GetAnnotations()[policy.TagMaxGrant],
+		Kind: secret.GetAnnotations()[policy.TagKind], GitHubOwners: secret.GetAnnotations()[policy.TagGitHubOwners], MaxGrant: secret.GetAnnotations()[policy.TagMaxGrant],
 		HasValue: hasValue,
 	}
 	if t := secret.GetCreateTime(); t != nil {

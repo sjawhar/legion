@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -55,14 +56,17 @@ type githubMintedInstallation struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 }
 
-// Mint returns a token and expiry for every installation of the App in value that is not
-// suspended. The value is the JSON object stored in the secret, never part of an error. Every
-// error wraps one of ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
-func (m GitHubApp) Mint(ctx context.Context, value string) (string, error) {
+// Mint returns a token and expiry for every installation of the App in req.Value that is not
+// suspended and whose account req.GitHubOwners lists, compared without regard to case. It leaves
+// out an installation on any other account without asking GitHub for its token: a public App can
+// be installed by anyone, and a release must not carry a token for an outsider's account. The
+// value is the JSON object stored in the secret, never part of an error. Every error wraps one of
+// ErrMintStoredValue, ErrMintRefused or ErrMintUpstream.
+func (m GitHubApp) Mint(ctx context.Context, req MintRequest) (string, error) {
 	var secret githubAppSecret
 	// encoding/json's syntax errors quote the offending byte, so this decode and the token's do
 	// not wrap their errors: the stored key and GitHub's token are both secrets.
-	if json.Unmarshal([]byte(value), &secret) != nil {
+	if json.Unmarshal([]byte(req.Value), &secret) != nil {
 		return "", fmt.Errorf("%w: decode GitHub App secret: not a JSON object of its fields", ErrMintStoredValue)
 	}
 	if !validGitHubAppID(secret.AppID) || secret.PrivateKey == "" {
@@ -96,6 +100,9 @@ func (m GitHubApp) Mint(ctx context.Context, value string) (string, error) {
 		if owner == "" {
 			return "", fmt.Errorf("%w: github app %s installation %d names no account", ErrMintUpstream, secret.AppID, installation.ID)
 		}
+		if !slices.Contains(req.GitHubOwners, strings.ToLower(owner)) {
+			continue
+		}
 		token, err := m.installationToken(ctx, jwt, installation.ID)
 		if err != nil {
 			return "", err
@@ -107,7 +114,7 @@ func (m GitHubApp) Mint(ctx context.Context, value string) (string, error) {
 		}
 	}
 	if len(minted.Installations) == 0 {
-		return "", fmt.Errorf("%w: github app %s has no installation", ErrMintRefused, secret.AppID)
+		return "", fmt.Errorf("%w: github app %s has no installation on an account its github-owners tag lists", ErrMintRefused, secret.AppID)
 	}
 	encoded, err := json.Marshal(minted)
 	if err != nil {
