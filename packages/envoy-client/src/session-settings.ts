@@ -89,6 +89,9 @@ function startNotice(
     }
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null) parts.push(checkout.envoyError);
+  if (checkout?.kind === "valid" && checkout.askgateError !== null) {
+    parts.push(checkout.askgateError);
+  }
   if (checkout?.kind === "invalid" && (dispatch.enabled || dispatch.error !== checkout.error)) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }

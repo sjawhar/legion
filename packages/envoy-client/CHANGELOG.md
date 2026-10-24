@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
+  envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse
+  leaves AskGate on and names the file and `askgate.enabled`, and never fails the Dispatch or Envoy
+  read. A checkout's `askgate` section is not read: `CheckoutEnvoyConfig.askgateError` names it,
+  and `sessionSettings` says it in its notice.
+
 ### Fixed
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
