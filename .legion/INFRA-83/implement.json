@@ -2,51 +2,76 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-83",
-  "completed": "2026-10-24T21:55:00Z",
-  "round": 11,
+  "completed": "2026-10-24T22:55:00Z",
+  "round": 12,
   "proof": [
     {
-      "criterion": "A ready_merge row that meets a disagreement never spends the one merge-waiting notice, and the notice no longer contradicts what the daemon is about to do",
-      "surface": "`rememberWait`'s warn gate in `packages/daemon/internal/daemon/auto_merge.go`, and the new test beside the suite's existing gate tests.",
-      "command": "The gate now reads `var lagging *ghautomerge.Lagging` then `warn := !payload.Warned && errors.Is(cause, wait.ErrWaiting) && !errors.As(cause, &lagging) && waited > mergeWaitWarn && !permanentRefusal(row, cause, now)`. Checks run: `gofmt -l packages/daemon/internal` (silent), `go -C packages/daemon build ./...`, `go -C packages/daemon vet ./...`, `go -C packages/daemon test -count=1 ./internal/{api,record,workflow,prompts}/...` (all ok), `go -C packages/daemon vet ./internal/daemon/` (type-checks the new test), and `go test -v -run TestAREADYMergeDisagreementSpendsNoWaitingNotice ./internal/daemon/`.",
-      "observed": "The traced path the reviewer gave holds: `Lagging.Is` returns true for `wait.ErrWaiting` (ghautomerge.go:271) and `permanentRefusal` answers true for a `Lagging` only once `Stalled` (ghautomerge.go:276), so a row past the hour meeting a fresh disagreement satisfied every term and sent `merge-waiting` saying the merge stands, quoting a cause whose own text says GitHub shows the pull request closed; within LagBound the same row sent `merge-stalled` saying the daemon stopped. With the clause, every `Lagging` is excluded and the disagreement's single telling stays `finishRefused`'s. The doc comment above `rememberWait` no longer describes only the stalled half. `go test -v` on the new test prints `--- SKIP` with the DSN reason, so it is reachable and wired rather than silently absent.",
-      "headSha": "2f833383049eb6e65ab8b4be36992031a12c6dc3",
-      "negativeControl": "Two, both inside the test. The fixture's `pullJSON` sets `updatedAt` to `time.Now()` against a clock at `now`, so `Stalled(now)` is false and the cause reaches the exact term this round adds - a stalled disagreement would have proved nothing, since `permanentRefusal` already excluded it. And the second half asserts exactly one notice for the genuine wait that follows, so a clause suppressing more than `Lagging` fails the test rather than passing it quietly."
+      "criterion": "A cause that is GitHub and the record disagreeing never spends the one merge-waiting notice, and the gate names what may spend it rather than listing what may not",
+      "surface": "`rememberWait`'s gate and the new `waitingOnGitHub` in `packages/daemon/internal/daemon/auto_merge.go`, driven directly.",
+      "command": "Ten causes through `rememberWait` with a `pgxpool` pointed at a dead port (`postgres://…@127.0.0.1:1/…?connect_timeout=1`), a real record store, a discarding logger and a held clock, in a scratch copy of the module under /tmp so the workspace was never touched; then the previous round's gate restored in that copy and the same ten re-run. Plus `gofmt -l packages/daemon/internal`, `go -C packages/daemon build ./...`, `go -C packages/daemon vet ./...`, `go -C packages/daemon test -count=1 ./internal/{api,record,workflow,prompts,classify,requiredchecks}/...`, `go vet ./internal/daemon/`, `go test -v -run TestAREADYMergeArmGoneFromGitHubSpendsNoWaitingNotice ./internal/daemon/`.",
+      "observed": "With the allowlist: Armed, Unmergeable and Merging spend the notice; Disappeared, both Lagging halves, Refused, Removed, a bare wait.ErrWaiting and a failed GitHub read do not. With the previous gate restored, two cases move - Disappeared (the finding's red-before, observed) and a bare wait.ErrWaiting from elsewhere. gofmt silent; build, vet and all six packages ok; the new test type-checks and reaches `--- SKIP` for want of LEGION_TEST_PG_DSN.",
+      "headSha": "434f974106d9d24ff24756d37f1d6f02a9f2d254",
+      "negativeControl": "The second moved case was checked rather than waved through: on the ready_merge path every wait.ErrWaiting producer is one of the five ghautomerge types (ghautomerge.go:271,297,321,398,418), the two other hits in the tree belonging to supervise and the suspension path, so no real cause takes that branch and the allowlist's refusal there is silence-by-default rather than a notice lost. The three admitted types are themselves the control against over-suppression: had the allowlist been narrower, they would have gone silent in the same run."
     },
     {
-      "criterion": "The red-before is claimed at the strength it was actually observed, which is not at all",
-      "surface": "This pod's ability to run `packages/daemon/internal/daemon`, measured rather than assumed.",
-      "command": "`env | grep LEGION_TEST_PG_DSN` (empty); `getent hosts legion-test-postgres.legion.svc.cluster.local`; one connection attempt with the conventional credential from `daemon_test.go`'s own skip message; `go test -v -run TestAREADYMergeDisagreementSpendsNoWaitingNotice ./internal/daemon/`.",
-      "observed": "LEGION_TEST_PG_DSN is unset here. The cluster Postgres resolves to 34.118.235.242 and answers on 5432 - the server speaks, refuses TLS, and refuses password authentication for the conventional user - so it is reachable and its credential is not in this pod. The architect measured the same from its own pod and additionally found `agent-secrets secret list` refused (secretmanager.secrets.list denied) and no `postgres`, `initdb`, `pg_ctl`, `docker` or `podman` in the image, so neither of us can run it tonight. I did not guess further credentials and none reached this transcript. The test therefore ran only as far as `--- SKIP`, and the red-before rests on CI's `test` job at this head: an event I am relying on and did not witness, written in the pull request body and on the review thread in those words.",
-      "headSha": "2f833383049eb6e65ab8b4be36992031a12c6dc3",
-      "negativeControl": "The strengthening the architect asked for is the control: the test asserts exact counts (zero, then exactly one) rather than a loose property, so a reviewer or any later reader with a database gets the red-before by running it instead of by trusting this handoff. My not having run it costs the moment, not the proof."
+      "criterion": "The change is clear of the deployment owner's four boundaries, or anything near one is named rather than assumed clear",
+      "surface": "Every file of the pull request's diff, 76 of them, read group by group against the four boundaries.",
+      "command": "`gh api repos/sjawhar/legion/pulls/2121/files --paginate --jq '.[]|[.status,.changes,.filename]'` for the inventory, then the patch of each file or group that could touch a boundary, including `contracts/src/legion-api.ts`, `contracts/fixtures/daemon-api/handoff-complete.json`, `record/outbox.go`, and the three role prompts.",
+      "observed": "Boundary 3 (no new requirement on handoffs between roles) is clear and derived rather than assumed: the only contract change is a doc comment and a note string on `handoff_complete`'s response, the `ready: true` request shape is untouched, and every role-prompt change in the diff is a deletion (the CI line, READY_CHECKS_NOT_GREEN's catalogue entry) or a pagination flag, never an added field or required step. `record.ReadyMerge`'s new `warned` and `queued` are fields of a daemon-owned outbox payload, not of any handoff a role writes. Boundary 4 (no company- or deployment-specific logic in Legion) is clear: no file of the diff names a deployment, and `.github/scripts/check-private-names.sh` passes over 4,874 files. Two items are near a line and are reported to the architect rather than decided here: the merge-waiting notice itself, under boundary 1, and the CI-line guard, under boundary 2. Each is described in `boundaryAudit` below with the reasoning that makes it arguable either way.",
+      "headSha": "434f974106d9d24ff24756d37f1d6f02a9f2d254",
+      "negativeControl": "The audit's own control is that it names two items rather than returning clear: an audit of one's own change that finds nothing is the shape this issue exists to delete. Boundary 3's clearance rests on the diff of the contract and the prompts, which a reader can re-run from the command above, not on my recollection of what the rounds added."
     },
     {
-      "criterion": "The Verification paragraph states no CI verdict, and the withdrawn instruction is gone from it",
-      "surface": "The live pull request body, re-read from the forge after the write.",
-      "command": "`gh api repos/sjawhar/legion/commits/2adb7d20c730b042c9f1013839d3c62f27f779eb/check-runs --paginate`; `gh api repos/sjawhar/legion/pulls/2121 --jq '[.changed_files,.additions,.deletions]'`; `gh api graphql … reviewThreads(first:100)`; the body re-read after the PATCH.",
-      "observed": "The paragraph claimed twice what was false by the time the reviewer read it - that no verdict existed at 2adb7d20, and a superlative naming b2350b43 - in the same body whose `E2E (tester)` block said otherwise. Re-derived: at 2adb7d20, read at 21:30Z, `lint`, `typecheck` and `test` are run 40130001027 and `pr-title` is run 40130001034, each completed and successful. The paragraph now states no verdict for the new head at all, names that read as an observation with a time on it, and says a verdict is a state with a clock while this record has none. The bolded `cited by run id and never by head` instruction, withdrawn by the architect at 19:38Z, is removed with the reason it was withdrawn. Size re-derived at +1665/-680, the thread ledger rebuilt from the forge at 14 resolved and 0 unresolved, stamped at this head.",
-      "headSha": "2f833383049eb6e65ab8b4be36992031a12c6dc3",
-      "negativeControl": "The control for a body claim is that it is re-derived rather than reconciled: each number here comes from its own command at this head, not from the sentence two paragraphs away that happened to be right. That is what the previous wording failed, which is why it disagreed with its own body."
+      "criterion": "No text left in the change says READY reads a check of the head",
+      "surface": "`packages/daemon/internal/workflow/review.go` and `readyMergeWaiting`'s doc in `auto_merge.go`.",
+      "command": "The reviewer's minor read at `review.go:67-68`; the sweep for the retired phrasings; `go test ./internal/workflow/... ./internal/prompts/...`.",
+      "observed": "review.go's mergeability comment no longer explains a conflict recorded before awaiting_merge by `the merger's READY check posts a conflicting head whose required checks all succeeded`; it now names the pass that reads every open pull request in whatever phase its issue is. `readyMergeWaiting`'s own doc still said `cause` is a wait and nothing else, which the allowlist makes false, and now names the three causes that carry it. Both packages' tests ok.",
+      "headSha": "434f974106d9d24ff24756d37f1d6f02a9f2d254",
+      "negativeControl": "The branch's sweep could not catch either: its retired-phrase list is READY_CHECKS_NOT_GREEN, `no check is required on` and `refused at READY`, and neither sentence contains any of the three. Both were found by a reader - the reviewer and, for the doc, by running the allowlist probe and noticing the sentence it falsified - which is why `required_checks.go:69`'s comment of the same family stays on the fast-follow line rather than being claimed as swept."
     }
   ],
-  "shelfLife": "This paragraph was the third sentence in this pull request to carry a claim past the moment it was true, after `Proven by`'s two halves, and the retro's ledger generalises it: every instance in this tree is a value true when written and false where it was read, and the defence is re-derivation at the point of use or a check that fires when the referent moves.",
+  "boundaryAudit": {
+    "asked": "The deployment's owner set four boundaries, each needing his decision before anything is built that crosses one: (1) new logic in the daemon beyond moving work through phases and keeping pods running, and any new control or constraint on agents; (2) any programmatic check on an agent's output; (3) any new requirement on the handoffs between roles; (4) any company- or deployment-specific logic in Legion itself.",
+    "clear": [
+      "Boundary 3, no new handoff requirement. The `handoff_complete` request shape is unchanged; the contract diff is a doc comment and a note string on the response. Every role-prompt change is a deletion or a pagination flag. `record.ReadyMerge.warned` and `.queued` are a daemon-owned outbox payload's fields, which no role writes or reads.",
+      "Boundary 4, nothing deployment-specific. No file of the 76 names a deployment, and check-private-names.sh passes over 4,874 files. The only mention of a deployment repository anywhere in this change's record is a risk line in the pull request body, which the required lint reads through check-pr-text.sh and has passed at every head that carried it."
+    ],
+    "nearTheLine": [
+      {
+        "boundary": 1,
+        "where": "packages/daemon/internal/daemon/auto_merge.go (mergeWaitWarn, rememberWait, waitingOnGitHub, readyMergeWaiting), with record/outbox.go's two payload fields, workflow/ready.go's Queued stamp and classify's notice-kind list serving it",
+        "argumentItIsClear": "It adds no control over any agent and constrains nothing: it blocks no call, refuses no completion and changes no phase. It is a telling - one notice to the issue's architect, once - and it was added as the replacement for a refusal this change deletes (READY_CHECKS_NOT_GREEN), so the net movement in the daemon is less judgement rather than more.",
+        "argumentItIsNear": "Read literally, a timer that fires a notice an hour after a row is queued is new daemon logic beyond moving work through phases and keeping pods running. Nothing else in the daemon measures elapsed time to tell a human something.",
+        "disposition": "Reported to the architect for its decision, with this reasoning and no action taken. It is the change's central deliverable (the fifth), so removing it is a scope decision rather than a cleanup."
+      },
+      {
+        "boundary": 2,
+        "where": "packages/pi-legion/src/skills-guard.test.ts (the CI-line guard this change adds) and packages/daemon/internal/prompts/prompts_test.go (the retired-phrase list it extends)",
+        "argumentItIsClear": "Both read text committed to this repository - the staged skills and the daemon's own prompt files - in the repository's own test suite. Neither reads a pull request, a review, or anything an agent wrote as output; the thing under test is source, and the lane is a lint like any other over instruction text.",
+        "argumentItIsNear": "The guard exists because an agent reintroduced a deleted paragraph through a forward merge, so its purpose is to catch text an agent writes, even though its surface is committed source. A reader could call that a programmatic check on an agent's output one step removed.",
+        "disposition": "Reported to the architect, no action taken. The architect's own reading - that it is a lint over committed instruction text rather than a pattern over what an agent wrote in a pull request - matches mine, and I record the counter-argument so the decision is made on both."
+      }
+    ]
+  },
   "filesChanged": [
-    "packages/daemon/internal/daemon/auto_merge.go — the warn gate excludes every ghautomerge.Lagging, and the doc comment above rememberWait says why",
-    "packages/daemon/internal/daemon/auto_merge_test.go — TestAREADYMergeDisagreementSpendsNoWaitingNotice, zero notices for the disagreement and exactly one for the wait that follows",
-    "The pull request body: the Verification paragraph re-derived and the withdrawn run-id instruction removed, Size re-derived, the Threads ledger rebuilt at 14, and round 11's E2E block"
+    "packages/daemon/internal/daemon/auto_merge.go — the gate is !payload.Warned && waited > mergeWaitWarn && waitingOnGitHub(cause); the new helper admits Armed, Unmergeable and Merging; rememberWait's and readyMergeWaiting's docs describe the allowlist and name the three",
+    "packages/daemon/internal/daemon/auto_merge_test.go — TestAREADYMergeArmGoneFromGitHubSpendsNoWaitingNotice, zero notices for the disappearance and exactly one for the wait that follows",
+    "packages/daemon/internal/workflow/review.go — the mergeability comment no longer names a check READY reads",
+    "The pull request body: Size and the Threads ledger re-derived at this head, the Verification paragraph's head updated, and round 12's E2E block"
   ],
   "trickyParts": [
-    "The test's whole force depends on the disagreement being unstalled: `pullJSON` stamps `updatedAt` at `time.Now()` while the runner's clock sits at `now`, so `Stalled(now)` is false. A later edit that moved the fixture's clock forward, or that used `pullJSONAt` with an older time, would quietly turn the test into a check of the half `permanentRefusal` already excluded - it would still pass, and it would prove nothing.",
-    "The code-quality half's re-proposal of a bare mention pin for the CI-line guard was not taken, as the architect and the reviewer both ruled. The reason stands from round 5: zero hits today is the state of the tree, not a property of the rule, and a flat ban cannot tell a skill saying the line is gone from one asking for it."
+    "Two terms left the gate with the allowlist, and both were dead rather than merely redundant: !permanentRefusal, which can only be true for causes the allowlist already rejects, and errors.Is(cause, wait.ErrWaiting), implied by the three types. permanentRefusal is untouched where it is still load-bearing, outbox.go:194, which is what sends merge-stalled.",
+    "The doc that said `cause is a wait (wait.ErrWaiting) and nothing else` was found by running the probe rather than by reading, which is the round's own lesson: reading this gate is what missed Disappeared twice."
   ],
   "deviations": [
-    "The red-before for this round's test was not observed locally. The pod has no database credential and no way to start one; the claim rests on CI's `test` job at this head and is written as an event not witnessed, in the body and on the thread, rather than reported as if it had been."
+    "The new test's red-before was not observed in a database. The probe above observed the gate's decision flip without one, which is the half that can be shown here; the half that needs Postgres - that the payload and the notice commit in one transaction under the row's lease - stays CI's, and the body and the thread say so."
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "The two boundary items above are the architect's to decide; neither is acted on in this round."
+  ],
   "discoveredComplexity": [
-    "`mergeable` was read before pushing, as it has been since the two silent conflicts: true, one behind main, so no forward merge was needed this round.",
-    "No CI verdict is stated for this head. The last observation with a time on it is at the previous code head 2adb7d20c730b042c9f1013839d3c62f27f779eb, read at 21:30Z: runs 40130001027 (lint, typecheck, test) and 40130001034 (pr-title), each completed and successful then.",
-    "The fast-follow list is carried unchanged, with the reviewer's two additions: the literal pin forcing a 187-character line in three documents, which normalising whitespace before the count would free, and neither guard reading docs/solutions."
+    "mergeable was read before pushing: true, three behind main, so no forward merge was needed.",
+    "No CI verdict is stated for this head. The last observation with a time on it is the reviewer's at the previous code head 2f833383049eb6e65ab8b4be36992031a12c6dc3.",
+    "Excluding Lagging leaves a disagreement whose pull request keeps being touched with no notice at all, since Stalled reads GitHub's latest updatedAt on every run; the operator log is its only signal. That is the reviewer's risk line, kept in the body as written."
   ]
 }
