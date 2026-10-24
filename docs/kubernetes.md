@@ -2537,29 +2537,41 @@ it is marked where it stands:
   every try — *that* class, not a refusal, which is a workload still starting up, and the
   distinction the paragraph under the sequence sets out. It is why the check is the step after
   the wait rather than the last. A role that sees it compares the labels on **the workload's**
-  pod (`kubectl get pod -l job-name=<workload> -o jsonpath='{.items[0].metadata.labels}'`, which
-  is a pod of this namespace; a role may not read its own, in the namespace Legion's pods run
+  pod (`kubectl get pod -l job-name="$workload" -o jsonpath='{.items[0].metadata.labels}'`,
+  which is a pod of this namespace; a role may not read its own, in the namespace Legion's pods
+  run
   in) with the deployment's declaration — not the Service's endpoints, which this identity may
   not read (`kubectl auth can-i get endpoints` answers `no`). The label's name is in that
   declaration, with the compute class, the storage class and the namespace; a role reads it
   there rather than here.
 
-Name the workload for the issue, as everything else on this cluster is named
-(`issue-legion-<project>-<issue key lowercased>`, `legion-<project>-<issue key lowercased>`
-above): `<issue key lowercased>-<what it is>`, for instance `infra-71-postgres`. An issue key
-carries its project, so that name is already unique among the projects whose agents share this
-namespace and its one identity — and a bare `postgres` or `db` is a name another role is using.
-Taking it does not overwrite that role's workload (this identity may not patch a Job: `kubectl
-auth can-i patch jobs` answers `no`, so the second `apply` is refused), but everything after it
-acts on the first role's workload all the same: `kubectl wait -l job-name=…` waits on its pod,
-the reachability check reaches its database, and the `kubectl delete job` at the end of the
-sequence takes it and its Service away mid-test.
+Name the workload for the issue **and for the run**, as everything else on this cluster is named
+for what owns it (`issue-legion-<project>-<issue key lowercased>`,
+`legion-<project>-<issue key lowercased>` above):
+`<issue key lowercased>-<what it is>-<six random characters>`, built once at the top of the
+sequence and substituted into both manifests, for instance `infra-71-postgres-9f2c1a`. The issue
+key carries its project, so the name cannot collide with another project's; the suffix is what
+keeps it from colliding with anything else, and both halves are needed.
+
+A bare `postgres`, or even `infra-71-postgres`, is a name something else is using. Six roles
+share one issue and one identity, so a second role submitting that name is refused — this
+identity may not patch a Job (`kubectl auth can-i patch jobs` answers `no`) — while everything
+after the apply acts on the *first* role's workload: both waits select its pod, the reachability
+check reaches its database, and the closing `kubectl delete job` takes it and its Service away
+mid-test. And a role that re-runs the sequence after any failure meets a worse version of the
+same thing, because a pod keeps its `job-name` label while it terminates: measured here, the
+second run's `--for=create` returned 0 in **1 s on the previous run's dying pod**, and the Ready
+wait reported `condition met` for one pod and `NotFound` for the other while the workload that
+would actually serve was still `Pending`. A reader who took that Ready at its word would run the
+reachability check against a workload that is not up and be sent, by the bullet above, to the
+one failure this section says announces nothing. A fresh suffix each run is what removes the
+whole class: the selector cannot match a corpse that never carried it.
 
 ```yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: <workload>                        # yours; the Service below is named for it and owned by it
+  name: <workload>                        # the sequence substitutes this run's name, here and in the Service
 spec:
   activeDeadlineSeconds: 3600           # on the Job, at most 43200
   ttlSecondsAfterFinished: 3600         # at most 86400
@@ -2613,13 +2625,14 @@ snapshotted into the role's working-copy commit and the password in it can reach
 
 ```sh
 cd "${TMPDIR:-/tmp}"                                               # not the checkout: see above
-kubectl apply -f workload.yaml                                     # the Job
-uid=$(kubectl get job <workload> -o jsonpath='{.metadata.uid}')    # what the Service must name
-sed "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -    # the name on the network
-kubectl wait --for=create pod -l job-name=<workload> --timeout=120s   # it does not exist yet
-kubectl wait --for=condition=Ready pod -l job-name=<workload> --timeout=300s
+workload="<issue key lowercased>-postgres-$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
+sed "s|<workload>|$workload|g" workload.yaml | kubectl apply -f -  # the Job, under this run's name
+uid=$(kubectl get job "$workload" -o jsonpath='{.metadata.uid}')   # what the Service must name
+sed -e "s|<workload>|$workload|g" -e "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -
+kubectl wait --for=create pod -l job-name="$workload" --timeout=120s   # it does not exist yet
+kubectl wait --for=condition=Ready pod -l job-name="$workload" --timeout=300s
 ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
-python3 - "<workload>.$ns.svc.cluster.local" 5432 <<'PY'           # does it answer yet?
+python3 - "$workload.$ns.svc.cluster.local" 5432 <<'PY'            # does it answer yet?
 import socket, sys, time
 host, port = sys.argv[1], int(sys.argv[2])
 deadline = time.monotonic() + 60
@@ -2634,8 +2647,8 @@ while True:
             sys.exit(1)
         time.sleep(2)
 PY
-kubectl logs -l job-name=<workload> --tail=5                       # and what it says it is doing
-kubectl delete job <workload>                                      # takes its pod and its Service
+kubectl logs -l job-name="$workload" --tail=5                      # and what it says it is doing
+kubectl delete job "$workload"                                     # takes its pod and its Service
 kubectl get jobs,pods                                              # nothing of it is left
 ```
 
