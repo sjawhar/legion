@@ -1,7 +1,9 @@
 // AskGate: before a root session's scoped Dispatch write executes, one model call judges it
-// against AskGate's rules (rules.md) and answers `allow` or `revise`. `askgate.ts` is the entry
-// that binds Oh My Pi's completion call and buildSessionContext; everything else lives here so the
-// tests drive it through a fake `pi`, a fake `ctx` and stubs.
+// against AskGate's charter (rules.md) and answers `allow` or `revise`, and a call that opens a
+// new ask for a person also gets the rules check (`rules-check.ts`, below). `askgate.ts` is the
+// entry that binds Oh My Pi's completion call and buildSessionContext; the new asks a call opens
+// are read in `new-asks.ts` and the text both checks share is in `text.ts`; everything else lives
+// here so the tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
@@ -87,6 +89,27 @@
 //     {"decision":"allow"} or {"decision":"revise","reason":"…"}. The reason reaches the agent
 //     verbatim but for a tag-opening `<` (see `agentFacing`), capped at 2 KiB, and is recorded
 //     as `deliveredReason`.
+//   - rules: a call that opens a new ask for a person gets a second model call beside the charter
+//     call, on the same chain, deadline, transcript and stop, which judges only those asks and
+//     only against two rules (rule-check.md): an ask whose own recommendation is to change
+//     nothing, and an ask for the person's hands where the agent did not try the access it has.
+//     A new ask (`new-asks.ts`) is a `dispatch ask`, each `:::ask{` opener a `dispatch doc-edit`
+//     insert, a `dispatch issue` spec or a markdown `dispatch artifact` upload writes, and each
+//     block a doc-edit retypes into an ask. For a retype the gate reads the block's own text from
+//     Dispatch, and for an upload the ids the version it replaces already holds, so a re-upload
+//     judges only the asks it adds; a read that fails sets `ruleTextMissing` and the ask is judged
+//     without it. The system prompt is rule-check-system.md and rule-check.md, and the request
+//     (rule-check-request.md) carries the same escaped system prompt and transcript, then each ask
+//     in an `<ask>` tag of its own, the list bounded at 32 KiB and each ask at 8 KiB
+//     (`ruleAsksCut`). When the answer names an ask that matches `no_change` or `untried_access`,
+//     AskGate refuses the call in every mode, naming each matching ask and putting the charter's
+//     revise reason after the rules reason. A rules call that fails, times out or gives no verdict
+//     changes nothing; three of those in a row write one log line, and show one UI notice where
+//     there is a UI. A rules verdict, a session_switch or a session_branch resets that count. The
+//     rules reason never feeds the charter request, and only the charter call moves the halt
+//     count. The entry adds `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleError`,
+//     `ruleModel`, `ruleLatencyMs`, `ruleTextMissing` and `ruleAsksCut`, and its `usage` and
+//     `promptBytes` sum both calls.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included. Every path fails open but
@@ -104,7 +127,27 @@ import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
+import ruleCheckRules from "./rule-check.md" with { type: "text" };
+import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
+import {
+  type DispatchSession,
+  matchLines,
+  type RuleName,
+  type RuleOutcome,
+  renderRuleRefusal,
+  runRulesCheck,
+} from "./rules-check";
+import {
+  agentFacing,
+  byteLength,
+  clipBytes,
+  escaped,
+  escapeXml,
+  GATE_REASON_MAX_BYTES,
+  lastLineJson,
+  renderTemplate,
+} from "./text";
 
 const SCOPED_DEVICES = [
   "dispatch_ask",
@@ -151,9 +194,10 @@ const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
-const GATE_REASON_MAX_BYTES = 2 * 1024;
 const GATE_BREAKER_REVISES = 2;
 const GATE_HALT_AFTER_FAILURES = 3;
+/** Rules calls in a row without a rules verdict that bring the session's one notice and log line. */
+const RULE_NOTICE_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
 /**
  * The model roles the gate asks, in order: `askgate` when it is configured, else `default`, so a
@@ -168,8 +212,7 @@ const MODES = ["warn", "block"] as const;
 /** The custom entry type the experiments extension records a session's arms under. */
 const EXPERIMENTS_ENTRY_TYPE = "experiments";
 const XD_PATH = /^xd:\/\/([a-z_]+)$/;
-// Room kept for a clip marker (` … [elided N bytes]`, at most 32 bytes) and the window's elision line.
-const CLIP_MARKER_BYTES = 32;
+// Room kept for the transcript window's elision line.
 const WINDOW_MARKER_BYTES = 64;
 const SEPARATOR = "\n\n";
 
@@ -182,6 +225,20 @@ export type Usage = {
   cacheWrite: number;
   cost: number;
 };
+/** Both model calls' spend on one entry; undefined when neither was billed. */
+function addUsage(a: Usage | undefined, b: Usage | undefined): { usage: Usage } | undefined {
+  if (a === undefined) return b === undefined ? undefined : { usage: b };
+  if (b === undefined) return { usage: a };
+  return {
+    usage: {
+      input: a.input + b.input,
+      output: a.output + b.output,
+      cacheRead: a.cacheRead + b.cacheRead,
+      cacheWrite: a.cacheWrite + b.cacheWrite,
+      cost: a.cost + b.cost,
+    },
+  };
+}
 export interface GateEntry {
   advisor: "AskGate";
   tool: string;
@@ -189,8 +246,9 @@ export interface GateEntry {
   toolCallId: string;
   /**
    * `revise`: the gate did not pass the call as sent (a revise verdict, or in block mode a call given up
-   * without a verdict, or in any mode a command it cannot read). A call was refused exactly when this is
-   * `revise` and either `verdictMode` is `block` or `outcome` is `unreadable`.
+   * without a verdict, or in any mode a command it cannot read or a new ask a rule matched). A call was
+   * refused exactly when this is `revise` and `verdictMode` is `block`, or `outcome` is `unreadable` or
+   * `no-model-role`, or `rule` is set.
    */
   decision: "allow" | "revise";
   outcome:
@@ -209,13 +267,16 @@ export interface GateEntry {
   verdictMode: Mode;
   reason?: string;
   rebuttal?: string;
-  /** On a revise: the reason exactly as the agent received it (the one agent-facing transform's output). */
+  /** On a revise: the reason exactly as the agent received it (the one agent-facing transform's output), the rules reason first when a rule matched. */
   deliveredReason?: string;
   /** The answer's tail when it held no verdict. */
   raw?: string;
   latencyMs: number;
   revisesForKey: number;
   argsDigest: string;
+  /** The call's breaker target in readable form: the tool, then each of the issue, ask, artifact, project and reply it names. */
+  target?: string;
+  /** Bytes of every prompt sent: the charter call's and, for a call that opens a new ask, the rules call's. */
   promptBytes?: number;
   /** `provider/id` that answered (or, with no answer, the last one asked), on every entry that reached the model call. */
   model?: string;
@@ -223,8 +284,26 @@ export interface GateEntry {
   failedModels?: Array<{ model: string; error: string }>;
   /** The deadline this call raced: OMP_ASKGATE_TIMEOUT_MS or 90 s, clamped under the runner's handler ceiling. */
   deadlineMs?: number;
-  /** Every attempt's spend, the aborted one included. */
+  /** Every attempt's spend of both calls, the aborted one included. */
   usage?: Usage;
+  /** The rule the first new ask that matched broke. Set exactly when the rules check refused the call. */
+  rule?: RuleName;
+  /** That ask's number in the rules request, from 1. */
+  ruleAsk?: number;
+  /** The words of that ask the rules call quoted. */
+  ruleQuote?: string;
+  /** How the rules check ended, on each call that opens a new ask and reached the model call. */
+  ruleOutcome?: RuleOutcome;
+  /** The provider's error text, `timeout` or `no-verdict`, on a rules call that gave no verdict. */
+  ruleError?: string;
+  /** `provider/id` that answered the rules call (or, with no answer, the last one asked). */
+  ruleModel?: string;
+  /** The rules check's own time, its document read included. */
+  ruleLatencyMs?: number;
+  /** An ask's text could not be read, so the rules call judged that ask without it. */
+  ruleTextMissing?: true;
+  /** New asks the rules request left out or cut to its bounds. */
+  ruleAsksCut?: number;
 }
 /** A model as the gate passes it around: the fork's full Model, of which the core reads only these. */
 export type GateModel = { provider: string; id: string };
@@ -275,6 +354,12 @@ interface Deps {
   handlerCeilingMs: () => number;
   /** Runs a `dispatch` command's --dry-run script under bash; `spawnDryRun` in the entry. */
   dryRun: (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
+  /**
+   * The session's Dispatch as the directory a call runs in configures it, every request ending with
+   * that call's stop; undefined when the session has no Dispatch configuration. The rules check
+   * reads a retyped block's text and an upload's current ask ids through it.
+   */
+  dispatchClient: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -304,7 +389,6 @@ export type Message = { role: string } & Record<string, unknown>;
 /** The module's one object guard: transcript and entry data are untyped JSON. */
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** OMP_ASKGATE as a mode: `warn` or `block`, else undefined, which leaves the mode to the session. */
@@ -890,11 +974,17 @@ export async function spawnDryRun(
   }
 }
 
+/**
+ * The call's target: its tool and each of the issue, ask, artifact, project and reply its arguments
+ * name. The NUL separators keep two values apart in the breaker's map; `targetLabel` is the same
+ * key with spaces for them, which the entry records and a reader joins calls on.
+ */
 function breakerKey(toolName: string, input: Input): string {
   let key = toolName;
   for (const k of BREAKER_KEYS) if (input[k] !== undefined) key += `\u0000${k}=${String(input[k])}`;
   return key;
 }
+const targetLabel = (key: string) => key.replaceAll("\u0000", " ");
 
 /** Splits a top-level REBUTTAL_KEY off a device's JSON arguments; anything else comes back unchanged. */
 function extractRebuttal(content: string): { rebuttal?: string; content: string } {
@@ -908,18 +998,6 @@ function extractRebuttal(content: string): { rebuttal?: string; content: string 
   const { [REBUTTAL_KEY]: value, ...rest } = parsed;
   if (typeof value !== "string" || !value.trim()) return { content };
   return { rebuttal: value.trim(), content: JSON.stringify(rest) };
-}
-
-/** `text` cut to at most `max` UTF-8 bytes, marker included. */
-function clipBytes(text: string, max: number): string {
-  const size = byteLength(text);
-  if (size <= max) return text;
-  // A cut inside a multi-byte character decodes to U+FFFD; drop it.
-  const head = Buffer.from(text, "utf8")
-    .subarray(0, Math.max(0, max - CLIP_MARKER_BYTES))
-    .toString("utf8")
-    .replace(/\uFFFD$/, "");
-  return `${head} … [elided ${size - byteLength(head)} bytes]`;
 }
 
 function renderArgs(input: Input): string {
@@ -938,11 +1016,6 @@ function textOf(content: unknown): string {
   }
   return parts.join("\n");
 }
-
-const escapeXml = (text: string) =>
-  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-/** Untrusted text escaped, then cut to `max` bytes: no transcript text can close or open a tag. */
-const escaped = (text: string, max = Number.POSITIVE_INFINITY) => clipBytes(escapeXml(text), max);
 
 function renderAssistant(content: unknown): string {
   const parts: string[] = [];
@@ -1031,53 +1104,44 @@ export function renderTranscript(messages: readonly Message[], capBytes: number)
 export function parseVerdict(
   text: string
 ): { decision: "allow" | "revise"; reason?: string } | undefined {
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-  while (lines.length > 0 && lines[lines.length - 1].startsWith("```")) lines.pop();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(lines.at(-1) ?? "");
-  } catch {
-    return undefined;
-  }
-  if (!isRecord(parsed)) return undefined;
+  const parsed = lastLineJson(text);
+  if (parsed === undefined) return undefined;
   if (parsed.decision === "allow") return { decision: "allow" };
   if (parsed.decision === "revise" && typeof parsed.reason === "string" && parsed.reason.trim())
     return { decision: "revise", reason: parsed.reason.trim() };
   return undefined;
 }
 
-/** Revise reasons per target since its last allowed call. */
+/** One revise on a target: the charter's reason, the rules check's, or both when both refused one call. */
+type Revise = { charter?: string; rules?: string };
+
+/** Revises per target since its last allowed call. */
 class Breaker {
-  readonly #reasons = new Map<string, string[]>();
-  revised(key: string, reason: string): void {
-    const reasons = this.#reasons.get(key) ?? [];
-    reasons.push(reason);
-    this.#reasons.set(key, reasons);
+  readonly #revises = new Map<string, Revise[]>();
+  revised(key: string, revise: Revise): void {
+    const revises = this.#revises.get(key) ?? [];
+    revises.push(revise);
+    this.#revises.set(key, revises);
   }
   tripped(key: string): boolean {
-    return this.reasons(key).length >= GATE_BREAKER_REVISES;
+    return this.count(key) >= GATE_BREAKER_REVISES;
   }
   reset(key: string): void {
-    this.#reasons.delete(key);
+    this.#revises.delete(key);
   }
   clear(): void {
-    this.#reasons.clear();
+    this.#revises.clear();
   }
-  reasons(key: string): readonly string[] {
-    return this.#reasons.get(key) ?? [];
+  /** How many times the gate refused this target, whichever check refused it. */
+  count(key: string): number {
+    return (this.#revises.get(key) ?? []).length;
   }
-}
-
-/** `{{name}}` placeholders replaced in one pass, values pasted verbatim (never re-scanned, never read as `$` patterns); a placeholder with no value throws. */
-export function renderTemplate(template: string, values: Record<string, string>): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_, name: string) => {
-    if (!Object.hasOwn(values, name))
-      throw new Error(`AskGate prompt template names {{${name}}}, which has no value`);
-    return values[name];
-  });
+  /** The charter's own reasons. They alone feed the charter request, so a rules reason never reads as one the charter gave. */
+  charterReasons(key: string): string[] {
+    return (this.#revises.get(key) ?? []).flatMap((revise) =>
+      revise.charter === undefined ? [] : [revise.charter]
+    );
+  }
 }
 
 /**
@@ -1109,33 +1173,27 @@ function renderRequest(
   });
 }
 
-/**
- * The one transform for text handed to the agent (a model's reason, the agent's own rebuttal): verbatim,
- * except that a `<` which could start a tag (before a letter, `/`, `!` or `?`) becomes `&lt;`, then capped
- * at 2 KiB. The two defects are disjoint. A frame closed or a harness tag opened needs a tag-opening `<`,
- * and this rule stops it. Full escaping also turned `&&`, `->` and a `> ` quote line into entities, so a fix
- * sent back verbatim posted `&gt;` and a check for the quote failed; those now pass through unchanged. Text
- * rendered into the gate's own prompt is escaped in full instead (`escaped`). Nothing between here and
- * delivery decodes entities: warn joins the text into a developer message as-is, block's Error message
- * becomes the tool result as-is.
- */
-const agentFacing = (text: string) =>
-  clipBytes(text.replace(/<(?=[A-Za-z/!?])/g, "&lt;"), GATE_REASON_MAX_BYTES);
 // What the agent reads after each gated call: silence only for an allow or a fail-open, since a
 // pass it cannot see is indistinguishable from a gate that broke.
 const SECOND_REVISE =
   "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
-/** How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the command. */
-type Override = { name: string; how: string; what: string };
+/**
+ * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
+ * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
+ * again with".
+ */
+type Override = { name: string; how: string; what: string; again: string };
 const DEVICE_OVERRIDE: Override = {
   name: REBUTTAL_KEY,
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
   what: "field",
+  again: `\`"${REBUTTAL_KEY}": "<one line>"\` in its JSON`,
 };
 const COMMAND_OVERRIDE: Override = {
   name: REBUTTAL_FLAG,
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
   what: "flag",
+  again: `\`${REBUTTAL_FLAG} '<one line>'\``,
 };
 const renderRevise = (reason: string, second: boolean, override: Override) =>
   `AskGate did not send this call.\n${agentFacing(reason)}\nSend the corrected call, or resend this one unchanged with ${override.how} to override; an override is always sent and recorded, and the ${override.what} is removed before sending.${second ? `\n${SECOND_REVISE}` : ""}`;
@@ -1196,13 +1254,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // The system role holds only the gate's own text and its rules; the agent's system prompt and
     // transcript are data about the agent under review, escaped into the user message.
     const system = `${systemTemplate.trim()}\n\n${rules.trim()}`;
-    const dumpPath = deps.env.OMP_ASKGATE_DUMP;
+    // The rules call's system role holds its own frame and the two rules, nothing of the charter's.
+    const ruleSystem = `${ruleCheckSystem.trim()}\n\n${ruleCheckRules.trim()}`;
     // The fork binds this factory once per process and keeps the binding across /new, /resume
     // and a branch switch, so the per-session state below resets on session_switch and
     // session_branch: a halt, a count, revise reasons or a rebuttal never outlive their session.
     const rebuttals = new Map<string, string>();
     const breaker = new Breaker();
+    const dumpPath = deps.env.OMP_ASKGATE_DUMP;
     let failures = 0;
+    /** Rules calls in a row that ended without a rules verdict. */
+    let ruleFailures = 0;
     let halted = false;
     // Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
     // that reaches the gate after that asks no model and takes the shutdown branch at once.
@@ -1211,6 +1273,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       rebuttals.clear();
       breaker.clear();
       failures = 0;
+      ruleFailures = 0;
       halted = false;
     };
     pi.on("session_switch", reset);
@@ -1224,9 +1287,55 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // makes after it finished, from its own timer or thread, never reaches a gate: both eval bridges
     // refuse a call from a finished cell ("Run no longer active", "No active Python tool bridge
     // session").
-    /** Why a waiting gate was given up: the user or the runner ended its call or run, or the session shut down. */
-    type Abandon = (cause: "abandoned" | "shutdown", graceMs?: number) => void;
+    /** Why a waiting gate was given up: its own deadline, the user or the runner ending its call or run, or the session shutting down. */
+    type Cause = "timeout" | "abandoned" | "shutdown";
+    /** Why a waiting gate was given up by something other than its own deadline. */
+    type Abandon = (cause: Exclude<Cause, "timeout">, graceMs?: number) => void;
+    /** Each waiting gated call's one stop, by its tool call id. */
     const inflight = new Map<string, Abandon>();
+    /**
+     * Everything one gated call waits on — its dry run, its document read, the charter call and the
+     * rules call — shares one signal, one `inflight` entry and one deadline, so its tool's end, a
+     * stopped run or a shutdown stops all of it at once. The first cause wins.
+     */
+    type Stop = {
+      readonly signal: AbortSignal;
+      readonly stopped: Promise<Cause>;
+      cause?: Cause;
+      graceMs: number;
+      /** Starts the call's deadline, once the model calls are about to go out. */
+      arm(ms: number): void;
+      /** Ends the call: its timer, its entry in `inflight`, and anything of it still running. */
+      close(): void;
+    };
+    const openStop = (toolCallId: string): Stop => {
+      const controller = new AbortController();
+      const { promise: stopped, resolve } = Promise.withResolvers<Cause>();
+      let timer: Timer | undefined;
+      const stopWith = (cause: Cause, graceMs = ABORT_GRACE_MS) => {
+        if (handle.cause !== undefined) return;
+        handle.cause = cause;
+        handle.graceMs = graceMs;
+        resolve(cause);
+        controller.abort();
+      };
+      const handle: Stop = {
+        signal: controller.signal,
+        stopped,
+        graceMs: ABORT_GRACE_MS,
+        arm: (ms) => {
+          timer = setTimeout(() => stopWith("timeout"), ms);
+        },
+        close: () => {
+          clearTimeout(timer);
+          if (inflight.get(toolCallId) === stopWith) inflight.delete(toolCallId);
+          // Nothing reads an answer after the decision: a call still in flight is abandoned.
+          controller.abort();
+        },
+      };
+      inflight.set(toolCallId, stopWith);
+      return handle;
+    };
     pi.on("tool_execution_end", (event: { toolCallId: string }) => {
       inflight.get(event.toolCallId)?.("abandoned");
     });
@@ -1261,6 +1370,21 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           `AskGate paused for this session after ${failures} consecutive calls without a verdict; Dispatch writes now go out unchecked.`,
           "warning"
         );
+    };
+
+    /**
+     * A rules verdict resets the count of rules calls in a row without one. The call that brings the
+     * count to three writes one log line, which is the record in a session whose UI no reader sees,
+     * and shows the notice where there is a UI.
+     */
+    const settleRules = (outcome: RuleOutcome | undefined, ctx: GateCtx) => {
+      if (outcome === "match" || outcome === "none") ruleFailures = 0;
+      if (outcome !== "error" && outcome !== "timeout" && outcome !== "no-verdict") return;
+      ruleFailures++;
+      if (ruleFailures !== RULE_NOTICE_AFTER_FAILURES) return;
+      const notice = `AskGate's rule check failed ${ruleFailures} times in a row; new asks are not checked against the two rules.`;
+      deps.logger.warn(notice);
+      if (ctx.hasUI) ctx.ui.notify(notice, "warning");
     };
 
     /** The outer `write xd://<device>` event: strip a rebuttal before the device validates its arguments. */
@@ -1333,60 +1457,37 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
 
     /** What one model walk answered: the answer, and the fields every entry that reached the model records. */
-    type Called = Pick<
-      GateEntry,
-      "promptBytes" | "model" | "deadlineMs" | "failedModels" | "usage"
-    >;
-    type Asked =
-      | { kind: "no-model-role" }
-      | { kind: "skipped"; reason: string }
-      | { kind: "asked"; answer: Answer; called: Called };
+    type Called = Pick<GateEntry, "promptBytes" | "model" | "failedModels" | "usage">;
+    type Walked = { answer: Answer; called: Called };
     /**
-     * One review by the gate's model: resolves the role, skips a session whose primary is on another
-     * provider, appends both prompts to OMP_ASKGATE_DUMP, and walks the role's chain on the primary's
-     * provider under the call's deadline (raced from `started`). `user` is rendered only once the
-     * model is known, so a skipped session reads nothing of its transcript. Every check of a Dispatch
-     * write that asks the model goes through here.
+     * One call to the gate's model: appends its prompts to OMP_ASKGATE_DUMP under `label`, then walks
+     * `chain` under the call's one stop, which its deadline is armed on. The charter check and the
+     * rules check each make one of these, on the same chain and the same stop, so a session is asked
+     * on one provider and both calls end together. `user` is rendered here, once the gate knows it
+     * will ask.
      */
-    const askModel = async (
+    const walk = async (
       ctx: GateCtx,
-      call: { toolCallId: string; started: number },
-      prompt: { system: string; user: () => string }
-    ): Promise<Asked> => {
-      const resolved = resolveRole(ctx);
-      if (resolved === undefined) return { kind: "no-model-role" };
-      const { role, model } = resolved;
-      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
-      if (ctx.model?.provider !== model.provider)
-        return { kind: "skipped", reason: `primary on ${ctx.model?.provider ?? "no model"}` };
+      call: { toolCallId: string; stop: Stop },
+      prompt: { system: string; user: () => string; label: string },
+      chain: readonly GateModel[]
+    ): Promise<Walked> => {
       const user = prompt.user();
       const promptBytes = byteLength(prompt.system) + byteLength(user);
       if (dumpPath)
         deps.appendFile(
           dumpPath,
-          `===== AskGate ${call.toolCallId} system =====\n${prompt.system}\n===== AskGate ${call.toolCallId} user =====\n${user}\n\n`
+          `===== AskGate ${call.toolCallId}${prompt.label} system =====\n${prompt.system}\n===== AskGate ${call.toolCallId}${prompt.label} user =====\n${user}\n\n`
         );
-      // Raced from handler entry, so the render above counts against the runner's ceiling too.
-      const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
       const sessionId = ctx.sessionManager.getSessionId();
-      // A model that answers with an error hands the request to the next one in the role's chain, inside
-      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
-      const chain = [
-        model,
-        ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
-      ];
       const failedModels: Array<{ model: string; error: string }> = [];
       const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
       let billed = false;
       let answer: Answer = { kind: "error", reason: "no model asked" };
-      let asked = model;
+      let asked = chain[0];
       for (const next of chain) {
         asked = next;
-        answer = await ask(
-          { ctx, model: next, system: prompt.system, user, sessionId },
-          call.toolCallId,
-          Math.max(0, deadlineMs - (deps.now() - call.started))
-        );
+        answer = await ask({ ctx, model: next, system: prompt.system, user, sessionId }, call.stop);
         if (answer.usage) {
           billed = true;
           for (const k of Object.keys(usage) as Array<keyof Usage>) usage[k] += answer.usage[k];
@@ -1394,13 +1495,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (answer.kind !== "error" || next === chain.at(-1)) break;
         failedModels.push({ model: `${next.provider}/${next.id}`, error: answer.reason });
       }
+
       return {
-        kind: "asked",
         answer,
         called: {
           promptBytes,
           model: `${asked.provider}/${asked.id}`,
-          deadlineMs,
           ...(failedModels.length > 0 ? { failedModels } : {}),
           ...(billed ? { usage } : {}),
         },
@@ -1415,6 +1515,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       key: string,
       rebuttal: string | undefined,
       override: Override,
+      stop: Stop,
+      directory: string,
       upload = false
     ): Promise<Decision> => {
       if (rebuttal !== undefined) {
@@ -1436,40 +1538,169 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
 
       if (closing) return givenUp(base.verdictMode, "shutdown");
-      const reviewed = await askModel(
+      const resolved = resolveRole(ctx);
+      if (resolved === undefined) return noModelRole;
+      const { role, model } = resolved;
+      // A session routed off the gate's provider keeps its transcript there: nothing is rendered or sent.
+      if (ctx.model?.provider !== model.provider)
+        return pass("skipped", { reason: `primary on ${ctx.model?.provider ?? "no model"}` });
+      // Raced from handler entry, so each render of this call counts against the runner's ceiling too.
+      const deadlineMs = Math.min(timeoutMs, deps.handlerCeilingMs() - CEILING_MARGIN_MS);
+      stop.arm(Math.max(0, deadlineMs - (deps.now() - started)));
+      // A model that answers with an error hands the request to the next one in the role's chain, inside
+      // the same deadline. Only models on the primary's provider are asked: the transcript stays there.
+      const chain = [
+        model,
+        ...deps.fallbackModels(ctx, model, role).filter((next) => next.provider === model.provider),
+      ];
+      // Both calls read one rendering of the agent under review, the newer of them reusing it.
+      let rendered: { primarySystemPrompt: string; transcript: string } | undefined;
+      const agentContext = () =>
+        (rendered ??= {
+          primarySystemPrompt: ctx.getSystemPrompt().join("\n\n"),
+          transcript: renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
+        });
+      const call = { toolCallId: event.toolCallId, stop };
+      // The charter call starts first (its request is rendered and sent before this returns); a call
+      // that opens a new ask also gets the rules call, beside it on the same chain, deadline and stop.
+      const charterRun = walk(
         ctx,
-        { toolCallId: event.toolCallId, started },
+        call,
         {
           system,
-          user: () =>
-            renderRequest(
-              ctx.getSystemPrompt().join("\n\n"),
-              renderTranscript(deps.contextMessages(ctx), GATE_CONTEXT_MAX_BYTES),
+          label: "",
+          user: () => {
+            const { primarySystemPrompt, transcript } = agentContext();
+            return renderRequest(
+              primarySystemPrompt,
+              transcript,
               base.path,
               event.input,
-              breaker.reasons(key),
+              breaker.charterReasons(key),
               upload
-            ),
+            );
+          },
+        },
+        chain
+      );
+      const rulesRun = runRulesCheck(
+        {
+          now: deps.now,
+          env: deps.env,
+          dispatchClient: deps.dispatchClient,
+          walk: (prompt) => walk(ctx, call, prompt, chain),
+        },
+        {
+          toolName: event.toolName,
+          tool: base.path,
+          input: event.input,
+          directory,
+          system: ruleSystem,
+          context: agentContext,
+          signal: stop.signal,
         }
       );
-      if (reviewed.kind === "no-model-role") return noModelRole;
-      if (reviewed.kind === "skipped") return pass("skipped", { reason: reviewed.reason });
-      const { answer, called } = reviewed;
+      const [charter, ruled] = await Promise.all([charterRun, rulesRun]);
+      const called: Partial<GateEntry> = {
+        ...charter.called,
+        deadlineMs,
+        // Both calls' prompts and spend are the gated call's own.
+        promptBytes: (charter.called.promptBytes ?? 0) + (ruled?.promptBytes ?? 0),
+        ...(addUsage(charter.called.usage, ruled?.usage) ?? {}),
+        ...(ruled === undefined
+          ? {}
+          : {
+              ruleOutcome: ruled.outcome,
+              ruleLatencyMs: ruled.latencyMs,
+              ...(ruled.model === undefined ? {} : { ruleModel: ruled.model }),
+              ...(ruled.error === undefined ? {} : { ruleError: ruled.error }),
+              ...(ruled.textMissing ? { ruleTextMissing: true as const } : {}),
+              ...(ruled.asksCut > 0 ? { ruleAsksCut: ruled.asksCut } : {}),
+            }),
+      };
+      const { answer } = charter;
+      const verdict = answer.kind === "answer" ? parseVerdict(answer.text) : undefined;
+      const matches = ruled?.matches ?? [];
+      if (ruled !== undefined && matches.length > 0) {
+        // A rule matched: refused in every mode, the charter's revise reason after the rules reason. The
+        // charter's own outcome stays on the record and alone moves the halt count. The refusal counts
+        // once toward the breaker, the rules reason labelled apart so it never feeds the charter request.
+        const rulesReason = [
+          ...matchLines(matches, ruled.names),
+          ...(ruled.reason === "" ? [] : [ruled.reason]),
+        ].join("\n");
+        const charterReason = verdict?.decision === "revise" ? verdict.reason : undefined;
+        breaker.revised(key, {
+          rules: rulesReason,
+          ...(charterReason === undefined ? {} : { charter: charterReason }),
+        });
+        const delivered = [
+          agentFacing(rulesReason),
+          ...(charterReason === undefined
+            ? []
+            : [agentFacing(`AskGate's charter check also answered revise: ${charterReason}`)]),
+        ].join("\n");
+        const outcome =
+          answer.kind !== "answer" ? answer.kind : verdict === undefined ? "no-verdict" : "verdict";
+        const charterFields =
+          answer.kind === "error"
+            ? { reason: answer.reason }
+            : answer.kind === "answer" && verdict === undefined
+              ? { raw: answer.text.slice(-2000) }
+              : charterReason === undefined
+                ? {}
+                : { reason: charterReason };
+        const [first] = matches;
+        return {
+          fields: {
+            decision: "revise",
+            outcome,
+            ...charterFields,
+            deliveredReason: delivered,
+            revisesForKey: base.revisesForKey + 1,
+            rule: first.rule,
+            ruleAsk: first.ask,
+            ruleQuote: first.quote,
+            ...called,
+          },
+          result: {
+            block: true,
+            reason: renderRuleRefusal(
+              delivered,
+              matches.map((match) => match.rule),
+              breaker.count(key) === GATE_BREAKER_REVISES,
+              override,
+              SECOND_REVISE
+            ),
+          },
+          effect:
+            outcome === "verdict"
+              ? "verdict"
+              : outcome === "abandoned" || outcome === "shutdown"
+                ? "none"
+                : "failure",
+        };
+      }
+      // No rule matched, or the rules check ended without a verdict: the charter decides, as it did
+      // before there was one.
       if (answer.kind === "error")
         return pass("error", { reason: answer.reason, ...called }, "failure");
       if (answer.kind !== "answer")
         return answer.kind === "timeout"
           ? pass("timeout", called, "failure")
           : givenUp(base.verdictMode, answer.kind, called);
-      const verdict = parseVerdict(answer.text);
       if (!verdict)
         return pass("no-verdict", { raw: answer.text.slice(-2000), ...called }, "failure");
       if (verdict.decision === "allow" || verdict.reason === undefined) {
+        // The charter passed the call, but its new asks were never judged: no verdict is not
+        // permission, so block mode refuses it as it refuses any call given up (E5).
+        if (ruled?.outcome === "abandoned" || ruled?.outcome === "shutdown")
+          return givenUp(base.verdictMode, ruled.outcome, called);
         breaker.reset(key);
         return pass("verdict", called, "verdict");
       }
-      breaker.revised(key, verdict.reason);
-      const second = breaker.reasons(key).length === GATE_BREAKER_REVISES;
+      breaker.revised(key, { charter: verdict.reason });
+      const second = breaker.count(key) === GATE_BREAKER_REVISES;
       return {
         fields: {
           decision: "revise",
@@ -1487,57 +1718,42 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       };
     };
 
-    /** The model call raced against the deadline and against its tool ending without it. */
+    /** One model call of a gated call, raced against that call's one stop: its deadline, its tool's end, a stopped run or the shutdown. */
     type Answer =
       | { kind: "answer"; text: string; usage?: Usage }
       | { kind: "error"; reason: string; usage?: Usage }
       | { kind: "timeout" | "abandoned" | "shutdown"; usage?: Usage };
-    const ask = async (
-      req: Omit<CompleteRequest, "signal">,
-      toolCallId: string,
-      remainingMs: number
-    ): Promise<Answer> => {
-      const controller = new AbortController();
-      const { promise: stopped, resolve: stop } = Promise.withResolvers<
-        "timeout" | "abandoned" | "shutdown"
-      >();
-      const timer = setTimeout(() => stop("timeout"), remainingMs);
-      let graceMs = ABORT_GRACE_MS;
-      inflight.set(toolCallId, (cause, grace = ABORT_GRACE_MS) => {
-        graceMs = grace;
-        stop(cause);
-      });
+    const ask = async (req: Omit<CompleteRequest, "signal">, stop: Stop): Promise<Answer> => {
       try {
-        const call = deps.complete({ ...req, signal: controller.signal });
+        const call = deps.complete({ ...req, signal: stop.signal });
         // Promise.race subscribes to the completion, so a late rejection is handled.
-        const first = await Promise.race([call, stopped]);
+        const first = await Promise.race([call, stop.stopped]);
         if (typeof first !== "string") {
           return first.error !== undefined
             ? { kind: "error", reason: first.error, usage: first.usage }
             : { kind: "answer", text: first.text, usage: first.usage };
         }
-        controller.abort();
-        // The aborted request was billed for what it sent; give it a moment to report that.
+        // The stop aborted the request, which was billed for what it sent; give it a moment to report that.
         const { promise: grace, resolve: graceOver } = Promise.withResolvers<undefined>();
-        const graceTimer = setTimeout(graceOver, graceMs);
+        const graceTimer = setTimeout(graceOver, stop.graceMs);
         const settled = await Promise.race([call.catch(() => undefined), grace]);
         clearTimeout(graceTimer);
         return { kind: first, usage: settled?.usage };
       } catch (error) {
         return { kind: "error", reason: messageOf(error) };
-      } finally {
-        clearTimeout(timer);
-        inflight.delete(toolCallId);
       }
     };
 
-    /** A scoped command's arguments as the CLI's own --dry-run prints them, or why there are none. */
-    type DryRun = { args: Input } | { failure: string } | { cause: "abandoned" | "shutdown" };
+    /**
+     * A scoped command's arguments as the CLI's own --dry-run prints them, and the directory it runs
+     * in, or why there are none.
+     */
+    type DryRun = { args: Input; directory: string } | { failure: string } | { cause: Cause };
     const readArgs = async (
       scoped: ScopedCommand,
       input: Input,
       ctx: GateCtx,
-      toolCallId: string
+      stop: Stop
     ): Promise<DryRun> => {
       // The bash tool's own resolution: `~` is home, a bare `/` is the session's directory, and a
       // relative path resolves against it.
@@ -1546,38 +1762,24 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ? input.cwd.replace(/^~(?=$|\/)/, deps.home)
           : undefined;
       const cwd = raw === undefined || /^\/+$/.test(raw) ? ctx.cwd : path.resolve(ctx.cwd, raw);
-      /** Runs one script as the dry run runs: in `cwd`, under the limit, abandoned with the call. */
+      /** Runs one script as the dry run runs: in `cwd`, under the limit, stopped with the call. */
       const runScript = async (
         script: string
-      ): Promise<{ run: DryRunResult } | { cause: "abandoned" | "shutdown" }> => {
-        // Abandoned like a waiting model call: the run's stop or the session's shutdown kills it.
-        const controller = new AbortController();
-        let cause: "abandoned" | "shutdown" | undefined;
-        inflight.set(toolCallId, (given) => {
-          cause = given;
-          controller.abort();
+      ): Promise<{ run: DryRunResult } | { cause: Cause }> => {
+        // Stopped like a waiting model call: the run's stop or the session's shutdown kills it.
+        const run = await deps.dryRun(script, {
+          cwd,
+          env: deps.env,
+          timeoutMs: DRY_RUN_TIMEOUT_MS,
+          signal: stop.signal,
         });
-        try {
-          const run = await deps.dryRun(script, {
-            cwd,
-            env: deps.env,
-            timeoutMs: DRY_RUN_TIMEOUT_MS,
-            signal: controller.signal,
-          });
-          return cause === undefined ? { run } : { cause };
-        } finally {
-          inflight.delete(toolCallId);
-        }
+        return stop.cause === undefined ? { run } : { cause: stop.cause };
       };
       /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
       const stdoutOf = async (
         script: string,
         what: string
-      ): Promise<
-        | { stdout: string; stderr: string }
-        | { failure: string }
-        | { cause: "abandoned" | "shutdown" }
-      > => {
+      ): Promise<{ stdout: string; stderr: string } | { failure: string } | { cause: Cause }> => {
         const ran = await runScript(script);
         if ("cause" in ran) return ran;
         const { run } = ran;
@@ -1602,19 +1804,22 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
         return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
       }
+      // Where the command runs: its own directory, or, after a leading `cd`, the one bash reaches
+      // (CDPATH included), which the gate asks bash for rather than guessing it. The rules check
+      // reads a document as the Dispatch configuration of that directory names it, and an upload's
+      // relative `--path` resolves there. Only those two reads need it, so only they pay for the run.
+      let directory = cwd;
+      const reads = scoped.upload === true || scoped.tool === "dispatch_doc_edit";
+      if (scoped.cdScript !== undefined && reads) {
+        const reached = await stdoutOf(scoped.cdScript, `${scoped.label}'s cd`);
+        if (!("stdout" in reached)) return reached;
+        directory = reached.stdout.trim();
+      }
       // An upload given with `--path` prints the path, not the text: the gate reads the file and adds
       // its text as `content`, so the model sees one shape for both forms of the upload.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
-        return { args };
-      // A relative path resolves where the command runs: after its own `cd`, which bash resolves
-      // (CDPATH included), so the gate asks bash for that directory rather than guessing it.
-      let base = cwd;
-      if (scoped.cdScript !== undefined) {
-        const reached = await stdoutOf(scoped.cdScript, `${scoped.label}'s cd`);
-        if (!("stdout" in reached)) return reached;
-        base = reached.stdout.trim();
-      }
-      const file = path.resolve(base, args.path);
+        return { args, directory };
+      const file = path.resolve(directory, args.path);
       let content: string | undefined;
       try {
         content = deps.readFile(file);
@@ -1623,7 +1828,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
       if (content === undefined)
         return { failure: `${scoped.label}: ${file}, which --path names, does not exist` };
-      return { args: { ...args, content } };
+      return { args: { ...args, content }, directory };
     };
 
     /** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
@@ -1676,27 +1881,41 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             if (scoped.rebuttal !== undefined)
               revised = { ...event.input, command: scoped.command };
             base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
-            const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
-            if ("cause" in run) decision = givenUp(mode, run.cause);
-            // The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
-            else if ("failure" in run) decision = pass("error", { reason: run.failure });
-            else {
-              const key = breakerKey(scoped.tool, run.args);
-              base = {
-                ...base,
-                revisesForKey: breaker.reasons(key).length,
-                argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
-              };
-              decision = await decide(
-                { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
-                ctx,
-                started,
-                base,
-                key,
-                scoped.rebuttal,
-                COMMAND_OVERRIDE,
-                scoped.upload === true
-              );
+            // One stop for everything this call waits on: its dry run, its document read and both
+            // model calls.
+            const stop = openStop(event.toolCallId);
+            try {
+              const run = await readArgs(scoped, event.input, ctx, stop);
+              if ("cause" in run)
+                decision =
+                  run.cause === "timeout"
+                    ? pass("timeout", {}, "failure")
+                    : givenUp(mode, run.cause);
+              // The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
+              else if ("failure" in run) decision = pass("error", { reason: run.failure });
+              else {
+                const key = breakerKey(scoped.tool, run.args);
+                base = {
+                  ...base,
+                  revisesForKey: breaker.count(key),
+                  argsDigest: createHash("sha256").update(JSON.stringify(run.args)).digest("hex"),
+                  target: targetLabel(key),
+                };
+                decision = await decide(
+                  { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.args },
+                  ctx,
+                  started,
+                  base,
+                  key,
+                  scoped.rebuttal,
+                  COMMAND_OVERRIDE,
+                  stop,
+                  run.directory,
+                  scoped.upload === true
+                );
+              }
+            } finally {
+              stop.close();
             }
           }
         } else {
@@ -1707,10 +1926,27 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           const key = breakerKey(event.toolName, event.input);
           base = {
             ...identity(event, mode),
-            revisesForKey: breaker.reasons(key).length,
+            revisesForKey: breaker.count(key),
             argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
+            target: targetLabel(key),
           };
-          decision = await decide(event, ctx, started, base, key, rebuttal, DEVICE_OVERRIDE);
+          const stop = openStop(event.toolCallId);
+          try {
+            // A device call runs in the session's own directory; it has no `cd` of its own.
+            decision = await decide(
+              event,
+              ctx,
+              started,
+              base,
+              key,
+              rebuttal,
+              DEVICE_OVERRIDE,
+              stop,
+              ctx.cwd
+            );
+          } finally {
+            stop.close();
+          }
         }
       } catch (error) {
         // Fail open: the runner turns a thrown handler into a refusal. A throw here is the
@@ -1723,6 +1959,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         settle(decision.effect, ctx);
       } catch {
         // The halt notice is best effort.
+      }
+      try {
+        settleRules(decision.fields.ruleOutcome, ctx);
+      } catch {
+        // The rules notice is best effort too.
       }
       // The first gated call says once that the OMP_ASKGATE it ignored is not the switch.
       if (ignoredModeNotice !== undefined) {

@@ -505,7 +505,7 @@ export default function envoyExtension(pi: PiApi): void {
       // The host's `pi.on` takes every event name; `PiApi` types only the events this entry uses,
       // and the gate also listens for `tool_execution_end`.
       const host = pi as unknown as AskGatePi;
-      askgateLoad = registerAskGate(host, { configFile: CONFIG_FILE.path, logger }).catch(
+      askgateLoad = registerAskGate(host, { configFile: CONFIG_FILE, logger }).catch(
         (error: unknown) => {
           const notice = `AskGate did not load, so Dispatch writes post unreviewed: ${messageFor(error)}`;
           logger.warn(notice);

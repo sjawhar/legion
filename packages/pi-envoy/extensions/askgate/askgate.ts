@@ -17,6 +17,10 @@
 // model only.
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
+import { dispatchServerUrls } from "@legion/envoy-client/dispatch-execute";
+import { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import { sessionDispatchSettings } from "@legion/envoy-client/session-settings";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { RetryFallbackResolutionContext } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -33,11 +37,16 @@ import {
   spawnDryRun,
   type Usage,
 } from "./askgate-core";
+import type { DispatchSession } from "./rules-check";
 
 /** What the entry hands the gate from its own extension: where the switch lives, and where notices go. */
 export interface AskGateHost {
-  /** The session's envoy.json, named in the notice for an OMP_ASKGATE the gate ignores. */
-  readonly configFile: string;
+  /**
+   * The session's envoy.json, found and read once by the extension that loads the gate: its path is
+   * named in the notice for an OMP_ASKGATE the gate ignores, and its Dispatch section is what the
+   * gate's own reads of a document go through.
+   */
+  readonly configFile: { readonly path: string; readonly error: null };
   readonly logger: { warn(message: string): void };
 }
 
@@ -211,13 +220,31 @@ export async function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> 
       return { text: "", error: error instanceof Error ? error.message : String(error), usage };
     }
   };
+  /**
+   * The session's Dispatch as the directory the gated command runs in configures it (a checkout's
+   * own `.envoy/envoy.json` names its own server), with the gated call's stop as the signal of
+   * every request, so a stopped run ends the read. `timedDispatchClient` in envoy.ts builds the
+   * session's own client the same way, with a timeout in place of the stop.
+   */
+  const dispatchClient = (directory: string, signal: AbortSignal): DispatchSession | undefined => {
+    const config = activeDispatchSettings(
+      sessionDispatchSettings(host.configFile, process.env, { cwd: directory }).dispatch
+    );
+    return config === null
+      ? undefined
+      : {
+          client: new DispatchClient(config.url, config.token, fetch, signal),
+          serverUrls: dispatchServerUrls(config),
+        };
+  };
 
   createAskGate({
     env: process.env,
     home: os.homedir(),
     now: Date.now,
     logger: host.logger,
-    configFile: host.configFile,
+    configFile: host.configFile.path,
+    dispatchClient,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
     readFile,

@@ -3852,7 +3852,8 @@ console.log(JSON.stringify(args));
         context
       )) as { block?: boolean; reason?: string } | undefined;
 
-      expect(completions).toEqual([MODEL]);
+      // The charter call, and the rules call the `dispatch ask` opens beside it.
+      expect(completions).toEqual([MODEL, MODEL]);
       expect(result?.block).toBe(true);
       expect(result?.reason).toContain("see the message above");
       expect(fixture.entries).toMatchObject([
@@ -3907,7 +3908,7 @@ console.log(JSON.stringify(args));
         context
       )) as { block?: boolean } | undefined;
       expect(result?.block).toBe(true);
-      expect(completions).toEqual([MODEL]);
+      expect(completions).toEqual([MODEL, MODEL]);
     });
 
     test("a gate that does not load is said at session start, so the writes it would review are not let out unsaid", async () => {
