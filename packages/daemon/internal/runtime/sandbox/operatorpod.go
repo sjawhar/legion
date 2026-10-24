@@ -152,6 +152,12 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 				}
 			}
 		}
+		for _, covered := range roleNamespacePaths {
+			if mount.MountPath == covered || strings.HasPrefix(covered, mount.MountPath+"/") || mount.MountPath == "/" {
+				return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s is at or above %s, which every role's namespace in an issue pod covers with its own: mount under it instead",
+					i, mount.MountPath, covered)
+			}
+		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(providerKeys)) {
 		if name == sessionDSNFile {

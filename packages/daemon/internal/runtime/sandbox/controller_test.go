@@ -359,7 +359,7 @@ func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("2Gi")},
 		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("40Gi")},
 	}
-	opts.Resources[claim.RoleController] = sized
+	opts.Resources.Controller = sized
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

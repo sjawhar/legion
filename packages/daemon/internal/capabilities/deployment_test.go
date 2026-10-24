@@ -381,14 +381,14 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 		{"a decided fallback gap", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackOff, Decided: decided}, ModelFallback, StatusDecided, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
 
 		{"tmux sets no limits", Deployment{Runtime: "tmux"}, ResourceLimits, StatusOpen, "the tmux runtime sets no requests or limits on a pane"},
-		{"every role reserved", satisfied, ResourceLimits, StatusPresent, "every role has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"},
-		{"a workflow role burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleImplementer, claim.RoleTester}}, ResourceLimits, StatusPresent,
-			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): implementer, tester, so every issue pod is Burstable; every other pod is Guaranteed"},
-		{"the controller burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleController}}, ResourceLimits, StatusPresent,
-			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): controller, so the controller's pod is Burstable; every other pod is Guaranteed"},
-		{"both pod kinds burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleImplementer, claim.RoleController}}, ResourceLimits, StatusPresent,
-			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): implementer, controller, so every issue pod and the controller's pod are Burstable; every other pod is Guaranteed"},
-		{"roles without a reservation", Deployment{Runtime: "kubernetes", RolesWithoutResources: []claim.Role{claim.RoleTester, claim.RoleController}}, ResourceLimits, StatusOpen, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester, controller"},
+		{"every pod reserved", satisfied, ResourceLimits, StatusPresent, "every pod has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"},
+		{"the issue pod burstable", Deployment{Runtime: "kubernetes", BurstablePods: []Pod{PodIssue}}, ResourceLimits, StatusPresent,
+			"every pod has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable (a request below the limit): the issue pod; every other pod is Guaranteed"},
+		{"the controller's pod burstable", Deployment{Runtime: "kubernetes", BurstablePods: []Pod{PodController}}, ResourceLimits, StatusPresent,
+			"every pod has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable (a request below the limit): the controller's pod; every other pod is Guaranteed"},
+		{"both pods burstable", Deployment{Runtime: "kubernetes", BurstablePods: []Pod{PodIssue, PodController}}, ResourceLimits, StatusPresent,
+			"every pod has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable (a request below the limit): the issue pod and the controller's pod; every other pod is Guaranteed"},
+		{"pods without a reservation", Deployment{Runtime: "kubernetes", UnreservedPods: []Pod{PodIssue, PodController}}, ResourceLimits, StatusOpen, "no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod and the controller's pod"},
 		{"a decided limits gap", Deployment{Runtime: "tmux", Decided: decided}, ResourceLimits, StatusDecided, "the tmux runtime sets no requests or limits on a pane"},
 
 		{"tmux runs no probe pod", Deployment{Runtime: "tmux"}, PoolCapacity, StatusPresent, "the tmux runtime runs no probe pod"},
@@ -421,7 +421,7 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 // the gap and the line that records a decision, as attributes too — and nothing for the rest.
 func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 	d := Deployment{Runtime: "kubernetes", Probed: true, ModelFallback: bootprobe.ModelFallbackOn, Decided: map[Name]string{Secrets: "dispatch://LEGION-205 enrolls pods later"},
-		RolesWithoutResources: []claim.Role{claim.RoleTester}}
+		UnreservedPods: []Pod{PodIssue}}
 
 	if got, want := d.Open(), []Name{ResourceLimits}; !slices.Equal(got, want) {
 		t.Errorf("Open() = %v, want %v", got, want)
@@ -434,9 +434,9 @@ func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 	}
 	for _, want := range []string{
 		`level=WARN`,
-		`msg="capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\""`,
+		`msg="capability resource-limits is open: no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\""`,
 		`capability=resource-limits`,
-		`detail="roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester"`,
+		`detail="no CPU and memory requests and limits under runtime.kubernetes.resources for the issue pod"`,
 		`configLine="capabilities.decided.resource-limits: \"<reason>\""`,
 		`source=configuration`,
 	} {
@@ -453,20 +453,20 @@ func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 
 // OpenFromConfiguration is what `legion start --check-config` prints: the open rows the file alone
 // decides, each as Report renders it — secrets where no broker is configured, resource-limits where
-// a role lacks a reservation — and never a configured broker's secrets row, whose login boot
+// a pod lacks a reservation — and never a configured broker's secrets row, whose login boot
 // measures, nor model fallback, which the probe or the plugin gate reads, nor pool capacity, which
 // the probe's run measures.
 func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
-	lacking := []claim.Role{claim.RoleTester}
+	lacking := []Pod{PodIssue}
 	for _, tc := range []struct {
 		name       string
 		deployment Deployment
 		want       []Name
 	}{
-		{"no broker, a role lacking", Deployment{Runtime: "kubernetes", RolesWithoutResources: lacking}, []Name{Secrets, ResourceLimits}},
-		{"no broker, every role reserved", Deployment{Runtime: "kubernetes"}, []Name{Secrets}},
-		{"a broker whose login is not issued, a role lacking", Deployment{Runtime: "kubernetes", AgentSecrets: true, RolesWithoutResources: lacking}, []Name{ResourceLimits}},
-		{"a broker whose login is not issued, every role reserved", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
+		{"no broker, a pod lacking", Deployment{Runtime: "kubernetes", UnreservedPods: lacking}, []Name{Secrets, ResourceLimits}},
+		{"no broker, every pod reserved", Deployment{Runtime: "kubernetes"}, []Name{Secrets}},
+		{"a broker whose login is not issued, a pod lacking", Deployment{Runtime: "kubernetes", AgentSecrets: true, UnreservedPods: lacking}, []Name{ResourceLimits}},
+		{"a broker whose login is not issued, every pod reserved", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
 		{"a broker login failed", Deployment{Runtime: "kubernetes", AgentSecrets: true, SecretsLogin: "failed"}, nil},
 		{"fallback off alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackOff}, nil},
 		{"fallback unread alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackUnread}, nil},

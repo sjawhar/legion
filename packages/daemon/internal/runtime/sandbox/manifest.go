@@ -26,14 +26,16 @@ import (
 
 // The pod's init containers: workspace-fetch, the one that holds the provisioning token and
 // mounts nothing an agent of the issue can write; and workspace-init, which works on the issue's
-// volume without it. Each of the six role containers is named for its role.
+// volume without it. The pod's one container is its kind's (podKind.container).
 const (
 	fetchContainer = "workspace-fetch"
 	initContainer  = "workspace-init"
 )
 
-// The pod's volumes. ghVolume is the prefix of each issue-pod role's gh volume (roleVolume), the
-// projection of its role Secret's two gh files its container alone mounts at GHConfigDir.
+// The pod's volumes. ghVolume is the prefix of each launcher role's gh volume (roleVolume), the
+// projection of its role Secret's gh files, which only that role's namespace sees at GHConfigDir.
+// roleHomesVolume is an issue pod's disk emptyDir of every role's home overlay and temporary
+// directories (issuePod.mainVolumes).
 const (
 	provisionVolume = "provision"
 	stateVolume     = "state"
@@ -41,6 +43,7 @@ const (
 	configVolume    = "config"
 	providersVolume = "providers"
 	ghVolume        = "gh"
+	roleHomesVolume = "role-homes"
 )
 
 // The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
@@ -115,13 +118,13 @@ var sessionStoreVariables = []string{ompsessions.StorageVariable, ompsessions.DS
 const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
-// probe's, whose names the operator's volumes may not take: the shared ones and each launcher
-// role's private ones. The agent-secrets volumes are reserved whether or not this deployment
-// enrolls: an operator's pod may never claim them. Every launcher role, the controller's included,
-// has a key volume when the pod enrolls and a gh volume always.
+// probe's, whose names the operator's volumes may not take: the shared ones, the role homes, and
+// each launcher role's private ones. The agent-secrets volumes are reserved whether or not this
+// deployment enrolls: an operator's pod may never claim them. Every launcher role, the
+// controller's included, has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
-		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
+		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume, roleHomesVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
@@ -132,18 +135,27 @@ func legionVolumeNames() []string {
 }
 
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
-// each role container and the image probe's: an operator's mount may be neither at, under, nor
-// above one. AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this
-// deployment enrolls, GHConfigDir whether or not the pod is an issue's, and FeedDir, which TreeRoot
-// already covers, is named for the read-only mount every issue pod's role container carries there.
+// the launcher container of either pod and the image probe's, or where a role's namespace binds
+// one: an operator's mount may be neither at, under, nor above one. AgentSecretsKeyDir and
+// AgentSecretsTokenDir are reserved whether or not this deployment enrolls, GHConfigDir whether or
+// not the pod is an issue's, FeedDir, which TreeRoot already covers, is named for the read-only
+// mount every issue pod's container carries there, and RolesDir is where an issue pod mounts every
+// role's own volumes, which each role's namespace covers whole.
 func legionMountPaths() []string {
 	paths := []string{
 		TreeRoot, FeedDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
-		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir,
+		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir, RolesDir,
 	}
 	slices.Sort(paths)
 	return paths
 }
+
+// roleNamespacePaths are the directories each role's namespace puts filesystems of its own at
+// (`legion launcher role-init`): its temporary directories, binds of its directories under
+// RoleHomesDir, and small private memory filesystems. role-init carries back a mount it finds under
+// one of them, so an operator's mount may be under one, but one at or above one would be covered in
+// every role's namespace.
+var roleNamespacePaths = []string{"/dev/shm", "/run/lock", "/tmp", "/var/lock", "/var/tmp"}
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
@@ -423,7 +435,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 		PriorityClassName: r.scheduling.PriorityClass,
 		Volumes:           r.volumes(l),
 		InitContainers:    l.kind.initContainers(r, l),
-		Containers:        r.launcherContainers(l, providersMounts),
+		Containers:        []corev1.Container{r.launcherContainer(l, providersMounts)},
 	}
 	for i := range spec.InitContainers {
 		kubeletLiteral(&spec.InitContainers[i])
@@ -440,42 +452,14 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 	}
 }
 
-// launcherContainers are the pod's launcher containers, one per role of l.roles: an issue pod's
-// six, the controller's one. Each runs only `legion launcher`; the per-generation worker-shim argv
-// and plain environment arrive in the launcher's start command, while values the kubelet must
-// resolve (the downward API, the operator's secret refs) are set on every container. An issue
-// pod's role container also mounts its own gh volume, read-only, at GHConfigDir: the role's
-// GitHub credential, which no other role's container can read.
-func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMount) []corev1.Container {
+// launcherContainer is the pod's one container, its kind's (podKind.launcherContainer): an issue
+// pod's `roles`, whose launcher runs every workflow role, or the controller's `controller`. It runs
+// only `legion launcher`; the per-generation worker-shim argv and plain environment arrive in the
+// launcher's start command, while values the kubelet must resolve (the downward API, the
+// operator's secret refs) are set on the container.
+func (r *Runtime) launcherContainer(l launch, providersMounts []corev1.VolumeMount) corev1.Container {
 	resolved, _ := r.launchEnvironment(l)
-	containers := make([]corev1.Container, 0, len(l.roles))
-	for _, role := range l.roles {
-		mounts := []corev1.VolumeMount{
-			{Name: issueVolume, MountPath: TreeRoot},
-			{Name: issueVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
-			{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
-			{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
-			{Name: roleVolume(stateVolume, role), MountPath: StateDir},
-			{Name: configVolume, MountPath: xdgConfigHome},
-			{Name: roleVolume(ghVolume, role), MountPath: GHConfigDir, ReadOnly: true},
-		}
-		mounts = append(mounts, l.kind.agentMounts()...)
-		containers = append(containers, corev1.Container{
-			Name:  string(role),
-			Image: r.image,
-			Command: []string{
-				r.tools.Legion, "launcher", connectFlag, r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
-				"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
-				"--stop-grace", r.terminationGrace.String(),
-			},
-			Env:             slices.Clone(resolved),
-			WorkingDir:      l.workspace,
-			VolumeMounts:    slices.Concat(mounts, providersMounts, agentSecretsMounts(r.agentSecrets, role), r.pod.VolumeMounts),
-			Resources:       r.resources[role],
-			SecurityContext: restrictedContainer(),
-		})
-	}
-	return containers
+	return l.kind.launcherContainer(r, l, resolved, providersMounts)
 }
 
 // kubeletLiteral escapes a container's command and env values against the kubelet's expansion,
@@ -501,11 +485,13 @@ func kubeletEscape(text string) string {
 // credential directory, state and gh volume: each owner's two gh files of its role Secret
 // (GitHubHostsKey(owner) as <owner>/hosts.yml, GitHubConfigKey(owner) as <owner>/config.yml) for
 // the launch's owners (gitHubOwners), read-only to the pod's user, from the same Secret as the
-// launcher token, so the refresher's one Update reaches the container's GHConfigDir. A projection's
+// launcher token, so the refresher's one Update reaches the role's gh directory. A projection's
 // items are fixed for the pod's life, so a pod holds the owners of its creation. A launch with no
 // owners — a controller whose project has no GitHub owner to mint for, and the Sandbox's first
 // template (sandboxManifest), which never runs — gets an empty directory instead: a Secret
 // projection with no items would project every key of the Secret, the launcher token among them.
+// Then the volumes its kind's one container alone mounts (podKind.mainVolumes), the agent-secrets
+// volumes, the providers and the operator's.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
@@ -541,7 +527,7 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 	}}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
 	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
-		r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
+		l.kind.mainVolumes(), r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
 // agentSecretsVolumes are, for a pod the runtime enrolls with the secrets broker
@@ -575,10 +561,10 @@ func brokerTokenProjection(broker *AgentSecrets) *corev1.ServiceAccountTokenProj
 	return &corev1.ServiceAccountTokenProjection{Audience: broker.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile}
 }
 
-// agentSecretsMounts are role's launcher container's mounts of the agent-secrets volumes when it
-// enrolls with broker, none when broker is nil: the one configured audience projection, shared,
-// and the role's own key directory, which keeps its generated private key and enrollment id out of
-// the other launcher containers.
+// agentSecretsMounts are the controller's container's mounts of the agent-secrets volumes when it
+// enrolls with broker, none when broker is nil: the one configured audience projection and the
+// role's own key directory. An issue pod's container mounts each role's key directory under the
+// role's directory of RolesDir instead (issuePod.launcherContainer).
 func agentSecretsMounts(broker *AgentSecrets, role claim.Role) []corev1.VolumeMount {
 	if broker == nil {
 		return nil

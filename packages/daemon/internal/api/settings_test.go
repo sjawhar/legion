@@ -110,12 +110,14 @@ var settingsEmitted = map[string]string{
 	"Toleration.Operator":                            "runtime.kubernetes.scheduling.tolerations[].operator",
 	"Toleration.Value":                               "runtime.kubernetes.scheduling.tolerations[].value",
 	"Toleration.Effect":                              "runtime.kubernetes.scheduling.tolerations[].effect",
-	"RoleResources.CPU":                              "runtime.kubernetes.resources.<role>.cpu",
-	"RoleResources.CPURequest":                       "runtime.kubernetes.resources.<role>.cpu_request",
-	"RoleResources.Memory":                           "runtime.kubernetes.resources.<role>.memory",
-	"RoleResources.MemoryRequest":                    "runtime.kubernetes.resources.<role>.memory_request",
-	"RoleResources.EphemeralStorage":                 "runtime.kubernetes.resources.<role>.ephemeral_storage",
-	"RoleResources.EphemeralStorageRequest":          "runtime.kubernetes.resources.<role>.ephemeral_storage_request",
+	"PodResources.Issue":                             "runtime.kubernetes.resources.issue",
+	"PodResources.Controller":                        "runtime.kubernetes.resources.controller",
+	"Reservation.CPU":                                "runtime.kubernetes.resources.<pod>.cpu",
+	"Reservation.CPURequest":                         "runtime.kubernetes.resources.<pod>.cpu_request",
+	"Reservation.Memory":                             "runtime.kubernetes.resources.<pod>.memory",
+	"Reservation.MemoryRequest":                      "runtime.kubernetes.resources.<pod>.memory_request",
+	"Reservation.EphemeralStorage":                   "runtime.kubernetes.resources.<pod>.ephemeral_storage",
+	"Reservation.EphemeralStorageRequest":            "runtime.kubernetes.resources.<pod>.ephemeral_storage_request",
 	"AgentSecretsConfig.URL":                         "runtime.kubernetes.agent_secrets.url",
 	"AgentSecretsConfig.Audience":                    "runtime.kubernetes.agent_secrets.audience",
 	"AgentSecretsConfig.TokenExpirySeconds":          "runtime.kubernetes.agent_secrets.token_expiry_seconds",
@@ -312,12 +314,12 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	if settings.LingerHours != 1.5 || settings.WorkerStopTimeoutSeconds != 30 || settings.Controller != config.ControllerLaunchDaemon {
 		t.Errorf("linger_hours %v, worker_stop_timeout_seconds %d, controller %q; want 1.5, 30, daemon", settings.LingerHours, settings.WorkerStopTimeoutSeconds, settings.Controller)
 	}
-	controller := settings.Runtime.Kubernetes.Resources["controller"]
+	controller := settings.Runtime.Kubernetes.Resources.Controller
 	if controller.CPU != "2" || controller.CPURequest != "1" || controller.MemoryRequest != "4Gi" || controller.EphemeralStorage != "10Gi" {
 		t.Errorf("resources.controller = %+v, want the file's cpu, cpu_request and memory_request with the default ephemeral storage", controller)
 	}
-	if len(settings.Runtime.Kubernetes.Resources) != 7 {
-		t.Errorf("resources names %d roles, want the six workflow roles and the controller", len(settings.Runtime.Kubernetes.Resources))
+	if issue := settings.Runtime.Kubernetes.Resources.Issue; issue != (ReservationSettings{CPU: "4", CPURequest: "4", Memory: "24Gi", MemoryRequest: "24Gi", EphemeralStorage: "80Gi", EphemeralStorageRequest: "6Gi"}) {
+		t.Errorf("resources.issue = %+v, want the file's cpu and memory, each requested in full, with the default disk bound", issue)
 	}
 	if want := []string{"C0123ABCD", "C0123ABCE"}; !slices.Equal(settings.Projects["LEGION"].SlackChannels, want) {
 		t.Errorf("projects.LEGION.slack_channels = %q, want %q", settings.Projects["LEGION"].SlackChannels, want)

@@ -87,7 +87,7 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	}
 	pod := g.pod(name)
 	if err := loc.Validate(); err != nil || loc.Sandbox.PodUID != string(pod.UID) || loc.Runtime != runtime.RuntimeSandbox ||
-		loc.Sandbox.Name != name || loc.Sandbox.Container != string(spec.Role) || loc.Sandbox.Generation != spec.Generation ||
+		loc.Sandbox.Name != name || loc.Sandbox.Container != workerContainer || loc.Sandbox.Generation != spec.Generation ||
 		loc.Incarnation != runtime.SandboxIncarnation(string(pod.UID), spec.Generation) || loc.Claim != workerToken {
 		t.Fatalf("locator %+v (%v), want the tester process in issue pod uid %s", loc, err, pod.UID)
 	}
@@ -152,7 +152,7 @@ func TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt(t *testing.T) {
 	if root.Sandbox.Name != worker.Sandbox.Name || root.Sandbox.PodUID != worker.Sandbox.PodUID {
 		t.Fatalf("role locators root=%+v worker=%+v, want one issue pod", root.Sandbox, worker.Sandbox)
 	}
-	if root.Sandbox.Container != string(claim.RoleArchitect) || worker.Sandbox.Container != string(claim.RoleTester) {
+	if root.Sandbox.Container != workerContainer || worker.Sandbox.Container != workerContainer {
 		t.Fatalf("containers root=%q worker=%q", root.Sandbox.Container, worker.Sandbox.Container)
 	}
 	for _, write := range g.writes()[writes:] {

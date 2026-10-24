@@ -39,27 +39,24 @@ func goldenOptions() Options {
 }
 
 // reservations are the daemon's default reservations (config.DefaultResources) as the daemon
-// translates them for the runtime (internal/daemon/kubernetes.go, roleRequirements): every role,
-// the controller included, its cpu and memory requested as the defaults set them — each equal to
+// translates them for the runtime (internal/daemon/kubernetes.go, requirements): an issue pod's
+// and the controller's pod's, its cpu and memory requested as the defaults set them — each equal to
 // its limit — and its ephemeral storage the limit over the smaller request.
-func reservations() map[claim.Role]corev1.ResourceRequirements {
-	translated := map[claim.Role]corev1.ResourceRequirements{}
-	for role, reservation := range config.DefaultResources() {
-		translated[role] = requirementsOf(reservation)
-	}
-	return translated
+func reservations() PodResources {
+	defaults := config.DefaultResources()
+	return PodResources{Issue: requirementsOf(defaults.Issue), Controller: requirementsOf(defaults.Controller)}
 }
 
 // probeReservation is the image probe's own reservation as the daemon hands it
 // (internal/daemon/kubernetes.go, probeReservation), translated the same way: 250m and 1Gi, with a
-// 5Gi disk bound over a 1Gi request — not a role's share, written here as data as the defaults are.
+// 5Gi disk bound over a 1Gi request — not a pod's share, written here as data as the defaults are.
 func probeReservation() corev1.ResourceRequirements {
-	return requirementsOf(config.RoleResources{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
+	return requirementsOf(config.Reservation{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
 }
 
-// requirementsOf is reservation as a container's requirements, translated as roleRequirements
-// translates it.
-func requirementsOf(reservation config.RoleResources) corev1.ResourceRequirements {
+// requirementsOf is reservation as a container's requirements, translated as the daemon's
+// requirements translates it.
+func requirementsOf(reservation config.Reservation) corev1.ResourceRequirements {
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU: resource.MustParse(reservation.CPURequest), corev1.ResourceMemory: resource.MustParse(reservation.MemoryRequest),
@@ -118,10 +115,11 @@ func podQOS(spec corev1.PodSpec) corev1.PodQOSClass {
 // and memory and bursts past neither: each has a non-zero request for both, equal to its limit,
 // which is the kubelet's rule for the Guaranteed class — judged over every container of the pod,
 // the init containers included — and each is bounded on the node's disk, an ephemeral-storage
-// request under its limit. An issue pod's six launchers each carry their role's reservation and its
-// two init containers the launching role's; the controller's pod carries the controller's on both
-// its containers; and the image probe's one container carries the probe's own, which the daemon
-// hands it. A deployment with no `resources` block therefore runs only Guaranteed pods.
+// request under its limit. An issue pod's one container and its two init containers carry the
+// issue pod's reservation, whichever role's launch creates it; the controller's pod carries the
+// controller's on both its containers; and the image probe's one container carries the probe's
+// own, which the daemon hands it. A deployment with no `resources` block therefore runs only
+// Guaranteed pods.
 func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -130,15 +128,13 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	want := reservations()
 	probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Now())
 	for name, tc := range map[string]struct {
-		pod corev1.PodSpec
-		// launch is the reservation every container that is not a role's own carries: the init
-		// containers', the role whose launch creates the pod; the probe's one, the probe's own.
-		launch     corev1.ResourceRequirements
+		pod        corev1.PodSpec
+		want       corev1.ResourceRequirements
 		containers int
 	}{
-		"root":       {podOf(t, r, rootSpec(t)), want[claim.RoleArchitect], 8},
-		"worker":     {podOf(t, r, workerSpec(t)), want[claim.RoleTester], 8},
-		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 2},
+		"root":       {podOf(t, r, rootSpec(t)), want.Issue, 3},
+		"worker":     {podOf(t, r, workerSpec(t)), want.Issue, 3},
+		"controller": {podOf(t, r, controllerSpec(t)), want.Controller, 2},
 		"probe":      {probe.Spec.PodTemplate.Spec, probeReservation(), 1},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -150,12 +146,8 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 				t.Fatalf("the pod runs %d containers, want %d", len(containers), tc.containers)
 			}
 			for _, c := range containers {
-				expected, whose := tc.launch, "the launch's"
-				if named := claim.Role(c.Name); claim.IsRole(named) || named == claim.RoleController {
-					expected, whose = want[named], string(named)+"'s"
-				}
-				if !reflect.DeepEqual(c.Resources, expected) {
-					t.Errorf("container %s carries %+v, want %s reservation %+v", c.Name, c.Resources, whose, expected)
+				if !reflect.DeepEqual(c.Resources, tc.want) {
+					t.Errorf("container %s carries %+v, want the pod's reservation %+v", c.Name, c.Resources, tc.want)
 				}
 				for _, kind := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
 					request, limit := c.Resources.Requests[kind], c.Resources.Limits[kind]
@@ -174,49 +166,34 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	}
 }
 
-// A role whose reservation requests less memory than its limit — the implementer at 8Gi under
-// 32Gi — runs its launcher container with exactly that request and limit, and every issue pod it
-// is a container of is Burstable, whichever role's launch created it; the init containers carry the
-// launching role's reservation as before: the root's, created by the architect's launch, the
-// architect's default Guaranteed 250m and 1Gi, and a pod the implementer's launch creates the
-// implementer's 8Gi request and 32Gi limit. The controller's pod, which holds no implementer, and
-// the image probe's, sized by the probe's own reservation, stay Guaranteed.
+// An issue-pod reservation that requests less memory than its limit — 8Gi under 32Gi — is what
+// every container of every issue pod carries, the init containers included, whichever role's launch
+// created the pod, and every issue pod is Burstable. The controller's pod, sized by its own
+// reservation, and the image probe's, sized by the probe's, stay Guaranteed.
 func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 	opts := goldenOptions()
-	bursting := config.RoleResources{CPU: "750m", CPURequest: "750m", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
-	opts.Resources[claim.RoleImplementer] = requirementsOf(bursting)
+	bursting := config.Reservation{CPU: "3", CPURequest: "3", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "80Gi", EphemeralStorageRequest: "6Gi"}
+	opts.Resources.Issue = requirementsOf(bursting)
 	r, err := configure(opts)
 	if err != nil {
-		t.Fatalf("configure with the implementer requesting 8Gi under a 32Gi limit: %v", err)
+		t.Fatalf("configure with the issue pod requesting 8Gi under a 32Gi limit: %v", err)
 	}
 	want := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("20Gi")},
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("6Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("80Gi")},
 	}
-	architect := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("10Gi")},
-	}
-	for name, tc := range map[string]struct {
-		pod  corev1.PodSpec
-		init corev1.ResourceRequirements
-	}{
-		"root":        {podOf(t, r, rootSpec(t)), architect},
-		"implementer": {podOf(t, r, childSpec(t)), want},
-	} {
+	for name, spec := range map[string]runtime.SpawnSpec{"root": rootSpec(t), "implementer": childSpec(t)} {
 		t.Run(name, func(t *testing.T) {
-			if got := containerNamed(t, tc.pod, string(claim.RoleImplementer)).Resources; !reflect.DeepEqual(got, want) {
-				t.Errorf("the implementer's container carries %+v, want %+v", got, want)
-			}
-			if qos := podQOS(tc.pod); qos != corev1.PodQOSBurstable {
+			pod := podOf(t, r, spec)
+			if qos := podQOS(pod); qos != corev1.PodQOSBurstable {
 				t.Errorf("the issue pod is %s, want %s", qos, corev1.PodQOSBurstable)
 			}
-			if len(tc.pod.InitContainers) == 0 {
+			if len(pod.InitContainers) == 0 {
 				t.Fatal("the issue pod has no init containers")
 			}
-			for _, c := range tc.pod.InitContainers {
-				if !reflect.DeepEqual(c.Resources, tc.init) {
-					t.Errorf("init container %s carries %+v, want the launching role's %+v", c.Name, c.Resources, tc.init)
+			for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+				if !reflect.DeepEqual(c.Resources, want) {
+					t.Errorf("container %s carries %+v, want the issue pod's %+v", c.Name, c.Resources, want)
 				}
 			}
 		})
@@ -398,17 +375,17 @@ func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.PodSpec {
 	return r.podTemplate(l).Spec
 }
 
-// workerContainer is the role container of workerSpec, the tester.
-const workerContainer = string(claim.RoleTester)
+// workerContainer is the container workerSpec's tester runs in: its issue pod's one container.
+const workerContainer = "roles"
 
-// workerOf is the worker-shim process a launch of spec starts: its role container as the pod runs
-// it (mounts, kubelet-resolved environment), with the launcher start command's argv as Command and
-// its plain environment appended. That is the process's whole environment: the launcher passes its
-// own on, then the start command's.
+// workerOf is the worker-shim process a launch of spec starts: its pod's one container as the pod
+// runs it (mounts, kubelet-resolved environment), with the launcher start command's argv as
+// Command and its plain environment appended. That is the process's whole environment: the
+// launcher passes its own on, then the start command's.
 func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.Container {
 	t.Helper()
 	l := launchOf(t, r, spec)
-	c := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
+	c := containerNamed(t, r.podTemplate(l).Spec, l.kind.container())
 	start := launcherCommand(l, r)
 	c.Command = start.Argv
 	for _, entry := range start.Env {
@@ -1061,45 +1038,45 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"no cache volume":           {func(o *Options) { o.RepositoryCache.Volume = resource.Quantity{} }, "repository cache volume 0 is not a positive quantity"},
 		"no cache retention":        {func(o *Options) { o.RepositoryCache.Retain = 0 }, "repository cache retention 0s is not positive"},
 		"an unreserved cache":       {func(o *Options) { o.RepositoryCache.Resources = corev1.ResourceRequirements{} }, "the repository cache reserves no cpu"},
-		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
-		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
+		"the issue pod unreserved":  {func(o *Options) { o.Resources.Issue = corev1.ResourceRequirements{} }, "the issue pod reserves no cpu"},
+		"the controller unreserved": {func(o *Options) { o.Resources.Controller = corev1.ResourceRequirements{} }, "the controller's pod reserves no cpu"},
 		"cpu request past limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleReviewer].Requests[corev1.ResourceCPU] = resource.MustParse("1500m")
+				o.Resources.Issue.Requests[corev1.ResourceCPU] = resource.MustParse("3500m")
 			},
-			"role reviewer requests cpu 1500m past its limit 750m",
+			"the issue pod requests cpu 3500m past its limit 3",
 		},
 		"memory request past limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceMemory] = resource.MustParse("7Gi")
+				o.Resources.Issue.Requests[corev1.ResourceMemory] = resource.MustParse("20Gi")
 			},
-			"role implementer requests memory 7Gi past its limit 6Gi",
+			"the issue pod requests memory 20Gi past its limit 19Gi",
 		},
 		"no memory": {
 			func(o *Options) {
-				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceMemory)
-				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceMemory)
+				delete(o.Resources.Controller.Requests, corev1.ResourceMemory)
+				delete(o.Resources.Controller.Limits, corev1.ResourceMemory)
 			},
-			"role merger reserves no memory",
+			"the controller's pod reserves no memory",
 		},
 		"ephemeral-storage request past its limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("40Gi")
+				o.Resources.Issue.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("90Gi")
 			},
-			"role implementer requests ephemeral-storage 40Gi past its limit 20Gi",
+			"the issue pod requests ephemeral-storage 90Gi past its limit 80Gi",
 		},
 		"ephemeral-storage unset": {
 			func(o *Options) {
-				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceEphemeralStorage)
-				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceEphemeralStorage)
+				delete(o.Resources.Issue.Requests, corev1.ResourceEphemeralStorage)
+				delete(o.Resources.Issue.Limits, corev1.ResourceEphemeralStorage)
 			},
-			"role merger bounds no ephemeral-storage",
+			"the issue pod bounds no ephemeral-storage",
 		},
 		"an extended resource": {
 			func(o *Options) {
-				o.Resources[claim.RoleTester].Limits["nvidia.com/gpu"] = resource.MustParse("1")
+				o.Resources.Issue.Limits["nvidia.com/gpu"] = resource.MustParse("1")
 			},
-			"role tester names nvidia.com/gpu in its limits",
+			"the issue pod names nvidia.com/gpu in its limits",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1345,8 +1322,8 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			if m := mounts[agentSecretsTokenVolume]; m.MountPath != AgentSecretsTokenDir || !m.ReadOnly {
 				t.Fatalf("token mount %+v, want read-only at %s", m, AgentSecretsTokenDir)
 			}
-			if m := mounts[keyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
-				t.Fatalf("key mount %+v, want writable at %s", m, AgentSecretsKeyDir)
+			if m := mounts[keyVolume]; m.MountPath != roleDir(role)+"/"+roleAgentSecretsDir || m.ReadOnly {
+				t.Fatalf("key mount %+v, want writable at %s", m, roleDir(role)+"/"+roleAgentSecretsDir)
 			}
 			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == keyVolume })
 			if key < 0 || spec.Volumes[key].EmptyDir == nil || spec.Volumes[key].EmptyDir.Medium != corev1.StorageMediumMemory {
@@ -1681,7 +1658,12 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 			volumes[volume.Name] = true
 		}
 		for _, mount := range agent.VolumeMounts {
-			mounts[mount.MountPath] = true
+			// Every role's own mounts lie under RolesDir, which is reserved whole.
+			if path := mount.MountPath; path == RolesDir || strings.HasPrefix(path, RolesDir+"/") {
+				mounts[RolesDir] = true
+			} else {
+				mounts[path] = true
+			}
 		}
 		for _, variable := range agent.Env {
 			env[variable.Name] = true
@@ -1860,7 +1842,7 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
 		}
 	}
-	role := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
+	role := containerNamed(t, r.podTemplate(l).Spec, l.kind.container())
 	for _, arg := range role.Command {
 		if expanded := kubeExpand(arg, envOf(role)); strings.ReplaceAll(arg, "$$", "$") != expanded {
 			t.Errorf("the launcher's argument %q reaches it as %q", arg, expanded)

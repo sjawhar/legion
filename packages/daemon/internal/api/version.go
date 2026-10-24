@@ -297,4 +297,15 @@ package api
 // 30; main then landed sjawhar/legion#1986 at 30, 31 and 32, LEGION-781 at 33 and INFRA-31 at 34,
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
-const DaemonAPIVersion = 35
+//
+// 36: INFRA-208 -- an issue pod is one container, `roles`, whose PID 1 is one `legion launcher`
+// serving every workflow role (`--roles-dir /var/run/legion/roles` and one `--role` per role), each
+// role's generation started in namespaces of its own by `legion launcher role-init`; each role's
+// own volumes are mounted under `/var/run/legion/roles/<role>/` and the role homes volume at
+// `/var/run/legion/roles/.homes`. An image whose `legion launcher` lacks multi-role mode cannot run
+// that pod, and the image probe refuses an image whose pi-legion declares another contract, so the
+// bump keeps a daemon from building such pods for an older image. A sandbox locator of an issue
+// pod's role names container `roles`. `settings.runtime.kubernetes.resources` is now
+// `{issue, controller}`, the two pods' reservations, rather than one entry per role; the
+// resource-limits capability row names those pods.
+const DaemonAPIVersion = 36

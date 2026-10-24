@@ -162,7 +162,8 @@ func treeVolumeLayout(object unstructured.Unstructured) string {
 }
 
 // legacyIssueSandbox is why object is not a pod this runtime builds, following its name in the
-// census's refusal, or "" when it is one.
+// census's refusal, or "" when it is one: its kind's one container, or an issue pod of the earlier
+// layout (earlierLayout), which the next launch of any of its roles replaces (movedLayout).
 func legacyIssueSandbox(object unstructured.Unstructured) string {
 	kind, err := podKindOf(object.GetLabels())
 	if err != nil {
@@ -181,15 +182,11 @@ func legacyIssueSandbox(object unstructured.Unstructured) string {
 		name, _ := container["name"].(string)
 		names = append(names, name)
 	}
-	roles := kind.roles()
-	want := make([]string, 0, len(roles))
-	for _, role := range roles {
-		want = append(want, string(role))
+	if slices.Equal(names, []string{kind.container()}) {
+		return ""
 	}
-	slices.Sort(names)
-	slices.Sort(want)
-	if !slices.Equal(names, want) {
-		return fmt.Sprintf(" runs containers %v, not exactly the launchers its labels name %v", names, want)
+	if _, issue := kind.(issuePod); issue && earlierLayout(names) {
+		return ""
 	}
-	return ""
+	return fmt.Sprintf(" runs containers %v, not the one container %s its labels name", names, kind.container())
 }

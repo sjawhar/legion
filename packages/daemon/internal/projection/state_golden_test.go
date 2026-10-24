@@ -107,14 +107,17 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	golden(t, "state-controller-claim.json", state)
 }
 
-// sandboxLocator is one role process in a Sandbox (contract 15): the Sandbox's name, the pod's uid,
-// the role's container (the role the token names, the controller's included) and the process
-// generation, its incarnation `<pod uid>/<generation>`.
+// sandboxLocator is one role process in a Sandbox: the Sandbox's name, the pod's uid, the pod's one
+// container (`roles` in an issue pod, `controller` in the controller's) and the process generation,
+// its incarnation `<pod uid>/<generation>`.
 func sandboxLocator(token claim.Token, sandbox, podUID string, generation uint64) *runtime.Locator {
-	role, _ := token.Role()
+	container := runtime.IssuePodContainer
+	if role, _ := token.Role(); role == claim.RoleController {
+		container = runtime.ControllerPodContainer
+	}
 	return &runtime.Locator{
 		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: runtime.SandboxIncarnation(podUID, generation),
-		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: sandbox, PodUID: podUID, Container: string(role), Generation: generation},
+		Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: sandbox, PodUID: podUID, Container: container, Generation: generation},
 	}
 }
 
