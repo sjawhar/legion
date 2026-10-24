@@ -3217,7 +3217,7 @@ under another record (a machine that signed two logins with one key) is `409
 KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. No token is ever returned by a decision;
 the credential is usable only with proofs signed by the key the request object embedded. The
 earlier login, `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
-is gone (`404`), and migration 0017 dropped its `machine_login_polls` table; a record such a broker
+is gone (the POST `405`, since `GET /v1/launcher-credentials` remains, the poll `404`), and migration 0017 dropped its `machine_login_polls` table; a record such a broker
 opened and left pending is still decided by its code, and having no device code
 (`decideDevice`'s `oauth2.ErrNotFound`), records nothing on the provider.
 

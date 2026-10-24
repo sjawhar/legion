@@ -127,8 +127,8 @@ expired login, marked as expired with sessions still running, until its last ses
 approved a person's machine login is its operator. A lapsed or revoked login means logging the
 machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
 a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A machine logs in
-through the device grant alone: the broker answers the earlier `POST /v1/launcher-credentials`
-login and its poll `404`. A service's login has no
+through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
+`405 Method Not Allowed` and its poll `GET /v1/launcher-credentials/{pending}` `404`. A service's login has no
 operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
 ends every pod it enrolled at once: a service login a person approved through a code before
 services logged in with their tokens, until it expires, and a service's token login, which names no

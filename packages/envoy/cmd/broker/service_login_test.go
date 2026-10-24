@@ -201,8 +201,8 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 	}
 	status, answer = call(http.MethodPost, "/v1/launcher-credentials", nil,
 		map[string]any{"request": signRequest(daemonKey, "example-host-devbox", "", "ada@example.com")})
-	if status != http.StatusNotFound {
-		t.Fatalf("the removed POST /v1/launcher-credentials = %d %s, want 404", status, answer)
+	if status != http.StatusMethodNotAllowed {
+		t.Fatalf("the removed POST /v1/launcher-credentials = %d %s, want 405", status, answer)
 	}
 
 	t.Log("--- the daemon logs in with its token, and its credential enrolls a pod")

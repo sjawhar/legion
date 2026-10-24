@@ -506,7 +506,8 @@
 
 - **Breaking:** the secrets broker serves a person's machine login only through the OAuth device
   grant. `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
-  the login helpers before legion-envoy 14 used, answer `404`, and migration 0017 drops their
+  the login helpers before legion-envoy 14 used, are gone: the POST answers `405 Method Not
+  Allowed` (Dispatch's `GET` on that path remains) and the poll `404`. Migration 0017 drops their
   `machine_login_polls` table. A broker of the release before this one still boots on the
   migrated database, its two removed routes answering 500. Dispatch's routes are unchanged:
   `GET /v1/launcher-credentials`, `POST /v1/launcher-credentials/{id}/revoke-by-approver`,

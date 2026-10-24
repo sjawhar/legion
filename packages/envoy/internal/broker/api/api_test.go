@@ -608,14 +608,15 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 }
 
 // TestTheHandBuiltMachineLoginRoutesAreGone pins the removal of the login helpers before the
-// device grant used: POST /v1/launcher-credentials and GET /v1/launcher-credentials/{pending}
-// answer the router's 404 and open no record, while the routes Dispatch and the Legion daemon
-// call under the same prefix still answer as they did.
+// device grant used: POST /v1/launcher-credentials answers the router's 405 (Dispatch's GET on the
+// same path remains) and GET /v1/launcher-credentials/{pending} its 404, neither opening a record,
+// while the routes Dispatch and the Legion daemon call under the same prefix still answer as they
+// did.
 func TestTheHandBuiltMachineLoginRoutesAreGone(t *testing.T) {
 	ts := newTestServer(t)
 	request := signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", "")
-	if status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": request}); status != http.StatusNotFound {
-		t.Fatalf("POST /v1/launcher-credentials = %d %s, want 404", status, body)
+	if status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": request}); status != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/launcher-credentials = %d %s, want 405", status, body)
 	}
 	for _, pending := range []string{"some-pending-id", uuid.NewString()} {
 		if status, body := ts.req(t, http.MethodGet, "/v1/launcher-credentials/"+pending, nil, nil); status != http.StatusNotFound {
