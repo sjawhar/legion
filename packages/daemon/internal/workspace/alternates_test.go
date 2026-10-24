@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -128,6 +129,59 @@ func TestProvisionDissociatesAnOldSharedCloneAfterFeedQuarantine(t *testing.T) {
 	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
 	if _, err := os.Stat(first.Feed + ".legacy"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("quarantined feed after provision = %v, want removed", err)
+	}
+}
+
+// A failed legacy repack leaves alternates pointing at the quarantine. The next provision retries
+// that repair before it removes the quarantine.
+func TestProvisionRetriesAnInterruptedLegacyCloneDissociation(t *testing.T) {
+	run := newLocalRunner(t)
+	fetch := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, fetch)
+	if err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
+	request := provisionRequest(t)
+	request.Source = FromFeed(fetch.Feed)
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workspace.Clone), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, request.StateDir, "git", "clone", "--shared", "--quiet", first.Feed, workspace.Clone)
+	runSetup(t, workspace.Clone, "git", "remote", "set-url", "origin", GitHubURL(request.Repo))
+	runSetup(t, workspace.Clone, "jj", "git", "init", "--colocate")
+	lost := commitOnlyInFeed(t, first.Feed)
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "refs/jj/keep/lost-history", lost)
+	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte("foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), run, fetch); err != nil {
+		t.Fatalf("Fetch after the foreign feed: %v", err)
+	}
+
+	interrupted := &failFirstRepack{Runner: run}
+	if _, err := Provision(context.Background(), interrupted, request); err == nil {
+		t.Fatal("Provision succeeded while the legacy repack failed")
+	}
+	quarantine := first.Feed + ".legacy"
+	if got, err := os.ReadFile(filepath.Join(workspace.Clone, ".git", "objects", "info", "alternates")); err != nil || strings.TrimSpace(string(got)) != filepath.Join(quarantine, "objects") {
+		t.Fatalf("alternate after failed repack = %q, %v; want the quarantined feed", got, err)
+	}
+	if _, err := os.Stat(quarantine); err != nil {
+		t.Fatalf("quarantine after failed repack: %v", err)
+	}
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("Provision retry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Clone, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clone alternates after retry = %v, want absent", err)
+	}
+	if _, err := os.Stat(quarantine); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantine after retry = %v, want removed", err)
 	}
 }
 
@@ -267,6 +321,19 @@ type failedFetchRunner struct{ Runner }
 func (r failedFetchRunner) Run(ctx context.Context, command Command) (Result, error) {
 	if commandWith(command.Argv, "jj", "git", "fetch") {
 		return Result{ExitCode: 1, Stderr: "the provision fetch failed"}, nil
+	}
+	return r.Runner.Run(ctx, command)
+}
+
+type failFirstRepack struct {
+	Runner
+	failed bool
+}
+
+func (r *failFirstRepack) Run(ctx context.Context, command Command) (Result, error) {
+	if !r.failed && command.Argv[0] == "git" && slices.Contains(command.Argv, "repack") {
+		r.failed = true
+		return Result{ExitCode: 1, Stderr: "interrupted repack"}, nil
 	}
 	return r.Runner.Run(ctx, command)
 }

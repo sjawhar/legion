@@ -76,11 +76,15 @@ func dissociateClone(ctx context.Context, run Runner, cloneDir, feed, legacy str
 	if err != nil {
 		return fmt.Errorf("read clone alternates: %w", err)
 	}
-	if strings.TrimSpace(string(contents)) != filepath.Join(feed, "objects") {
+	current := strings.TrimSpace(string(contents))
+	original, quarantined := filepath.Join(feed, "objects"), filepath.Join(legacy, "objects")
+	if current != original && current != quarantined {
 		return nil
 	}
-	if err := os.WriteFile(alternates, []byte(filepath.Join(legacy, "objects")+"\n"), 0o600); err != nil {
-		return fmt.Errorf("point clone alternates at quarantined feed: %w", err)
+	if current == original {
+		if err := os.WriteFile(alternates, []byte(quarantined+"\n"), 0o600); err != nil {
+			return fmt.Errorf("point clone alternates at quarantined feed: %w", err)
+		}
 	}
 	argv := []string{"git", "--git-dir=" + gitDir, "repack", "-a", "-d"}
 	result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", CloneTimeout)
