@@ -1151,6 +1151,45 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.notices).toHaveLength(0);
     }
   });
+  test("a scoped write after a prefix's options or its -- terminator is refused, in every mode", async () => {
+    const prefixed = [
+      "command -- dispatch ask --issue X-1 --question q",
+      "command -p -- dispatch ask --issue X-1 --question q",
+      "command -p dispatch ask --issue X-1 --question q",
+      "exec -- dispatch ask --issue X-1 --question q",
+      "(exec -a name dispatch ask --issue X-1 --question q)",
+      "nohup -- dispatch ask --issue X-1 --question q",
+      "env -- dispatch ask --issue X-1 --question q",
+      "env -u HOME dispatch ask --issue X-1 --question q",
+      "env -C /tmp -- FOO=1 dispatch ask --issue X-1 --question q",
+      "timeout -- 30 dispatch ask --issue X-1 --question q",
+      "timeout -s KILL 30 dispatch ask --issue X-1 --question q",
+      "timeout -k 5 --signal=TERM 30 dispatch ask --issue X-1 --question q",
+      "time -p -- dispatch ask --issue X-1 --question q",
+      "timeout 30 env -- command -- dispatch ask --issue X-1 --question q",
+      "/usr/bin/env -- dispatch ask --issue X-1 --question q",
+    ];
+    for (const command of prefixed)
+      expect(unreadableDispatchWrite(command)).toEqual({
+        tool: "dispatch_ask",
+        label: "dispatch ask",
+      });
+    // `command -v` prints where a program is and runs nothing.
+    expect(unreadableDispatchWrite("command -v dispatch ask --issue X-1")).toBeUndefined();
+    for (const mode of ["warn", "block"]) {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+      for (const [index, command] of prefixed.entries()) {
+        const result = await g.bash(`p${index}`, command);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("Nothing in the call ran");
+      }
+      expect(g.dryRuns).toHaveLength(0);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(
+        Array(prefixed.length).fill(["dispatch_ask", "unreadable"])
+      );
+    }
+  });
   test("a compound command whose dispatch sends nothing, or names dispatch only as text, is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     for (const command of [

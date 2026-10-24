@@ -655,7 +655,100 @@ const COMMAND_PREFIXES: ReadonlySet<string> = new Set([
   "env",
   "timeout",
 ]);
+/** The prefixes that are programs of their own, also called by a path (`/usr/bin/env`). */
+const PROGRAM_PREFIXES: Record<string, true> = { env: true, nohup: true, timeout: true };
+/**
+ * How a prefix that runs the command after it reads its own options, as its parser (getopt, or
+ * bash's for a builtin) reads them: up to `--`, which it consumes, or the first word that is no
+ * option. `values` are the short options that take a value (the rest of the word, else the next
+ * word) and `longValues` the long ones (after `=`, else the next word). An option in `runsNothing`
+ * makes the prefix run nothing (`command -v` only prints), `split` names the options whose value
+ * holds the command's own words (`env -S`), `dash` lets a lone `-` be an option (`env -`, as
+ * `env -i`), and `operands` counts the words after the options that are not the command
+ * (`timeout`'s duration). Every other word that starts with `-` there is an option with no value.
+ */
+interface PrefixOptions {
+  values?: string;
+  longValues?: readonly string[];
+  runsNothing?: string;
+  split?: readonly string[];
+  dash?: true;
+  operands?: number;
+}
+const PREFIX_OPTIONS: Record<string, PrefixOptions> = {
+  command: { runsNothing: "vV" },
+  exec: { values: "a" },
+  nohup: {},
+  time: {},
+  env: {
+    values: "uCSa",
+    longValues: ["--unset", "--chdir", "--split-string", "--argv0"],
+    split: ["-S", "--split-string"],
+    dash: true,
+  },
+  timeout: { values: "sk", longValues: ["--signal", "--kill-after"], operands: 1 },
+};
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Where the command a simple command runs starts, past its assignments and prefixes and each
+ * prefix's options; undefined when a prefix runs nothing. `words` comes back with the words an
+ * `env -S` value splits into put where the command starts.
+ */
+function commandStart(segment: readonly Word[]): { words: Word[]; at: number } | undefined {
+  let words = [...segment];
+  let at = 0;
+  while (at < words.length) {
+    const prefix = words[at];
+    if (ASSIGNMENT.test(prefix.raw)) {
+      at++;
+      continue;
+    }
+    const base = prefix.value.split("/").at(-1) ?? "";
+    const name = COMMAND_PREFIXES.has(prefix.value)
+      ? prefix.value
+      : Object.hasOwn(PROGRAM_PREFIXES, base)
+        ? base
+        : undefined;
+    if (name === undefined) break;
+    at++;
+    if (!Object.hasOwn(PREFIX_OPTIONS, name)) continue;
+    const options = PREFIX_OPTIONS[name];
+    const split: Word[] = [];
+    while (at < words.length) {
+      const word = words[at].value;
+      if (word === "--") {
+        at++;
+        break;
+      }
+      if (!word.startsWith("-") || (word === "-" && !options.dash)) break;
+      at++;
+      let flag = word;
+      let value: string | undefined;
+      if (word.startsWith("--")) {
+        const eq = word.indexOf("=");
+        if (eq !== -1) {
+          flag = word.slice(0, eq);
+          value = word.slice(eq + 1);
+        } else if (options.longValues?.includes(word)) value = words[at++]?.value;
+      } else {
+        for (let index = 1; index < word.length; index++) {
+          const char = word[index];
+          if (options.runsNothing?.includes(char)) return undefined;
+          if (!options.values?.includes(char)) continue;
+          flag = `-${char}`;
+          value = index + 1 < word.length ? word.slice(index + 1) : words[at++]?.value;
+          break;
+        }
+      }
+      if (value !== undefined && options.split?.includes(flag))
+        split.push(...commandWords(value).flat());
+    }
+    at += options.operands ?? 0;
+    words = [...words.slice(0, at), ...split, ...words.slice(at)];
+  }
+  return { words, at };
+}
 
 /** An open subshell, or an open command substitution with the command and word it sits in, which
  * go on at its end. */
@@ -814,27 +907,20 @@ export interface UnreadableCommand {
 
 /**
  * A scoped `dispatch` write anywhere in a `bash` command, found at a command's position (after any
- * assignments and prefixes such as `env` or `timeout 30`), or a scoped subcommand run by a program
- * an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may be `dispatch`. One
- * carrying `--dry-run` or `--help`, or a `dispatch issue` without `--spec`/`--spec-file`, sends
- * nothing for review and is not one. Only for a command `scopedCommand` could not read.
+ * assignments and prefixes such as `env -u HOME --` or `timeout -s KILL 30`, each prefix's options
+ * and its `--` read as its own parser reads them: `commandStart`), or a scoped subcommand run by a
+ * program an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may be
+ * `dispatch`. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
+ * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
+ * `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
   // A write names `dispatch`, or reaches it through an expansion.
   if (typeof command !== "string" || !/dispatch|[$`]/.test(command)) return undefined;
-  for (const words of commandWords(command)) {
-    let at = 0;
-    while (at < words.length) {
-      const prefix = words[at];
-      if (ASSIGNMENT.test(prefix.raw)) at++;
-      else if (COMMAND_PREFIXES.has(prefix.value)) {
-        at++;
-        if (prefix.value === "env" || prefix.value === "timeout")
-          while (words[at]?.value.startsWith("-")) at++;
-        if (prefix.value === "timeout") at++;
-      } else break;
-    }
-    const [program, name, ...flags] = words.slice(at);
+  for (const segment of commandWords(command)) {
+    const start = commandStart(segment);
+    if (start === undefined) continue;
+    const [program, name, ...flags] = start.words.slice(start.at);
     if (program === undefined || name === undefined || !reviewedWrite(name.value, flags)) continue;
     const named = program.value.split("/").at(-1) === "dispatch";
     const unread = [...new Set(scanWord(program.raw, 0).unread)];
