@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-221",
-  "completed": "2026-10-24T19:50:00Z",
+  "completed": "2026-10-24T20:56:50Z",
   "proof": [
     {
       "criterion": "A role that needs a tool its work requires can get it, in one documented step, without a person — the image half: the five clients are in the pod.",
-      "surface": "A Job in this role's own cluster namespace (read from /var/run/secrets/kubernetes.io/serviceaccount/namespace), running the image this pull request itself built, ghcr.io/sjawhar/legion-worker:sha-839ab9e81bfe, under the admission policy's compute class and gVisor runtime class; its log read back from this role container.",
-      "command": "kubectl -n \"$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)\" create -f <job on ghcr.io/sjawhar/legion-worker:sha-839ab9e81bfe>, whose container runs: sh -c \"bash -c 'type -P psql redis-cli sqlite3 nc dig'; psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models\"; then kubectl wait --for=condition=complete job/infra-221-head and kubectl logs job/infra-221-head",
-      "observed": "type -P printed /usr/bin/psql, /usr/bin/redis-cli, /usr/bin/sqlite3, /usr/bin/nc, /usr/bin/dig and exited 0; each ran: psql (PostgreSQL) 17.11 (Debian 17.11-0+deb13u1), redis-cli 8.0.2, sqlite3 3.46.1, OpenBSD netcat (Debian patchlevel 1.229-1), DiG 9.20.30-1~deb13u1-Debian; legion probe-image printed 'capability toolchain: present (on PATH: ... /usr/bin/flock, /usr/bin/psql, /usr/bin/redis-cli, /usr/bin/sqlite3, /usr/bin/nc, /usr/bin/dig; go version go1.27.1 linux/amd64)' and ended with 'probe-image: OK ... capabilities=checked ... daemon-api-version=35'. Job completed 2026-10-24T19:44:25Z, 93 s from submission including the node and the 1 GiB pull. The check runs the image's own legion, so the probe that passed is the one the capability row this pull request changed.",
-      "headSha": "839ab9e81bfe5a879302ac4d9bb0ad82b13fb138",
+      "surface": "A Job in this role's own cluster namespace (read from /var/run/secrets/kubernetes.io/serviceaccount/namespace), running the image this pull request itself built at the review round's head, ghcr.io/sjawhar/legion-worker:sha-afa29128061f, under the admission policy's compute class and gVisor runtime class; its log read back from this role container. The same Job ran at round 1's head sha-839ab9e81bfe with the same result.",
+      "command": "kubectl -n \"$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)\" create -f <job on ghcr.io/sjawhar/legion-worker:sha-afa29128061f>, whose container runs: sh -c \"bash -c 'type -P psql redis-cli sqlite3 nc dig'; psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models\"; then kubectl wait --for=condition=complete job/infra-221-round2 and kubectl logs job/infra-221-round2",
+      "observed": "type -P printed /usr/bin/psql, /usr/bin/redis-cli, /usr/bin/sqlite3, /usr/bin/nc, /usr/bin/dig and exited 0; each ran: psql (PostgreSQL) 17.11 (Debian 17.11-0+deb13u1), redis-cli 8.0.2, sqlite3 3.46.1, OpenBSD netcat (Debian patchlevel 1.229-1), DiG 9.20.30-1~deb13u1-Debian; legion probe-image printed 'capability toolchain: present (on PATH: ... /usr/bin/flock, /usr/bin/psql, /usr/bin/redis-cli, /usr/bin/sqlite3, /usr/bin/nc, /usr/bin/dig; go version go1.27.1 linux/amd64)' and ended 'probe-image: OK ... capabilities=checked ... daemon-api-version=35'. That this tag exists at all is the proof of round 2's new build gate: the final step now resolves nc and refuses anything but /usr/bin/nc, and it runs before the push. The probe runs the image's own legion, so the row that passed is the one this change edits. Job deleted; the namespace holds none.",
+      "headSha": "afa29128061fc10dd6c6aa3755ba051b98b84e02",
       "negativeControl": "The same Job on the digest the deployment pins today (ghcr.io/sjawhar/legion-worker@sha256:e669e39dae705a9475583b14ac1fdc2e152c214ec5378a8d6b6760829e558379): type -P printed nothing and exited 1, each command answered 'sh: 1: <tool>: not found' for all five, and that image's own probe printed 'capability toolchain: present (on PATH: ... /usr/bin/ssh-keygen, /usr/bin/flock; go version ...)' — the row ending at flock. Both Jobs were deleted afterwards; the namespace holds none."
     },
     {
@@ -17,38 +17,42 @@
       "surface": "This live role container (the worker image the deployment pins today), the surface a phase worker actually types into.",
       "command": "uvx ruff@0.14.0 --version (with UV_CACHE_DIR emptied, then again warm); bunx --package @biomejs/biome@2.6.3 biome --version; go run github.com/nats-io/natscli/nats@v0.1.5 --version",
       "observed": "ruff 0.14.0 in 1.70 s with the uv cache empty and 0.149 s warm; Version: 2.6.3 in 0.278 s with bun's cache warm; v0.1.5 in 7.2 s with the module cache warm (103 s on a cold cache, measured while planning). These are the three forms skills/legion-worker/references/tools.md and docs/kubernetes.md document, typed exactly as written there.",
-      "headSha": "839ab9e81bfe5a879302ac4d9bb0ad82b13fb138",
+      "headSha": "afa29128061fc10dd6c6aa3755ba051b98b84e02",
       "negativeControl": "Each form asked for a version that does not exist fails closed, exit 1, naming it: uvx ruff@99.99.99 --version → 'error: No solution found when resolving tool dependencies ... there is no version of ruff==99.99.99'; bunx --package @biomejs/biome@99.99.99 biome --version → 'error: No version matching \"99.99.99\" found for specifier \"@biomejs/biome\" (but package exists)'; go run github.com/nats-io/natscli/nats@v99.99.99 --version → 'go: ...: invalid version: unknown revision nats/v99.99.99'."
     },
     {
-      "criterion": "That step never resolves something other than what was asked for — the squatting defect this tree opened on.",
-      "surface": "This live role container, npm's registry through bun and npm.",
-      "command": "bunx biome --version; bunx --package @biomejs/biome@2.6.3 biome --version; npm view biome version description maintainers; npm view @biomejs/biome version",
-      "observed": "The bare name printed 0.3.3; the documented pinned form printed Version: 2.6.3. The registry says the package 'biome' is version 0.3.3, 'A simple way to manage environment variables on a per-project basis', one maintainer, while '@biomejs/biome' is 2.6.3. The pair is in the written rule, as two commands and two outputs, in both docs/kubernetes.md and skills/legion-worker/references/tools.md. Independently reproduced in this issue's own work: a subagent ran `bunx biome check skills/ AGENTS.md` in this workspace and got exit 0 with no output from biome@0.3.3, where the pinned form (the repository's own 2.4.11) actually checked the files.",
-      "headSha": "839ab9e81bfe5a879302ac4d9bb0ad82b13fb138",
-      "negativeControl": "The bare form is the control: it resolves a different package and exits 0, which is exactly the failure the written rule exists to stop. Nothing in the repository refuses it — no guard, no lint, no check — and both documents say so rather than implying a gate (dispatch://INFRA-199 is closed as not wanted)."
+      "criterion": "That step never resolves something other than what was asked for: the written rule must bind the package's identity, not only its version (review round 1, finding 1).",
+      "surface": "This live role container, npm's registry through bun and npm — the surface a role types the documented form into.",
+      "command": "bunx biome --version; bunx biome@0.3.3 --version; bunx --package @biomejs/biome@2.6.3 biome --version; npm view biome version description repository.url homepage; npm view @biomejs/biome version description repository.url homepage",
+      "observed": "The bare name printed 0.3.3; the version-pinned bare name printed 0.3.3 too; only the documented form printed Version: 2.6.3. `npm view biome ...` answered version 0.3.3 and the env-var description with no repository.url and no homepage; `npm view @biomejs/biome ...` answered 2.6.3, 'Biome is a toolchain for the web: formatter, linter and more', repository.url git+https://github.com/biomejs/biome.git and homepage https://biomejs.dev. The rule in skills/legion-worker/references/tools.md and docs/kubernetes.md is now the two halves these commands separate: the coordinate, checked with that npm view before first use, and the version on it.",
+      "headSha": "afa29128061fc10dd6c6aa3755ba051b98b84e02",
+      "negativeControl": "`bunx biome@0.3.3 --version` is the control the first round lacked: it obeys 'always write the exact version' to the letter and still runs the squatter, which is why the rule no longer stops at the version. Nothing in the repository refuses either unpinned form -- no guard, no lint, no check -- and both documents say so rather than implying a gate (dispatch://INFRA-199 is closed as not wanted)."
     },
     {
       "criterion": "The choice is written down with the measurement that decided it, so the next reader is not left to infer the cost.",
       "surface": "The repository's own documentation, with every number re-measured in this role container rather than carried over.",
       "command": "apt-get -o Dir::State=/tmp/apt/state -o Dir::State::status=/var/lib/dpkg/status -o Dir::Cache=/tmp/apt/cache install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3 | summed; and the two image manifests read from the registry (ghcr.io/v2/sjawhar/legion-worker/manifests/sha-839ab9e81bfe and .../sha256:e669e39d…)",
-      "observed": "20 packages, 6,216,928 bytes = 5.9 MiB of downloads, the same set for the virtual name `dnsutils` and the real `bind9-dnsutils`. Compressed image size: the head's image is 24 layers / 1,076,758,160 bytes (1027 MiB) against the pinned image's 24 layers / 1,068,467,415 bytes (1019 MiB) — 7.9 MiB. Both numbers, the container refusal, the runner timings and the two rejected options are in docs/kubernetes.md's new subsection 'The tools a role's own work needs'.",
-      "headSha": "839ab9e81bfe5a879302ac4d9bb0ad82b13fb138",
+      "observed": "20 packages, 6,216,928 bytes = 5.9 MiB of downloads, the same set for the virtual name `dnsutils` and the real `bind9-dnsutils`. Compressed image size, measured like for like against this branch's own base after the reviewer rejected the deployment's pinned digest as a baseline (its revision 3bab1a8a7381af585e5a0a54f2fbe0a9851d564e is eight commits of main behind this branch's base): head :sha-afa29128061f (revision afa29128061f...) 24 layers / 1,076,764,060 bytes (1026.9 MiB) against base :sha-92dbeea3d391 (revision 92dbeea3d391..., the commit this branch forks from) 24 layers / 1,068,477,764 bytes (1019.0 MiB) = 8,286,296 bytes, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 -> 335,441,703); every other layer is within 2 KB of compression noise. Each size from that image's own manifest, each revision from its config blob. Both numbers and the two rejected options are in docs/kubernetes.md's 'The tools a role's own work needs'.",
+      "headSha": "afa29128061fc10dd6c6aa3755ba051b98b84e02",
       "negativeControl": "apt-cache policy dnsutils in this image prints 'Candidate: (none)' — the name the first draft installed is virtual in trixie, so the shipped THIRD_PARTY_NOTICES sentence would have pointed at a /usr/share/doc/dnsutils/copyright that does not exist. The apt line, the comments, the notices sentence and the docs now name bind9-dnsutils, and the Job above proves dig is present under that name."
     }
   ],
   "filesChanged": [
-    "packages/daemon/docker/worker.Dockerfile",
-    "packages/daemon/internal/capabilities/image.go",
-    "packages/daemon/internal/capabilities/capabilities.go",
-    "packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go",
-    "packages/daemon/internal/capabilities/image_test.go",
+    "AGENTS.md",
     "docs/kubernetes.md",
     "docs/site/src/content/docs/legion/running-legion.md",
-    "skills/legion-worker/references/tools.md",
-    "skills/legion-worker/SKILL.md",
+    "docs/solutions/testing/a-throwaway-sandbox-repository-probes-workflow-semantics-with-a-control-job-and-every-production-first-step-rides-the-same-run-and-a-reimplementation-is-differentialled-against-its-oracle-first-LEGION-748.md",
+    "packages/claude-envoy/legion/skills/legion-architect/SKILL.md",
+    "packages/claude-envoy/legion/skills/legion-worker/SKILL.md",
+    "packages/claude-envoy/legion/skills/legion-worker/references/tools.md",
+    "packages/daemon/docker/worker.Dockerfile",
+    "packages/daemon/internal/capabilities/capabilities.go",
+    "packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go",
+    "packages/daemon/internal/capabilities/image.go",
+    "packages/daemon/internal/capabilities/image_test.go",
     "skills/legion-architect/SKILL.md",
-    "AGENTS.md"
+    "skills/legion-worker/SKILL.md",
+    "skills/legion-worker/references/tools.md"
   ],
   "trickyParts": [
     "`dnsutils` is a virtual package in Debian trixie with no candidate of its own (apt-cache policy says Candidate: (none)); apt resolves it to its single provider, bind9-dnsutils. The apt line, the three Dockerfile comments, the shipped notices sentence and the docs all name bind9-dnsutils now, so the notices sentence's /usr/share/doc/<package>/copyright claim is true and the build does not depend on one provider staying unique.",
@@ -56,11 +60,14 @@
     "`nc -h` and `dig -v` take no --version: nc -h prints its usage and exits 0 (OpenBSD netcat, Debian patchlevel 1.229-1), dig -v prints its version on stderr. Both are in the build's toolchain smoke step in that form.",
     "psql in Debian is a Perl wrapper around the versioned client; it resolves because perl-base is already in the image. The Job ran `psql --version` in the built image and got psql (PostgreSQL) 17.11, so the wrapper works there — this is the one tool the rejected .deb-extraction route could not deliver.",
     "The image's /bin/sh is dash, whose `type` builtin has no -P, so the on-PATH check runs as `bash -c 'type -P …'` inside the Job rather than from the harness's shell.",
-    "The capability row was extended rather than added: a row renders as name, status and detail with no tool list, so packages/contracts/src/legion-api.ts, the daemon API golden fixture and the end-to-end scripts that enumerate rows by name are untouched."
+    "The capability row was extended rather than added: a row renders as name, status and detail with no tool list, so packages/contracts/src/legion-api.ts, the daemon API golden fixture and the end-to-end scripts that enumerate rows by name are untouched.",
+    "Review round 1 (REQUEST_CHANGES at afb6d68840543a123e32e1496c4e9f54efaa31d4) found four documentation defects, all answered at this head and dispositioned in the pull request comment 6389358614: the pin rule bound only the version, so `bunx biome@0.3.3` obeyed it and still ran the squatter; 'you cannot install a sixth' overstated the bar and contradicted docs/solutions/testing/...LEGION-748.md item 5; the psql reason named local-instance.ts as the entry point of `bun run e2e`, which package.json:16 shows it is not; and the size figure was measured against the deployment's pinned digest rather than this branch's base.",
+    "The build's final step now pins nc to /usr/bin/nc beside git, flock, legion and gh: nc is the one new name the alternatives system supplies rather than its own package, so the link is what the name resolves through and a base that changed it would pass every other gate. The gate runs before the image is pushed, so the published sha-afa29128061f tag is its proof."
   ],
   "deviations": [
     "The plan's evidence rule asked for the `Setting up <package>` lines counted per stage in the build's own log. The build run (40126149608) had not finished when this phase completed, and `gh run view --log` serves nothing until it does; waiting on CI is forbidden. The stronger evidence was taken instead and is above: the five tools run in a pod of the image that build published (tag sha-839ab9e81bfe), and the image's own `legion probe-image` names them in its toolchain row.",
-    "The plan's last section offers restoring a psql example to INFRA-71's section once the tool exists. sjawhar/legion#2092 is still open with changes requested, so there is nothing here to edit without colliding with it; the forward-merge the plan prescribes will land it, and this is left to the architect's call rather than taken unilaterally."
+    "The plan's last section offers restoring a psql example to INFRA-71's section once the tool exists. sjawhar/legion#2092 is still open with changes requested, so there is nothing here to edit without colliding with it; the forward-merge the plan prescribes will land it, and this is left to the architect's call rather than taken unilaterally.",
+    "The decision's image figures name the tag they were measured on (:sha-afa29128061f). A later push rebuilds the image under a new tag with the same content, and two builds of identical content differ by a kilobyte or two of gzip noise; the text says so and gives the figure as 7.9 MiB rather than resting on its last digits."
   ],
   "openQuestions": [
     "Everything in the image — the five clients, the capability row, and the skill text, which ships inside the image — reaches a role only after a deployment pins the new digest. The deployment pins ghcr.io/sjawhar/legion-worker@sha256:e669e39dae705a9475583b14ac1fdc2e152c214ec5378a8d6b6760829e558379 today. 'Without a person' is about the step the role takes, not about the roll, which every Legion change needs; the pull request says so."
