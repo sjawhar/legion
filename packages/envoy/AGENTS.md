@@ -2266,7 +2266,7 @@ An enrollment's kind is `session` (an agent session on a machine its person logg
 helper's own, or a key a launcher such as agentbox brings through the helper's
 `enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
 `POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise): the `host`
-and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in.
+and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in again.
 No reader of stored data needs them: the `enrollments` kind constraint admits only the two, and a
 record body that predates 0012 keeps its `box`/`host` as text its id hashes, which
 `record.ParseBody` reads without checking the kind. The helper still asks an older broker, which

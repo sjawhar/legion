@@ -29,7 +29,7 @@
   limit bucket of its own (429 `RATE_LIMITED` with `Retry-After`). A login through the earlier
   `POST /v1/launcher-credentials` route, which cannot refresh, keeps its seven-day credential, or
   `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter (that route is removed since: see the
-  Breaking entry on the hand-built machine login under Changed). The provider's device codes, tokens,
+  Breaking entry under Changed that serves a person's machine login only through the OAuth device grant). The provider's device codes, tokens,
   DPoP proofs and nonces and its HMAC secret live in the tables migration 0016 creates. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
   its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
   logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
@@ -532,7 +532,7 @@
   broker of this release: against an earlier broker, `agent-secrets machine login` fails. Upgrade
   the broker before the helpers. The broker still serves `POST /v1/launcher-credentials` and
   `GET /v1/launcher-credentials/{pending}` for helpers from earlier releases, whose logins it never
-  refreshes. (Superseded by the Breaking entry above: those routes are removed.)
+  refreshes. (Superseded by the first Breaking entry under Changed: those routes are removed.)
 - `BROKER_LAUNCHER_CREDENTIAL_SECONDS` defaults to 2592000 (30 days), up from 604800 (7 days), and
   is how long a machine login lasts without a refresh: an approval mints its credential for that
   long, and each refresh moves its expiry to that long from then. Its maximum stays 2592000.
