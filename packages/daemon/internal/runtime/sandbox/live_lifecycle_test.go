@@ -425,11 +425,12 @@ func (r *liveRig) checkAdoptWorkingCopy() error {
 		return err
 	}
 	note("runtime", "AdoptWorkingCopy(%s, %s <%s>): nil", root.token, r.identity.Name, r.identity.Email)
-	author, err := r.exec(root, "sh", "-c", `cd "$LEGION_WORKSPACE" && jj log -r @ --no-graph -T author`)
+	// The agent's own environment names its workspace; an exec into the role carries none of it.
+	author, err := r.asAgent(root, `cd "$LEGION_WORKSPACE" && jj log -r @ --no-graph -T author`)
 	if err != nil {
 		return err
 	}
-	note("operator", "exec: cd \"$LEGION_WORKSPACE\" && jj log -r @ --no-graph -T author: %s", author)
+	note("operator", "as the root's agent: cd \"$LEGION_WORKSPACE\" && jj log -r @ --no-graph -T author: %s", author)
 	if !strings.Contains(author, r.identity.Name) || !strings.Contains(author, r.identity.Email) {
 		return fmt.Errorf("the working copy's author is %q, not %s <%s>", author, r.identity.Name, r.identity.Email)
 	}

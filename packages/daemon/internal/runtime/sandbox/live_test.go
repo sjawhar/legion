@@ -283,7 +283,7 @@ type liveEnv struct {
 	// script still runs every checkpoint it knows (stalePluginBlocked).
 	piLegionTarball, piEnvoyTarball, piLegionVersion, piEnvoyVersion string
 	// previous-layout's own inputs: the previous release's fixture harness the script built from
-	// the merge base (testdata/previouslayout), and that release's worker image by digest, which
+	// LEGION_E2E_PREVIOUS_IMAGE's revision (testdata/previouslayout), and that release's worker image by digest, which
 	// it runs on. Read with os.Getenv, as the plugin inputs are (previousLayoutBlocked).
 	previousHarness, previousImage string
 }

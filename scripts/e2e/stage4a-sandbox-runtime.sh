@@ -81,12 +81,13 @@
 # bridge, forwarded through the same tunnel); LEGION_E2E_REPO_SECOND_OWNER (required) `<owner>/<name>`,
 # a repository under an owner other than sjawhar on which both Legion Apps are installed, where
 # second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
-# read-only tokens (nothing is pushed to it); LEGION_E2E_PREVIOUS_IMAGE (required) the worker image
-# by digest of the commit this checkout forked from main at (`git merge-base HEAD origin/main`, which
-# runs issue pods of six role containers): previous-layout builds that commit's Stage 4a harness with
-# testdata/previouslayout's fixture and runs it on that image, to leave a pod of the previous layout
-# running for this runtime to take over, and the script refuses an image whose
-# org.opencontainers.image.revision is not that commit; STAGE4A_FROM a development entry point,
+# read-only tokens (nothing is pushed to it); LEGION_E2E_PREVIOUS_IMAGE (required) a worker image
+# by digest built from a commit of main before one container (its issue pods run six role
+# containers), which this checkout contains: previous-layout builds that commit's own Stage 4a
+# harness (the image's org.opencontainers.image.revision) with testdata/previouslayout's fixture and
+# runs it on that image, to leave a pod of the previous layout running for this runtime to take
+# over; the script refuses an image whose revision main or this checkout does not contain, or one
+# whose commit already runs one container; STAGE4A_FROM a development entry point,
 # which is never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go
 # (default a fresh /tmp directory, kept and printed).
 #
@@ -245,12 +246,17 @@ esac
 [[ $second_owner_repo =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] || fail "LEGION_E2E_REPO_SECOND_OWNER must be <owner>/<name>, not '$second_owner_repo'"
 [ "$(tr '[:upper:]' '[:lower:]' <<<"${second_owner_repo%%/*}")" != "$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")" ] ||
   fail "LEGION_E2E_REPO_SECOND_OWNER $second_owner_repo is under ${repo%%/*}, $repo's owner: the check needs a repository of another owner"
-previous_base=$(git -C "$root" merge-base HEAD origin/main) || fail "git merge-base HEAD origin/main failed: previous-layout builds the previous release's harness from it"
-case "$previous_image" in *@sha256:*) ;; *) fail "LEGION_E2E_PREVIOUS_IMAGE must be the worker image of $previous_base pinned by digest (…@sha256:…), not '$previous_image'" ;; esac
-previous_revision=$(docker buildx imagetools inspect "$previous_image" --format '{{json .Image.Config.Labels}}' | jq -r '."org.opencontainers.image.revision" // empty') ||
+case "$previous_image" in *@sha256:*) ;; *) fail "LEGION_E2E_PREVIOUS_IMAGE must be a worker image of main from before one container, pinned by digest (…@sha256:…), not '$previous_image'" ;; esac
+previous_base=$(docker buildx imagetools inspect "$previous_image" --format '{{json .Image.Config.Labels}}' | jq -r '."org.opencontainers.image.revision" // empty') ||
   fail "reading LEGION_E2E_PREVIOUS_IMAGE $previous_image's labels failed"
-[ "$previous_revision" = "$previous_base" ] ||
-  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from '$previous_revision', not this checkout's merge base with main $previous_base"
+[ -n "$previous_base" ] || fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image names no org.opencontainers.image.revision"
+git -C "$root" merge-base --is-ancestor "$previous_base" origin/main ||
+  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which origin/main does not contain: the previous layout is a release's"
+git -C "$root" merge-base --is-ancestor "$previous_base" HEAD ||
+  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which this checkout does not contain"
+if git -C "$root" cat-file -e "$previous_base:packages/daemon/internal/runtime/sandbox/one_container_test.go" 2>/dev/null; then
+  fail "LEGION_E2E_PREVIOUS_IMAGE $previous_image was built from $previous_base, which already runs issue pods of one container"
+fi
 for taken in "$port" "$session_db_port"; do
   if [ -n "$(ss -Hltn "sport = :$taken")" ]; then
     fail "port $taken is taken on the devbox: $(ss -Hltnp "sport = :$taken")"
@@ -427,7 +433,7 @@ begin build
 go -C "$root/packages/daemon" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
 go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout"
-# previous-layout's fixture: the merge base's own Stage 4a harness, with testdata/previouslayout's
+# previous-layout's fixture: the previous release's own Stage 4a harness (LEGION_E2E_PREVIOUS_IMAGE's revision), with testdata/previouslayout's
 # one test added, built from an archive of that commit so no worktree or branch is made.
 mkdir "$work/previous"
 git -C "$root" archive "$previous_base" go.work go.work.sum packages/daemon packages/envoy | tar -x -C "$work/previous" ||

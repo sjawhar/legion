@@ -43,7 +43,7 @@ func previousLayoutBlocked(r *liveRig) string {
 	if r.env.previousHarness != "" && r.env.previousImage != "" {
 		return ""
 	}
-	return "LEGION_E2E_PREVIOUS_HARNESS and LEGION_E2E_PREVIOUS_IMAGE are unset: scripts/e2e/stage4a-sandbox-runtime.sh builds the previous release's fixture only when LEGION_E2E_PREVIOUS_IMAGE names the merge base's worker image"
+	return "LEGION_E2E_PREVIOUS_HARNESS and LEGION_E2E_PREVIOUS_IMAGE are unset: scripts/e2e/stage4a-sandbox-runtime.sh builds the previous release's fixture only when LEGION_E2E_PREVIOUS_IMAGE names a worker image of main from before one container"
 }
 
 // adopt makes gen, with its boot token, claim c's current generation, as a daemon's store carries a
@@ -57,7 +57,7 @@ func (g *registry) adopt(c claim.Token, gen uint64, token string) {
 }
 
 // previous-layout: with this runtime stopped, the previous release's own runtime and rig
-// (LEGION_E2E_PREVIOUS_HARNESS, built from the merge base with the fixture) launch issue S4A-9's
+// (LEGION_E2E_PREVIOUS_HARNESS, built from LEGION_E2E_PREVIOUS_IMAGE's revision with the fixture) launch issue S4A-9's
 // architect and tester in one issue pod of six role containers, on the previous release's worker
 // image, and exit, leaving both running, as a deployment upgrading onto this release has them. Their
 // locators are taken over as store migration 0051 rewrites them (container `roles`) and this

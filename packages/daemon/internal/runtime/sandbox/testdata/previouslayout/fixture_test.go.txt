@@ -1,7 +1,7 @@
 //go:build e2e
 
 // Stage 4a's previous-layout fixture. scripts/e2e/stage4a-sandbox-runtime.sh copies this file into
-// a checkout of the commit this branch forked from main at (the merge base, which runs issue pods of
+// a checkout of the commit LEGION_E2E_PREVIOUS_IMAGE was built from (a commit of main whose issue pods run
 // six role containers), as zz_previous_layout_fixture_test.go of its internal/runtime/sandbox, and
 // builds that package's Stage 4a harness with it. The previous-layout check of this branch's harness
 // runs the result once, while its own runtime is stopped: the previous release's own runtime and rig
