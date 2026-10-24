@@ -6,7 +6,10 @@ anything. Every path it cites is in sjawhar/legion.
 
 ## The five clients the image already carries
 
-Check this list first: each of these is on your `PATH` now, and needs no runner.
+Check this list first: the worker image carries these five from the change that added them onward,
+and they are on a role's `PATH` once its deployment pins a digest at or after that change — a role
+still on an older digest finds none of them. Run `command -v psql redis-cli sqlite3 nc dig` to see
+which you have; those need no runner.
 
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
@@ -14,8 +17,10 @@ Check this list first: each of these is on your `PATH` now, and needs no runner.
   `PATH` — so a role whose change owes that suite can run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a
   megabyte, because a second image roll costs more than a megabyte.
-- `sqlite3` — Oh My Pi's own session files are SQLite databases, and a role reading its own session
-  or a repository's SQLite fixture has no other way to open one.
+- `sqlite3` — a repository's own SQLite fixture or database has no other way to open from a shell,
+  and Oh My Pi's own profile databases (`~/.omp/profiles/legion/agent/agent.db`, `models.db`,
+  `history.db`) are SQLite too. Your session is not one of them: it is `results.jsonl`,
+  `state.json` and `title` under `XDG_STATE_HOME`.
 - `nc` — the reachability check you would otherwise write as an inline Python loop. The name comes
   from the alternatives system, so ask for `nc`, never `nc.openbsd`.
 - `dig` — how a role whose connection to a service name fails tells "the name does not resolve"
@@ -98,18 +103,36 @@ prints `3.2.4` at once off the cache that first run filled. When your work needs
 too — a comparison that has to hold across days or across pods — that is a project's own lockfile
 with `uv run` or `bun install` in a workspace, not a one-off runner line.
 
-A pinned run whose tool then installs something of its own — a browser download, a second toolchain
-under `$HOME` — is on the sanctioned side when both of these hold: what it writes lands under the
-issue's own volume through the documented variables, and after the command exits nothing else
-resolves differently. A browser download under a relocated browsers path passes both. It is the
-withheld capability when either fails — anything that writes into a system prefix, and anything
-that leaves a toolchain, shim or binary which a later launch or another role's process will resolve
-without asking for it. The test is resolution, not disk: a second toolchain under `$HOME` that only
-an explicit absolute path reaches is sanctioned; the same toolchain put where `PATH` finds it is
-operator setup, whoever typed the command. The three artefacts above are the whole of that line's
-ground. Disk is not: the issue's volume is 49 GiB with 2.5 GiB used and every cache already
-relocated onto it, and a sanctioned install is paid once per issue, on the issue's own disk, by the
-issue's roles together.
+A pinned run whose tool then installs something of its own — an interpreter, a browser, a second
+toolchain — is on the sanctioned side when both of these hold: what it writes lands under the
+issue's own volume, through one of the variables the runtime actually sets for you —
+`XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
+`GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
+`UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`) — and after the command exits nothing else
+resolves differently. (`XDG_CONFIG_HOME` is set too and is not one of them: it is the pod's shared
+in-memory volume.) `uv run --with pyyaml==6.0.2 --no-project` passes both, and so does the
+interpreter `uv run` downloads for a project whose `.python-version` names one: the wheel lands in
+`UV_CACHE_DIR`, the interpreter under `UV_PYTHON_INSTALL_DIR`, and the issue's next pod finds both
+there. A browser download passes only if you point that tool's own cache variable at a directory
+under one of those paths yourself — the runtime sets no browser path at all, so an unset one leaves
+the download wherever the tool defaults, which is nowhere this runtime chose.
+
+Where it lands is what you pay. Under one of those variables it is on the issue's volume: it
+outlives the pod, every role of the issue shares it, and a later pod of the issue reuses it. Under
+`$HOME` — `/home/legion`, which no volume is mounted on — it is the container's own filesystem: one
+copy per role, per pod, gone when the role relaunches, and charged to the gigabyte of ephemeral
+storage the container is admitted with. Moving exactly these writes off that filesystem is what
+`roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists for, after GKE
+Autopilot evicted issue pods that charged their caches to it — so an install under `$HOME` fails
+the first condition and is outside the sanctioned form, however little else it changes. It is the
+withheld capability when either condition fails — anything that writes into a system prefix, and
+anything that leaves a toolchain, shim or binary which a later launch or another role's process
+will resolve without asking for it. Between two installs that both land in the right place, the
+test is resolution, not disk: a second toolchain that only an explicit absolute path reaches is
+sanctioned; the same toolchain put where `PATH` finds it is operator setup, whoever typed the
+command. The three artefacts above are the whole of that line's ground. Disk is not: the issue's
+volume is 49 GiB with 5.2 GiB used and every cache already relocated onto it, and a sanctioned
+install is paid once per issue, on the issue's own disk, by the issue's roles together.
 
 ## The three pinned runner forms
 
@@ -273,10 +296,17 @@ halves are yours to type.
 ## When no runner reaches it
 
 A tool that is neither in the image nor reachable through one of the three runners is an image
-change: a pull request against sjawhar/legion that adds it to
-`packages/daemon/docker/worker.Dockerfile` and to the `toolchain` row in
-`packages/daemon/internal/capabilities/image.go`. It reaches a role only once a deployment pins the
-new image digest, as every Legion change does — never within your own phase.
+change: a pull request against sjawhar/legion that carries the same name through five files,
+because its own tests hold them to each other. The apt line in
+`packages/daemon/docker/worker.Dockerfile`, with the comment saying why that package is carried,
+installs it; the `toolchain` name list in `packages/daemon/internal/capabilities/image.go` makes
+the probe require it; that row's summary in `packages/daemon/internal/capabilities/capabilities.go`
+has to name it, a test holding the summary to the list; the stub binaries at
+`packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go:14` have to include it,
+or the capability and `probe-image` tests fail on an image that does not carry it; and
+`packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
+A pull request that stops at the first two opens red. It reaches a role only once a deployment pins
+the new image digest, as every Legion change does — never within your own phase.
 
 So when your work needs such a tool, say so to the architect that owns your issue (`envoy_publish`
 to its role topic), with the tool, what your phase needs it for, and the runner forms you already
