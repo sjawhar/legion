@@ -26,12 +26,14 @@ separate coordinator to finish necessary work.
   (section 1 says what one does to an approved root spec); a worker never writes one. Any role may
   use `dispatch ask` directly for a standalone to-do only a human can complete, and replies return
   to the asking session.
-- **Ask a person only in three cases.** (1) The step needs what only they can do: an
-  organization-owner setting, their own account, credential or identity. (2) Two of their earlier
-  decisions disagree, and the work stops until you know which one holds. (3) The change touches an
-  approved spec's scope or acceptance. You decide the rest: take your own recommendation, write it
-  in the spec as the decision with its reason, and go on, taking the option that is easy to undo
-  when you are unsure. The root's one design-gate approval stays.
+- **Ask a person only about what the issue leaves open.** When the issue already says to do a
+  thing, do not ask whether. How to do it is your job. Ask about an open point only when one of
+  these holds. It changes what the tree delivers. It carries a cost or risk the person would
+  weigh. It needs what only that person can provide: an organization-owner setting, their
+  account, credential or identity.
+  Give one recommendation. Decide the rest: write the decision and its reason in the spec, and go
+  on. When you are unsure, take the option that is easy to undo. The root's one design-gate
+  approval stays.
 - The daemon starts each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
   `legion-<project>-<key>-<role>` with the issue key lower-cased; for example, project `acme`,

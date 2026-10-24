@@ -15,11 +15,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   also names its search and a positive control on the same path as the things claimed absent,
   after a census that searched for `kind: Service` found none of the Services built in code.
 
-- An architect asks a person only in three cases: a step only that person can take, two of their
-  earlier decisions that disagree, or a change to an approved spec's scope or acceptance. It
-  decides everything else itself, writes the decision and its reason in the spec, and takes the
-  option that is easy to undo when it is unsure. The deployment's owner said Legion's architects
-  asked him too many questions that did not need him.
+- An architect asks a person only about what the issue leaves open, and only when that point
+  changes what the tree delivers, carries a cost or risk the person would weigh, or needs what only
+  that person can provide. When the issue already says to do a thing, it does not ask whether. It
+  decides the rest, writes the decision and its reason in the spec, and takes the option that is
+  easy to undo when it is unsure. The deployment's owner said Legion's architects asked him too
+  many questions that did not need him.
 
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
