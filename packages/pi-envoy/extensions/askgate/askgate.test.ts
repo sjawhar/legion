@@ -834,11 +834,8 @@ describe("deadline and abandonment", () => {
     await short.device("t1", "dispatch_comment", COMMENT);
     expect(short.entries[0].deadlineMs).toBe(50);
   });
-  test("a ceiling that leaves no room for a verdict binds nothing, and says why", () => {
-    const g = bind({ ceiling: 8_000 });
-    expect(g.handlers.size).toBe(0);
-    expect(g.warnings).toHaveLength(1);
-    expect(g.warnings[0]).toContain("8000");
+  test("a ceiling that leaves no room for a verdict throws when the gate binds, saying why", () => {
+    expect(() => bind({ ceiling: 8_000 })).toThrow(/8000 ms/);
   });
   test("a call abandoned by its tool (a user abort, or the runner's ceiling) cancels the model call and never counts toward the halt", async () => {
     const signals: AbortSignal[] = [];
@@ -1577,7 +1574,8 @@ console.log(JSON.stringify(args, null, 2));
         ["dispatch_ask", "verdict", "allow"],
       ]);
     }
-  });
+    // Ten real dry runs, each a bun process: past bun's 5 s default on a loaded host.
+  }, 30_000);
   test("a 2>&1 after the here-document opener runs as written and is left out of the dry-run; no other redirect is read there", () => {
     const after = core.scopedCommand(
       "dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF"
@@ -2103,8 +2101,10 @@ describe("askgate.ts, the entry", () => {
   mock.module("@oh-my-pi/pi-coding-agent/config/settings", () => ({
     settings: { getModelRole: (role: string) => modelRoles[role] },
   }));
+  /** extensionHandlers.toolCallTimeoutMs as the stubbed settings answer it. */
+  let toolCallCeilingMs = 120_000;
   mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({
-    cfgExtensionHandlersToolCallTimeoutMs: { get: () => 120_000 },
+    cfgExtensionHandlersToolCallTimeoutMs: { get: () => toolCallCeilingMs },
   }));
   mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner", () => ({
     EXTENSION_HANDLER_TIMEOUT_MS: 30_000,
@@ -2241,6 +2241,121 @@ describe("askgate.ts, the entry", () => {
     expect(result?.block).toBe(true);
     expect(completions).toHaveLength(0);
     expect(entries).toMatchObject([{ outcome: "no-model-role" }]);
+  });
+
+  /** Calls the entry's registration without awaiting it: what the factory does. */
+  async function registerOnly(env: Record<string, string> = {}) {
+    delete process.env.OMP_ASKGATE;
+    Object.assign(process.env, env);
+    const { registerAskGate } = await import("./askgate");
+    const handlers = new Map<string, Handler>();
+    const entries: GateEntry[] = [];
+    const loaded = registerAskGate(
+      {
+        on: (event: string, handler: Handler) => handlers.set(event, handler),
+        appendEntry: (_: string, data: GateEntry) => entries.push(data),
+      } as never,
+      { configFile: CONFIG_FILE, logger: { warn: () => {} } }
+    );
+    // Registered before the load settles, so no call can pass between the load and the binding.
+    const atOnce = [...handlers.keys()];
+    return { loaded, handlers, entries, atOnce };
+  }
+  const mainCtx = (kind = "main") => ({
+    agent: { kind },
+    hasUI: false,
+    ui: { notify: () => {} },
+    getSystemPrompt: () => ["PRIMARY"],
+    models: { resolve: (spec: string) => (spec === "@askgate" ? MODEL : undefined) },
+    model: MODEL,
+    modelRegistry: { resolver: () => "resolved-key" },
+    sessionManager: {
+      getEntries: () => [experimentsEntry(false)],
+      getLeafId: () => null,
+      getSessionId: () => "sess-e",
+    },
+    cwd: "/work",
+  });
+  test("the entry registers its tool_call handler at once, and a call made before the load settles waits for it and is reviewed", async () => {
+    const { loaded, handlers, entries, atOnce } = await registerOnly();
+    expect(atOnce).toEqual(["tool_call"]);
+    const result = await handlers.get("tool_call")?.(
+      { type: "tool_call", toolName: "dispatch_comment", toolCallId: "t1", input: COMMENT },
+      mainCtx()
+    );
+    await loaded;
+    expect(result).toBeUndefined();
+    expect(completions).toHaveLength(1);
+    expect(entries).toMatchObject([{ outcome: "verdict", decision: "allow" }]);
+    // The core's other handlers reach the host's own `on` once it loads.
+    expect([...handlers.keys()]).toEqual(
+      expect.arrayContaining(["tool_call", "session_switch", "tool_execution_end", "agent_end"])
+    );
+  });
+  test("a gate that does not load refuses each write it would review, in both modes, naming the error and the switch", async () => {
+    for (const mode of ["warn", "block"]) {
+      const { loaded, handlers, entries } = await registerOnly({
+        OMP_ASKGATE: mode,
+        OMP_ASKGATE_TIMEOUT_MS: "soon",
+      });
+      expect(loaded).rejects.toThrow(
+        'OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"'
+      );
+      const gate = handlers.get("tool_call");
+      const bash = (command: string, kind = "main") =>
+        gate?.(
+          { type: "tool_call", toolName: "bash", toolCallId: command, input: { command } },
+          mainCtx(kind)
+        );
+      for (const command of [
+        "dispatch ask --issue X-1 --question 'Ship it?'",
+        "dispatch comment --issue X-1 --body b | cat",
+        "dispatch artifact --issue X-1 --name-file n.txt --path p.txt",
+      ]) {
+        const result = await bash(command);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain(
+          'OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"'
+        );
+        expect(result?.reason).toContain(`set askgate.enabled to false in ${CONFIG_FILE}`);
+      }
+      const device = await gate?.(
+        { type: "tool_call", toolName: "dispatch_comment", toolCallId: "d1", input: COMMENT },
+        mainCtx()
+      );
+      expect(device?.block).toBe(true);
+      // Not a write it reviews, a subagent's write, and an upload that is no markdown document pass.
+      expect(await bash("ls -la")).toBeUndefined();
+      expect(await bash("dispatch read --issue X-1")).toBeUndefined();
+      expect(await bash("dispatch ask --issue X-1 --question q", "sub")).toBeUndefined();
+      expect(
+        await bash("dispatch artifact --issue X-1 --name shot.png --path shot.png")
+      ).toBeUndefined();
+      expect(completions).toHaveLength(0);
+      expect(entries.map((e) => [e.tool, e.outcome, e.decision, e.verdictMode])).toEqual([
+        ["dispatch_ask", "load-failed", "revise", mode],
+        ["dispatch_comment", "load-failed", "revise", mode],
+        ["dispatch_artifact", "load-failed", "revise", mode],
+        ["dispatch_comment", "load-failed", "revise", mode],
+      ]);
+      expect(entries[0].reason).toContain("OMP_ASKGATE_TIMEOUT_MS");
+    }
+  });
+  test("a handler ceiling too short for a verdict is a load failure too: the write is refused, naming why", async () => {
+    toolCallCeilingMs = 8_000;
+    try {
+      const { loaded, handlers, entries } = await registerOnly();
+      expect(loaded).rejects.toThrow("8000 ms");
+      const result = await handlers.get("tool_call")?.(
+        { type: "tool_call", toolName: "dispatch_comment", toolCallId: "c1", input: COMMENT },
+        mainCtx()
+      );
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("extensionHandlers.toolCallTimeoutMs is 8000 ms");
+      expect(entries).toMatchObject([{ outcome: "load-failed", decision: "revise" }]);
+    } finally {
+      toolCallCeilingMs = 120_000;
+    }
   });
 
   test("the completion runs at high effort with prompt caching off, and its usage is recorded", async () => {

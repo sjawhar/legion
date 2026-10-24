@@ -26,11 +26,15 @@ import {
   type Completion,
   createAskGate,
   GATE_EFFORT,
+  type GateCtx,
   type GateModel,
   type GateRole,
+  loadFailureGate,
   type Message,
   type Pi,
   spawnDryRun,
+  type ToolCallEvent,
+  type ToolCallResult,
   type Usage,
 } from "./askgate-core";
 
@@ -79,11 +83,35 @@ function appendDump(p: string, text: string): void {
   }
 }
 
+type ToolCallHandler = (event: ToolCallEvent, ctx: GateCtx) => Promise<ToolCallResult>;
+
 /**
- * Loads the Oh My Pi modules the gate needs, then binds it to `pi`. Rejects when a module does not
- * load; the caller reports that, since a gate that never binds lets every write out unreviewed.
+ * Registers AskGate's one `tool_call` handler on `pi` now, synchronously, so no call can pass
+ * between the load of Oh My Pi's modules and the gate's binding, and starts that load. Each call
+ * waits for the load. Loaded, the handler runs the core's own; not loaded, it refuses each write
+ * the gate would review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
+ * The returned promise settles with the load and rejects with its error, for the caller's notice.
  */
-export async function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> {
+export function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> {
+  const loading = loadAskGate(pi, host);
+  // A rejection is handled here and by the caller's notice; never an unhandled one.
+  const gate: Promise<ToolCallHandler> = loading.then(
+    (handler) => handler,
+    (error: unknown) => {
+      const refuse = loadFailureGate(error, { env: process.env, configFile: host.configFile }, pi);
+      return async (event, ctx) => refuse(event, ctx);
+    }
+  );
+  pi.on("tool_call", async (event: ToolCallEvent, ctx: GateCtx) => (await gate)(event, ctx));
+  return loading.then(() => undefined);
+}
+
+/**
+ * Loads the Oh My Pi modules the gate needs, then binds the core to `pi` with its `tool_call`
+ * handler kept back, which it returns: every other event, and `appendEntry`, reach the real `pi`.
+ * Rejects when a module does not load or the core refuses to bind.
+ */
+async function loadAskGate(pi: Pi, host: AskGateHost): Promise<ToolCallHandler> {
   // String-literal imports: the host's loader resolves only these (see the head of this file).
   const [
     { completeSimple, retryTransientCompletion },
@@ -212,6 +240,16 @@ export async function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> 
     }
   };
 
+  // The core binds to a `pi` that keeps its tool_call handler, which the one registered above
+  // runs, and passes every other event, and appendEntry, to the real `pi`.
+  let handler: ToolCallHandler | undefined;
+  const wrapped: Pi = {
+    on: (event, listener) => {
+      if (event === "tool_call") handler = listener as unknown as ToolCallHandler;
+      else pi.on(event, listener);
+    },
+    appendEntry: (customType, data) => pi.appendEntry(customType, data),
+  };
   createAskGate({
     env: process.env,
     home: os.homedir(),
@@ -236,5 +274,7 @@ export async function registerAskGate(pi: Pi, host: AskGateHost): Promise<void> 
       return buildSessionContext([...sessionManager.getEntries()], sessionManager.getLeafId())
         .messages as unknown as readonly Message[];
     },
-  })(pi);
+  })(wrapped);
+  if (handler === undefined) throw new Error("AskGate's core registered no tool_call handler");
+  return handler;
 }

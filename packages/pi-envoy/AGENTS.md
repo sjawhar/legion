@@ -169,13 +169,19 @@ AskGate (`extensions/askgate/`) reviews each Dispatch write of a main agent befo
 README's "AskGate" section says what it reviews, the switch, the modes and the model role.
 `envoy.ts` reads the switch at load (`askgateSetting` in `@legion/envoy-client/envoy-config`, the
 top-level `askgate` section of the session's envoy.json) and calls `registerAskGate` only with
-Dispatch on and the switch not off. `registerAskGate` (`askgate.ts`) loads Oh My Pi's own modules
-through string-literal `import()`, declared in `../pi-shared/src/omp-host.d.ts`, then binds the
-core, so its handlers register after the factory returns. The runner reads an event's handlers
-when the event fires, so they still fire. `session_start` waits for that load and shows a load
-failure or a switch that does not parse as a notice. `askgate-core.ts` holds every rule of the
-gate and takes the host through its dependencies, so `askgate.test.ts` drives it with fakes. The
-model walk (`askModel` in `createAskGate`) is the one path a review takes to the model.
+Dispatch on and the switch not off. `registerAskGate` (`askgate.ts`) registers the gate's one
+`tool_call` handler at once, in the factory, after `envoy.ts`'s own, and starts the load of Oh My
+Pi's own modules through string-literal `import()`, declared in `../pi-shared/src/omp-host.d.ts`.
+Each call waits for the load. Once the modules load, the core binds to a `pi` that keeps its
+`tool_call` handler, which the registered one runs, and passes every other event to the real `pi`,
+so no call passes between the load and the binding. A load that fails (a module, an
+`OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler ceiling too short for a verdict)
+is no off switch: `loadFailureGate` refuses each write the gate would review, in both modes, naming
+the error and `askgate.enabled`, and records a `load-failed` entry. `session_start` waits for the
+load and shows a load failure or a switch that does not parse as a notice. `askgate-core.ts` holds
+every rule of the gate and takes the host through its dependencies, so `askgate.test.ts` drives it
+with fakes. The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
+model.
 `rules.md`, `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an
 upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
 

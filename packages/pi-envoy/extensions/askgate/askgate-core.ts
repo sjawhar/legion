@@ -60,7 +60,9 @@
 //
 // Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
 // tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) and raced from
-// handler entry. A ceiling that leaves under 10 s binds nothing and logs why.
+// handler entry. A ceiling that leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no
+// positive integer, throw when the gate binds: the entry then refuses each write the gate would
+// review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
 //
 // Per gated call, in order:
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
@@ -202,8 +204,9 @@ export interface GateEntry {
   toolCallId: string;
   /**
    * `revise`: the gate did not pass the call as sent (a revise verdict, or in block mode a call given up
-   * without a verdict, or in any mode a command it cannot read). A call was refused exactly when this is
-   * `revise` and either `verdictMode` is `block` or `outcome` is `unreadable`.
+   * without a verdict, or in any mode a command it cannot read or a gate that did not load). A call was
+   * refused exactly when this is `revise` and either `verdictMode` is `block` or `outcome` is
+   * `unreadable`, `no-model-role` or `load-failed`.
    */
   decision: "allow" | "revise";
   outcome:
@@ -218,7 +221,8 @@ export interface GateEntry {
     | "skipped"
     | "abandoned"
     | "shutdown"
-    | "unreadable";
+    | "unreadable"
+    | "load-failed";
   verdictMode: Mode;
   reason?: string;
   rebuttal?: string;
@@ -295,11 +299,11 @@ export interface Pi {
   on(event: string, handler: (event: never, ctx: never) => unknown): void;
   appendEntry(customType: string, data?: unknown): void;
 }
-type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
-type ToolCallResult =
+export type ToolCallEvent = { toolName: string; toolCallId: string; input: Input };
+export type ToolCallResult =
   | { block?: boolean; reason?: string; input?: Input; additionalContext?: string }
   | undefined;
-type GateCtx = {
+export type GateCtx = {
   agent: { kind: string };
   hasUI: boolean;
   ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
@@ -1354,6 +1358,52 @@ function renderUnreadable({ label, program }: UnreadableCommand): string {
   return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and AskGate reads a \`dispatch\` command only when it calls \`dispatch\` by name or by a literal path (no \`$\`, \`~\`, glob or backslash) and is the whole bash call, optionally after one \`cd <path> && \` (a literal path too) and with one \`2>&1\` at the end of its first line, before or after a here-document opener.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
 }
 
+/**
+ * The gate of a session where AskGate did not load: a host module that did not import, an
+ * OMP_ASKGATE_TIMEOUT_MS that is no positive integer, or a handler ceiling too short for a verdict.
+ * Only `askgate.enabled: false` turns AskGate off, so a load failure is no off switch: each call of
+ * the main agent the gate would review (`scopedCommand`, `unreadableDispatchWrite`, `scopedDevice`,
+ * an upload counted as the gate counts it) is refused in both modes, naming the error and the
+ * switch, and recorded as `load-failed`. Every other call runs.
+ */
+export function loadFailureGate(
+  error: unknown,
+  deps: Pick<Deps, "env" | "configFile">,
+  pi: Pi
+): (event: ToolCallEvent, ctx: GateCtx) => ToolCallResult {
+  const message = messageOf(error);
+  const reason = `AskGate did not send this call: it reviews each Dispatch write before it posts, and it did not load: ${message}. Send the call again once AskGate loads. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
+  const envMode = parseMode(deps.env.OMP_ASKGATE);
+  return (event, ctx) => {
+    if (ctx.agent.kind !== "main") return undefined;
+    let found: { tool: string; path: string } | undefined;
+    if (event.toolName === "bash") {
+      const write =
+        scopedCommand(event.input.command) ?? unreadableDispatchWrite(event.input.command);
+      if (write !== undefined) found = { tool: write.tool, path: write.label };
+    } else if (scopedDevice(event.toolName, event.input))
+      found = { tool: event.toolName, path: `xd://${event.toolName}` };
+    if (found === undefined) return undefined;
+    try {
+      pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+        advisor: "AskGate",
+        ...found,
+        toolCallId: event.toolCallId,
+        decision: "revise",
+        outcome: "load-failed",
+        verdictMode: envMode ?? sessionMode(ctx.sessionManager.getEntries()),
+        reason: message,
+        latencyMs: 0,
+        revisesForKey: 0,
+        argsDigest: "",
+      } satisfies GateEntry);
+    } catch {
+      // The entry is best effort; the call is refused either way.
+    }
+    return { block: true, reason };
+  };
+}
+
 export function createAskGate(deps: Deps): (pi: Pi) => void {
   return function askGate(pi: Pi): void {
     const rawMode = deps.env.OMP_ASKGATE;
@@ -1364,15 +1414,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       rawMode === undefined || envMode !== undefined
         ? undefined
         : `AskGate: OMP_ASKGATE is ${JSON.stringify(rawMode)}, which is not a mode, so AskGate ignores it and stays on. OMP_ASKGATE takes warn or block. To turn AskGate off for this session, set askgate.enabled to false in ${deps.configFile}.`;
+    // Both checks throw before any handler binds, so the entry turns them into its load-failure
+    // refusal (`loadFailureGate`): a gate that cannot review is never an off switch.
     const timeoutMs = parseTimeout(deps.env.OMP_ASKGATE_TIMEOUT_MS);
     const ceiling = deps.handlerCeilingMs();
-    if (ceiling - CEILING_MARGIN_MS < MIN_DEADLINE_MS) {
-      // A deadline this short would time out nearly every verdict; the runner would refuse a longer one.
-      deps.logger.warn(
-        `AskGate not bound: extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`
+    // A deadline this short would time out nearly every verdict; the runner would refuse a longer one.
+    if (ceiling - CEILING_MARGIN_MS < MIN_DEADLINE_MS)
+      throw new Error(
+        `extensionHandlers.toolCallTimeoutMs is ${ceiling} ms, which leaves no room for a verdict (it needs at least ${MIN_DEADLINE_MS + CEILING_MARGIN_MS} ms)`
       );
-      return;
-    }
     // The system role holds only the gate's own text and its rules; the agent's system prompt and
     // transcript are data about the agent under review, escaped into the user message.
     const system = `${systemTemplate.trim()}\n\n${rules.trim()}`;

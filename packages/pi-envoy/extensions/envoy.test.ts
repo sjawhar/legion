@@ -3910,8 +3910,9 @@ console.log(JSON.stringify(args));
       expect(completions).toEqual([MODEL]);
     });
 
-    test("a gate that does not load is said at session start, so the writes it would review are not let out unsaid", async () => {
-      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+    test("a gate that does not load is said at session start and refuses each write it would review, so a load failure is no off switch", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      writeFileSync(file, "{}\n");
       process.env.DISPATCH_URL = "http://dispatch.test";
       process.env.DISPATCH_TOKEN = "dispatch-token";
       process.env.OMP_ASKGATE_TIMEOUT_MS = "soon";
@@ -3921,10 +3922,33 @@ console.log(JSON.stringify(args));
         const fixture = createPi();
         envoyExtension(fixture.pi);
         const notifications: string[] = [];
-        await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
+        const context = gateContext(notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+        standInDispatch();
 
         expect(notifications).toEqual([
-          'envoy: AskGate did not load, so Dispatch writes post unreviewed: OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"',
+          `envoy: AskGate did not load, so it refuses each Dispatch write it would review: OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon". To turn AskGate off for this session, set askgate.enabled to false in ${file}.`,
+        ]);
+        const refused = (await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+          context
+        )) as { block?: boolean; reason?: string } | undefined;
+        expect(refused?.block).toBe(true);
+        expect(refused?.reason).toContain(
+          'OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"'
+        );
+        expect(refused?.reason).toContain(`askgate.enabled to false in ${file}`);
+        const other = await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: "call-ls", input: { command: "ls -la" } },
+          context
+        );
+        expect(other).toBeUndefined();
+        expect(completions).toEqual([]);
+        expect(fixture.entries).toMatchObject([
+          {
+            customType: "advisor-gate",
+            data: { tool: "dispatch_ask", outcome: "load-failed", decision: "revise" },
+          },
         ]);
       } finally {
         delete process.env.OMP_ASKGATE_TIMEOUT_MS;

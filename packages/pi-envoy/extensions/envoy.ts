@@ -492,27 +492,17 @@ export default function envoyExtension(pi: PiApi): void {
   const startNotice = atStart.notice ?? "";
   // AskGate (extensions/askgate/) reviews each Dispatch write before it posts. It runs in a session
   // with Dispatch on at load, unless the session's envoy.json turns it off (`askgate.enabled`,
-  // read once, here). The gate loads Oh My Pi's modules before it binds, so its handlers register
-  // after this factory returns; the runner reads an event's handlers when the event fires, so they
-  // still fire. A switch that cannot be read, and a gate that did not load, are said at every
-  // session start, since with no gate the writes post unreviewed.
+  // read once, here). Its one `tool_call` handler registers with this factory's own handlers (after
+  // this entry's `tool_call` handler, below) and waits for the Oh My Pi modules the gate loads. A
+  // switch that cannot be read, and a gate that did not load, are said at every session start; a
+  // gate that did not load refuses each write it would review.
   const askgateNotices: string[] = [];
   let askgateLoad: Promise<void> = Promise.resolve();
+  let askgateOn = false;
   if (atStart.dispatch.enabled && CONFIG_FILE.path !== null) {
     const setting = askgateSetting(CONFIG_FILE.path);
     if (setting.error !== null) askgateNotices.push(setting.error);
-    if (setting.enabled) {
-      // The host's `pi.on` takes every event name; `PiApi` types only the events this entry uses,
-      // and the gate also listens for `tool_execution_end`.
-      const host = pi as unknown as AskGatePi;
-      askgateLoad = registerAskGate(host, { configFile: CONFIG_FILE.path, logger }).catch(
-        (error: unknown) => {
-          const notice = `AskGate did not load, so Dispatch writes post unreviewed: ${messageFor(error)}`;
-          logger.warn(notice);
-          askgateNotices.push(notice);
-        }
-      );
-    }
+    askgateOn = setting.enabled;
   }
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
@@ -2809,6 +2799,20 @@ export default function envoyExtension(pi: PiApi): void {
     writtenTitle = { sessionID: id, title };
     return undefined;
   });
+
+  // AskGate's `tool_call` handler, registered now, in the factory, so it is there for the first
+  // call; it waits for the modules the gate loads (`registerAskGate`).
+  if (askgateOn && CONFIG_FILE.path !== null) {
+    const configFile = CONFIG_FILE.path;
+    // The host's `pi.on` takes every event name; `PiApi` types only the events this entry uses,
+    // and the gate also listens for `tool_execution_end`.
+    const host = pi as unknown as AskGatePi;
+    askgateLoad = registerAskGate(host, { configFile, logger }).catch((error: unknown) => {
+      const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+      logger.warn(notice);
+      askgateNotices.push(notice);
+    });
+  }
 
   pi.on("tool_result", async (event, context) => {
     // Read, and the offset advanced, on every result, failed or not and armed period or not, so a

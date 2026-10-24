@@ -6,6 +6,8 @@ import {
   computeStats,
   formatReport,
   type GateRecord,
+  isRefusal,
+  isSentBack,
   parseArgs,
   parseSessionText,
   readSessions,
@@ -199,6 +201,17 @@ describe("parseArgs", () => {
     expect(() =>
       parseArgs(["--sessions", "d", "--since", SINCE, "--sample", "-1", "--out", "o"])
     ).toThrow("--sample");
+  });
+});
+
+describe("isSentBack and isRefusal", () => {
+  test("a gate that did not load sent the write back and refused it, in warn mode too", () => {
+    const [record] = parseSessionText(
+      gate({ id: "lf", outcome: "load-failed", decision: "revise", mode: "warn" }),
+      "s"
+    );
+    expect(record && isSentBack(record)).toBe(true);
+    expect(record && isRefusal(record)).toBe(true);
   });
 });
 
