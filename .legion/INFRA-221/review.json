@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-221",
+  "completed": "2026-10-24T21:05:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "skills/legion-worker/references/tools.md:53-56",
+      "description": "The pinning rule's stated cause is wrong, and it is the rule this tree exists to ship. The heading is 'Always write the exact version' and the sentence is 'unpinned, the command can run a different package altogether', but the only evidence given (tools.md:58-63, docs/kubernetes.md:197-202) is `bunx biome` -> 0.3.3 against `bunx --package @biomejs/biome@2.6.3 biome` -> 2.6.3: the two commands differ in the package NAME, not in the version. A worker who obeys the rule as written and types `bunx biome@0.3.3` gets the squatter exactly as the bare form did; what defends is `--package <exact package>`, and the version pin defends only against a later release of the right package. The same gap is in the forms: the bunx form names package and binary separately and says why (tools.md:42-43), while the uvx form is given only as `uvx <name>@<version>` (tools.md:38, docs/kubernetes.md:181) with no `--from` for a package whose console script differs, so the identical hazard is taught for one ecosystem and not the other. This defeats the issue's own acceptance line 'it never resolves something other than what was asked for'."
+    },
+    {
+      "severity": "important",
+      "file": "skills/legion-worker/references/tools.md:22,32-33",
+      "description": "'Why you cannot install a sixth' / 'a compiled client is not something you can fetch for yourself, however much room the issue's disk has' (and docs/kubernetes.md:167 'cannot install a compiled client for itself at all') claims physical impossibility, which this PR's own table row disproves eight lines later: docs/kubernetes.md:175 records that redis-cli, sqlite3 and dig ran from an extraction prefix with LD_LIBRARY_PATH set. The real bar is the one that row states -- the withheld operator-setup capability (ruling dispatch://LEGION-200) plus psql's Perl wrapper -- a ruling, not a filesystem limit. The overstatement contradicts a standing repository learning the same reader follows, docs/solutions/testing/a-throwaway-sandbox-repository-...-LEGION-748.md:50-54, which tells a worker to install jq, shellcheck, extracted OpenSSH and PyYAML under $HOME/.local and prepend it to PATH; after this merges, AGENTS.md:125 points a worker at the rule that says the opposite. Supporting error: both copies say '/usr/local/bin, /opt and /home are read-only' (docs/kubernetes.md:156, tools.md:24-25); measured in a live role container, /home is root-owned and refuses a write but $HOME=/home/legion is drwx------ legion legion and writable, which is the false belief that makes the impossibility claim look true. The tester recorded this and it was not acted on (.legion/INFRA-221/test.json observations[0])."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/capabilities/image.go:249-251",
+      "description": "The only recorded justification for shipping postgresql-client cites the wrong entry point, in four hand-maintained copies plus the generated bundle (image.go:249-251, worker.Dockerfile:487-489, docs/kubernetes.md:100-103, skills/legion-worker/references/tools.md:11-12). packages/dispatch/package.json:13 is `\"e2e\": \"bun run build:web && playwright test --config e2e/playwright.config.ts\"`; local-instance.ts is the entry point of `bun run dispatch:local` (package.json:12), and `bun run e2e` never loads it. What `bun run e2e` actually needs psql for is packages/dispatch/e2e/psql.ts:53 (`execFile(\"psql\", ...)`) reached from e2e/seed.ts's resetDatabase, which every spec calls. The skill's conclusion is also false as written for a worker: local-instance.ts:119 requires docker as well when DATABASE_URL is unset, and no Legion pod has docker, so 'a role whose change owes that suite can run it' holds only for a role that brings its own DATABASE_URL."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:172",
+      "description": "The decisive cost figure is misattributed. docs/kubernetes.md:172 and :223-226 say the five client tools 'cost 7.9 MiB of that total: 24 layers and 1027 MiB (1,076,758,160 bytes) where the image pinned before them was 24 layers and 1019 MiB (1,068,467,415 bytes)'. Read from each image's own config blob on GHCR: the 1027 MiB image is org.opencontainers.image.revision 839ab9e81bfe (this branch) and the 1019 MiB image is revision 3bab1a8a7381, which is eight commits of main behind this branch's base 92dbeea3d391 -- among them `chore: release pi-legion v10.19.9`, `chore: release pi-envoy v10.17.9` and `chore: release envoy-plugin v8.20.9`, all bundled into the worker image. The 8,290,745-byte difference therefore includes those releases and is an upper bound, not the five packages' cost. The apt measurement beside it (20 packages, 6,216,928 bytes) is clean; the compressed one is the unit the page itself calls what a cold launch pays, so the issue's 'written down with the measurement that decided it' rests on it."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:168",
+      "description": "'The four priced options and their verdicts:' introduces a five-row table (:172-176); the runtime.kubernetes.setup row was added per the plan's F9 and the count was not updated."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:218-226",
+      "description": "Three image totals in one paragraph with the middle one unexplained: the section states 1007 MiB at 22 layers (the sha-ff33c8c9fb1b build), then the new sentence says the clients cost 7.9 MiB 'of that total' and gives 1027 against 1019 MiB at 24 layers. 'That total' is 1007. Nothing says the first is an older build at a different layer count."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:178-211",
+      "description": "The three runner bullets, their five timings, their three failure strings and the bunx biome pair are written twice, in docs/kubernetes.md:178-211 and skills/legion-worker/references/tools.md:36-68, and have already diverged in the diff that created them: kubernetes.md:183-184 renders the uvx refusal as 'error: No solution found when resolving tool dependencies ... there is no version of ruff==99.99.99', tools.md:40-41 as the same error 'with cause: Because there is no version of ruff==99.99.99'. Each file also delegates to the other (kubernetes.md:213, tools.md:83-84 says the numbers live in kubernetes.md while repeating all of them). Batched as the round's one Fast-follow, not blocking: one home per concern -- tools.md owns the forms and the pin rule, kubernetes.md owns the decision, the container refusal and the table."
+    }
+  ],
+  "ciRead": "Base main requires lint, typecheck, test and pr-title (repos/sjawhar/legion/rules/branches/main; branch protection lists none). The branch's newest pull_request run is at c6e0ee37272ead7d79630fa0bcf0f4e7582e15e7; that commit's check-runs show lint, typecheck, test and pr-title all completed/success (Worker Image's `build` still in_progress, not required). compare c6e0ee3...8856833f is `ahead` with .legion/INFRA-221/test.json the only file, so the code under review is the CI head's. Green at the code commit; the findings are not CI's.",
+  "thermonuclear": {
+    "head": "8856833f26d09febc5fb8807d8c9dfc2d64f7cb6",
+    "deepReview": "CHANGES at 8856833f -- 1 medium (the pinning rule's stated cause), 3 minor, 2 hardening; it traced every consumer of the toolchain row (probe-image, daemon boot on an older pinned digest, tmux, legion state, the contracts golden fixture, --check-config, stage 4b, the probe log tail, role PATH) and found none broken.",
+    "codeQuality": "CHANGES at 8856833f -- 4 blocking (the impossibility premise, the psql citation, the duplicated prose, the four/five count), 3 non-blocking; it judges stubs.onPATH the right abstraction, fully applied, and the extended capability row the right design."
+  },
+  "threads": "None. gh api graphql reviewThreads(first:100) returned no nodes at this head: no review, bot or otherwise, has opened a thread on #2149."
+}
