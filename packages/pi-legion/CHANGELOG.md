@@ -89,9 +89,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   never a reason to label or admit an issue, the controller never sets a parked issue back to
   `todo` to fill one, and the `slot-free`, `todo` and `tick` wakes the daemon still sends take
   nothing. Work reaches Legion only when a person labels it, or asks the controller to (a message,
-  a Slack request, an answer to a finding ask). Triage admits a labelled root only when a person
-  set the label, or the controller's own filing cites a person's answer, and asks a person about
-  any other. A Slack mention a bot posted gets an answer, never an issue or a label. Re-filing a
+  a Slack request, an answer to a finding ask). Every issue the controller files for a person
+  carries one spec line, `Filed for <person> at their request: <request>`, naming the answered
+  ask, the Slack message or the direct message. Triage admits a labelled root only when a person
+  set the label, or the controller's own session filed it with that line (for an ask, the session
+  whose `Filed dispatch://<KEY>` reply follows a `File it for Legion` answer), and asks a person
+  about any other. A Slack mention a bot posted gets an answer, never an issue or a label. When
+  the report issue is found closed, the controller reopens it into `icebox`. Re-filing a
   child as an independent root is an ask the controller opens, acted on only on the person's yes.
   Stopped-session recovery moves work to Legion only on a person's ruling the weekly plan records,
   no longer when a session's handoff or a plan row of the controller's own says so.

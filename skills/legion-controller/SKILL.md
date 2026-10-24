@@ -161,9 +161,9 @@ else:
    `issues`. A root recorded there and now in `triage` is work the daemon holds that a human
    pulled back: never re-admit it yourself; name it in your summary to the human ("<KEY> was
    pulled back to triage; what do you want?").
-3. Catch up the finding asks answered while no controller ran
-   ([Findings, and the issues you file](#findings-and-the-issues-you-file)), and name the free
-   slots in your summary: a free slot is no reason to take an issue ([Free slots](#free-slots-go-daemon)).
+3. Catch up on the report issue
+   ([finding asks](skill://legion-controller/references/finding-asks.md#catch-up-at-every-start)),
+   and name the free slots in your summary: a free slot is no reason to take an issue ([Free slots](#free-slots-go-daemon)).
 4. Post the day's report when this is your first turn of the UTC day
    ([Daily report](#daily-report-go-daemon)).
 
@@ -198,8 +198,9 @@ quoted`), so they hand it over from the issue header.
 dispatch issue-update --issue <KEY> --label '<each current label>' --label legion
 ```
 
-In `todo` the label admits it. Elsewhere, `set_status` it to `todo` only when the person asked
-Legion to start it now.
+In `todo` the label admits it. In `triage`, triage it in the same turn, from step 3 of [New issue
+triage](#new-issue-triage): the person's request is its handover. Elsewhere, `set_status` it to
+`todo` only when the person asked Legion to start it now.
 
 ## Trees waiting on a root claim (Go daemon)
 
@@ -241,12 +242,14 @@ registered, and none while one of the same kind is still unsent:
   `controller_wake_interval_seconds` (an hour by default), whatever the slots. A day with no event
   and [a tree waiting on a root claim](#trees-waiting-on-a-root-claim-go-daemon) get a turn from
   it. Its payload's `openCapabilities`, when present, names the open capability rows: the
-  deployment capabilities its configuration leaves undecided, and the live capabilities a running
-  session's own check failed. `read_state` lists every row under `capabilities`, each open one
-  with its `detail` (a deployment row's `configLine` for `legion.yaml`; a live row's failing
-  session and fact). Name them in the day's report: a gap is the operator's to close or decide, a
-  live one the operator's or the issue's architect's to fix in the session's environment, never
-  yours.
+  deployment capabilities (the secrets broker, model fallback, every role's CPU and memory limits,
+  the pool's capacity at boot) its configuration leaves undecided, and the live capabilities
+  (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) a
+  running session's own check failed. `read_state` lists every row under `capabilities`, each
+  open one with its `detail` (a deployment row's `configLine` for `legion.yaml`; a live row's
+  failing session and fact). Name them in the day's report: a gap is the operator's to close or
+  decide, a live one the operator's or the issue's architect's to fix in the session's
+  environment, never yours.
 
 On each, read the daemon's state with `read_state`: the free slots are `admission.cap` minus the
 roots in `admission.active` and in `admission.waiting`. Name them in your summary, take nothing for
@@ -256,55 +259,31 @@ them, and do the rest of the turn ([Turn discipline](#turn-discipline)).
 
 You file an issue only when a person asks you to: in a direct message, in a Slack request
 ([Slack mentions](skill://legion-controller/references/slack-mentions.md)), or in their answer to a
-finding ask. Anything else is a finding: a problem you find, and one a session or role sends you as
-text. For each, open a `dispatch ask` on your report issue
-([Daily report](#daily-report-go-daemon) finds it, or creates it when there is none), as
-`skill://legion-worker/references/findings.md` says. Then file nothing until a person answers. A
-problem is not Legion's because Legion found it: the ask names where the fix belongs.
+finding ask. The one issue you file unasked is the report issue. Anything else is a finding: a
+problem you find, and one a session or role sends you as text. For each, open a `dispatch ask` on
+your report issue ([Daily report](#daily-report-go-daemon) finds it, creates it when there is none,
+and reopens it when it is closed), as `skill://legion-worker/references/findings.md` says. Then
+file nothing until a person answers. A problem is not Legion's because Legion found it: the ask
+names where the fix belongs. Follow another role's finding ask, act on each finding ask's answer,
+and catch up on the report issue at every start, as
+[finding asks](skill://legion-controller/references/finding-asks.md) says.
 
-A finding ask another role opened reaches you as its reference, `dispatch://<KEY>/ask/<id>`, on
-the controller topic. Follow it, so that its answer reaches you:
+Every issue you file for a person carries one line in its spec, which [New issue
+triage](#new-issue-triage) reads: `Filed for <person> at their request: <request>`. The request,
+and the person it names, are:
 
-```text
-dispatch follow --ask 'dispatch://<KEY>/ask/<id>' --action follow
-```
+- an answer to an ask: `dispatch://<REPORT KEY>/ask/<id>`, for the person who answered it;
+- a Slack request: `Slack <channel_id> message <ts>`, for the mention's `<@user_id>`;
+- a direct message: `direct message <id>`, with the id its frame's `reply_with` names after
+  `--in-reply-to`, for the frame's `actor`. One that arrives as your own user turn shows no id:
+  write `direct message to session <your session id>`, for the person by the name they gave, else
+  `the person who messaged this session`.
 
-Once it is answered (an ask you follow brings its answer to you), read it with
-`dispatch read --ref 'dispatch://<KEY>/ask/<id>'` and act on the newest answer, its typed text over
-the selected option when the two disagree:
-
-- `Do not file`: file nothing.
-- `File an issue`: `dispatch issue --project <PROJECT> --title '<the problem, as a title>'
-  --spec-file -` in the project where the fix belongs, as the answer or the ask names it. The spec
-  states the problem and where the fix belongs, and cites the ask and its evidence by their
-  `dispatch://` references. No `legion` label.
-- `File it for Legion`: the same, with `--label legion`. It opens in `triage` with the label, so
-  its triage wake brings it back to you ([New issue triage](#new-issue-triage)).
-
-Then reply under the ask with what you did, its first line exactly `Filed dispatch://<NEW KEY>` or
-`Not filed: <reason>`: `dispatch comment --issue <REPORT KEY> --reply-to-ask '<ask id>'
---body-file -`. Dispatch refuses to resolve an answered ask, so that reply is its record. An open
-finding ask that turns moot (an issue now tracks the problem, or the problem is gone) you close
-with `dispatch resolve-ask --kind resolved`, naming why.
-
-An answer that arrives while no controller runs never wakes you, a reference published then
-reaches nobody, and a new session follows none of the asks an earlier one followed. So at every
-start, catch up on the report issue (with none yet, there is nothing to catch up):
-
-1. Read it with `dispatch read`. When `Assignee:` says `unassigned` and a person is known (the
-   deployment instructions name one, or `dispatch whoami` names an owner), assign it, naming your
-   session (`envoy_whoami`'s `session_id`):
-   `curl -sS -X PATCH -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" -H 'Content-Type: application/json' -d '{"assignee": "<email>", "actor": {"kind": "session", "id": "<session id>"}}' "$DISPATCH_URL/api/v1/issues/<REPORT KEY>"`.
-2. Follow each of its open asks: `dispatch open-asks --project <PROJECT>` lists every unanswered
-   ask of the project, with no cap, each line naming its issue; follow those on the report issue.
-3. List the answered asks still waiting on you, which no `dispatch` command lists:
-   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
-   Act on each as above (a triage ask as [New issue triage](#new-issue-triage) says); one that
-   re-files an escalated child also takes the steps of [Architect escalation](#architect-escalation).
-
-Each `curl` here and in triage reads `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which `legion
-controller start` sets only when `controller.yaml` names `dispatch_url`. A read that fails or prints
-no JSON array admits nothing and acts on nothing: name it, with its first line, in your summary.
+Each `curl` in this skill and its references reads `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which
+`legion controller start` sets only when `controller.yaml` names `dispatch_url`. A read that fails
+or prints no JSON array admits nothing and acts on nothing, and an assignment that does not print
+the issue with its new `assignee` leaves it unassigned (`400 ASSIGNEE_NOT_ALLOWED` names an email
+nobody has signed in to Dispatch with). Name either, with its first line, in your summary.
 
 ## Daily report (Go daemon)
 
@@ -316,7 +295,8 @@ on the project's `Legion daily report` issue:
 `dispatch search --query '"Legion daily report"' --project <PROJECT>` finds it. When it
 does not exist, create it once (the one issue you file unasked) and park it in `icebox`, so nobody
 takes it as work; it never carries the `legion` label. It holds every finding ask, so assign it to
-the person who answers for the project, as catch-up step 1 above names them:
+the person who answers for the project: the one the deployment instructions name, else the owner
+`dispatch whoami` names:
 
 ```text
 dispatch issue --project <PROJECT> --title 'Legion daily report' --assignee '<email>' --spec-file - <<'EOF'
@@ -331,11 +311,17 @@ With no person known, leave out `--assignee`. While the issue's `Assignee:` says
 each report opens with one sentence asking a person to take the issue from its header, since its
 asks reach only the Inbox's `Unassigned` filter.
 
+Each time you read it, keep it answerable. `Status: done` means someone closed it: Dispatch
+refuses an ask or a message there (`409 ISSUE_CLOSED`) and hides its open asks, so reopen it with
+`set_status` to `icebox` and say so in the day's report. `Assignee: unassigned`, with a person
+known, means assign it, naming your session (`dispatch whoami` names it):
+`curl -sS -X PATCH -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" -H 'Content-Type: application/json' -d '{"assignee": "<email>", "actor": {"kind": "session", "id": "<session id>"}}' "$DISPATCH_URL/api/v1/issues/<REPORT KEY>"`.
+
 **When.** On your first turn of each UTC day, whatever it is: your start, or a wake of any kind.
 While you are registered, the daemon's `tick` gives you a turn at least every
 `controller_wake_interval_seconds`. After the turn's own work, read the report issue with
-`dispatch read`, assign it as catch-up step 1 says when it is unassigned, and post when its
-`Events:` show no `message.created` from today.
+`dispatch read`, keep it answerable as above, and post when its `Events:` show no
+`message.created` from today.
 
 **What.** One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters,
 since it is a report rather than a log of the day, written as `skill://dispatch`'s "Writing for
@@ -407,7 +393,7 @@ themselves: an issue reaches Legion only when a person hands it over
 | `unslotted on <KEY>` from the Go daemon (payload `{kind: "unslotted", reason}`) | a root that held no slot and waited for none: a person or another session moved it from `todo` to the status `reason` names while it waited, so the daemon took it out of the workflow (`issues.<KEY>.phase` is `done`) and starts nothing for it ([reading admission](skill://legion-controller/references/admission.md)) | Re-admit nothing yourself: the move was someone else's, and `dispatch read` shows who claims it now. Name it in your summary to the human ("<KEY> left Legion's waiting line: it was set to <status> while it waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again") |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `read_state`, and the live capabilities a running session's check failed, each with the detail naming the session (pod or pane), role, issue and fact, and no `configLine` | Recheck the trees waiting on a claim and name the free slots in your summary; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides a deployment row; the operator or the issue's architect fixes a live row's session; you take no other action) |
 | Architect escalation (a child that looks independent of its tree, capacity, a cross-tree conflict) | request + context | Judge it; a child is re-filed as a root only on a person's answer to your ask ([Architect escalation](#architect-escalation)); the owning architect writes an issue-design decision as a decision block and opens its own finding asks |
-| A finding ask's reference (`dispatch://<KEY>/ask/<id>`) on the controller topic, or the answer to a finding ask you follow | the ask, or its answer | Follow the ask; file only what a person's answer asks for ([Findings, and the issues you file](#findings-and-the-issues-you-file)) |
+| A finding ask's reference (`dispatch://<KEY>/ask/<id>`) on the controller topic, or the answer to a finding ask you follow | the ask, or its answer | Follow the ask; file only what a person's answer asks for ([finding asks](skill://legion-controller/references/finding-asks.md)) |
 | A finding sent to you as text | the problem and its evidence | Open a `dispatch ask` for it and file nothing ([Findings, and the issues you file](#findings-and-the-issues-you-file)) |
 | Mention | GitHub PR @mention text | Answer, or route to the owning issue's architect role |
 | Slack mention (`from: slack`) | the mention's `channel_id`, `user_id`, `text`, `ts`, `thread_ts` | Nothing when your `Slack channels:` line does not name its `channel_id`; otherwise answer in its thread with `slack_post`: a state question from `read_state`, a work request filed as a Dispatch issue, an architect's question routed to that architect ([Slack mentions](skill://legion-controller/references/slack-mentions.md)) |
@@ -427,13 +413,16 @@ themselves: an issue reaches Legion only when a person hands it over
    events: `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<issue>/events?limit=200"`.
    The first `issue.created` or `issue.updated` event whose `payload.labels` holds `legion` (in
    any case) set it, and its `actor` is who. A person's label (`actor.kind` is `user`) hands it
-   over. So does a filing whose spec cites, by its link, a person's request of you, or an ask
-   whose newest answer is `File it for Legion` and whose thread holds a session reply
-   `Filed dispatch://<this KEY>` after that answer. Any other actor (a session, a bot, a filing
-   that cites neither) hands over nothing: leave the issue in `triage` and ask the person on your
-   report issue whether Legion should take it, naming the issue and who labelled it, with the
-   options `Admit it` and `Leave it`. On `Admit it`, admit it below; either way reply under the
-   ask `Admitted dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
+   over. So does your own filing for a person: its spec as filed (`dispatch doc-read --issue
+   <issue> --version 1`) holds the line `Filed for <person> at their request: <request>`
+   ([Findings, and the issues you file](#findings-and-the-issues-you-file)), and its `actor` is a
+   session that is yours: this one, which `dispatch whoami` names, or, for a request that is an
+   ask, the one whose reply under that ask (`dispatch read --ref`) starts `Filed dispatch://<this
+   KEY>` after a newest answer of `File it for Legion`, which holds across your restarts. Any other
+   filing hands over nothing: leave the issue in `triage` and ask the person on your report issue
+   whether Legion should take it, naming the issue and who labelled it, with the options `Admit
+   it` and `Leave it`. On `Admit it`, admit it below; either way reply under the ask `Admitted
+   dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
 3. If a person handed it over and it should run now, admit the root issue:
 
    ```text
@@ -470,8 +459,9 @@ issue` re-files it as a root a person takes, `File it for Legion` as a root Legi
 file` keeps it in its tree). Only on the person's yes:
 
 1. File the root with `dispatch issue --project <KEY> --title '<title>' --spec-file -` (no
-   `--parent`), its spec citing the ask; add `--label legion` only when the answer asks Legion to
-   run it. `--project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`):
+   `--parent`), its spec citing the ask and carrying its `Filed for` line ([Findings, and the issues
+   you file](#findings-and-the-issues-you-file)); add `--label legion` only when the answer asks
+   Legion to run it. `--project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`):
    the project key exactly as `legion.yaml` writes it, which `read_state` shows as
    `daemon.project`. It is not the lowercase project token in role names such as
    `legion-<project>-controller`.

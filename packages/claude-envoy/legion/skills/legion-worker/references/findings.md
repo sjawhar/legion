@@ -19,7 +19,8 @@ whether it needs an issue, where, and whether Legion works it.
 - Search first (`skill://dispatch-first`): when an open issue already tracks the problem, comment
   the evidence on that issue and ask nothing. When an open ask on the report issue already asks
   about it (`dispatch open-asks --project <PROJECT>` lists them), add your evidence under that ask
-  (`dispatch comment --issue <REPORT KEY> --reply-to-ask '<ask id>'`) and open no second one.
+  (`dispatch comment --issue <REPORT KEY> --reply-to-ask '<ask id>' --body-file -`, the evidence on
+  stdin) and open no second one.
 
 Three kinds of issue are still filed: an architect's children of its own tree (`dispatch issue
 --parent`, `skill://legion-architect`); an issue a person asked the controller to file, in a
@@ -37,11 +38,13 @@ closes, Dispatch takes its open asks out of the Inbox and refuses their answers
 (`409 ISSUE_CLOSED`). The question names the issue the finding came from by its `dispatch://`
 reference.
 
-When the project has no report issue yet, do not create one yourself (the controller does): send
-the finding to the controller as text, with `envoy_publish` to the controller topic your `Legion
-addressing` line names (`expects_reply: none`), holding the problem, the issue it came from and
-the evidence. The controller creates the report issue and opens the ask. A production check's
-`Production:` line then names the finding as sent to the controller.
+When the project has no report issue yet, or a person closed it (`dispatch read` shows `Status:
+done`, and Dispatch refuses the ask with `409 ISSUE_CLOSED`), do not create or reopen one yourself
+(the controller does): send the finding to the controller as text, with `envoy_publish` to the
+controller topic your `Legion addressing` line names (`expects_reply: none`), holding the problem,
+the issue it came from and the evidence. The controller creates or reopens the report issue and
+opens the ask. A production check's `Production:` line then names the finding as sent to the
+controller.
 
 ## What it says
 

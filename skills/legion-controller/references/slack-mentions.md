@@ -72,16 +72,18 @@ For a person's mention, take the first of these that fits.
 
   <what the person asked for, in your words, and why if they said>
 
-  Asked in Slack by <@user_id> in channel <channel_id>, message <ts>.
+  Filed for <@user_id> at their request: Slack <channel_id> message <ts>
   EOF
   ```
 
-  Add `--label legion` only when the person asks Legion to do the work ("Legion, fix…", "can
+  The last line is the skill's `Filed for` line ("Findings, and the issues you file"), which triage
+  reads. Add `--label legion` only when the person asks Legion to do the work ("Legion, fix…", "can
   Legion take…"); a request for someone to look at something, or one that does not say who, gets
   no label and waits for a person to hand it over. Never label a request outside the scope the
   deployment instructions state. Reply with the new issue's key, its title, the link and assignee
   the `Created` line names (Dispatch assigns the issue to your token's owner when you name nobody),
-  and whether Legion will take it.
+  and whether Legion will take it: with the label, triage admits it in its next turn unless it
+  should wait.
 - **Something an issue's architect owns.** A question about a tree's design, a change of direction,
   a decision only the tree's architect can make about an issue Legion runs. Find the tree: follow
   `Links:` up through each `child_of` parent with `dispatch read` until you reach the issue
