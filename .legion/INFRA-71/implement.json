@@ -2,65 +2,56 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T08:40:00Z",
-  "round": "the reviewer's eight items and nothing else, on the architect's instruction that the section is frozen after them",
+  "completed": "2026-10-24T09:40:00Z",
+  "round": "the reviewer's four defects, plus the evidence boundary the architect required in the same change; the section is closed after this",
   "proof": [
     {
-      "criterion": "The two required: the section's diagnostic for the one failure that announces nothing used a verb this identity may not use, and the collision clause said a second apply could patch another role's Job.",
-      "surface": "The live cluster from this role container, through the credential its deployment projects — `kubectl auth can-i` against the API server, not a reading of any policy.",
-      "command": "kubectl auth can-i get endpoints ; list endpoints ; patch jobs ; update jobs ; get services ; create jobs ; delete jobs ; get pods ; get pods/log",
-      "observed": "`get endpoints` no, `list endpoints` no, `patch jobs` no, `update jobs` no, `get services` no; `create jobs` yes, `delete jobs` yes, `get pods` yes, `get pods/log` yes. So the endpoints command is gone from the label bullet, which now compares the labels on the role's own pod with the deployment's declaration and names the refusal in place; and the naming paragraph says taking a name in use does not overwrite that workload, because the apply is refused, while the wait, the reachability check and the delete all still act on the other role's workload — which is the part that costs.",
-      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
-      "negativeControl": "The grants are measured as a matrix rather than one at a time, so the section's remaining commands are checked as well as the removed ones: every command the sequence still names is in the `yes` set above, and every one in the `no` set is gone from it."
+      "criterion": "Finding 1 — the Service step needs `get services` as well as `create services`, so the gate's two `create` answers did not predict that the sequence completes, and the sentence inferring one verb's answer from another's could not hold where the sequence runs.",
+      "surface": "The live cluster from this role container: the section's own Service manifest submitted both ways, and the gate block run line by line as published.",
+      "command": "kubectl apply -f <the section's Service> ; kubectl create -f <the same file> ; then each line of the published gate block, evaluated in order",
+      "observed": "The apply ends `Error from server (Forbidden): error when retrieving current configuration of: … cannot get resource \"services\"` (the namespace elided here as the reviewer elided it) and never attempts the create; `kubectl create` of the same file is refused on the create instead. The gate now asks three verbs and explains the third where it stands — `kubectl apply` is client-side and reads the live object first — and run as published it answers `yes`, `no`, `no`. The submit-nothing rule reads `unless all three commands answer a bare yes`, the closing line says reading a Service needs that third answer rather than inferring it, and the `AGENTS.md` pointer names the third verb too.",
+      "headSha": "73f952904b896d0f59b782eefc3aadf020ff6414",
+      "negativeControl": "Scoped, which is this round's finding 4: of the commands the sequence runs **before** the Service steps, every one is in the measured `yes` set (`create jobs`, `get job`, `get pods`, `wait`, `pods/log`, `delete jobs`), and every verb in the `no` set is absent from them. The Service `apply` is the exception and is not claimed otherwise: it needs `get` and `create` on Services, both `no` here, which is why the section says the sequence has never run past its second line in this deployment. The previous handoff's unscoped version of this sentence is corrected rather than repeated."
     },
     {
-      "criterion": "The gate quoted an output nobody got, and decided without instructing — so a role could read two answers, submit the Job anyway, and leave a four-processor workload on the shared quota until its deadline.",
-      "surface": "This role container with its in-cluster configuration taken away, which is the shape a credential-less role runs in.",
-      "command": "env -u KUBERNETES_SERVICE_HOST -u KUBERNETES_SERVICE_PORT -u KUBERNETES_SERVICE_PORT_HTTPS kubectl auth can-i create jobs ; the status captured directly rather than through a pipeline",
-      "observed": "Exit **1**, last line `The connection to the server localhost:8080 was refused - did you specify the right host or port?`. The section quotes that and nothing else; the earlier `exit 0` and the two strings it quoted are gone. And the gate now instructs: **unless both commands answer a bare `yes`, submit nothing**, with the reason in place — the sequence is unconditional, its only `kubectl delete job` is after the Service steps, and those are refused `Forbidden` wherever the second answer is `no`. The trailing pre-apply paragraph is removed, as that makes it unnecessary.",
-      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
-      "negativeControl": "The previous text's `exit 0` came from a pipeline reporting `head`'s status rather than `kubectl`'s — the reviewer's own error, carried into the section and now corrected at its source. Running it the same wrong way still prints 0, which is why the measurement is written with the status captured directly."
+      "criterion": "Finding 2 — the label bullet named as the symptom what both failure shapes do, contradicting the paragraph eight lines below it, so a role meeting a persistent refusal would read it as the missing label.",
+      "surface": "The published `python3` block run unedited against each shape, and the two passages read against each other.",
+      "command": "the block run against a listener and against an address whose packets are dropped (deadline cut to end the case), beside the bullet and the paragraph",
+      "observed": "A listener prints `answered`; a dropped address prints `never answered: TimeoutError: timed out` and exits 1. The bullet now names the class — ending at its deadline with `TimeoutError` every try, *that* class, not a refusal, which is a workload still starting up — and points at the paragraph that sets the distinction out, so the two passages say one thing.",
+      "headSha": "73f952904b896d0f59b782eefc3aadf020ff6414",
+      "negativeControl": "The refusal case is the control and the reviewer measured it at this head: a port refusing throughout prints `never answered: ConnectionRefusedError` at 60.1 s. That string is what the old bullet would have sent a role to the label for; under the new wording it is excluded by name."
     },
     {
-      "criterion": "The reachability check ran once, the instant `kubectl wait` returned, and the only reading offered was for a timeout — so the normal first outcome, a refused connection while the database initialises, was handed the one wrong answer in the section.",
-      "surface": "The published `python3` block, extracted from the section and run as published, against all three shapes a role can meet.",
-      "command": "the block run against a port that listens; against a port that refuses for six seconds and then listens; and against an address whose packets are dropped, with its deadline cut to twelve seconds so the case ends",
-      "observed": "A listening port prints `answered` at once. A port that refuses and then listens prints `answered`, the loop riding out the refusals — which is the readiness race, since the pod carries no readiness probe and `condition=Ready` means only that the container started. A dropped address prints `never answered: TimeoutError: timed out` and exits 1. The paragraph now names the two failures apart: refused in the first seconds is reachable and not listening yet; timed out every try to the deadline is unreachable, which is the missing label.",
-      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
-      "negativeControl": "The third shape is the control for the second: both are failures of the same call, and only the exception type tells them apart, which is why the section reports the exception's name rather than saying `failed`. The loop is a minute at 5 s per connect and 2 s between tries, inside the `kubectl wait --timeout=300s` above it."
+      "criterion": "Finding 3 — `the labels on its own pod` reads as the role's own, where the pod that must carry the reachability label is the workload's, and a role may not read its own pod at all.",
+      "surface": "The section's text against the grant this role holds.",
+      "command": "the bullet re-read against `kubectl auth can-i get pods` in this namespace (yes, for pods of this namespace) and the reviewer's measurement for Legion's own namespace (no)",
+      "observed": "The bullet reads `compares the labels on **the workload's** pod`, with a parenthesis saying the bracketed command reads a pod of this namespace and that a role may not read its own, in the namespace Legion's pods run in. The gloss in the previous handoff repeated the same error and is corrected here rather than carried forward.",
+      "headSha": "73f952904b896d0f59b782eefc3aadf020ff6414",
+      "negativeControl": "The command itself was always the workload's (`-l job-name=<workload>`); it was the prose that misled, which is why the fix is the word and the parenthesis rather than a new command."
     },
     {
-      "criterion": "The two minor claims: the bullets' preamble promised the namespace enforces each of them four lines above the bullet that says it does not, and the Services line reasoned from RBAC rather than from a measurement.",
-      "surface": "The section's text against the measured grant matrix.",
-      "command": "the preamble and the closing line re-read against kubectl auth can-i get services / delete jobs / patch jobs",
-      "observed": "The preamble reads `Every one but the last is enforced by the namespace's admission rather than by anyone's good behaviour; the last is enforced by nothing, which is why it is marked where it stands.` The closing line says the last command asks only for Jobs and pods because this identity may not read Services either — `get services` answers `no` wherever `create services` does — rather than claiming reading needs the same grant as creating, which this identity disproves: `delete jobs` yes while `patch jobs` no.",
-      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
-      "negativeControl": "The section's own manifest, extracted and filled as a role fills it, is still accepted by live admission at this head (`job.batch/infra-71-postgres created (server dry run)`), so none of this round's wording changes moved the thing the rules describe."
-    },
-    {
-      "criterion": "The reviewer's new finding, in the test handoff rather than in the guidance: five proofs recorded a headSha no commit has, and the swept diff was called five files where it is nine.",
-      "surface": "The committed `.legion/INFRA-71/test.json`, and GitHub's own commit lookup.",
-      "command": "gh api repos/sjawhar/legion/commits/63a5ab96903a68505eb288ad63a223398f13c7e1 ; the file edited and re-parsed as JSON",
-      "observed": "All five `headSha` values now read `63a5ab96903a68505eb288ad63a223398f13c7e1`, which GitHub resolves to itself; the bad value `63a5ab96903a95996e30bae1d0d8a7f2b15f5af5` answered 422. The surface line reads nine files, with a parenthesis in place saying it said five and that the four `.legion/` handoffs were what it left out — one of which is where the private name was, so the sweep's own count mattered. Corrected openly on the architect's instruction, not quietly; the tester is told by Envoy that its handoff changed under it, and nothing else of that file is touched.",
-      "headSha": "0ca46259289e7694e0f0a7e35f70e7e144d6fcc8",
-      "negativeControl": "This is the same defect this tree caught in itself two rounds ago — a proof naming a commit nobody has — so it is checked the same way: every `headSha` in both handoffs is 40 hex and resolves on GitHub, and the one that did not is named here rather than silently replaced."
+      "criterion": "The architect's requirement in the same change: the section must show which of its instructions were executed in this deployment and which are written from the declarations and wait on a person's apply — the pattern under every defect found since the freeze, all of which lived in the half that cannot run here.",
+      "surface": "The section itself, and the record of what this issue has actually run.",
+      "command": "the new `What of this has been run, and where` passage written from this round's and the previous rounds' measurements, each re-checked at this head: the gate block, the grant matrix, the Job manifest through live admission, the credential-less gate, and the reachability block",
+      "observed": "The passage names two lists. Executed from a role container at this head: the three gate commands and the whole grant matrix behind them; the Job manifest through the namespace's own admission, server-side with nothing created, with one deliberate breakage of each rule; the credential-less gate with the in-cluster environment removed; and the reachability block against a listener, a port that refuses and then listens, and a dropped address. Not executed anywhere yet: creating the Job for real, the Service steps, the wait, the logs and the delete — with the reason (the Service steps are refused on `get` before the create is attempted) and the instruction to read them as a design until a role has run them end to end and said so. Re-measured at this head: the gate answers `yes`, `no`, `no`, and `job.batch/infra-71-postgres created (server dry run)`.",
+      "headSha": "73f952904b896d0f59b782eefc3aadf020ff6414",
+      "negativeControl": "The boundary is falsifiable rather than decorative: every claim in the executed list is a command a reader can run from a role container and check, and the unexecuted list names the exact step where the sequence stops here — the second line — which is what the reviewer's four findings all sat behind."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md: the gate's measured output and its instruction to submit nothing without two `yes`es; the bullets' preamble; the label bullet's diagnostic; the naming paragraph's collision; the looping reachability check and the paragraph separating refusal from timeout; the closing line on Services; the trailing pre-apply paragraph removed.",
-    ".legion/INFRA-71/test.json: five `headSha` values corrected to the commit that exists, and the swept diff's file count corrected from five to nine, each saying so in place."
+    "docs/kubernetes.md: the gate's third verb with its reason and the submit-nothing rule; the label bullet's symptom and the workload's pod; the closing line on reading a Service; and the `What of this has been run, and where` passage.",
+    "AGENTS.md: the pointer names the third gate verb and says the section marks its own evidence boundary."
   ],
   "trickyParts": [
-    "The readiness race is invisible to every check that is not a loop: `kubectl wait --for=condition=Ready` is satisfied by a container that has started, and a database's listener comes up later, so a single connect attempt reports a failure that means nothing. The exception type is the only signal that separates it from unreachability, which is why the published block prints it."
+    "`kubectl apply` failing on a read is invisible to `kubectl auth can-i create services` and to any reasoning from the verb the step appears to use. Only submitting the manifest shows it, which is the same shape as the defects before it: the claim was about a command nobody had run here."
   ],
   "deviations": [
-    "Nothing beyond the reviewer's eight items was touched, on the architect's instruction that the section is frozen after this round."
+    "Nothing beyond the reviewer's four and the architect's evidence-boundary requirement was touched. The reviewer's four improvements (a reading for `gaierror`, a name unique across the six roles of one issue, a `trap … EXIT` for the quota warning, and `plan.json`'s citation of `AGENTS.md:155` now being `:145`) are deliberately not taken: they went to the architect as the freeze asks."
   ],
   "openQuestions": [
-    "Specification acceptance 1, 2, 3 and 4 wait on a person applying dispatch://INFRA-206. The Service half of the sequence is refused `Forbidden` here and recorded as refused, never simulated; the reachability check's positive path against a real workload is part of that live proof.",
-    "The private name exposed in `.legion/INFRA-71/plan.json:100` between 761e24ff and 63a5ab96 remains reachable through this pull request's history by the architect's ruling; retro takes `.legion/` off the merging head."
+    "Specification acceptance 1, 2, 3 and 4 wait on a person applying dispatch://INFRA-206. The section now says which of its own steps that covers, so the gap is in the document rather than only in this handoff."
   ],
   "discoveredComplexity": [
-    "Three of this round's eight were claims about what the cluster would refuse, written without asking it. The matrix of `kubectl auth can-i` answers costs seconds and decides all of them, which is now how every command in the section is justified."
+    "Every defect found in this section since it was frozen was in a step this deployment cannot execute, while the executable half has been clean for two rounds. That is why the boundary is now in the text: a reader can see which half carries evidence."
   ]
 }
