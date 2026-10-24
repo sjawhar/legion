@@ -538,6 +538,7 @@ resolve_trusted_root() {
 # 1; and from there the user namespace of its worker-shim (role-init's child), so the command runs
 # as the role's own user with the role's own mounts. The Stage 4a harness enters a role the same way
 # (packages/daemon/internal/runtime/sandbox/live_test.go, roleEnter).
+# shellcheck disable=SC2016 # the shell runs in the pod, so nothing in it expands here
 role_enter='role=$1; shift
 found=
 for d in /proc/[0-9]*; do
