@@ -73,8 +73,7 @@ func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.
 	}
 	report, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), workspace.FetchRequest{
 		Repo: repository, Token: token, CredentialDir: os.TempDir(), Feed: feed,
-		Clone: filepath.Join(workspace.CloneRoot(filepath.Dir(feed)), repository.Owner(), repository.Name()),
-		Log:   func(line string) { fmt.Fprintln(stdout, "workspace-init fetch: "+line) }, Clock: fetchClock, CacheURL: cacheURL, CacheToken: cacheToken,
+		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init fetch: "+line) }, Clock: fetchClock, CacheURL: cacheURL, CacheToken: cacheToken,
 	})
 	if err != nil {
 		return err

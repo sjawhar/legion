@@ -71,18 +71,13 @@ func TestProvisionNamesRefsThatLostBorrowedHistory(t *testing.T) {
 	runSetup(t, workspace.Clone, "jj", "git", "init", "--colocate")
 	lost := commitOnlyInFeed(t, first.Feed)
 	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "refs/jj/keep/lost-history", lost)
-	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte("foreign\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Fetch(context.Background(), run, fetch); err != nil {
-		t.Fatalf("Fetch after the foreign feed: %v", err)
-	}
+	replaceAlternate(t, workspace.Clone, run.remote)
 	failed := exec.Command("git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
 	if output, err := failed.CombinedOutput(); err == nil {
 		t.Fatalf("test setup left the shared clone connected: %s", output)
 	}
 
-	_, err = Provision(context.Background(), run, request)
+	_, err = Provision(context.Background(), failedFetchRunner{Runner: run}, request)
 	if err == nil {
 		t.Fatal("Provision succeeded with refs that lost borrowed history")
 	}
@@ -94,34 +89,93 @@ func TestProvisionNamesRefsThatLostBorrowedHistory(t *testing.T) {
 	}
 }
 
-// A clone created before local feed clones replaced alternates must be dissociated before a foreign
-// feed is removed, preserving the objects its refs still need.
-func TestFetchDissociatesAnOldSharedCloneBeforeReplacingItsFeed(t *testing.T) {
+// A clone created before local feed clones replaced alternates is dissociated from the quarantined
+// feed by the uncredentialed provision step before that feed is removed.
+func TestProvisionDissociatesAnOldSharedCloneAfterFeedQuarantine(t *testing.T) {
 	run := newLocalRunner(t)
-	request := fetchRequest(t)
-	first, err := Fetch(context.Background(), run, request)
+	fetch := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, fetch)
 	if err != nil {
 		t.Fatalf("first Fetch: %v", err)
 	}
-	clone := filepath.Join(t.TempDir(), "repos", "github.com", "acme", "widgets")
-	if err := os.MkdirAll(filepath.Dir(clone), 0o700); err != nil {
+	request := provisionRequest(t)
+	request.Source = FromFeed(fetch.Feed)
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
 		t.Fatal(err)
 	}
-	runSetup(t, t.TempDir(), "git", "clone", "--shared", "--quiet", first.Feed, clone)
+	if err := os.MkdirAll(filepath.Dir(workspace.Clone), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, request.StateDir, "git", "clone", "--shared", "--quiet", first.Feed, workspace.Clone)
+	runSetup(t, workspace.Clone, "git", "remote", "set-url", "origin", GitHubURL(request.Repo))
+	runSetup(t, workspace.Clone, "jj", "git", "init", "--colocate")
 	lost := commitOnlyInFeed(t, first.Feed)
-	runSetup(t, clone, "git", "--git-dir="+filepath.Join(clone, ".git"), "update-ref", "refs/jj/keep/lost-history", lost)
-	request.Clone = clone
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "refs/jj/keep/lost-history", lost)
 	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte("foreign\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := Fetch(context.Background(), run, request); err != nil {
+	if _, err := Fetch(context.Background(), run, fetch); err != nil {
 		t.Fatalf("Fetch after the foreign feed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(clone, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("Provision after the feed quarantine: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Clone, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("clone alternates after dissociation = %v, want absent", err)
 	}
-	runSetup(t, clone, "git", "--git-dir="+filepath.Join(clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
+	if _, err := os.Stat(first.Feed + ".legacy"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantined feed after provision = %v, want removed", err)
+	}
+}
+
+// Moving a symlinked feed owner aside must preserve the legacy alternate path until the
+// uncredentialed provisioner repacks the clone.
+func TestProvisionDissociatesAnOldSharedCloneAfterSymlinkedFeedOwnerQuarantine(t *testing.T) {
+	run := newLocalRunner(t)
+	fetch := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, fetch)
+	if err != nil {
+		t.Fatalf("first Fetch: %v", err)
+	}
+	request := provisionRequest(t)
+	request.Source = FromFeed(fetch.Feed)
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workspace.Clone), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, request.StateDir, "git", "clone", "--shared", "--quiet", first.Feed, workspace.Clone)
+	runSetup(t, workspace.Clone, "git", "remote", "set-url", "origin", GitHubURL(request.Repo))
+	runSetup(t, workspace.Clone, "jj", "git", "init", "--colocate")
+	lost := commitOnlyInFeed(t, first.Feed)
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "update-ref", "refs/jj/keep/lost-history", lost)
+	owner := filepath.Dir(first.Feed)
+	target := filepath.Join(t.TempDir(), "owner")
+	if err := os.Rename(owner, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Fetch(context.Background(), run, fetch); err != nil {
+		t.Fatalf("Fetch after the symlinked owner: %v", err)
+	}
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("Provision after the symlinked owner quarantine: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Clone, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clone alternates after dissociation = %v, want absent", err)
+	}
+	runSetup(t, workspace.Clone, "git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling")
+	if _, err := os.Lstat(owner + ".legacy"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("quarantined owner after provision = %v, want removed", err)
+	}
 }
 
 // A previous Jujutsu import can retain a feed-only commit in its operation view after Git drops the
@@ -153,12 +207,7 @@ func TestProvisionNamesJujutsuOperationHistoryThatLostBorrowedObjects(t *testing
 	if err := os.Remove(filepath.Join(workspace.Clone, ".git", "logs", "refs", "heads", "lost-history")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(first.Feed, "info", "grafts"), []byte("foreign\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Fetch(context.Background(), run, fetch); err != nil {
-		t.Fatalf("Fetch after the foreign feed: %v", err)
-	}
+	replaceAlternate(t, workspace.Clone, run.remote)
 	if output, err := exec.Command("git", "--git-dir="+filepath.Join(workspace.Clone, ".git"), "fsck", "--connectivity-only", "--no-dangling").CombinedOutput(); err != nil {
 		t.Fatalf("Git reports missing history that only Jujutsu should name: %v\n%s", err, output)
 	}
@@ -188,6 +237,15 @@ func (r failedFetchRunner) Run(ctx context.Context, command Command) (Result, er
 		return Result{ExitCode: 1, Stderr: "the provision fetch failed"}, nil
 	}
 	return r.Runner.Run(ctx, command)
+}
+
+func replaceAlternate(t *testing.T, clone, remote string) {
+	t.Helper()
+	fresh := filepath.Join(t.TempDir(), "replacement.git")
+	runSetup(t, t.TempDir(), "git", "clone", "--bare", "--quiet", remote, fresh)
+	if err := os.WriteFile(filepath.Join(clone, ".git", "objects", "info", "alternates"), []byte(filepath.Join(fresh, "objects")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func commitOnlyInFeed(t *testing.T, feed string) string {

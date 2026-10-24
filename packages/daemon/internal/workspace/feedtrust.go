@@ -15,18 +15,22 @@ import (
 )
 
 // ownFeedRepository makes the feed repository gitDir one Fetch may take as its own, before it runs
-// any git there: a symlink at the repository's owner directory is removed (an earlier release's
-// agent could have pointed it anywhere), the stale locks a killed fetch left are removed
-// (RemoveStaleFeedLocks, which follows no link), and a repository foreignFeed refuses is removed
-// whole after beforeRemove preserves any history an old clone borrowed from it. It answers whether
-// a repository Fetch may fetch into is left there.
-func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log func(string), beforeRemove func() error) (bool, error) {
+// any git there. A foreign feed is quarantined outside the new feed path, so the uncredentialed
+// provisioner can preserve a legacy clone that borrowed its objects before the quarantine is removed.
+func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log func(string)) (bool, error) {
 	owner := filepath.Dir(gitDir)
 	if info, err := os.Lstat(owner); err == nil && info.Mode()&fs.ModeSymlink != 0 {
-		if err := os.Remove(owner); err != nil {
-			return false, fmt.Errorf("remove the symlink at the feed's %s: %w", owner, err)
+		legacy := owner + ".legacy"
+		if _, err := os.Lstat(legacy); !errors.Is(err, fs.ErrNotExist) {
+			if err == nil {
+				return false, fmt.Errorf("the feed's legacy owner %s already exists", legacy)
+			}
+			return false, err
 		}
-		log(fmt.Sprintf("the feed's %s is not one this fetch wrote (it is a symlink): removed; the feed is filled afresh", owner))
+		if err := os.Rename(owner, legacy); err != nil {
+			return false, fmt.Errorf("quarantine the symlink at the feed's %s: %w", owner, err)
+		}
+		log(fmt.Sprintf("the feed's %s is not one this fetch wrote (it is a symlink): quarantined; the feed is filled afresh", owner))
 		return false, nil
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return false, err
@@ -46,15 +50,17 @@ func ownFeedRepository(gitDir string, repo ghrepo.Repository, now time.Time, log
 	if why == "" {
 		return true, nil
 	}
-	if beforeRemove != nil {
-		if err := beforeRemove(); err != nil {
-			return false, fmt.Errorf("dissociate the clone before removing the feed's %s: %w", gitDir, err)
+	legacy := gitDir + ".legacy"
+	if _, err := os.Lstat(legacy); !errors.Is(err, fs.ErrNotExist) {
+		if err == nil {
+			return false, fmt.Errorf("the feed's legacy repository %s already exists", legacy)
 		}
+		return false, err
 	}
-	if err := os.RemoveAll(gitDir); err != nil {
-		return false, fmt.Errorf("remove the feed's %s, which %s: %w", gitDir, why, err)
+	if err := os.Rename(gitDir, legacy); err != nil {
+		return false, fmt.Errorf("quarantine the feed's %s, which %s: %w", gitDir, why, err)
 	}
-	log(fmt.Sprintf("the feed's %s is not one this fetch wrote (%s): removed; the feed is filled afresh", repo, why))
+	log(fmt.Sprintf("the feed's %s is not one this fetch wrote (%s): quarantined; the feed is filled afresh", repo, why))
 	return false, nil
 }
 

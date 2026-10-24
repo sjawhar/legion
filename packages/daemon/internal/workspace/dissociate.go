@@ -10,13 +10,38 @@ import (
 	"strings"
 )
 
-// dissociateClone copies objects from feed into an old shared clone before Fetch removes that feed.
-// New clones have no alternates. A clone that borrows another store is left alone because removing
-// this feed cannot remove that history.
-func dissociateClone(ctx context.Context, run Runner, cloneDir, feed string, log func(string)) error {
-	if cloneDir == "" {
-		return nil
+// legacyFeedPaths are the two quarantines ownFeedRepository creates: a bare feed moved aside, or
+// a symlinked owner moved aside without following its target.
+func legacyFeedPaths(feed string) []string {
+	return []string{feed + ".legacy", filepath.Join(filepath.Dir(feed)+".legacy", filepath.Base(feed))}
+}
+
+// dissociateLegacyClone repacks a legacy alternate clone after workspace-fetch quarantines a
+// foreign feed and before provisioning reads the clone. This process holds no provisioning token.
+func dissociateLegacyClone(ctx context.Context, run Runner, cloneDir, feed string, log func(string)) error {
+	for _, legacy := range legacyFeedPaths(feed) {
+		if _, err := os.Lstat(legacy); errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("read quarantined feed: %w", err)
+		}
+		if err := dissociateClone(ctx, run, cloneDir, feed, legacy, log); err != nil {
+			return err
+		}
+		quarantine := legacy
+		if legacy == filepath.Join(filepath.Dir(feed)+".legacy", filepath.Base(feed)) {
+			quarantine = filepath.Dir(legacy)
+		}
+		if err := os.RemoveAll(quarantine); err != nil {
+			return fmt.Errorf("remove quarantined feed: %w", err)
+		}
 	}
+	return nil
+}
+
+// dissociateClone points an old clone at the quarantined feed just long enough to repack every
+// borrowed object into the clone, then removes the alternate and verifies connectivity.
+func dissociateClone(ctx context.Context, run Runner, cloneDir, feed, legacy string, log func(string)) error {
 	gitDir := filepath.Join(cloneDir, ".git")
 	info, err := os.Lstat(gitDir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -46,6 +71,9 @@ func dissociateClone(ctx context.Context, run Runner, cloneDir, feed string, log
 	if strings.TrimSpace(string(contents)) != filepath.Join(feed, "objects") {
 		return nil
 	}
+	if err := os.WriteFile(alternates, []byte(filepath.Join(legacy, "objects")+"\n"), 0o600); err != nil {
+		return fmt.Errorf("point clone alternates at quarantined feed: %w", err)
+	}
 	argv := []string{"git", "--git-dir=" + gitDir, "repack", "-a", "-d"}
 	result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", CloneTimeout)
 	if _, err := checkedResult(argv, result, err); err != nil {
@@ -59,6 +87,6 @@ func dissociateClone(ctx context.Context, run Runner, cloneDir, feed string, log
 	if _, err := checkedResult(argv, result, err); err != nil {
 		return err
 	}
-	log("dissociated the clone from the feed before replacing it")
+	log("dissociated the clone from the quarantined feed")
 	return nil
 }

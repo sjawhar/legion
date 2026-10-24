@@ -62,6 +62,9 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := ensureRepoClone(ctx, run, WallClock{}, workspace.Clone, GitHubURL(request.Repo), request.DefaultBranch, source); err != nil {
 		return Workspace{}, err
 	}
+	if err := dissociateLegacyClone(ctx, run, workspace.Clone, source.feed, request.Log); err != nil {
+		return Workspace{}, err
+	}
 	if err := ensureFetchConfiguration(ctx, run, workspace.Clone, source); err != nil {
 		return Workspace{}, err
 	}

@@ -40,12 +40,10 @@ type FetchRequest struct {
 	Token         func() (string, error)
 	CredentialDir string
 	Feed          string
-	// Clone is the issue clone that shares Feed's volume. It is empty for a repository cache.
-	Clone      string
-	Log        func(line string)
-	Clock      Clock
-	CacheURL   string
-	CacheToken string
+	Log           func(line string)
+	Clock         Clock
+	CacheURL      string
+	CacheToken    string
 }
 
 // CacheRepositoryHeader names, on every answer the repository cache gives a request its token
@@ -132,9 +130,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	defer func() {
 		_ = credential.remove()
 	}()
-	present, err := ownFeedRepository(feed, request.Repo, request.Clock.Now(), request.Log, func() error {
-		return dissociateClone(ctx, run, request.Clone, feed, request.Log)
-	})
+	present, err := ownFeedRepository(feed, request.Repo, request.Clock.Now(), request.Log)
 	if err != nil {
 		return FetchReport{}, err
 	}
