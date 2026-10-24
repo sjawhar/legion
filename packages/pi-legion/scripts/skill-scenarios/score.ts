@@ -3,9 +3,10 @@
 // remote recorded, never from what an agent said it did.
 //
 //   score.ts live-read <run dir> <skills dir> <omp logs dir>
-//     One row per `read` the session made: the characters it got back, the file's own character
-//     count less its trailing newline, whether the result spilled to an artifact, and so whether
-//     the file arrived whole; then the plugin paths Oh My Pi's log says it loaded.
+//     One row per `read` the session made: the characters it got back (less the `[Skill file:
+//     <path>]` line that Oh My Pi puts first), the file's own character count less its trailing
+//     newline, whether the result spilled to an artifact, and so whether the file arrived whole;
+//     then the plugin paths Oh My Pi's log says it loaded.
 //   score.ts runs <runs dir> [<scenario>]
 //     One row per run, then counts per scenario and label, and a legend saying what each count
 //     is. Each scenario's rule is on the function that scores it: askOnMessage,
@@ -14,7 +15,19 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { CREATED, type SessionEntry, session, toolResults } from "./transcript";
+import {
+  CheckableFile,
+  DecisionsOutput,
+  FaultsOutput,
+  FindingsOutput,
+  NumbersOutput,
+  PreambleOutput,
+  ProposalOutput,
+  QUESTION_KINDS,
+  QuestionsOutput,
+  SharedRunsFile,
+} from "./judge-prompts";
+import { CREATED, type SessionEntry, session, sessionId, toolResults } from "./transcript";
 
 /** `GET /api/v1/issues/{key}/asks`: every ask on the issue, whatever its state. */
 const IssueAsks = z.array(
@@ -148,10 +161,14 @@ function liveRead(runDir: string, skillsDir: string, logsDir: string) {
   for (const { message } of entries) {
     if (message?.role !== "toolResult" || message.toolName !== "read") continue;
     const target = calls.get(message.toolCallId ?? "") ?? "";
+    // The pinned Oh My Pi starts a skill read's result with one line, `[Skill file: <absolute
+    // path>]`, and then gives the file's text. That line is not the file's. Any other first line
+    // stays in the count.
     const got = (message.content ?? [])
       .filter((part) => part.type === "text")
       .map((part) => part.text ?? "")
-      .join("");
+      .join("")
+      .replace(/^\[Skill file: \/[^\n]*\]\n/, "");
     const match = /^skill:\/\/([^/]+)(?:\/(.+))?$/.exec(target);
     const file = match ? path.join(skillsDir, match[1] ?? "", match[2] ?? "SKILL.md") : "";
     // Characters, as `wc -m` counts them, less the file's trailing newline, which a read drops.
@@ -194,6 +211,10 @@ interface Row {
   pass: boolean;
   ref: boolean;
   notes: string;
+  /** spec-writing and spec-rewrite: the run's source and its faults.json counts. */
+  source?: string;
+  faults?: number;
+  steBreaks?: number;
 }
 
 /** A Dispatch scenario's row: its asks, each printed whole under the row because a person judges
@@ -486,6 +507,858 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   return { run, scenario: "tester-proof", label, pass, ref, notes: notes.join(" ") };
 }
 
+// spec-writing and spec-rewrite (INFRA-140 plan, Task 1.3, "Scores"). A run is a design
+// conversation between a fresh agent and a person stand-in on the run's own issue. Its directory
+// holds what rig.sh, seed.ts and judge.ts recorded: the source (source/), the turns (turns.txt,
+// state-<turn>.json), the captured issue (spec.md, spec-versions/, agent-asks.json,
+// agent-texts.json, documents/, plan.md) and the judges' answers (faults.json and the rest).
+
+/** Contract C2: the spec's `##` headings, exactly and in this order. */
+export const OUTLINE = [
+  "Summary",
+  "Problem",
+  "Goals and non-goals",
+  "Requirements",
+  "Design",
+  "Decisions",
+  "Acceptance",
+] as const;
+/** The Dispatch skill the change removes. `routed` fails a run that reads it, so this name stays
+ * when the skill is renamed everywhere else. */
+const REMOVED_SKILL = "dispatch-brainstorming";
+/** The fewest words a shared run holds. */
+const RUN_WORDS = 8;
+/** The checkout rig.sh runs from, which a run's agent can also reach. */
+const RIG_ROOT = path.resolve(import.meta.dir, "../../../..");
+
+const Actor = z.looseObject({ kind: z.string(), id: z.string().nullish() });
+/** spec-versions.json: every version of the primary spec. A version lists its `authors`; `actor`
+ * is the first of them. */
+export const SpecVersions = z.array(
+  z.looseObject({
+    version: z.number().int(),
+    created_at: z.string(),
+    authors: z.array(Actor).nullish(),
+    actor: Actor.nullish(),
+  })
+);
+const AskOption = z.looseObject({ label: z.string(), description: z.string().nullish() });
+/** state-<turn>.json: after the turn, the issue's open question asks (never the approval request)
+ * and its open approval request. */
+export const State = z.looseObject({
+  turn: z.number().int(),
+  open_asks: z.array(
+    z.looseObject({
+      id: z.string(),
+      question: z.string(),
+      options: z.array(AskOption).nullish(),
+      multiple: z.boolean().nullish(),
+    })
+  ),
+  approval: z.looseObject({ ask_id: z.string(), version: z.number().int() }).nullable(),
+});
+export type State = z.infer<typeof State>;
+/** agent-asks.json: each ask on the issue that seed.ts did not seed, the approval request
+ * included. */
+export const AgentAsks = z.array(
+  z.looseObject({
+    id: z.string(),
+    kind: z.string(),
+    question: z.string(),
+    options: z.array(AskOption).nullish(),
+    created_at: z.string().nullish(),
+  })
+);
+/** agent-texts.json: each message, comment and ask the run's session wrote. */
+export const AgentTexts = z.array(
+  z.looseObject({ id: z.string(), kind: z.string(), body: z.string() })
+);
+/** source/asks.json: the asks the people answered on the source issue. */
+const SourceAsks = z.array(
+  z.looseObject({ answer: z.looseObject({ text: z.string().nullish() }).nullish() })
+);
+const SpecFixture = z.looseObject({ issue: z.string(), spec_artifact: z.string() });
+
+/** The ids of the asks seed.ts seeded (seeded.json). Each is another agent's ask, which counts
+ * neither against the run nor for it. */
+export function seededIds(runDir: string): Set<string> {
+  return new Set(json(path.join(runDir, "seeded.json"), z.array(z.string())));
+}
+
+/** Each turn's state-<turn>.json, one per line of turns.txt, in turn order. */
+function states(runDir: string): State[] {
+  return lines(path.join(runDir, "turns.txt")).map((line) =>
+    json(path.join(runDir, `state-${line.split(" ")[0]}.json`), State)
+  );
+}
+
+/** Whether the person approved the spec: turns.txt has an `approved` turn, the one the rig starts
+ * with "The person approved the spec". `version` is the version the approval request named in
+ * the last state before that turn. */
+export function approval(runDir: string): {
+  approved: boolean;
+  version: number | null;
+  turns: number;
+} {
+  const turns = lines(path.join(runDir, "turns.txt")).map((line) => line.split(" "));
+  const approvedTurn = turns.find(([, kind]) => kind === "approved")?.[0];
+  if (approvedTurn === undefined) return { approved: false, version: null, turns: turns.length };
+  const requested = states(runDir)
+    .filter((state) => state.turn < Number(approvedTurn) && state.approval !== null)
+    .at(-1)?.approval;
+  if (!requested)
+    throw new Error(
+      `turns.txt names turn ${approvedTurn} approved, but no state before it holds an approval request`
+    );
+  return { approved: true, version: requested.version, turns: turns.length };
+}
+
+/** Every checkout a run's agent can reach: each label's, as `rig.sh profile` recorded it under
+ * <work>/profiles, and the one rig.sh runs from. */
+export function checkouts(work: string): string[] {
+  const profiles = path.join(work, "profiles");
+  const labels = (existsSync(profiles) ? readdirSync(profiles) : [])
+    .filter((label) => existsSync(path.join(profiles, label, "checkout")))
+    .map((label) => readFileSync(path.join(profiles, label, "checkout"), "utf8").trim());
+  return [...new Set([...labels, RIG_ROOT])];
+}
+
+const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Every string in a value, depth first. */
+function strings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(strings);
+  if (typeof value === "object" && value !== null) return Object.values(value).flatMap(strings);
+  return [];
+}
+
+/** One tool call of the session, at the assistant message that made it. */
+interface Step {
+  index: number;
+  at: string;
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+}
+/** One tool result: whether the tool refused the call, a `bash` call's exit code (`details`, else
+ * the text's last line), its text and the tool's own record. */
+interface Outcome {
+  index: number;
+  at: string;
+  failed: boolean;
+  exit: number | undefined;
+  text: string;
+  details: unknown;
+}
+function steps(entries: SessionEntry[]): Step[] {
+  return entries.flatMap((entry, index) =>
+    entry.message?.role !== "assistant"
+      ? []
+      : (entry.message.content ?? [])
+          .filter((part) => part.type === "toolCall")
+          .map((part) => ({
+            index,
+            at: entry.timestamp ?? "",
+            id: part.id ?? "",
+            tool: part.name ?? "",
+            args:
+              typeof part.arguments === "object" && part.arguments !== null
+                ? (part.arguments as Record<string, unknown>)
+                : {},
+          }))
+  );
+}
+function outcomes(entries: SessionEntry[]): Map<string, Outcome> {
+  const found = new Map<string, Outcome>();
+  for (const [index, entry] of entries.entries()) {
+    const message = entry.message;
+    if (message?.role !== "toolResult" || message.toolCallId === undefined) continue;
+    const text = (message.content ?? []).map((part) => part.text ?? "").join("");
+    const details = message.details;
+    const exit =
+      typeof details === "object" &&
+      details !== null &&
+      "exitCode" in details &&
+      typeof details.exitCode === "number"
+        ? details.exitCode
+        : Number(/Command exited with code (\d+)\s*$/.exec(text)?.[1] ?? Number.NaN);
+    found.set(message.toolCallId, {
+      index,
+      at: entry.timestamp ?? "",
+      failed: message.isError === true,
+      exit: Number.isNaN(exit) ? undefined : exit,
+      text,
+      details,
+    });
+  }
+  return found;
+}
+
+/** One `dispatch <command>` a tool call ran, with its flags. */
+interface DispatchCall {
+  command: string;
+  text: string;
+  flag: (name: string) => string | undefined;
+}
+/** A `dispatch` command at a command's place in shell text: at a line's start, or after `;`, `&`,
+ * `|`, `(`, `$(` or a backquote, past any variable assignments. */
+const DISPATCH_COMMAND =
+  /(?:^|[;&|(`]|\$\()[ \t]*(?:[A-Za-z_]\w*=\S*[ \t]+)*(?:(?:command|exec|env)[ \t]+)?dispatch[ \t]+([a-z][a-z-]*)[^\n;&|`)]*/gm;
+/** Every `dispatch` command a tool call ran: in a `bash` command or an `eval` cell, here-document
+ * bodies left out (their text is data), or a Dispatch tool a host calls by name. */
+function dispatchCalls(step: Step): DispatchCall[] {
+  const named = /^dispatch_([a-z_]+)$/.exec(step.tool)?.[1];
+  if (named !== undefined) {
+    const flag = (name: string) => {
+      const value = step.args[name.replace(/-/g, "_")];
+      return value === undefined
+        ? undefined
+        : typeof value === "string"
+          ? value
+          : JSON.stringify(value);
+    };
+    return [
+      {
+        command: named.replace(/_/g, "-"),
+        text: `${step.tool} ${JSON.stringify(step.args)}`,
+        flag,
+      },
+    ];
+  }
+  const shell =
+    step.tool === "bash"
+      ? strings(step.args.command)
+      : step.tool === "eval"
+        ? strings(step.args)
+        : [];
+  return shell.flatMap((source) =>
+    [
+      ...source
+        .replace(/(<<-?[ \t]*(['"]?)(\w+)\2[^\n]*\n)[\s\S]*?^[ \t]*\3[ \t]*$/gm, "$1")
+        .matchAll(DISPATCH_COMMAND),
+    ].map((hit) => {
+      const text = hit[0].replace(/^[\s;&|(`$]+/, "").trim();
+      return {
+        command: hit[1] ?? "",
+        text,
+        flag: (name: string) => {
+          const found = new RegExp(
+            `(?:^|\\s)--${name}(?:=|\\s+)(?:'([^']*)'|"([^"]*)"|(\\S+))`
+          ).exec(text);
+          if (found !== null) return found[1] ?? found[2] ?? found[3];
+          return new RegExp(`(?:^|\\s)--${name}(?:\\s|$)`).test(text) ? "" : undefined;
+        },
+      };
+    })
+  );
+}
+/** Whether a call writes the primary spec: `dispatch issue` with a spec, `dispatch doc-edit` of the
+ * issue's primary document (no artifact named, or the spec named), or `dispatch artifact` of the
+ * spec's file. `specArtifact` is the spec's artifact id (fixture.json). */
+function writesSpec(call: DispatchCall, specArtifact: string): boolean {
+  const isSpec = (name: string) =>
+    ["spec", "spec.md", "spec-md", specArtifact.toLowerCase()].includes(name.toLowerCase());
+  if (call.command === "issue")
+    return call.flag("spec") !== undefined || call.flag("spec-file") !== undefined;
+  if (call.command === "doc-edit") {
+    const ref = call.flag("ref");
+    if (call.flag("project") !== undefined && call.flag("issue") === undefined && ref === undefined)
+      return false;
+    const target =
+      call.flag("artifact") ??
+      (ref === undefined ? undefined : /\/artifact\/([^@/?#\s]+)/.exec(ref)?.[1]);
+    return target === undefined || isSpec(target);
+  }
+  if (call.command === "artifact") return isSpec(call.flag("name") ?? "");
+  return false;
+}
+/** The skill file a tool call reads, if any: a `read` of a skill:// target or of a file under a
+ * `skills/<name>/` directory, or a shell command that names one. A `dispatch` call or a `task`
+ * assignment that names a skill reads nothing. */
+function skillRead(step: Step): string | undefined {
+  if (step.tool === "task" || dispatchCalls(step).length > 0) return undefined;
+  if (step.tool === "read") {
+    const target = typeof step.args.path === "string" ? step.args.path : "";
+    return /^skill:\/\//.test(target) || /(^|\/)skills\/[^/]+\//.test(target) ? target : undefined;
+  }
+  return /skill:\/\/[\w./-]+|[^\s"'`]*\/skills\/[\w.-]+\/[\w./-]*\.md/.exec(
+    strings(step.args).join("\n")
+  )?.[0];
+}
+/** Whether a skill file read is skill `name` itself. */
+const readsSkill = (target: string, name: string) =>
+  new RegExp(`^skill://${escaped(name)}(/SKILL\\.md)?$|/skills/${escaped(name)}/SKILL\\.md$`).test(
+    target
+  );
+
+/** A spec-only check: a `task` call made before a spec write, its assignment (every string of its
+ * arguments), its report and when the last part of the report arrived. `write` is the place of
+ * the spec write that follows it, in SpecWork.writes. */
+export interface SpecCheck {
+  assignment: string;
+  report: string;
+  reportAt: string;
+  write: number;
+}
+export interface SpecWork {
+  /** Each spec write the tool accepted, in order, and whether a spec-only check came after the
+   * write before it (or the session's start) and before it. */
+  writes: { index: number; at: string; text: string; checked: boolean }[];
+  checks: SpecCheck[];
+}
+/** A task result's report: the `<task-result id="…">` blocks in the call's own result and, for a
+ * task that runs in the background, in each later message that delivers one of its tasks; else the
+ * outputs the result's `details` keep; else the result's text. */
+function checkReport(
+  entries: SessionEntry[],
+  step: Step,
+  own: Outcome | undefined
+): { report: string; reportAt: string } {
+  const block = /<task-result\b[^>]*?\bid="([^"]+)"[^>]*>([\s\S]*?)<\/task-result>/g;
+  const tasks = Array.isArray(step.args.tasks) ? step.args.tasks : [];
+  const names = new Set<string>(
+    tasks.flatMap((task) =>
+      typeof task === "object" && task !== null && "name" in task && typeof task.name === "string"
+        ? [task.name]
+        : []
+    )
+  );
+  const text = own?.text ?? "";
+  for (const [, name] of text.matchAll(/`([^`\s]+)` \(job/g)) if (name) names.add(name);
+  const parts: string[] = [];
+  let reportAt = own?.at || step.at;
+  for (const [, name, body] of text.matchAll(block)) {
+    if (name) names.add(name);
+    parts.push((body ?? "").trim());
+  }
+  const details = own?.details;
+  if (parts.length === 0 && typeof details === "object" && details !== null && "results" in details)
+    for (const result of Array.isArray(details.results) ? details.results : [])
+      if (typeof result === "object" && result !== null && "output" in result)
+        if (typeof result.output === "string") parts.push(result.output.trim());
+  for (const [index, entry] of entries.entries()) {
+    if (index <= step.index || index === own?.index) continue;
+    const delivered =
+      entry.type === "custom_message"
+        ? strings(entry.content).join("")
+        : entry.message?.role === "toolResult"
+          ? (entry.message.content ?? []).map((part) => part.text ?? "").join("")
+          : "";
+    for (const [, name, body] of delivered.matchAll(block)) {
+      const report = (body ?? "").trim();
+      if (!names.has(name ?? "") || parts.includes(report)) continue;
+      parts.push(report);
+      reportAt = entry.timestamp ?? reportAt;
+    }
+  }
+  return { report: parts.length > 0 ? parts.join("\n\n") : text, reportAt };
+}
+/** The spec writes of a transcript and the spec-only checks before them. A check is a `task` call
+ * whose assignment holds the seven outline headings as `##` lines and names no path under a
+ * checkout in `reach`; a check counts for the first spec write after it. */
+export function specWork(entries: SessionEntry[], reach: string[], specArtifact: string): SpecWork {
+  const results = outcomes(entries);
+  const writes: SpecWork["writes"] = [];
+  const checks: SpecCheck[] = [];
+  let pending: { step: Step; assignment: string }[] = [];
+  for (const step of steps(entries)) {
+    if (step.tool === "task") {
+      const assignment = strings(step.args).join("\n\n");
+      const outlined = OUTLINE.every((heading) =>
+        new RegExp(`^[ \\t]*## ${escaped(heading)}[ \\t]*$`, "m").test(assignment)
+      );
+      const local = reach.some((dir) => new RegExp(`${escaped(dir)}(?![\\w.-])`).test(assignment));
+      if (outlined && !local) pending.push({ step, assignment });
+      continue;
+    }
+    const outcome = results.get(step.id);
+    const calls = dispatchCalls(step).filter((call) => writesSpec(call, specArtifact));
+    if (outcome === undefined || outcome.failed || calls.length === 0) continue;
+    for (const check of pending)
+      checks.push({
+        assignment: check.assignment,
+        ...checkReport(entries, check.step, results.get(check.step.id)),
+        write: writes.length,
+      });
+    writes.push({
+      index: step.index,
+      at: step.at,
+      text: calls.map((call) => call.text).join(" ; "),
+      checked: pending.length > 0,
+    });
+    pending = [];
+  }
+  return { writes, checks };
+}
+
+/** Each `**R<n>.**` or `**A<n>.**` paragraph of a spec: its mark and its text, up to a blank line,
+ * a heading or the next list item. */
+function marked(spec: string): { mark: string; body: string }[] {
+  const found: { mark: string; body: string }[] = [];
+  let current: { mark: string; body: string } | undefined;
+  for (const line of spec.split("\n")) {
+    const mark = /^\s*(?:[-*+]\s+|\d+[.)]\s+)?\*\*([RA]\d+)\.\*\*/.exec(line)?.[1];
+    if (mark !== undefined) {
+      current = { mark, body: line };
+      found.push(current);
+    } else if (
+      current === undefined ||
+      line.trim() === "" ||
+      /^\s*(#|[-*+]\s|\d+[.)]\s)/.test(line)
+    )
+      current = undefined;
+    else current.body += `\n${line}`;
+  }
+  return found;
+}
+/** The requirement marks of a spec (`R1`, `R2`, …), in order. */
+export function requirements(spec: string): string[] {
+  return marked(withoutFences(spec))
+    .map((paragraph) => paragraph.mark)
+    .filter((mark) => mark.startsWith("R"));
+}
+/** Replaces each match of `pattern` with spaces and keeps the line breaks, so an offset into the
+ * result still points into the text. */
+function blank(text: string, pattern: RegExp): string {
+  return text.replace(pattern, (hit) => hit.replace(/[^\n]/g, " "));
+}
+const withoutFences = (text: string) => blank(text, /^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm);
+/** outline: what keeps a spec from contract C2. Its `##` headings are exactly OUTLINE's, in order.
+ * It holds a requirement and a check. Each `**R<n>.**` paragraph names its source after `From:`,
+ * and each `**A<n>.**` paragraph names at least one `R<n>`. */
+function outlineProblems(spec: string): string[] {
+  const text = withoutFences(spec);
+  const headings = [...text.matchAll(/^##[ \t]+(.+?)[ \t#]*$/gm)].map((hit) => hit[1] ?? "");
+  const problems: string[] = [];
+  if (headings.join("\n") !== OUTLINE.join("\n"))
+    problems.push(
+      `headings are ${headings.map((heading) => `## ${heading}`).join(", ") || "none"}`
+    );
+  const paragraphs = marked(text);
+  const reqs = paragraphs.filter((paragraph) => paragraph.mark.startsWith("R"));
+  const checks = paragraphs.filter((paragraph) => paragraph.mark.startsWith("A"));
+  if (reqs.length === 0) problems.push("no **R<n>.** requirement");
+  if (checks.length === 0) problems.push("no **A<n>.** check");
+  for (const req of reqs)
+    if (!/From:\s*\S/.test(req.body)) problems.push(`${req.mark} names no source (From:)`);
+  for (const check of checks)
+    if (!/\bR\d+\b/.test(check.body)) problems.push(`${check.mark} names no requirement`);
+  return problems;
+}
+
+/** A text the `quoted` score compares: `display` is what a reader sees of it, and `compare` the
+ * same text with what the score leaves out blanked. */
+interface Piece {
+  source: string;
+  display: string;
+  compare: string;
+}
+/** What `quoted` leaves out of a text: fenced code, code spans, links and images whole, URLs and
+ * dispatch:// references, HTML comments, character references, and typed-block lines, whose
+ * attributes Dispatch writes (an answered ask's line holds the person's answer). */
+function piece(source: string, display: string): Piece {
+  let compare = withoutFences(display);
+  for (const pattern of [
+    /``[^`]*``|`[^`\n]*`/g,
+    /!?\[[^\]\n]*\]\([^)\n]*\)/g,
+    /<[a-z][a-z0-9+.-]*:[^>\s]*>/gi,
+    /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi,
+    /<!--[\s\S]*?-->/g,
+    /&#?\w+;/g,
+    /^:::[\w-]*(\{.*\})?[ \t]*$/gm,
+  ])
+    compare = blank(compare, pattern);
+  return { source, display, compare };
+}
+interface Word {
+  word: string;
+  piece: number;
+  start: number;
+  end: number;
+}
+/** The words of pieces, with case and punctuation folded: letters and digits, an apostrophe inside
+ * a word dropped. A line break is a space like any other. */
+function wordsOf(pieces: Piece[]): Word[] {
+  return pieces.flatMap((text, index) =>
+    [...text.compare.matchAll(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu)].map((hit) => ({
+      word: hit[0].toLowerCase().replace(/['’]/g, ""),
+      piece: index,
+      start: hit.index ?? 0,
+      end: (hit.index ?? 0) + hit[0].length,
+    }))
+  );
+}
+/** The sentences of `display` that hold [from, to), with one sentence on each side. */
+function context(display: string, from: number, to: number): string {
+  const bounds = [
+    0,
+    ...[...display.matchAll(/[.!?]+["')\]*_]*\s+|\n+/g)].map(
+      (hit) => (hit.index ?? 0) + hit[0].length
+    ),
+    display.length,
+  ];
+  const sentences = bounds
+    .slice(0, -1)
+    .map((start, index) => ({ start, end: bounds[index + 1] ?? display.length }))
+    .filter((sentence) => display.slice(sentence.start, sentence.end).trim() !== "");
+  const first = Math.max(
+    0,
+    sentences.findIndex((sentence) => sentence.end > from)
+  );
+  const last = sentences.findLastIndex((sentence) => sentence.start < to);
+  const begin = sentences[Math.max(0, first - 1)]?.start ?? 0;
+  const end = sentences[Math.min(sentences.length - 1, last + 1)]?.end ?? display.length;
+  return display.slice(begin, end).replace(/\s+/g, " ").trim();
+}
+/** Where `words` sit in `pieces`: each piece's sentences that hold them, with one on each side. */
+function contextOf(pieces: Piece[], words: Word[]): string {
+  return [...new Set(words.map((word) => word.piece))]
+    .map((index) => {
+      const inPiece = words.filter((word) => word.piece === index);
+      return context(
+        pieces[index]?.display ?? "",
+        inPiece[0]?.start ?? 0,
+        inPiece.at(-1)?.end ?? 0
+      );
+    })
+    .join(" … ");
+}
+
+/** One shared run: the words a text of the run and the person's input both hold, where the text
+ * is, and the context of the run in the text and in the input. */
+export interface SharedRun {
+  source: string;
+  run: string;
+  words: number;
+  text: string;
+  input: string;
+}
+/** The shared runs the `quoted` score finds. The run's texts are spec.md, each text of
+ * agent-texts.json (seeded asks left out) and each file of documents/. The person's input is
+ * source/messages.md without its `>` lines (they quote the old spec) and its entry headers, and the
+ * text of each answer in source/asks.json. A shared run is a longest stretch of RUN_WORDS words or
+ * more that a text and the input both hold, so a copied paragraph is one run: a stretch inside a
+ * longer one, or a repeat of one, is not a run of its own. */
+export function sharedRuns(runDir: string): SharedRun[] {
+  const seeded = seededIds(runDir);
+  const messages = readFileSync(path.join(runDir, "source", "messages.md"), "utf8");
+  const input = [
+    piece(
+      "messages.md",
+      blank(blank(messages, /^[ \t]*>.*$/gm), /^<!-- (?:message|comment) \S+ -->[ \t]*$/gm)
+    ),
+    ...json(path.join(runDir, "source", "asks.json"), SourceAsks).flatMap((ask, index) =>
+      ask.answer?.text ? [piece(`asks.json#${index}`, ask.answer.text)] : []
+    ),
+  ];
+  const documents = path.join(runDir, "documents");
+  const texts = [
+    piece("spec.md", readFileSync(path.join(runDir, "spec.md"), "utf8")),
+    ...json(path.join(runDir, "agent-texts.json"), AgentTexts)
+      .filter((text) => !seeded.has(text.id))
+      .map((text) => piece(`agent-texts.json#${text.id}`, text.body)),
+    ...(existsSync(documents) ? readdirSync(documents).sort() : []).map((file) =>
+      piece(`documents/${file}`, readFileSync(path.join(documents, file), "utf8"))
+    ),
+  ];
+  const held = wordsOf(input);
+  const grams = new Map<string, number[]>();
+  const gram = (words: Word[], at: number) =>
+    words
+      .slice(at, at + RUN_WORDS)
+      .map((word) => word.word)
+      .join(" ");
+  for (let at = 0; at + RUN_WORDS <= held.length; at++)
+    grams.set(gram(held, at), [...(grams.get(gram(held, at)) ?? []), at]);
+  const runs: SharedRun[] = [];
+  for (const text of texts) {
+    const words = wordsOf([text]);
+    const spans: { start: number; end: number; from: number }[] = [];
+    for (let at = 0; at + RUN_WORDS <= words.length; at++)
+      for (const from of grams.get(gram(words, at)) ?? []) {
+        // A stretch that the word before both continues starts earlier.
+        if (at > 0 && from > 0 && words[at - 1]?.word === held[from - 1]?.word) continue;
+        let length = RUN_WORDS;
+        while (
+          words[at + length] !== undefined &&
+          words[at + length]?.word === held[from + length]?.word
+        )
+          length++;
+        spans.push({ start: at, end: at + length, from });
+      }
+    const longest = spans.filter(
+      (span, index) =>
+        !spans.some(
+          (other, o) =>
+            other.start <= span.start &&
+            other.end >= span.end &&
+            (other.end - other.start > span.end - span.start || o < index)
+        )
+    );
+    for (const span of longest.sort((a, b) => a.start - b.start)) {
+      const own = words.slice(span.start, span.end);
+      runs.push({
+        source: text.source,
+        run: own.map((word) => word.word).join(" "),
+        words: own.length,
+        text: contextOf([text], own),
+        input: contextOf(input, held.slice(span.from, span.from + own.length)),
+      });
+    }
+  }
+  return runs;
+}
+
+/** A judge's answer in the run directory, as judge.ts wrote it; a file missing or malformed is a
+ * rig error that `rig.sh judge` fixes. */
+function judged<T>(runDir: string, file: string, schema: z.ZodType<T>): T {
+  const full = path.join(runDir, file);
+  if (!existsSync(full)) throw new Error(`${file} is missing: run rig.sh judge ${runDir}`);
+  const result = schema.safeParse(JSON.parse(readFileSync(full, "utf8")));
+  if (!result.success)
+    throw new Error(`${file} is not a judge's answer: ${z.prettifyError(result.error)}`);
+  return result.data;
+}
+/** Each count of `values` in `kinds`, as `kind:n,…`. */
+const tally = (kinds: readonly string[], values: string[]) =>
+  kinds.map((kind) => `${kind}:${values.filter((value) => value === kind).length}`).join(",");
+/** Lines under a row, each indented past the row's own notes. */
+const indented = (text: string, depth = 6) =>
+  text
+    .split("\n")
+    .map((line) => `${" ".repeat(depth)}${line}`)
+    .join("\n");
+
+/** spec-writing and spec-rewrite: one row per run, from the INFRA-140 plan's "Scores" (Task 1.3).
+ * The row passes when its eight scores pass; `judged` gives the judges' counts, which pass or fail
+ * nothing here (Task 2.6 holds each one to its own condition).
+ *   - outline: outlineProblems finds nothing.
+ *   - checked: the transcript holds at least one spec write, a spec-only check (specWork) came
+ *     before every one, the first included, and findings.json has no `neither` row.
+ *   - refusals: each `dispatch` call that exited 1 or 2 (a `bash` result's `isError` and
+ *     `details.exitCode`) is followed by a `dispatch` call that succeeded, with no skill file read
+ *     between them (skillRead). Each failing pair is printed with its refusal text.
+ *   - plan: the person approved the spec, the issue holds plan.md (capture-spec runs after the
+ *     approval), and the transcript read skill://writing-plans.
+ *   - routed: the transcript read skill://dispatch-writing-specs before its first spec write, and
+ *     never read REMOVED_SKILL. `ref` is the first half.
+ *   - chat: no call of the interactive `ask` tool (surfaceOf's chat), and every state-<turn>.json
+ *     but the last lists an open approval request, or an open ask whose id is not in seeded.json.
+ *   - quoted: every run sharedRuns finds has the verdict `names` in shared-runs.json. Each run is
+ *     printed with its context in the text and in the input.
+ *   - self: spec.md and each text of agent-texts.json hold neither the session id the
+ *     transcript's header names nor its first 8 characters.
+ *   - judged: faults.json's faults and STE breaks; decisions.json's choices not recorded, or
+ *     recorded without a reason, the options or the parts; findings.json's findings and `neither`
+ *     rows; checkable.json (`checkable`: the approved version's every requirement has a check);
+ *     questions.json's `dominated`, `settled` and kinds; numbers.json's `names_number`;
+ *     preamble.json's passages by kind; proposal.json's verdicts. Each row whose id is in
+ *     seeded.json is left out. */
+function specRow(
+  runDir: string,
+  run: string,
+  scenario: string,
+  label: string,
+  reach: string[]
+): Row {
+  const entries = session(runDir);
+  const seeded = seededIds(runDir);
+  const spec = readFileSync(path.join(runDir, "spec.md"), "utf8");
+  const source = readFileSync(path.join(runDir, "source.txt"), "utf8").trim();
+  const fixture = json(path.join(runDir, "fixture.json"), SpecFixture);
+  const { approved, version, turns } = approval(runDir);
+  const all = steps(entries);
+  const results = outcomes(entries);
+  const work = specWork(entries, reach, fixture.spec_artifact);
+  const firstWrite = work.writes[0]?.index ?? Number.POSITIVE_INFINITY;
+  const reads = all.flatMap((step) => {
+    const target = skillRead(step);
+    return target === undefined ? [] : [{ index: step.index, target }];
+  });
+  const details: string[] = [];
+
+  const outline = outlineProblems(spec);
+  details.push(...outline.map((problem) => `outline: ${problem}`));
+
+  const findings = judged(runDir, "findings.json", FindingsOutput);
+  const neither = findings.rows.filter((row) => row.verdict === "neither");
+  const unchecked = work.writes.filter((write) => !write.checked);
+  const checked = work.writes.length > 0 && unchecked.length === 0 && neither.length === 0;
+  if (work.writes.length === 0) details.push("checked: the transcript holds no spec write");
+  if (unchecked.length > 0)
+    details.push(
+      `unchecked writes: ${unchecked.length} of ${work.writes.length}`,
+      ...unchecked.map((write) => indented(write.text, 2))
+    );
+  for (const row of neither)
+    details.push(`finding of check ${row.check} neither fixed nor recorded: ${row.finding}`);
+
+  const refused: string[] = [];
+  for (const [place, step] of all.entries()) {
+    const outcome = results.get(step.id);
+    const calls = dispatchCalls(step);
+    if (calls.length === 0 || outcome === undefined || !outcome.failed) continue;
+    if (step.tool === "bash" && outcome.exit !== 1 && outcome.exit !== 2) continue;
+    let read: string | undefined;
+    let fixed = false;
+    for (const next of all.slice(place + 1)) {
+      if (dispatchCalls(next).length === 0) read ??= skillRead(next);
+      else if (results.get(next.id)?.failed === false) {
+        fixed = true;
+        break;
+      }
+    }
+    if (fixed && read === undefined) continue;
+    refused.push(
+      [
+        `refused call: ${calls.map((call) => call.text).join(" ; ")}`,
+        indented(outcome.text.replace(/\s*Command exited with code \d+\s*$/, ""), 4),
+        fixed
+          ? `    then read ${read} before the next dispatch call succeeded`
+          : "    no later dispatch call succeeded",
+      ].join("\n")
+    );
+  }
+  details.push(...refused);
+
+  const planned = reads.some((read) => readsSkill(read.target, "writing-plans"));
+  const plan = approved && existsSync(path.join(runDir, "plan.md")) && planned;
+  const routedRead = reads.some(
+    (read) => read.index < firstWrite && readsSkill(read.target, "dispatch-writing-specs")
+  );
+  const removed = reads.filter(
+    (read) =>
+      read.target.startsWith(`skill://${REMOVED_SKILL}`) ||
+      read.target.includes(`/skills/${REMOVED_SKILL}/`)
+  );
+  const routed = routedRead && removed.length === 0;
+  details.push(...removed.map((read) => `routed: read ${read.target}`));
+
+  const chatAsks = all.filter((step) => step.tool === "ask").length;
+  const idle = states(runDir)
+    .slice(0, -1)
+    .filter(
+      (state) => state.approval === null && !state.open_asks.some((ask) => !seeded.has(ask.id))
+    )
+    .map((state) => state.turn);
+  const chat = chatAsks === 0 && idle.length === 0;
+  if (chatAsks > 0) details.push(`chat: ${chatAsks} calls of the interactive ask tool`);
+  if (idle.length > 0) details.push(`turns with nothing open for the person: ${idle.join(", ")}`);
+
+  const shared = sharedRuns(runDir);
+  const verdicts = judged(runDir, "shared-runs.json", SharedRunsFile).rows;
+  const key = (row: { source: string; run: string }) => `${row.source}\n${row.run}`;
+  if (
+    verdicts.length !== shared.length ||
+    shared.some((found) => !verdicts.some((row) => key(row) === key(found)))
+  )
+    throw new Error(
+      `shared-runs.json judges ${verdicts.length} runs, and sharedRuns finds ${shared.length} others: run rig.sh judge ${runDir}`
+    );
+  let copies = 0;
+  for (const [index, found] of shared.entries()) {
+    const verdict = verdicts.find((row) => key(row) === key(found));
+    if (verdict?.verdict === "copies") copies++;
+    details.push(
+      `shared run ${index + 1} in ${found.source} (${found.words} words, ${verdict?.verdict}: ${verdict?.reason}): ${found.run}`,
+      `    text: ${found.text}`,
+      `    input: ${found.input}`
+    );
+  }
+  const quoted = copies === 0;
+
+  const id = sessionId(entries);
+  if (id === undefined) throw new Error("the transcript has no session header");
+  const selfTexts = [
+    { source: "spec.md", body: spec },
+    ...json(path.join(runDir, "agent-texts.json"), AgentTexts)
+      .filter((text) => !seeded.has(text.id))
+      .map((text) => ({ source: `agent-texts.json#${text.id}`, body: text.body })),
+  ].filter((text) => text.body.toLowerCase().includes(id.slice(0, 8).toLowerCase()));
+  const self = selfTexts.length === 0;
+  details.push(...selfTexts.map((text) => `self: ${text.source} names the session`));
+
+  const faults = judged(runDir, "faults.json", FaultsOutput);
+  const faultCount = Object.values(faults.faults).reduce((sum, n) => sum + n, 0);
+  const decisions = judged(runDir, "decisions.json", DecisionsOutput).rows;
+  const checkable = judged(runDir, "checkable.json", CheckableFile);
+  if (approved && checkable.version !== version)
+    throw new Error(
+      `checkable.json judged version ${checkable.version}, and the person approved version ${version}: run rig.sh judge ${runDir}`
+    );
+  const uncheckable = checkable.rows.filter((row) => row.uncheckable);
+  for (const row of uncheckable) details.push(`uncheckable ${row.requirement}: ${row.check}`);
+  const asks = judged(runDir, "questions.json", QuestionsOutput).rows.filter(
+    (row) => !seeded.has(row.id)
+  );
+  const texts = judged(runDir, "numbers.json", NumbersOutput).rows.filter(
+    (row) => !seeded.has(row.id)
+  );
+  const passages = judged(runDir, "preamble.json", PreambleOutput).rows.filter(
+    (row) => !seeded.has(/^agent-texts\.json#(.+)$/.exec(row.source)?.[1] ?? "")
+  );
+  for (const row of passages) details.push(`preamble ${row.kind} in ${row.source}: ${row.passage}`);
+  const proposals = judged(runDir, "proposal.json", ProposalOutput).rows.filter(
+    (row) => !seeded.has(row.ask ?? "")
+  );
+
+  const scores = {
+    outline: outline.length === 0,
+    checked,
+    refusals: refused.length === 0,
+    plan,
+    routed,
+    chat,
+    quoted,
+    self,
+  };
+  const notes = [
+    `source=${source} turns=${turns} approved=${approved}`,
+    ...Object.entries(scores).map(([name, ok]) => `${name}=${ok}`),
+    `faults=${faultCount} ste_breaks=${faults.ste_breaks}`,
+    `decisions=${decisions.length} unrecorded=${decisions.filter((row) => !row.recorded).length}`,
+    `incomplete=${decisions.filter((row) => row.recorded && !(row.reason && row.options && row.parts)).length}`,
+    `findings=${findings.rows.length} neither=${neither.length}`,
+    `checkable=${approved && checkable.rows.length > 0 && uncheckable.length === 0} uncheckable=${uncheckable.length}`,
+    `asks=${asks.length} dominated=${asks.filter((row) => row.dominated).length}`,
+    `settled=${asks.filter((row) => row.settled).length}`,
+    `kinds=${tally(
+      QUESTION_KINDS,
+      asks.map((row) => row.kind)
+    )}`,
+    `texts=${texts.length} names_number=${texts.filter((row) => row.names_number).length}`,
+    `preamble=${tally(
+      ["retold", "dated", "self"],
+      passages.map((row) => row.kind)
+    )}`,
+    `proposal=${tally(
+      ["proposed", "asked", "missing"],
+      proposals.map((row) => row.verdict)
+    )}`,
+    `writes=${work.writes.length} shared=${shared.length} copies=${copies}`,
+  ].join(" ");
+  return {
+    run,
+    scenario,
+    label,
+    pass: Object.values(scores).every(Boolean),
+    ref: routedRead,
+    notes: [notes, ...details.map((line) => `  ${line}`)].join("\n"),
+    source,
+    faults: faultCount,
+    steBreaks: faults.ste_breaks,
+  };
+}
+
+/** The median of numbers: the middle one, or the mean of the two middle ones. */
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? (sorted[middle] ?? 0)
+    : ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2;
+}
+
 /** Why the rig cannot score a run, or undefined when it can:
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
@@ -539,12 +1412,16 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       return [];
     }
   });
+  // Every checkout a spec run's agent can reach, so that a check naming one is no spec-only check.
+  const reach = checkouts(path.dirname(runsDir));
   // Each scenario's scorer, keyed by the name its runs' directories start with.
   const scorers: Record<string, (dir: string, run: string, label: string) => Row> = {
     "ask-on-message": askOnMessage,
     "measure-before-ask": measureBeforeAsk,
     "tester-proof": (dir, run, label) => testerProof(dir, run, label, heads),
     brainstorm: brainstormSurface,
+    "spec-writing": (dir, run, label) => specRow(dir, run, "spec-writing", label, reach),
+    "spec-rewrite": (dir, run, label) => specRow(dir, run, "spec-rewrite", label, reach),
   };
   const name = new RegExp(`^(${Object.keys(scorers).join("|")})-(.+)-(\\d+)$`);
   for (const run of existsSync(runsDir) ? readdirSync(runsDir).sort() : []) {
@@ -582,6 +1459,23 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       `${key}\t${passed.length}/${group.length}\t${withRef.length}/${group.length}\t${failed}`
     );
   }
+  // A1: for each source and label, the median fault count of its spec runs (faults.json).
+  const specKeys = [
+    ...new Set(
+      rows.flatMap((row) =>
+        row.source === undefined ? [] : [`${row.source}\t${row.scenario}\t${row.label}`]
+      )
+    ),
+  ];
+  if (specKeys.length > 0) {
+    console.log("\nsource\tscenario\tlabel\truns\tmedian faults\tmedian ste breaks");
+    for (const key of specKeys) {
+      const group = rows.filter((row) => `${row.source}\t${row.scenario}\t${row.label}` === key);
+      console.log(
+        `${key}\t${group.length}\t${median(group.map((row) => row.faults ?? 0))}\t${median(group.map((row) => row.steBreaks ?? 0))}`
+      );
+    }
+  }
   console.log(
     [
       "",
@@ -589,7 +1483,10 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           measure-before-ask: their automatic flags clear (askOnMessage, measureBeforeAsk),",
       "           which point a person at the asks to read and do not check a recommendation.",
       "           brainstorm: the design went to the issue's spec and nothing leaked the project",
-      "           lookup (brainstormSurface); a person still reads notes for unagreed points",
+      "           lookup (brainstormSurface); a person still reads notes for unagreed points.",
+      "           spec-writing and spec-rewrite: the eight scores of specRow pass (outline,",
+      "           checked, refusals, plan, routed, chat, quoted, self); the judges' counts follow",
+      "           them, and the source table gives each source and label's median fault count",
       "pass+ref   passed, and the agent read the file the rule is in",
       "rig errors runs the rig could not score (unscored), left out of both counts",
       "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",
@@ -598,14 +1495,17 @@ function scoreRuns(runsDir: string, only: string | undefined) {
   );
 }
 
-const [command, ...rest] = Bun.argv.slice(2);
-if (command === "live-read" && rest.length === 3) {
-  liveRead(rest[0] ?? "", rest[1] ?? "", rest[2] ?? "");
-} else if (command === "runs" && rest.length >= 1) {
-  scoreRuns(rest[0] ?? "", rest[1]);
-} else {
-  console.error(
-    "usage: score.ts live-read <run dir> <skills dir> <omp logs dir> | runs <runs dir> [<scenario>]"
-  );
-  process.exit(2);
+// judge.ts imports sharedRuns from this file: the command line runs only when bun runs score.ts.
+if (import.meta.main) {
+  const [command, ...rest] = Bun.argv.slice(2);
+  if (command === "live-read" && rest.length === 3) {
+    liveRead(rest[0] ?? "", rest[1] ?? "", rest[2] ?? "");
+  } else if (command === "runs" && rest.length >= 1) {
+    scoreRuns(rest[0] ?? "", rest[1]);
+  } else {
+    console.error(
+      "usage: score.ts live-read <run dir> <skills dir> <omp logs dir> | runs <runs dir> [<scenario>]"
+    );
+    process.exit(2);
+  }
 }

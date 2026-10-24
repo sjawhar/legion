@@ -7,6 +7,22 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The skill-scenarios rig (`scripts/skill-scenarios/`, not shipped in the package) measures how
+  agents write Dispatch specs:
+  - `label-comments.ts` labels the comments people wrote on Dispatch in a window with the eleven
+    questions of the INFRA-140 labels, and prints the share of comments that complain about
+    writing. It reads production Dispatch with GET only.
+  - `fetch-spec-sources.ts` reads an issue's or a project document's input from Dispatch into a
+    work directory outside the checkout.
+  - `rig.sh batch spec-writing` and `spec-rewrite` seed a scratch issue with that input and let a
+    fresh agent design the change with a person stand-in that answers its asks and approves its
+    spec.
+  - `rig.sh judge` runs ten judge prompts over each run, and `rig.sh score` scores the spec's
+    outline, checks, refusals, plan, questions, quoting and self-naming.
+- `rig.sh profile` takes the key-file model route (`LEGION_E2E_MODEL_ROUTE=key-file` with
+  `LEGION_E2E_ANTHROPIC_KEY_FILE`). It refuses a work directory with a `.omp` in it or above it,
+  because Oh My Pi would load that directory's plugins and not the label's.
+
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
