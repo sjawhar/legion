@@ -112,6 +112,8 @@ const ROUTES: Record<string, unknown> = {
     comment("c1", bob, "Why 5 s?", "2026-10-16T11:00:00Z", "The widget waits 5 s.\n\nIt is slow."),
     comment("c2", agent(), "Fixed.", "2026-10-16T13:00:00Z"),
     comment("c3", bob, "Good.", "2026-10-16T15:00:00Z"),
+    // An unanchored comment whose body starts with a block quote: the person's own paste.
+    comment("c4", bob, "> The ticket says 5 s.\n\nIt is wrong.", "2026-10-16T15:30:00Z"),
   ],
   "/api/v1/issues/ACME-7/asks": [
     ask({
@@ -225,7 +227,7 @@ test("an issue key and a project document each write their files; the document g
       "<!-- message 2026-10-16T10:00:00Z -->",
       "Please make the widget faster.",
       "",
-      "<!-- comment 2026-10-16T11:00:00Z -->",
+      "<!-- comment 2026-10-16T11:00:00Z anchored -->",
       "> The widget waits 5 s.",
       ">",
       "> It is slow.",
@@ -237,6 +239,11 @@ test("an issue key and a project document each write their files; the document g
       "",
       "<!-- comment 2026-10-16T15:00:00Z -->",
       "Good.",
+      "",
+      "<!-- comment 2026-10-16T15:30:00Z -->",
+      "> The ticket says 5 s.",
+      "",
+      "It is wrong.",
       "",
     ].join("\n")
   );
@@ -279,7 +286,7 @@ test("an issue key and a project document each write their files; the document g
   expect(JSON.parse(read(path.join(document, "asks.json")))).toEqual([]);
 
   expect(run.stdout).toEqual([
-    `${issue}: title.txt, messages.md (4 entries), asks.json (2 asks), old-spec.md`,
+    `${issue}: title.txt, messages.md (5 entries), asks.json (2 asks), old-spec.md`,
     `${document}: title.txt, messages.md (1 entries), asks.json (0 asks)`,
   ]);
 });

@@ -241,9 +241,10 @@ function outlined({ problem = "The CLI prints no greeting.", design = "", summar
     "",
   ].join("\n");
 }
-// The person's input: messages.md less each entry's header and each comment's anchored quote (the
-// `>` lines right after a comment's header), and each answer's text in asks.json. Every other `>`
-// line is the person's own words: a block quote in a message, or one after a comment's quote.
+// The person's input: messages.md less each entry's header and each anchored comment's quote (the
+// `>` lines right after a `<!-- comment <time> anchored -->` header), and each answer's text in
+// asks.json. Every other `>` line is the person's own words: a block quote in a message, one after
+// a comment's quote, or one an unanchored comment starts with.
 const askedFor =
   "Please make the widgets command line print a friendly greeting whenever somebody runs it with their name.";
 const quotedLine = "The command line prints nothing at all when a person runs it today.";
@@ -253,11 +254,13 @@ const voiceLine =
   "I want the greeting to feel warm, so pick words a support agent would really say out loud.";
 const commentQuote =
   "A colleague wrote that the old banner scrolled off the top of every small terminal window.";
+const pastedLine =
+  "The old ticket said every run of the greeting tool gets eight turns before it stops.";
 const personMessages = [
   "<!-- message 2026-10-20T10:00:00Z -->",
   askedFor,
   "",
-  "<!-- comment 2026-10-20T11:00:00Z -->",
+  "<!-- comment 2026-10-20T11:00:00Z anchored -->",
   `> ${quotedLine}`,
   "",
   "Keep the output short so that scripts can still read each line.",
@@ -271,6 +274,11 @@ const personMessages = [
   `> ${voiceLine}`,
   "",
   "That is what I said on the call.",
+  "",
+  "<!-- comment 2026-10-23T09:00:00Z -->",
+  `> ${pastedLine}`,
+  "",
+  "I pasted that from the old ticket.",
   "",
 ].join("\n");
 const sourceAsks = [
@@ -631,6 +639,11 @@ specRun("spec-writing-head-20", {
   spec: outlined({ problem: commentQuote }),
   judges: copied("spec.md", folded(commentQuote), "copies"),
 });
+// Copies the `>` line an unanchored comment starts with: a person's paste, their own input.
+specRun("spec-writing-head-26", {
+  spec: outlined({ problem: pastedLine }),
+  judges: copied("spec.md", folded(pastedLine), "copies"),
+});
 // Spec writes: only a write Dispatch made, of the run's own primary spec, counts. Each call below is
 // something else, and the run's two checked writes still stand. Each result is the one Dispatch
 // gives, so the calls that Dispatch did apply are left out for what they name, not for their result.
@@ -722,8 +735,8 @@ specRun("spec-writing-head-21", {
 });
 // The spec writes of the run's issue that do count: `dispatch issue` that Dispatch answered with the
 // run's issue made, the spec by its artifact id, by a dispatch:// ref, as an uploaded spec.md, by a
-// dashboard URL, and in a shell whose last command failed after Dispatch made the version. Each has
-// its check before it.
+// dashboard URL, in a shell whose last command failed after Dispatch made the version, and with no
+// document named, by `--issue` alone and by a bare issue ref. Each has its check before it.
 specRun("spec-writing-head-22", {
   transcript: conversation(
     routedRead,
@@ -768,6 +781,21 @@ specRun("spec-writing-head-22", {
       "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json 2>&1; dispatch doc-read --issue LWEVAL-7 --artifact spec | grep -c TODO",
       1,
       "Applied 1 ops (version 6)\nDocument token: sha256:abc\n0"
+    ),
+    // No document named: the CLI edits the issue's primary document, the spec.
+    checkOf("c6"),
+    sh(
+      "w6",
+      "dispatch doc-edit --issue LWEVAL-7 --ops-json-file ops.json",
+      0,
+      "Applied 1 ops (version 7)"
+    ),
+    checkOf("c7"),
+    sh(
+      "w7",
+      "dispatch doc-edit --ref dispatch://LWEVAL-7 --ops-json-file ops.json",
+      0,
+      "Applied 1 ops (version 8)"
     ),
     finish
   ),
@@ -1050,13 +1078,17 @@ test("quoted: 7 shared words and a comment's anchored quote are no run", () => {
   expect(rowOf("spec-writing-head-12")).toContain(" shared=0 ");
 });
 
-test("quoted: the person's own `>` lines are input, in a message or after a comment's quote", () => {
+test("quoted: the person's own `>` lines are input: in a message, after a comment's quote, or at the start of an unanchored comment", () => {
   expect(scoresOf("spec-writing-head-19")).toEqual({ ...allPass, quoted: "false" });
   expect(rowOf("spec-writing-head-19")).toContain(
     `shared run 1 in spec.md (${folded(voiceLine).split(" ").length} words, copies: The verdict.): ${folded(voiceLine)}`
   );
   expect(scoresOf("spec-writing-head-20")).toEqual({ ...allPass, quoted: "false" });
   expect(rowOf("spec-writing-head-20")).toContain(`: ${folded(commentQuote)}`);
+  expect(scoresOf("spec-writing-head-26")).toEqual({ ...allPass, quoted: "false" });
+  expect(rowOf("spec-writing-head-26")).toContain(
+    `shared run 1 in spec.md (${folded(pastedLine).split(" ").length} words, copies: The verdict.): ${folded(pastedLine)}`
+  );
 });
 
 test("checked: only an accepted write of the run's own primary spec is a spec write", () => {
@@ -1065,9 +1097,10 @@ test("checked: only an accepted write of the run's own primary spec is a spec wr
   expect(scoresOf("spec-writing-head-21")).toEqual(allPass);
   expect(rowOf("spec-writing-head-21")).toContain(" writes=2 ");
   // The run's issue made with its spec, its spec by artifact id, by a dispatch:// ref, as an
-  // uploaded spec.md, by a dashboard URL, and in a shell that failed after the write.
+  // uploaded spec.md, by a dashboard URL, in a shell that failed after the write, and with no
+  // document named (`--issue` alone, a bare issue ref), which the CLI reads as the primary spec.
   expect(scoresOf("spec-writing-head-22")).toEqual(allPass);
-  expect(rowOf("spec-writing-head-22")).toContain(" writes=6 ");
+  expect(rowOf("spec-writing-head-22")).toContain(" writes=8 ");
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {

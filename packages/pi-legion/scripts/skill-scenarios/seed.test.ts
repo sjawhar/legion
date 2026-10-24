@@ -265,8 +265,9 @@ function ask(fields: Partial<FakeAsk> & Pick<FakeAsk, "id">): FakeAsk {
   };
 }
 
-/** A source directory as fetch-spec-sources.ts writes it: two messages and a comment by people,
- * and three asks of which only the answered question is input. */
+/** A source directory as fetch-spec-sources.ts writes it: two messages, an anchored comment and an
+ * unanchored comment whose body starts with a block quote, all by people, and three asks of which
+ * only the answered question is input. */
 function source(oldSpec?: string): string {
   const dir = freshDir("source");
   writeFileSync(path.join(dir, "title.txt"), "Make the widget faster\n");
@@ -276,13 +277,18 @@ function source(oldSpec?: string): string {
       "<!-- message 2026-10-16T17:53:32.037069Z -->",
       "Please make the widget faster.",
       "",
-      "<!-- comment 2026-10-17T09:00:00Z -->",
+      "<!-- comment 2026-10-17T09:00:00Z anchored -->",
       "> The widget waits 5 s.",
       "",
       "Why 5 s?",
       "",
       "<!-- message 2026-10-18T12:00:00Z -->",
       "One second is enough.",
+      "",
+      "<!-- comment 2026-10-18T13:00:00Z -->",
+      "> The ticket says 5 s.",
+      "",
+      "It is wrong.",
       "",
     ].join("\n")
   );
@@ -353,6 +359,7 @@ describe("spec-writing", () => {
       "alice /api/v1/issues/<id>/messages",
       "alice /api/v1/asks/<id>/answer",
       "alice /api/v1/issues/<id>/messages",
+      "alice /api/v1/issues/<id>/messages",
     ]);
     const posts = dispatch.calls.filter((call) => call.method === "POST");
     expect(posts[0]?.body).toEqual({
@@ -364,6 +371,7 @@ describe("spec-writing", () => {
       "Please make the widget faster.",
       "> The widget waits 5 s.\n\nWhy 5 s?",
       "One second is enough.",
+      "> The ticket says 5 s.\n\nIt is wrong.",
     ]);
     expect(posts[2]?.body).toEqual({
       question: "Cache the widget or shorten its wait?",

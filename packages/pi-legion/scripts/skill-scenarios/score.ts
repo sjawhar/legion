@@ -17,6 +17,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 import { z } from "zod";
+import { ENTRY_HEADER } from "./fetch-spec-sources";
 import {
   CheckableFile,
   DecisionsOutput,
@@ -768,7 +769,8 @@ const ISSUE_REF =
  * the write does not take it back. A `--help` or `--dry-run` call writes nothing.
  * - `dispatch issue` with a spec, answered with the run's issue made (`Created <issue>:`).
  * - `dispatch doc-edit` of the run's issue (`--issue`, or the issue of a `--ref`) and of its spec
- *   (`--artifact`, or the document of the `--ref`), answered `Applied <n> ops (version <v>)`.
+ *   (`--artifact`, or the document of the `--ref`; no document named is the issue's primary
+ *   document, as the CLI resolves it), answered `Applied <n> ops (version <v>)`.
  * - `dispatch artifact` of the run's issue and of the spec's file, answered
  *   `Uploaded <name> as version <v>`.
  * A call of another issue, another document or a project's document writes no spec. */
@@ -786,9 +788,10 @@ function writesSpec(call: DispatchCall, fixture: SpecFixture, text: string): boo
     );
   if (call.command === "doc-edit") {
     const named = ISSUE_REF.exec(call.flag("ref") ?? "");
+    const document = call.flag("artifact") ?? named?.[2] ?? named?.[3];
     return (
       (named?.[1] ?? call.flag("issue")) === fixture.issue &&
-      isSpec(call.flag("artifact") ?? named?.[2] ?? named?.[3]) &&
+      (document === undefined || isSpec(document)) &&
       /\bApplied \d+ ops[^\n]*\(version \d+\)/.test(text)
     );
   }
@@ -1073,10 +1076,13 @@ export interface SharedRun {
   input: string;
 }
 /** The `>` lines fetch-spec-sources.ts writes for an anchored comment's quote: the lines right
- * after a comment entry's header, up to its first line that is not a `>` line. The quote is the old
- * spec's text, not the person's. Every other `>` line of messages.md is the person's own: a block
- * quote in a message, or one after a comment's quote and body. */
-const ANCHORED_QUOTE = /^(<!-- comment \S+ -->[ \t]*\n)((?:>[^\n]*(?:\n|$))+)/gm;
+ * after a `<!-- comment <time> anchored -->` header, up to its first line that is not a `>` line.
+ * The quote is the old spec's text, not the person's. Every other `>` line of messages.md is the
+ * person's own: a block quote in a message, one after a comment's quote and body, or one an
+ * unanchored comment starts with. */
+const ANCHORED_QUOTE = /^(<!-- comment \S+ anchored -->[ \t]*\n)((?:>[^\n]*(?:\n|$))+)/gm;
+/** Every entry header of messages.md (fetch-spec-sources.ts's ENTRY_HEADER), which is no input. */
+const ENTRY_HEADERS = new RegExp(ENTRY_HEADER.source, "gm");
 /** The shared runs the `quoted` score finds. The run's texts are spec.md, each text of
  * agent-texts.json (seeded asks left out) and each file of documents/. The person's input is
  * source/messages.md less its entry headers and each comment's anchored quote (ANCHORED_QUOTE),
@@ -1091,7 +1097,7 @@ export function sharedRuns(runDir: string): SharedRun[] {
     (_, header: string, quote: string) => header + quote.replace(/[^\n]/g, " ")
   );
   const input = [
-    piece("messages.md", blank(quotesBlanked, /^<!-- (?:message|comment) \S+ -->[ \t]*$/gm)),
+    piece("messages.md", blank(quotesBlanked, ENTRY_HEADERS)),
     ...json(path.join(runDir, "source", "asks.json"), SourceAsks).flatMap((ask, index) =>
       ask.answer?.text ? [piece(`asks.json#${index}`, ask.answer.text)] : []
     ),

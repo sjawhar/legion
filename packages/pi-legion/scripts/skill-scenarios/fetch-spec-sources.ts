@@ -11,8 +11,9 @@
  * <dir>/<project in lower case>-<slug>/. The directory is written again from nothing:
  *   title.txt    the issue's title, or the document's name
  *   messages.md  each message and comment by a person, oldest first. Each entry starts with the
- *                line `<!-- message <created_at> -->` or `<!-- comment <created_at> -->`. An anchored
- *                comment starts with its quote, each line after `> `, then a blank line. A project
+ *                line `<!-- message <created_at> -->` or `<!-- comment <created_at> -->`, or, for a
+ *                comment anchored to the spec, `<!-- comment <created_at> anchored -->`, whose text
+ *                starts with its quote, each line after `> `, then a blank line. A project
  *                document is one message: its text, at the time of its latest version.
  *   asks.json    each ask on the issue, every state, oldest first: id, kind, question, options,
  *                multiple, state, created_at, and answer (selected, text, user, at) or null. A
@@ -54,8 +55,9 @@ const USAGE =
 const ISSUE_KEY = /^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$/;
 const DOCUMENT_REF = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 
-/** The header line of one messages.md entry. seed.ts splits the file on it. */
-export const ENTRY_HEADER = /^<!-- (message|comment) (\S+) -->$/m;
+/** The header line of one messages.md entry: its kind, its time and, for a comment anchored to the
+ * spec, the word `anchored`. seed.ts splits the file on it, and score.ts finds the headers by it. */
+export const ENTRY_HEADER = /^<!-- (message|comment) (\S+)( anchored)? -->$/m;
 
 /** How many issues are read at once. */
 const CONCURRENCY = 8;
@@ -69,6 +71,8 @@ interface Entry {
   readonly kind: "message" | "comment";
   readonly created_at: string;
   readonly text: string;
+  /** A comment anchored to the spec: its text starts with the quote as `>` lines. */
+  readonly anchored?: boolean;
 }
 
 /** One ask of asks.json. */
@@ -107,14 +111,14 @@ function parseReference(text: string): Reference | undefined {
   return undefined;
 }
 
-/** A comment's text as messages.md holds it: its quote as `>` lines, then its body, then the
- * replacement text when the comment is a suggestion. */
+/** A comment's text as messages.md holds it: its quote as `>` lines when it is anchored (see
+ * `anchored`), then its body, then the replacement text when the comment is a suggestion. */
 function commentText(comment: Comment): string {
   const parts: string[] = [];
-  const quote = comment.anchor?.quote.trimEnd();
-  if (quote !== undefined && quote !== "") {
+  if (anchored(comment)) {
     parts.push(
-      quote
+      (comment.anchor?.quote ?? "")
+        .trimEnd()
         .split("\n")
         .map((line) => (line === "" ? ">" : `> ${line}`))
         .join("\n")
@@ -126,6 +130,12 @@ function commentText(comment: Comment): string {
     parts.push(`Suggested replacement:\n${comment.suggestion.replace_with.trimEnd()}`);
   }
   return parts.join("\n\n");
+}
+
+/** Whether messages.md gives a comment its quote, and marks its header `anchored`: an anchor whose
+ * quote is not empty. */
+function anchored(comment: Comment): boolean {
+  return (comment.anchor?.quote.trimEnd() ?? "") !== "";
 }
 
 /** messages.md from its entries, oldest first. Throws when a line of an entry reads as a header,
@@ -140,7 +150,7 @@ function messagesMarkdown(source: string, entries: readonly Entry[]): string {
     }
   }
   if (ordered.length === 0) return "";
-  return `${ordered.map((entry) => `<!-- ${entry.kind} ${entry.created_at} -->\n${entry.text}`).join("\n\n")}\n`;
+  return `${ordered.map((entry) => `<!-- ${entry.kind} ${entry.created_at}${entry.anchored === true ? " anchored" : ""} -->\n${entry.text}`).join("\n\n")}\n`;
 }
 
 function sourceAsk(ask: Ask): SourceAsk {
@@ -204,6 +214,7 @@ async function fetchIssue(dispatch: ProductionDispatch, out: string, key: string
         kind: "comment" as const,
         created_at: comment.created_at,
         text: commentText(comment),
+        anchored: anchored(comment),
       })),
   ];
   const sourceAsks = asks.toSorted(byCreatedAt).map(sourceAsk);

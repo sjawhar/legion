@@ -70,6 +70,7 @@ import {
   listIssueAsks,
   listIssueMessages,
 } from "../../../dispatch/e2e/api";
+import { ENTRY_HEADER } from "./fetch-spec-sources";
 import { CREATED, session, sessionId, toolResults } from "./transcript";
 
 /** What `ask-on-message` writes and `capture` reads. */
@@ -87,8 +88,8 @@ const PERSON = "alice";
 /** Dispatch's approval answer (packages/envoy/internal/dispatch/docs/approval_review.go). */
 const APPROVE = "Approve";
 
-/** One entry header of a source's messages.md, as fetch-spec-sources.ts writes it. */
-const ENTRY = /^<!-- (message|comment) (\S+) -->$/gm;
+/** Every entry header of a source's messages.md: fetch-spec-sources.ts's ENTRY_HEADER, every match. */
+const ENTRY = new RegExp(ENTRY_HEADER.source, "gm");
 /** One ask of a source's asks.json, as fetch-spec-sources.ts writes it. */
 const SourceAsk = z.object({
   id: z.string(),

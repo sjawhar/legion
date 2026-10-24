@@ -67,7 +67,7 @@ const messages = [
   "<!-- message 2026-10-20T10:00:00Z -->",
   asked,
   "",
-  "<!-- comment 2026-10-20T11:00:00Z -->",
+  "<!-- comment 2026-10-20T11:00:00Z anchored -->",
   "> The old spec said nothing about the format.",
   "",
   format,
@@ -513,17 +513,19 @@ test("answer refuses a label the ask does not offer, and writes an empty file wh
   expect(readFileSync(path.join(dir, "answers-3.jsonl"), "utf8")).toBe("");
 });
 
-// fetch-spec-sources.ts writes `>` lines for a comment's anchored quote alone, at the start of the
-// comment's text. Any other `>` line, such as a block quote in a message, is the person's words.
-test("each prompt that reads messages.md says only a comment's leading `>` lines quote the spec", async () => {
+// fetch-spec-sources.ts writes `>` lines for an anchored comment's quote alone, at the start of the
+// comment's text, and marks that comment's header `anchored`. Any other `>` line, such as a block
+// quote in a message or one an unanchored comment starts with, is the person's words.
+test("each prompt that reads messages.md says only an anchored comment's leading `>` lines quote the spec", async () => {
   const asked: Seen[] = [];
   await answerTurn(runDir("spec-writing-head-5"), 1, { runner: fakeRunner(asked) });
   const prompts = [...asked, only("questions"), only("preamble")].map((judge) => judge.prompt);
   expect(prompts).toHaveLength(4);
   for (const prompt of prompts) {
     expect(prompt).toContain(
-      "The `>` lines directly after a `<!-- comment <time> -->` line quote the spec that the comment is about. They are not the person's words. Every other line is the person's words."
+      "The `>` lines directly after a `<!-- comment <time> anchored -->` line quote the spec that the comment is about. They are not the person's words. Every other line is the person's words."
     );
     expect(prompt).not.toContain("A line that starts with `>` quotes the spec");
+    expect(prompt).not.toContain("directly after a `<!-- comment <time> -->` line");
   }
 });
