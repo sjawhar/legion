@@ -93,6 +93,10 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `claude-envoy:asd-ste100`, as a symlink into the root
+  `skills/`: the ASD-STE100 rules (Simplified Technical English) for text a reader must not
+  misread. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69, with
+  its licence and without its linter.
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight
   characters. Inside tmux the name is `session:window` for a window whose `automatic-rename` is

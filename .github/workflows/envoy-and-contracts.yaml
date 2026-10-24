@@ -306,7 +306,7 @@ jobs:
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
             # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
             # installed through the mise install-jj leaves. Every skill and every daemon prompt:
-            # src/skills-guard.test.ts stages its four skills through the prepack script and resolves
+            # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
             # .md under skills/ and packages/daemon/internal/prompts, so a prompt that names a
             # Dispatch tool fails the pull request that writes it, not the next one to touch this
@@ -549,7 +549,7 @@ jobs:
       # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
-      # license cannot be determined) and stages this plugin's four skills. The listing shows the
+      # license cannot be determined) and stages this plugin's five skills. The listing shows the
       # tarball ships those and nothing of the Legion plugin's: no legion.js, no agents/, none of
       # its skills.
       - name: Pack pi-envoy

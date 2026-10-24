@@ -113,6 +113,10 @@
 
 ### Added
 
+- The plugin ships a fifth skill, `asd-ste100`: the ASD-STE100 rules (Simplified Technical
+  English) for text a reader must not misread, which a session reads before it writes text a
+  person reads. It is Legion's copy of the MIT-licensed `danyuchn/asd-ste100-skill` at 32511c69,
+  with its licence and without its linter.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
   `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
   repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.
