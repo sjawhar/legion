@@ -32,6 +32,9 @@ import (
 // the token it was handed, and exits 128, git's fatal status. Every other invocation is the real
 // git's.
 const fakeGit = `#!/bin/sh
+while [ "$1" = "-c" ]; do
+	shift 2
+done
 if [ "$1 $2 $3 $4" = "clone --bare --quiet https://github.com/acme/widgets" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
 	if [ -n "$WINIT_CLONE_FAILURES" ]; then
