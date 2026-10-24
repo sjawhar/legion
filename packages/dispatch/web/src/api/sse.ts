@@ -41,6 +41,7 @@ const knownEventTypes: Record<EventType, true> = {
   "issue.deployed": true,
   "artifact.created": true,
   "artifact.version": true,
+  "artifact.human_edited": true,
   "artifact.approved": true,
   "artifact.changes_requested": true,
   "ask.opened": true,
@@ -90,7 +91,9 @@ function withoutInbox(keys: (readonly unknown[])[]): (readonly unknown[])[] {
 }
 
 function artifactId(event: Event): string | undefined {
-  return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
+  return event.type === "artifact.version" || event.type === "artifact.human_edited"
+    ? event.payload.artifact_id
+    : undefined;
 }
 
 // The document an ask or comment event touches: a block ask names the document that holds its
@@ -550,7 +553,11 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   }
   // The branches above name every `issue.*` type there is, so a type added later falls to the
   // default branch below instead of returning the bare base keys.
-  if (event.type === "artifact.created" || event.type === "artifact.version") {
+  if (
+    event.type === "artifact.created" ||
+    event.type === "artifact.version" ||
+    event.type === "artifact.human_edited"
+  ) {
     keys.push(["artifacts", event.issue_key]);
     const id = artifactId(event);
     if (id !== undefined) {

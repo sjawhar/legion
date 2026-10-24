@@ -86,6 +86,8 @@ export function activityDescription(
       return `added ${event.payload.artifact.name}`;
     case "artifact.version":
       return `saved ${event.payload.name} v${event.payload.version.number}`;
+    case "artifact.human_edited":
+      return `edited ${event.payload.name} v${event.payload.from_version} to v${event.payload.to_version}`;
     case "comment.created":
       if (event.payload.ask_id !== null) {
         return `replied to “${event.payload.ask_question ?? "an ask"}”`;

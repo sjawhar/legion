@@ -773,6 +773,38 @@ describe("renderInbound dispatch events", () => {
     expect(renderInbound(raw, reader)).toMatchObject({ skip: true, content: "" });
   });
 
+  test("renders a person's spec edit as its versions and editor, then the diff in a fenced block", () => {
+    const edit = {
+      artifact_id: "artifact-1",
+      name: "spec.md",
+      from_version: 4,
+      to_version: 7,
+      editors: ["person@example.com"],
+      diff: "--- previous\n+++ current\n@@ -1 +1 @@\n-The export runs at 02:00 UTC.\n+The export runs at 04:00 UTC.\n",
+      diff_truncated: false,
+    };
+    const person = { kind: "user", id: "person@example.com" };
+    const whole = renderInbound(dispatchEvent("artifact.human_edited", edit, person), reader);
+    const [card, block] = whole.content.split("\n\n```diff\n");
+    expect(decode(card ?? "")).toMatchObject({
+      envoy: {
+        dispatch: {
+          owner: "DSP-1",
+          type: "artifact.human_edited",
+          edit: "spec.md v4 to v7, edited by person@example.com",
+        },
+      },
+    });
+    expect(card).not.toContain("02:00");
+    expect(block).toBe(`${edit.diff}\`\`\``);
+
+    const cut = renderInbound(
+      dispatchEvent("artifact.human_edited", { ...edit, diff_truncated: true }, person),
+      reader
+    );
+    expect(cut.content.endsWith(`${edit.diff}\`\`\`\n(diff cut at 4,096 bytes)`)).toBe(true);
+  });
+
   test("renders subscription.removed as a short plain-text notice, not the generic TOON envelope", () => {
     const rendered = renderInbound(
       dispatchEvent("subscription.removed", {

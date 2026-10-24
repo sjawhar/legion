@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- A person's browser edit of a spec a session wrote reaches that session as one Envoy card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block. An idle session starts a turn on it.
+
 ### Fixed
 
 - The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux

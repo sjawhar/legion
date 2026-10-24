@@ -1592,6 +1592,23 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
   readonly diff?: string;
 }
 
+/** `artifact.human_edited`: a person's browser edits of a document, sent once the document has
+ *  been quiet for 30 seconds after the last of them. `from_version` is the version before the
+ *  quiet window's first version by a person, `to_version` the window's last one; `editors` names
+ *  each person who wrote one, and the event's actor is the one who edited last. `diff` is the
+ *  unified diff of the two versions' stored markdown, cut at its last line end within 4,096 bytes,
+ *  `diff_truncated` then true; it is empty when a version is no longer stored. The event reaches
+ *  each session the document credits and the issue's route, never a person. */
+export interface ArtifactHumanEditedEventPayload {
+  readonly artifact_id: string;
+  readonly name: string;
+  readonly from_version: number;
+  readonly to_version: number;
+  readonly editors: readonly string[];
+  readonly diff: string;
+  readonly diff_truncated: boolean;
+}
+
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
  *  pinned to `version`; `reason` is required for changes requested; `ask_id` names the
  *  approval ask the review answered, null when given from the document header with no
@@ -1837,6 +1854,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "artifact.version";
       readonly payload: ArtifactVersionEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "artifact.human_edited";
+      readonly payload: ArtifactHumanEditedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.approved";
@@ -2442,6 +2463,16 @@ export const ArtifactVersionEventPayloadSchema = z.object({
   name: z.string().optional(),
   version: z.object({ number: z.number().optional(), summary: z.string().nullish() }).optional(),
   diff: z.string().optional(),
+});
+
+export const ArtifactHumanEditedEventPayloadSchema = z.object({
+  artifact_id: z.string().optional(),
+  name: z.string().optional(),
+  from_version: z.number().int().optional(),
+  to_version: z.number().int().optional(),
+  editors: z.array(z.string()).optional(),
+  diff: z.string().optional(),
+  diff_truncated: z.boolean().optional(),
 });
 
 export const ArtifactReviewEventPayloadSchema = z.object({

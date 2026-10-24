@@ -1520,8 +1520,10 @@ profile, launched with `controller-start-tmux.sh`'s `operator_env` line and `OMP
 fresh profile's first launch otherwise sits in the first-run setup wizard), its cwd under `/tmp` —
 registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
-conversation page as the person the header names. The session's model turns go through the model
-gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+conversation page as the person the header names. The session's model turns go through the route
+`LEGION_E2E_MODEL_ROUTE` names: the model gateway on the operator's own hawk login
+([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)), or a local key file
+([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 
 The rig serves the checkout's built `packages/dispatch/web/dist` live. Do not run `bun run build:web`
 or `bun run e2e` in this checkout while a run is live: either rewrites that directory under the
@@ -1538,11 +1540,16 @@ or custom message after it and no background job the model started still owed it
 
 ```bash
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/dispatch-user-turns.sh   # the same, for a devbox with no Hawk gateway
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> DISPATCH_USER_TURNS_ONLY=spec-edit bash scripts/e2e/dispatch-user-turns.sh   # INFRA-140's spec-edit checks alone
 ```
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_MODEL_ROUTE` | `gateway` | `gateway` or `key-file`: how the session reaches Anthropic |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required under `gateway` | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_ANTHROPIC_KEY_FILE` | required under `key-file` | a 0600 file holding a plaintext Anthropic key, read by the key command on every call; the key command is written under the run's scratch directory, which every exit removes |
+| `DISPATCH_USER_TURNS_ONLY` | unset, every check | `spec-edit`: `session-registers` and the two spec-edit checks alone, then PASS; `spec-edit-card`: `session-registers` and `a-persons-spec-edit-reaches-its-writer` alone, then PASS |
 | `DISPATCH_USER_TURNS_OMP` | the pinned build, `.omp-pin`'s mise tool spec (`github:sjawhar/oh-my-pi@<version>`) | another Oh My Pi, as a mise tool spec |
 | `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots, the session's pane at exit, `extension-command-args` and `message-starts.jsonl`) and `session.jsonl`, the session's transcript |
 
@@ -1555,6 +1562,8 @@ Postgres and NATS containers; a run that finds another's leftovers refuses to st
 | check | what it holds |
 | :--- | :--- |
 | `session-registers` | the session registers with the listener from its cwd and advertises `aside`, `btw` and `steer` |
+| `a-persons-spec-edit-reaches-its-writer` | a person's message asks the session to create an issue in project UT whose spec's first section says `The export runs at 02:00 UTC.` and whose second section repeats the time, so the session is the spec's creator; the page opens the issue's Spec tab as the person, its document's connection dot reads connected (so the trusted header reaches the editor's socket), and it selects the first section's sentence and types `The export runs at 04:00 UTC.` over it; once the person's `artifact.version` settles, with Dispatch's own 30 s quiet time, the session's transcript holds one `artifact.human_edited` card whose diff adds the new sentence, within 60 s |
+| `the-writer-rewrites-what-the-edit-touched` | within 5 minutes of the person's version, a later version that lists the session says `04:00` in both sections and `02:00` nowhere |
 | `send-is-the-persons-own-turn` | the page's composer opens on Send and offers Send, Aside and BTW; a Send typed there is one user message in the session's transcript that is exactly the body, and no card; the session answers it |
 | `aside-is-the-persons-own-turn` | the same for an Aside |
 | `btw-is-a-side-question` | a BTW is answered in Dispatch and is no user message |

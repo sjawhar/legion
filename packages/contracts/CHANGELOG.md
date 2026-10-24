@@ -4,6 +4,10 @@
 
 ### Added
 
+- The event `artifact.human_edited` and its payload, `ArtifactHumanEditedEventPayload` and
+  `ArtifactHumanEditedEventPayloadSchema`: `artifact_id`, `name`, `from_version`, `to_version`,
+  `editors`, `diff` and `diff_truncated`. Dispatch sends it once a document has been quiet for 30
+  seconds after a person's last browser edit.
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

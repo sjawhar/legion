@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- A person's browser edit of a spec a session wrote reaches that session's channel as one card, 30
+  seconds after the person stops editing: the card names the document, the two versions and each
+  editor, and the diff follows it in a fenced `diff` block.
+
 ### Fixed
 
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on

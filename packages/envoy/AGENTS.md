@@ -2208,6 +2208,15 @@ the synchronous listener call records the sent or failed attempt instead of blin
   has no delivery route, so the same author routes above are the only way an involved session
   learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a
   human's new comment on a document it wrote.
+- `artifact.human_edited` goes to the issue's route and to each session the document credits,
+  never to a person. Dispatch appends it once a document has been quiet for 30 seconds after a
+  person's last settled browser version (`document_edit_notices`, migration 0116, swept every 5 s
+  under the `edit-notices` lease by `docs.RunEditNotices`); its actor is the person who edited
+  last, and its payload names the document, the two versions the quiet window spans, each person
+  who edited, and the unified diff of the two versions, cut at its last line end within 4,096
+  bytes (`ArtifactHumanEditedEventPayload` in `packages/contracts/src/dispatch-api.ts`). The
+  document is the payload's `artifact_id`, and its sessions are read as a comment's are
+  (`loadDocumentSessionAuthors`).
 - Dispatch project events use `notifications.dispatch.project.<PROJECT>.<type>` and are retained in JetStream. They have no issue route; project, repository-setting, and user-interface state consumers refresh from the event stream.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,

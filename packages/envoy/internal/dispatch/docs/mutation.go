@@ -707,11 +707,21 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 		return VersionResult{Version: latest.Version}, nil
 	}
 	capture.authors[actorKey(actor)] = actor
+	_, open, err := lockArtifactOwner(ctx, tx, artifactID)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if !open {
+		return VersionResult{}, ErrIssueClosed
+	}
 	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
 		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})
 	if err != nil {
+		return VersionResult{}, err
+	}
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), actor); err != nil {
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
@@ -1179,6 +1189,11 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 		capture: &capture,
 	})
 	if err != nil {
+		return VersionResult{}, err
+	}
+	// A person's credit in this version opens the edit notice: the owner lock this transaction
+	// holds keeps the sweep's lock order (INFRA-140 R8).
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), actor); err != nil {
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
