@@ -202,9 +202,9 @@ func TestEmptyKindIsAPlainSecret(t *testing.T) {
 
 // TestAGitHubAppSecretWithoutOwnersIsRefused: a public App can be installed by any account, so a
 // github-app secret names the accounts the broker mints for, and one that names none, by a missing
-// tag or a tag of only commas and spaces, is refused github-owners-missing rather than served.
+// tag or a tag of only white space, is refused github-owners-missing rather than served.
 func TestAGitHubAppSecretWithoutOwnersIsRefused(t *testing.T) {
-	for name, owners := range map[string]*string{"missing": nil, "empty": new(" , ,")} {
+	for name, owners := range map[string]*string{"missing": nil, "empty": new("  \t ")} {
 		t.Run(name, func(t *testing.T) {
 			logged := policytest.CaptureLog(t)
 			secret := kindSecret("APP_KEY", policy.KindGitHubApp, "value")
@@ -241,9 +241,12 @@ func TestGitHubOwnersAreReadWithoutRegardToCase(t *testing.T) {
 		}
 		return set
 	}
-	first, second := load("Acme-Org, ada"), load("ADA,acme-org,ada")
+	first, second := load("Acme-Org  ada"), load("ADA acme-org\tada")
 	if got := first.Secrets["APP_KEY"].GitHubOwnerLogins(); !slices.Equal(got, []string{"acme-org", "ada"}) {
 		t.Fatalf("GitHubOwnerLogins = %v, want [acme-org ada]", got)
+	}
+	if got := first.Secrets["APP_KEY"].GitHubOwners; got != "acme-org ada" {
+		t.Fatalf("GitHubOwners = %q, want the canonical single-space list %q", got, "acme-org ada")
 	}
 	if first.Version != second.Version {
 		t.Fatal("two spellings of one github-owners list made two policy versions")
@@ -253,6 +256,32 @@ func TestGitHubOwnersAreReadWithoutRegardToCase(t *testing.T) {
 	}
 	if narrowed := load("ada"); narrowed.Version == first.Version {
 		t.Fatal("narrowing github-owners left the policy version unchanged")
+	}
+}
+
+// TestAGitHubOwnersCommaIsRefused: github-owners separates its logins with spaces, the form both
+// stores hold, and a comma anywhere in it is refused github-owners-malformed rather than read as
+// a separator or as part of a login.
+func TestAGitHubOwnersCommaIsRefused(t *testing.T) {
+	for _, owners := range []string{"acme-org,ada", "acme-org, ada", "ada,"} {
+		t.Run(owners, func(t *testing.T) {
+			logged := policytest.CaptureLog(t)
+			secret := kindSecret("APP_KEY", policy.KindGitHubApp, "value")
+			secret.Tags[policy.TagGitHubOwners] = owners
+			set, err := policytest.Loader(secrets.NewLocal(secret)).Load(context.Background())
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if _, ok := set.Secrets["APP_KEY"]; ok {
+				t.Fatalf("Load served a github-app secret whose github-owners is %q", owners)
+			}
+			if !strings.Contains(logged.String(), policy.ReasonGitHubOwnersMalformed) {
+				t.Fatalf("log %q does not name %q", logged.String(), policy.ReasonGitHubOwnersMalformed)
+			}
+			if _, err := policy.ParseGitHubOwners(owners); !errors.Is(err, policy.ErrGitHubOwnersComma) || !strings.Contains(err.Error(), "spaces") {
+				t.Fatalf("ParseGitHubOwners(%q) = %v; want ErrGitHubOwnersComma naming the space-separated form", owners, err)
+			}
+		})
 	}
 }
 

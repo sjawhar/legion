@@ -52,8 +52,9 @@ func checkMaxGrant(maxGrant string, orNone bool) error {
 }
 
 // checkGitHubOwners is --github-owners' rule, the broker's own (policy.ParseGitHubOwners): GitHub
-// account logins separated by commas, or none where orNone allows it. It answers the list as the
-// broker reads it, lowercased and sorted, so the tag is written as it will be served.
+// account logins separated by spaces, which the shell quotes as one argument, or none where orNone
+// allows it; a comma is refused. It answers the list as the broker reads it, lowercased, sorted and
+// single-spaced, so the tag is written as it will be served.
 func checkGitHubOwners(owners string, orNone bool) (string, error) {
 	if owners == "" || (orNone && owners == tagNone) {
 		return owners, nil

@@ -367,12 +367,6 @@ func (b *gcpBackend) currentTags(ctx context.Context, slug string) (map[string]s
 	return maps.Clone(secret.GetAnnotations()), nil
 }
 
-// refuseTagValues refuses nothing: Secret Manager's annotations take any value, a github-owners
-// list separated by commas among them.
-func (b *gcpBackend) refuseTagValues(map[string]string) error {
-	return nil
-}
-
 // setTags writes tags into the secret's annotations, and removeTags deletes keys from them, each in
 // one UpdateSecret that keeps every annotation it does not name. An UpdateSecret whose mask names
 // "annotations" replaces the whole map, so updateAnnotations reads and merges the current

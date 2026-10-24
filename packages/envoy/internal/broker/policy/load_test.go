@@ -469,7 +469,7 @@ func TestGoldenDigest(t *testing.T) {
 // SHA-256 of the lines printed by hand, so it holds the bytes, not just their stability:
 // printf 'A_B\tada@example.com\thuman\t<arn>/a-b\nA0\t…\tagent\t<arn>/a0\n
 // DEEL_API_KEY\tshared\thuman\t<arn>/deel-api-key\n
-// GOLDEN_APP\tada@example.com\tagent\tmint:github-app:<arn>/golden-app\t0s\tacme,ada\n
+// GOLDEN_APP\tada@example.com\tagent\tmint:github-app:<arn>/golden-app\t0s\tacme ada\n
 // GOLDEN_KIND\tada@example.com\tagent\tmint:google-login:<arn>/golden-kind\t1h0m0s\t\n' | sha256sum,
 // with <arn> arn:aws:secretsmanager:local:000000000000:secret:example/agent-secrets.
 func TestGoldenDigestWithKindAndMaxGrant(t *testing.T) {
@@ -478,9 +478,9 @@ func TestGoldenDigestWithKindAndMaxGrant(t *testing.T) {
 	kind.Tags[policy.TagMaxGrant] = "1h"
 	store.Put(kind)
 	app := policytest.KindSecret("GOLDEN_APP", "ada@example.com", policy.TierAgent, policy.KindGitHubApp, "v1")
-	app.Tags[policy.TagGitHubOwners] = "Ada, acme"
+	app.Tags[policy.TagGitHubOwners] = "Ada  acme"
 	store.Put(app)
-	const want = "540b9988c78a137c88c1f8cead307a0a5502a9dfb1549a304194722c3793b018"
+	const want = "88c77e2ce85b8174fcfaa88ce25c7905ae902d12bc5584cf82cb3089aa7c364e"
 	set, err := policytest.Loader(store).Load(context.Background())
 	if err != nil {
 		t.Fatal(err)

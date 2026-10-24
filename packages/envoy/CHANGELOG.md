@@ -101,8 +101,10 @@
   separate index with no attestation; pin the `<commit>` image its revision annotation names.
 - The secrets broker mints releases by each secret's `kind` tag. `github-app` releases contain
   installation tokens for every installation of the GitHub App that is not suspended and is on an
-  account the secret's `github-owners` tag lists; a `github-app` secret without that tag is refused
-  `github-owners-missing`, since anyone can install a public App. `google-login` releases contain
+  account the secret's `github-owners` tag lists (GitHub logins separated by spaces); a
+  `github-app` secret without that tag is refused `github-owners-missing`, and one whose list
+  holds a comma `github-owners-malformed`, since anyone can install a public App. `google-login`
+  releases contain
   a Google access token. A kind secret holds its key or refresh
   token as a current value, which the broker never returns, and a mint GitHub or Google refuses
   is `502 MINT_FAILED` with their reason, logged at ERROR as `broker: mint failed` with the
@@ -114,8 +116,7 @@
   retag` takes `--kind`, `--github-owners LOGINS|none` and `--max-grant DURATION|none`. A retag
   either sets tags or removes them (`none`), in one write, so a refused write leaves the secret as
   it was. A retag that names `none` beside another change exits 2 before it writes anything, and
-  so does a create or retag that would leave a `github-app` secret without `github-owners`. On the
-  AWS store `--github-owners` names one account, since AWS tag values hold no comma.
+  so does a create or retag that would leave a `github-app` secret without `github-owners`.
 
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the

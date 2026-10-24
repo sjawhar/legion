@@ -102,7 +102,7 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 	for _, kind := range []string{policy.KindGitHubApp, policy.KindGoogleLogin} {
 		args := []string{"retag", "LOGIN_KEY", "--kind", kind}
 		if policy.KindNeedsGitHubOwners(kind) {
-			args = append(args, "--github-owners", "Ada, acme-org")
+			args = append(args, "--github-owners", "Ada  acme-org")
 		}
 		if _, stderr, code = runSecret(args...); code != 0 {
 			t.Fatalf("retag %s: exit %d, stderr %q", kind, code, stderr)
@@ -115,8 +115,8 @@ func TestSecretKindAndMaxGrantOnGCP(t *testing.T) {
 		}
 	}
 	fake.mu.Lock()
-	if got := fake.secrets[id].secret.GetAnnotations()[policy.TagGitHubOwners]; got != "acme-org,ada" {
-		t.Errorf("github-owners after the round trip = %q, want the comma list GCP keeps: acme-org,ada", got)
+	if got := fake.secrets[id].secret.GetAnnotations()[policy.TagGitHubOwners]; got != "acme-org ada" {
+		t.Errorf("github-owners after the round trip = %q, want the canonical space-separated list: acme-org ada", got)
 	}
 	fake.mu.Unlock()
 	if _, stderr, code = runSecret("retag", "LOGIN_KEY", "--kind", "none"); code != 0 {
@@ -144,9 +144,9 @@ func TestSecretKindFlagsRejectInvalidValues(t *testing.T) {
 		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--max-grant", "soon"},
 		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--max-grant", "500ms"},
 		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp},
-		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", " , "},
+		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "  "},
 		{"create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGoogleLogin, "--github-owners", "ada"},
-		{"retag", "HELD_KEY", "--github-owners", " , "},
+		{"retag", "HELD_KEY", "--github-owners", "  "},
 		{"retag", "HELD_KEY", "--github-owners", "none", "--tier", "human"},
 	} {
 		_, stderr, code := runSecret(args...)
@@ -198,7 +198,7 @@ func TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing(t *testing.T
 		startSecretBrokerWith(t, settings, gcpServedBy(fake, settings))
 		for _, args := range [][]string{
 			{"create", "PLAIN_KEY", "--owner", "me", "--tier", "agent"},
-			{"create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "acme-org, ada"},
+			{"create", "APP_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "acme-org ada"},
 		} {
 			useStdin(t, "stored-value")
 			if _, stderr, code := runSecret(args...); code != 0 {
@@ -230,10 +230,11 @@ func TestARetagThatLeavesAGitHubAppSecretWithoutOwnersWritesNothing(t *testing.T
 	})
 }
 
-// TestAMultiOwnerGitHubOwnersIsRefusedOnAWSBeforeAnyWrite: AWS's tag values hold no comma, which a
-// github-owners list of several accounts needs, so the AWS backend refuses one before it creates or
-// tags anything; a single owner is written. GCP takes the list (TestSecretKindAndMaxGrantOnGCP).
-func TestAMultiOwnerGitHubOwnersIsRefusedOnAWSBeforeAnyWrite(t *testing.T) {
+// TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused: on AWS, whose tag values take a
+// space and no comma, a list of several accounts is written as the broker reads it, lowercased,
+// sorted and single-spaced; a comma anywhere is refused before create or retag writes anything,
+// naming the space-separated form.
+func TestAGitHubOwnersListIsWrittenSpaceSeparatedAndACommaIsRefused(t *testing.T) {
 	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
 	startSecretBroker(t, servedBy(local))
 	writes := &countingTagWrites{Local: local}
@@ -244,8 +245,8 @@ func TestAMultiOwnerGitHubOwnersIsRefusedOnAWSBeforeAnyWrite(t *testing.T) {
 		{"retag", "APP_KEY", "--github-owners", "acme-org, ada"},
 	} {
 		_, stderr, code := runSecret(args...)
-		if code != exitUsageError || !strings.Contains(stderr, "2 accounts") || !strings.Contains(stderr, "no comma") {
-			t.Fatalf("%v: exit %d stderr %q; want a usage error naming the two accounts and AWS's comma limit", args, code, stderr)
+		if code != exitUsageError || !strings.Contains(stderr, "spaces, not commas") || !strings.Contains(stderr, `"<login> <login>"`) {
+			t.Fatalf("%v: exit %d stderr %q; want a usage error naming the space-separated form", args, code, stderr)
 		}
 	}
 	if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
@@ -254,11 +255,18 @@ func TestAMultiOwnerGitHubOwnersIsRefusedOnAWSBeforeAnyWrite(t *testing.T) {
 	if writes.tags != 0 {
 		t.Fatalf("the refused retag made %d TagResource calls, want none", writes.tags)
 	}
-	if _, stderr, code := runSecret("retag", "APP_KEY", "--github-owners", "Ada"); code != 0 {
-		t.Fatalf("retag to one owner: exit %d stderr %q", code, stderr)
+	if _, stderr, code := runSecret("retag", "APP_KEY", "--github-owners", "Trajectory-Org  ada acme-org"); code != 0 {
+		t.Fatalf("retag to three owners: exit %d stderr %q", code, stderr)
 	}
-	if tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags); tags[policy.TagGitHubOwners] != "ada" {
-		t.Fatalf("tags = %v, want github-owners ada", tags)
+	if tags := secrets.TagMap(describe(t, local, "APP_KEY").Tags); tags[policy.TagGitHubOwners] != "acme-org ada trajectory-org" {
+		t.Fatalf("tags = %v, want github-owners %q", tags, "acme-org ada trajectory-org")
+	}
+	useStdin(t, "stored-value")
+	if _, stderr, code := runSecret("create", "NEW_KEY", "--owner", "me", "--tier", "agent", "--kind", policy.KindGitHubApp, "--github-owners", "ada acme-org"); code != 0 {
+		t.Fatalf("create with two owners: exit %d stderr %q", code, stderr)
+	}
+	if tags := secrets.TagMap(describe(t, local, "NEW_KEY").Tags); tags[policy.TagGitHubOwners] != "acme-org ada" {
+		t.Fatalf("tags = %v, want github-owners %q", tags, "acme-org ada")
 	}
 }
 
@@ -296,7 +304,8 @@ func kindTaggedSecret(name string) secrets.LocalSecret {
 
 // TestSecretRetagRemovalIsOneCallThatChangesNothingElse: on AWS a tag removal is its own
 // UntagResource and nothing else, so IAM refusing it leaves every tag as it was, and a retag that
-// both removes and sets tags is refused before any write, since it would take two calls.
+// both removes and sets tags is refused before any read or write, since it would take two calls.
+// Each retag reads the secret's tags once, to build the tags it will leave and check them.
 func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 	local := secrets.NewLocal(kindTaggedSecret("APP_KEY"))
 	startSecretBroker(t, servedBy(local))
@@ -313,8 +322,8 @@ func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 			t.Fatalf("%v: exit %d stderr %q; want a usage error naming two retags", args, code, stderr)
 		}
 	}
-	if writes.tags != 0 || writes.untags != 0 {
-		t.Fatalf("refused mixes made %d TagResource and %d UntagResource calls, want none", writes.tags, writes.untags)
+	if writes.tags != 0 || writes.untags != 0 || writes.describes != 0 {
+		t.Fatalf("refused mixes made %d TagResource, %d UntagResource and %d DescribeSecret calls, want none", writes.tags, writes.untags, writes.describes)
 	}
 
 	writes.refuseUntag = true
@@ -335,8 +344,8 @@ func TestSecretRetagRemovalIsOneCallThatChangesNothingElse(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "removed kind, mint-service-account, max-grant") {
 		t.Fatalf("removal: exit %d stdout %q stderr %q", code, stdout, stderr)
 	}
-	if writes.tags != 0 || writes.untags != 2 || writes.describes != 0 {
-		t.Fatalf("removal made %d TagResource, %d UntagResource and %d DescribeSecret calls in all, want 0, 2 and 0: a removal reads no tags", writes.tags, writes.untags, writes.describes)
+	if writes.tags != 0 || writes.untags != 2 || writes.describes != 2 {
+		t.Fatalf("removals made %d TagResource, %d UntagResource and %d DescribeSecret calls in all, want 0, 2 and 2: one read of the tags and one write each", writes.tags, writes.untags, writes.describes)
 	}
 	tags = secrets.TagMap(describe(t, local, "APP_KEY").Tags)
 	if _, ok := tags[policy.TagKind]; ok {

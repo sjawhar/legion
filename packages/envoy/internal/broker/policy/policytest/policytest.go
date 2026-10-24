@@ -37,8 +37,9 @@ func Secret(name, owner, tier, value string) secrets.LocalSecret {
 	}
 }
 
-// FixtureGitHubOwners is the github-owners tag KindSecret gives a github-app secret.
-const FixtureGitHubOwners = "acme,ada"
+// FixtureGitHubOwners is the github-owners tag KindSecret gives a github-app secret, in the
+// canonical form ParseGitHubOwners answers.
+const FixtureGitHubOwners = "acme ada"
 
 // KindSecret is Secret with a kind tag: a secret whose release the broker mints from value. A
 // kind that needs github-owners (policy.KindNeedsGitHubOwners) also carries them

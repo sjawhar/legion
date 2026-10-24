@@ -82,7 +82,7 @@ func TestAGitHubAppReleaseMintsForTheOwnersThePolicyServesNow(t *testing.T) {
 	if _, _, err := machine.Values(t.Context(), *request.GrantID, enrollmentID); err != nil {
 		t.Fatalf("Values: %v", err)
 	}
-	if want := strings.Split(policytest.FixtureGitHubOwners, ","); !slices.Equal(got, want) {
+	if want := strings.Fields(policytest.FixtureGitHubOwners); !slices.Equal(got, want) {
 		t.Fatalf("minter's GitHubOwners = %v, want %v", got, want)
 	}
 	narrowed := secret

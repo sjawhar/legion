@@ -164,10 +164,11 @@ marked with tags or annotations:
 - **`kind`** is absent for a stored secret. It is `github-app` for a GitHub App key, or
   `google-login` for a Google authorized-user login. A secret with a kind must have a current value.
 - **`github-owners`** is required on a `github-app` secret, and read on no other kind. It lists
-  the GitHub accounts the broker mints installation tokens for, separated by commas and compared
-  without regard to case; an AWS tag value holds no comma, so on that store it names one account.
-  A public App can be installed by any account, so an installation on an account the list does not
-  name gets no token. A `github-app` secret without the tag is refused `github-owners-missing`.
+  the GitHub accounts the broker mints installation tokens for, separated by spaces
+  (`acme-org ada`) and compared without regard to case, a form both stores hold; a comma is
+  refused `github-owners-malformed`. A public App can be installed by any account, so an
+  installation on an account the list does not name gets no token. A `github-app` secret without
+  the tag, or with one that names no account, is refused `github-owners-missing`.
 - **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
   secret must use `--ttl` no longer than the tag.
 - **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
@@ -251,7 +252,8 @@ followed by a reread. A read that fails (Secrets Manager or KMS out of reach) is
 last good read stays in force. The broker leaves out a secret it cannot serve, and logs it by name
 on every read
 ([Operating the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner`
-or `tier` tag (an email with a capital letter is malformed), an unknown `kind`, a malformed
+or `tier` tag (an email with a capital letter is malformed), an unknown `kind`, a `github-app`
+secret whose `github-owners` names no account or holds a comma, a malformed
 `max-grant`, a name that is not in the form above, a secret encrypted with any key but the
 agent-secrets key, the AWS-managed key included, or a secret with no current value (created without
 one, so none of its versions carries the `AWSCURRENT` label). A request for a secret left out is

@@ -87,9 +87,8 @@ On a machine whose Application Default Credentials are its own identity, the sam
   writes `mint-service-account: kind-secret`, which makes an earlier broker refuse the secret
   rather than serve its stored key.
 - **`--github-owners`** is required with `--kind github-app`, and refused with any other kind. It
-  lists the GitHub accounts the broker mints installation tokens for, separated by commas. On the
-  AWS store it names one account, since AWS tag values hold no comma; the CLI refuses a list there
-  before it writes anything.
+  lists the GitHub accounts the broker mints installation tokens for, separated by spaces, so the
+  shell quotes it: `--github-owners "acme-org ada"`. A comma is refused before anything is written.
 - **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
   It must be a duration of at least one second.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,

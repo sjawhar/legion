@@ -102,13 +102,24 @@ func ParseMaxGrant(raw string) (time.Duration, error) {
 // ErrGitHubOwnersMissing is a github-owners tag that names no account.
 var ErrGitHubOwnersMissing = errors.New("github-owners names at least one GitHub account")
 
-// ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by commas, compared
-// without regard to case. It answers them lowercased, sorted and joined by commas, so a Secret
-// holding them stays comparable and two spellings of one list are one policy.
+// ErrGitHubOwnersComma is a github-owners tag that holds a comma: its logins are separated by
+// spaces, as BROKER_SERVICES separates its entries, since an AWS tag value takes a space and no
+// comma.
+var ErrGitHubOwnersComma = errors.New(`github-owners separates GitHub logins with spaces, not commas ("<login> <login>")`)
+
+// ParseGitHubOwners reads a github-owners tag: GitHub account logins separated by white space,
+// compared without regard to case, refusing a comma anywhere (ErrGitHubOwnersComma) and a list
+// that names no account (ErrGitHubOwnersMissing). It answers them lowercased, sorted and joined by
+// single spaces, so a Secret holding them stays comparable, two spellings of one list are one
+// policy, and the value is one that both stores hold: an AWS tag value and a Secret Manager
+// annotation both take a space. A GitHub login or enterprise slug never holds one.
 func ParseGitHubOwners(raw string) (string, error) {
+	if strings.Contains(raw, ",") {
+		return "", ErrGitHubOwnersComma
+	}
 	var owners []string
-	for _, owner := range strings.Split(raw, ",") {
-		if owner = strings.ToLower(strings.TrimSpace(owner)); owner != "" && !slices.Contains(owners, owner) {
+	for _, owner := range strings.Fields(raw) {
+		if owner = strings.ToLower(owner); !slices.Contains(owners, owner) {
 			owners = append(owners, owner)
 		}
 	}
@@ -116,7 +127,7 @@ func ParseGitHubOwners(raw string) (string, error) {
 		return "", ErrGitHubOwnersMissing
 	}
 	slices.Sort(owners)
-	return strings.Join(owners, ","), nil
+	return strings.Join(owners, " "), nil
 }
 
 // KindNeedsGitHubOwners reports whether a secret of kind must carry a github-owners tag naming at
@@ -127,9 +138,8 @@ func KindNeedsGitHubOwners(kind string) bool {
 
 // GitHubOwnersFor is the github-owners rule every reader and writer of a secret's tags applies:
 // the loader, and `agent-secrets secret create` and `retag` before they write. For a kind that
-// needs owners (KindNeedsGitHubOwners) it answers ParseGitHubOwners of raw, and
-// ErrGitHubOwnersMissing when raw names no account; for any other kind the tag is not read, and it
-// answers "".
+// needs owners (KindNeedsGitHubOwners) it answers ParseGitHubOwners of raw, with its two errors;
+// for any other kind the tag is not read, and it answers "".
 func GitHubOwnersFor(kind, raw string) (string, error) {
 	if !KindNeedsGitHubOwners(kind) {
 		return "", nil
@@ -207,7 +217,7 @@ func (secret Secret) GitHubOwnerLogins() []string {
 	if secret.GitHubOwners == "" {
 		return nil
 	}
-	return strings.Split(secret.GitHubOwners, ",")
+	return strings.Fields(secret.GitHubOwners)
 }
 
 // approver is who decides an approval request for secret: anyone signed in to Dispatch for a

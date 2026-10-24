@@ -89,7 +89,7 @@ nothing. SIGHUP, Ctrl-C, Ctrl-\\ or SIGTERM at the value prompt ends the CLI by 
 | `… has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier` (exit 2) | The secret is missing a tag, and `retag` sends both. | Name the missing one too. |
 | `none removes a tag in a retag of its own: run the removal and the other changes as two retags` (exit 2) | The retag named `--kind none` or `--max-grant none` beside another change. A removal is a write of its own, so nothing was written. | Run the removal alone, then the other change as a second retag. |
 | `a github-app secret needs --github-owners naming at least one GitHub account, or the broker refuses it as github-owners-missing` (exit 2) | The create or retag would leave a `github-app` secret without GitHub owners: `--kind github-app` with no `--github-owners`, or `--github-owners none` on a `github-app` secret. Nothing was written. | Name the accounts with `--github-owners`, or remove the kind first. |
-| `--github-owners names N accounts, but AWS Secrets Manager's tag values hold no comma …` (exit 2) | On the AWS store a tag value holds no comma, so `github-owners` names one account. Nothing was written. | Name one account. |
+| `--github-owners: github-owners separates GitHub logins with spaces, not commas ("<login> <login>")` (exit 2) | The list was separated by commas. Nothing was written. | Separate the logins with spaces and quote the value: `--github-owners "acme-org ada"`. |
 
 ## Listing and revoking machine logins and grants
 

@@ -233,20 +233,6 @@ func (b *awsBackend) currentTags(ctx context.Context, slug string) (map[string]s
 	return secrets.TagMap(held.Tags), nil
 }
 
-// refuseTagValues refuses a github-owners value naming more than one account. AWS's tagging guide
-// lets a tag value hold letters, digits, white space and _ . / = + - @, and no comma
-// (https://docs.aws.amazon.com/secretsmanager/latest/userguide/managing-secrets_tagging.html),
-// while the broker reads a github-owners list as logins separated by commas. Nothing here has
-// measured Secrets Manager itself: its API model gives a tag value no pattern, and LocalStack
-// accepts characters the guide forbids. So a multi-owner value is refused before the write rather
-// than tried. A GitHub login is letters, digits and hyphens, so one owner is always a valid value.
-func (b *awsBackend) refuseTagValues(tags map[string]string) error {
-	if owners := tags[policy.TagGitHubOwners]; strings.Contains(owners, ",") {
-		return usageErr{fmt.Errorf("--github-owners names %d accounts, but AWS Secrets Manager's tag values hold no comma (letters, digits, white space and _ . / = + - @ only), so a github-app secret on the AWS store names one GitHub account", strings.Count(owners, ",")+1)}
-	}
-	return nil
-}
-
 // setTags writes tags in one TagResource, which keeps every tag it does not name.
 func (b *awsBackend) setTags(ctx context.Context, slug string, tags map[string]string) error {
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
