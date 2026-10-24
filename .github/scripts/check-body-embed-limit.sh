@@ -7,7 +7,15 @@
 # model whole. The comparison is therefore sound in exactly one direction: this check fails iff
 # `DISPATCH_BODY_MAX > maxInputChars`. Equal passes. Raise the body limit past the embedder's and
 # every comment tail past it would vanish from search by meaning, silently; that is what this
-# check stops, and it is why each of the two numbers' sites must name the other.
+# check stops.
+#
+# What this check holds: the two numbers, and that one line of each package guide
+# (packages/contracts/AGENTS.md, packages/envoy/AGENTS.md) names both constants, so a reader
+# raising either one finds the other. The declaration comments that pair them -
+# `maxInputChars`'s comment in embed.go, the `DISPATCH_BODY_MAX` JSDoc in dispatch-tools.ts - are
+# confirmed by a human at review, not here: reading a comment out of a file cannot tell comment
+# text from a `//` or `/*` inside a string literal without parsing the language, and a gate that
+# can report agreement it has not established is worse than one that does not try.
 #
 # What makes equality safe is that a comment's and a message's embedded text is the body alone,
 # with nothing prepended: the triggers in
@@ -117,65 +125,6 @@ def declaration(path: str, lines: list[str], const: str, pattern: str) -> Declar
     return Declaration(int(match.group(1)), number)
 
 
-def comment_flags(lines: list[str]) -> list[bool]:
-    """One flag per line, true where the line is itself comment text, decided by reading the file
-    downward - the direction a comment is written. A line is comment text when it opens with `//`
-    or `/*`, or when an unterminated `/*` above it is still open. A `/*` is only an opener when
-    the line starts with it: a line of code carrying a trailing `/* ... */` is code, and so is one
-    carrying an unterminated trailing `/*` - this check does not follow that block's continuation
-    lines, which are then credited to nothing (fail-closed: the cross-reference refuses and names
-    the site, as it does for any declaration whose comment says nothing)."""
-    inside = False
-    flags: list[bool] = []
-    for line in lines:
-        stripped = line.strip()
-        flags.append(inside or stripped.startswith(("//", "/*")))
-        if inside:
-            inside = "*/" not in stripped
-        elif stripped.startswith("/*"):
-            inside = "*/" not in stripped[2:]
-    return flags
-
-
-def attached_comment(lines: list[str], line_number: int) -> str:
-    """Every comment the declaration carries: the trailing comment on its own line (the patterns
-    admit nothing but `//...` after the number), and the contiguous run of comment-text lines
-    directly above it, classified by `comment_flags`. The invariant is that a line is credited
-    only when it is itself comment text - never because some `/*` exists somewhere above it. A
-    `const (` opener is transparent, so a Go doc comment written on a one-member group reaches its
-    member. Anything else - a blank line, another declaration, code, a line of code carrying a
-    trailing block comment - ends the run."""
-    block: list[str] = []
-    declaration_line = lines[line_number - 1]
-    trailing = declaration_line.find("//")
-    if trailing >= 0:
-        block.append(declaration_line[trailing:])
-    flags = comment_flags(lines)
-    index = line_number - 2
-    while index >= 0:
-        stripped = lines[index].strip()
-        if stripped == "const (":
-            index -= 1
-            continue
-        if not flags[index]:
-            break
-        block.append(stripped)
-        index -= 1
-    return "\n".join(block)
-
-
-def cross_reference(path: str, lines: list[str], line: int, const: str, other: str) -> None:
-    if other in attached_comment(lines, line):
-        return
-    where = f"the comment above {const} ({path}:{line})"
-    problem(
-        path,
-        line,
-        f"{where} does not name {other}. Each limit's site must name the other, so whoever "
-        f"moves {const} sees that {other} bounds it: write {other} into {where}",
-    )
-
-
 body_lines = load(BODY_FILE)
 embed_lines = load(EMBED_FILE)
 contracts_agents_lines = load(CONTRACTS_AGENTS)
@@ -198,8 +147,6 @@ if body.value > embed.value:
         f"25 x 8,000 = 200,000 arithmetic and packages/envoy/cmd/dispatch/README.md",
     )
 
-cross_reference(BODY_FILE, body_lines, body.line, BODY_CONST, EMBED_CONST)
-cross_reference(EMBED_FILE, embed_lines, embed.line, EMBED_CONST, BODY_CONST)
 
 for agents_path, agents_lines in ((CONTRACTS_AGENTS, contracts_agents_lines), (ENVOY_AGENTS, envoy_agents_lines)):
     if any(BODY_CONST in line and EMBED_CONST in line for line in agents_lines):
@@ -225,6 +172,6 @@ if problems:
 
 print(
     f"body limit {body.value} ({BODY_FILE}:{body.line}) fits the embedder's {embed.value} "
-    f"({EMBED_FILE}:{embed.line}), and each names the other"
+    f"({EMBED_FILE}:{embed.line}), and a line of each package guide names both"
 )
 PY
