@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -580,13 +579,13 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	}
 	if changes, reason := approval.ChangesRequestedLatest(); changes >= root.issue.Awaiting.GateVersion &&
 		!classify.DesignGateChangesTold(*root.gate, changes, reason) {
-		// Dispatch's read names no review id. A changes request the gate records as told is the one
-		// that answered an earlier wait (a plain reply can hand the request back without reopening
-		// it), so it answers nothing now. Another at the same version, in a later wait of the same
-		// generation, is a new act of a person; its reason is in the event id, so it is not dropped
-		// as already processed, and a redelivery of the same review stays one event.
-		review := sha256.Sum256([]byte(reason))
-		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d:%x", root.issue.Key, root.issue.Generation, changes, review[:8]),
+		// Dispatch's read names no review id, so the event id cannot name the review: a person may
+		// repeat an earlier review's version and wording in a later wait of the same generation,
+		// and an id built from those would drop that new act as already processed. The id is this
+		// catch-up's own instead, and what keeps a review from answering twice is the record: a
+		// changes request the gate records as told (the one that answered an earlier wait, whose
+		// application records it) answers nothing, and a root already answered is skipped above.
+		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, changes, time.Now().UnixNano()),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactChangesRequested, Version: changes, Reason: reason})
 	}
 	if approval.State != "awaiting" || approval.WaitingOn != "agent" || approval.AskID == "" {
