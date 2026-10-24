@@ -2,56 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-212",
-  "completed": "2026-10-24T21:30:00Z",
-  "round": 2,
+  "completed": "2026-10-24T21:56:00Z",
+  "round": 3,
   "proof": [
     {
-      "criterion": "Round 2, the tester's failure — the environment paragraph of \"Anatomy of a Sandbox pod\" claimed that a printenv inside the container finds none of the eleven variables in its table, which is false of PATH, the table's first row.",
-      "surface": "The live implementer role container of this issue's Agent Sandbox pod (legion-infra-infra-212): /proc/1/environ, the environment of the kubelet-started PID 1 (the legion launcher the container spec and the image config start), which is the environment a kubectl exec inherits, read beside the agent process's own.",
-      "command": "for n in PATH LEGION_STATE_DIR GH_CONFIG_DIR DISPATCH_TOKEN_FILE ENVOY_TOKEN_FILE LEGION_BOOT_TOKEN_FILE LEGION_WORKSPACE LEGION_GRANT_FILE LEGION_CREDENTIAL_HELPER LEGION_ROOT_WORKSPACE LEGION_TERMINATION_GRACE_SECONDS; do v=$(tr '\\0' '\\n' < /proc/1/environ | grep \"^$n=\" || true); [ -n \"$v\" ] && echo \"present: $v\" || echo \"absent:  $n\"; done; printenv PATH; printenv LEGION_STATE_DIR",
-      "observed": "PID 1 carries PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin — /opt/legion/bin first, the value the table's PATH row documents — and none of the other ten names. The role's own agent process carries them all (first PATH field /opt/legion/bin, LEGION_STATE_DIR=/var/run/legion/state). That is exactly what the corrected sentence now says: such a printenv finds none of them but PATH, which the worker image's own ENV (packages/daemon/docker/worker.Dockerfile) sets to the value the row documents, so every process of the container carries it however it was started; one the role's own agent runs prints them all.",
-      "headSha": "0c24884a4da7d51d6048159b4fe03dd49ba524c0",
-      "negativeControl": "In the same PID 1 read LEGION_STATE_DIR is absent while PATH is present, so the read distinguishes the two halves of the claim rather than reporting everything absent (which would make the old sentence look right) or everything present (which would make the new one look right). kubectl itself is in the image but this pod's ServiceAccount cannot exec into a pod, as the tester recorded, so PID 1's environ is the container-side reading, and it is the same environment."
+      "criterion": "Review finding (important), docs/kubernetes.md:1984 — the daemon-launched controller's GH_CONFIG_DIR was documented as \"the project's default owner's directory\", a derivation the runtime does not implement and one this same file contradicts at :3967 and :4014.",
+      "surface": "The derivation itself, executed: the daemon's own appauth package through the test that drives GitHubCredential with the controller's empty owner, plus the controller launch path that produces that empty owner.",
+      "command": "cd packages/daemon && go test -count=1 -v ./internal/appauth/ -run TestGitHubCredentialBundlesEveryOwnerOfTheProject; go test -count=1 ./internal/daemon/ -run TestTheDaemonLaunchesItsControllerAndHandsItTheStartMessage",
+      "observed": "PASS. Its `the_controller` case asks for role controller with owner \"\" against owners {\"sjawhar\", \"Acme\"} and gets Default = \"acme\" — the alphabetically first owner, which is neither the first listed nor a project default — which is bundle.Default = names[0] over slices.Sorted(maps.Keys(all)) at internal/appauth/credential.go:52-59, its comment at :26-29 reading \"the first owner, sorted\". The empty owner is the controller's: its launch spec carries no repository (internal/daemon/specs.go:86), so gitHubBundles passes l.spec.Repository.Owner() = \"\" (internal/runtime/sandbox/relaunch.go:638). The clause now says the controller's GH_CONFIG_DIR is its bundle's first owner's directory, with the reason and the citation, matching what this file already says at :3967 (\"`github-default`, the first owner\") and :4014 (\"`GH_CONFIG_DIR` its first owner's directory there\"); grep \"project's default owner\" docs/kubernetes.md now prints nothing.",
+      "headSha": "f661b25adceae78a67642d8c00a5e1999c37a320",
+      "negativeControl": "The same test's `the_controller_asked_for_the_default_its_launch_recorded` case gives Default = \"sjawhar\" for the same owner set when an owner is named, so the empty-owner branch is what decides the value and the test is not returning one answer whatever it is asked. Stated plainly because it matters: no live container can settle this clause. On INFRA the project's default repository's owner and the alphabetically first owner are both sjawhar, so a pod read would have agreed with the wrong wording; the code is the only surface that distinguishes them, which is why the proof runs the derivation rather than a printenv."
     },
     {
-      "criterion": "The tester's red test passes against the corrected prose, unmodified, before its removal.",
-      "surface": "The daemon's Go test binary over the tester's own committed test file, at the commit it was written against and at the corrected head.",
-      "command": "cd packages/daemon && go test -count=1 ./internal/runtime/sandbox/ -run TestTheAgentEnvironmentParagraphNamesEveryVariableTheImageItselfSets",
-      "observed": "At 589e4979 (the tester's head) it fails: \"...never names PATH, which the worker image's own ENV (packages/daemon/docker/worker.Dockerfile) sets in every process of that container\". After the one-paragraph correction and with the test file byte-identical, it passes: ok 0.124s. The whole package is green after the file's removal too: go test -count=1 ./internal/runtime/sandbox/ ok (205s).",
-      "headSha": "0c24884a4da7d51d6048159b4fe03dd49ba524c0",
-      "negativeControl": "The same test at the previous head fails with the message above, so its pass is the prose change and not a test that passes on anything; and it was never edited — the removal is a separate commit, after the pass, on the architect's instruction."
+      "criterion": "Reviewer's second clause, ruled on by Envoy at 2026-10-24T21:45:39Z after its submission (so it carries no review thread) — \"one the role's own agent runs prints them all\" is false of the four rows the table documents as never set, contradicting the table four lines down and the spec's acceptance line that each such name exits 1.",
+      "surface": "The live implementer role container of this issue's Agent Sandbox pod, as the agent process — the same surface the acceptance criterion names.",
+      "command": "for n in PATH GH_CONFIG_DIR LEGION_GRANT_FILE LEGION_STATE_DIR LEGION_CREDENTIAL_HELPER DISPATCH_TOKEN_FILE LEGION_ROOT_WORKSPACE LEGION_WORKSPACE LEGION_BOOT_TOKEN_FILE LEGION_TERMINATION_GRACE_SECONDS ENVOY_TOKEN_FILE; do if printenv \"$n\" >/dev/null; then echo \"prints: $n\"; else echo \"exit 1: $n\"; fi; done",
+      "observed": "set=7 unset=4. Seven print — PATH, GH_CONFIG_DIR, LEGION_STATE_DIR, DISPATCH_TOKEN_FILE, LEGION_WORKSPACE, LEGION_BOOT_TOKEN_FILE, ENVOY_TOKEN_FILE — and four exit 1: LEGION_GRANT_FILE, LEGION_CREDENTIAL_HELPER, LEGION_ROOT_WORKSPACE, LEGION_TERMINATION_GRACE_SECONDS, exactly the four rows that read \"the runtime sets it in no container\". The clause now reads \"prints each of them the runtime sets, and exits 1 for the four it does not\", which is that count.",
+      "headSha": "f661b25adceae78a67642d8c00a5e1999c37a320",
+      "negativeControl": "The same loop puts seven names in one group and four in the other, so it discriminates rather than reporting every name one way; had it reported all eleven printing, the old wording would have stood. The kubectl-exec half of the sentence is untouched and still rests on round 2's /proc/1/environ read, where PATH is present and the other ten absent."
     },
     {
-      "criterion": "The paragraph's token citation reaches the whole rule rather than half of it (the tester's note).",
-      "surface": "The daemon's configuration source, read at the head, and the configuration suite that asserts the refusals.",
-      "command": "grep -n 'envoy_token_file\\|dispatch_url' packages/daemon/internal/config/kubernetes.go; grep -n 'missingDispatchTokenFile' packages/daemon/internal/config/stage3.go; cd packages/daemon && go test -count=1 ./internal/config/...",
-      "observed": "kubernetes.go's required-key table refuses a runtime: kubernetes daemon with no envoy_token_file (\"every pod receives the Envoy bearer\") and one with no dispatch_url (\"the workflow is what launches every pod\"); stage3.go:98,559 then refuses a configured dispatch_url with no dispatch_token_file (missingDispatchTokenFile). The sentence now names both files and the path between them. go test ./internal/config/... ok.",
-      "headSha": "0c24884a4da7d51d6048159b4fe03dd49ba524c0",
-      "negativeControl": "grep for the Dispatch-token refusal in kubernetes.go returns nothing — the file the old citation named does not hold that half — so the correction is the citation being wrong rather than a preference about wording."
-    },
-    {
-      "criterion": "Round 1's acceptance (AC1-AC6) still holds at the new head; this round changed one paragraph and removed one test file.",
-      "surface": "The repository at the pushed head, and the checks the plan names.",
-      "command": "jj diff --stat -r 589e4979..0c24884a; cd packages/daemon && go test -count=1 ./internal/runtime/sandbox/ && go test -count=1 ./internal/config/...; cd packages/pi-legion && bun test src/skills-guard.test.ts; bash .github/scripts/check-private-names.sh",
-      "observed": "The round's diff is docs/kubernetes.md (+11/-6, lines 1951-1964 only) and the deletion of packages/daemon/internal/runtime/sandbox/agent_environment_doc_test.go (-173). No heading, no table row, no other section touched, so the heading list, the anchors, the five table notes, the six opening lines and the eleven documented values are as the tester verified them at ac1d2aea on GitHub's own rendering. go test ./internal/runtime/sandbox/ ok; go test ./internal/config/... ok; bun test src/skills-guard.test.ts 10 pass 0 fail; check-private-names.sh passed over 4868 files.",
-      "headSha": "0c24884a4da7d51d6048159b4fe03dd49ba524c0",
-      "negativeControl": "The same diff command against the fork point (9a0d549f..0c24884a) shows the whole change, so the two-file round diff is the comparison being scoped rather than a diff that reports nothing."
+      "criterion": "Nothing else of the reviewed head moved: the eleven rows, the two citation halves, the six opening lines, the five noted tables, the anchors and the headings are as the reviewer verified them at c7bb2c3d.",
+      "surface": "The repository at the pushed head and the checks the plan names.",
+      "command": "jj diff --stat -r c7bb2c3d..f661b25a; cd packages/daemon && go test -count=1 ./internal/runtime/sandbox/ -run TestTheReclaimParagraph; cd packages/pi-legion && bun test src/skills-guard.test.ts; bash .github/scripts/check-private-names.sh",
+      "observed": "The round's diff is docs/kubernetes.md alone, +8/-5, confined to the two sentences named above (lines 1954-1960 and 1982-1988); no table row, heading, note or anchor changed. go test TestTheReclaimParagraph ok; bun test src/skills-guard.test.ts 10 pass 0 fail; check-private-names.sh passed over 4868 files. The PR body's Size line is corrected to what GitHub reports at this head (5 files, +346/-13), the finding the reviewer recorded as minor.",
+      "headSha": "f661b25adceae78a67642d8c00a5e1999c37a320",
+      "negativeControl": "The same diff command against the fork point (9a0d549f..f661b25a) shows the whole change, so the one-file round diff is the comparison being scoped rather than a diff that reports nothing."
     }
   ],
   "filesChanged": [
-    "docs/kubernetes.md — the environment paragraph of \"Anatomy of a Sandbox pod\": the container-side printenv claim now names PATH as its one exception, and the DISPATCH_TOKEN_FILE/ENVOY_TOKEN_FILE citation now names both internal/config/kubernetes.go and internal/config/stage3.go and the path between them.",
-    "packages/daemon/internal/runtime/sandbox/agent_environment_doc_test.go — removed (the tester's red test; see deviations)."
+    "docs/kubernetes.md — the controller clause of \"Anatomy of a Sandbox pod\" now says its GH_CONFIG_DIR is its bundle's first owner's directory, with the reason and the appauth citation; the agent clause of the paragraph above now bounds what a printenv prints to the names the runtime sets and names the four that exit 1."
   ],
   "trickyParts": [
-    "The claim that was wrong was a negative one, and a variable the worker image's own ENV sets is in every process of the container whatever the pod spec's env carries: PATH is the only such name in the table (the image's ENV block at worker.Dockerfile:522-526 sets OMP_PROFILE, LEGION_OMP_PATH, HOME, DO_NOT_TRACK and PATH, and PATH is the only one of the five the table lists).",
-    "The agent's own PATH in a live role container is /opt/legion/bin:/opt/legion/pi-envoy/bin:/opt/omp/bin:… — the pi-envoy plugin prepends its own bin at session start, after the runtime has rendered the value. The table's row documents what podPath renders (/opt/legion/bin first, then the image's own), which is what PID 1 carries and what the first PATH field is in both processes; the plugin's extra second entry is not the runtime's and is out of this issue's scope. Worth knowing before someone reads the two PATHs side by side."
+    "The controller clause is the one claim in this section that no live surface can settle: on INFRA the project's default repository's owner and the alphabetically first owner are both sjawhar. The proof is the derivation executed in the daemon's own test, whose fixture owners {sjawhar, Acme} do distinguish the two.",
+    "The reviewer's second clause arrived by Envoy after its review submission, so there is no review thread for it; it is recorded in the PR body's Threads section and here instead."
   ],
   "deviations": [
-    "Removed the tester's red test, packages/daemon/internal/runtime/sandbox/agent_environment_doc_test.go (its commit 4b8ffbdbf40e), on the architect's explicit instruction in its Envoy message of 2026-10-24T21:20:13Z (id e70f97093e51b34e532300f351dbb8fb), point 3: it is a committed check that reads docs/kubernetes.md and asserts its contents, which decision D1 of the plan rules out on the architect's instruction of 20:20Z, and this change adds no test. Not a quiet weakening: the test was left byte-identical until it passed against the corrected prose (ok 0.124s, where it failed at 589e4979), and only then removed in its own commit. The defect it pinned is fixed in the document, and the guard the architect names is that a reader disproves such a sentence in one command, which is how this one was found.",
-    "Round 1's deviation stands: the plan's AC1 negative control (delete the blank line before a table, expect no <table>) is false of GitHub's renderer, which lets a table interrupt a paragraph; the control that discriminates is deleting the delimiter row."
+    "Round 2's deviation stands: the tester's red test was removed on the architect's instruction of 21:20:13Z after it had passed unmodified against the corrected prose. Round 1's stands too: the plan's AC1 negative control (delete the blank line before a table) is false of GitHub's renderer; the control that discriminates is deleting the delimiter row."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The old citation's composite claim was true while its single file held only half the rule. The two refusals are genuinely in two files because the Kubernetes block requires dispatch_url and the Dispatch token rule is the generic one that fires on a configured dispatch_url; the sentence now spells that path rather than naming one file for both."
+    "\"The project's default owner\" and \"the bundle's first owner\" are both real things in this system and name the same owner on this project, which is why the wrong one survived three readings. The corrected sentence states the derivation rather than the result, so the next reader can tell them apart without a two-owner project to test on."
   ]
 }
