@@ -236,8 +236,10 @@ const factsGate = (verdictMode: string) =>
     verdictMode,
     reason: factsReason,
   });
+// An askgate run's directory is askgate-<case>-<label>-<n>, so the three cases' batches of one
+// label, each numbered from 1, keep their own records.
 // on, facts: refused in block mode, the reason naming both facts.
-run("askgate-on-1", askgate("facts"), [
+run("askgate-facts-on-1", askgate("facts"), [
   ...header,
   turn[0],
   askCall,
@@ -245,7 +247,7 @@ run("askgate-on-1", askgate("facts"), [
   factsGate("block"),
 ]);
 // on, facts: the gate only warned, and the call went out.
-run("askgate-on-2", askgate("facts"), [
+run("askgate-facts-on-2", askgate("facts"), [
   ...header,
   turn[0],
   askCall,
@@ -253,7 +255,7 @@ run("askgate-on-2", askgate("facts"), [
   factsGate("warn"),
 ]);
 // on, facts: refused, but the reason names neither fact.
-run("askgate-on-3", askgate("facts"), [
+run("askgate-facts-on-3", askgate("facts"), [
   ...header,
   turn[0],
   askCall,
@@ -278,7 +280,7 @@ const linkGate = (decision: string) =>
     verdictMode: "block",
   });
 // on, link: the gate let the linked ask through.
-run("askgate-on-4", askgate("link", anAsk), [
+run("askgate-link-on-1", askgate("link", anAsk), [
   ...header,
   turn[0],
   askCall,
@@ -286,7 +288,7 @@ run("askgate-on-4", askgate("link", anAsk), [
   linkGate("allow"),
 ]);
 // on, link: the gate sent the linked ask back once, and the second try went out.
-run("askgate-on-5", askgate("link", anAsk), [
+run("askgate-link-on-2", askgate("link", anAsk), [
   ...header,
   turn[0],
   askCall,
@@ -294,12 +296,12 @@ run("askgate-on-5", askgate("link", anAsk), [
   linkGate("revise"),
 ]);
 // on, link: no ask reached the issue.
-run("askgate-on-6", askgate("link"), [...header, ...turn]);
+run("askgate-link-on-3", askgate("link"), [...header, ...turn]);
 const uploadCall = (id: string, command: string) => toolCall(id, "bash", { command });
 const uploadGate = (toolCallId: string, data: object) =>
   gate({ tool: "dispatch_artifact", path: "dispatch artifact", toolCallId, ...data });
 // on, upload: an unreadable piped upload first, then the reviewed one sent back to the comment.
-run("askgate-on-7", askgate("upload"), [
+run("askgate-upload-on-1", askgate("upload"), [
   ...header,
   turn[0],
   uploadCall("call-u1", "cat brief.md | dispatch artifact --issue LWEVAL-2 --name brief.md"),
@@ -315,7 +317,7 @@ run("askgate-on-7", askgate("upload"), [
   }),
 ]);
 // on, upload: the gate let the upload through.
-run("askgate-on-8", askgate("upload"), [
+run("askgate-upload-on-2", askgate("upload"), [
   ...header,
   turn[0],
   uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
@@ -323,7 +325,7 @@ run("askgate-on-8", askgate("upload"), [
   uploadGate("call-u2", { decision: "allow", outcome: "verdict", verdictMode: "block" }),
 ]);
 // on, upload: sent back, but the reason names no comment and no link.
-run("askgate-on-9", askgate("upload"), [
+run("askgate-upload-on-3", askgate("upload"), [
   ...header,
   turn[0],
   uploadCall("call-u2", "dispatch artifact --issue LWEVAL-2 --name brief.md --file brief.md"),
@@ -336,14 +338,14 @@ run("askgate-on-9", askgate("upload"), [
   }),
 ]);
 // off, facts: the ask went out and the gate never ran.
-run("askgate-off-1", askgate("facts", anAsk), [
+run("askgate-facts-off-1", askgate("facts", anAsk), [
   ...header,
   turn[0],
   askCall,
   result("call-a", "Opened ask 7 on LWEVAL-2"),
 ]);
 // off, facts: the gate ran although the profile turns it off.
-run("askgate-off-2", askgate("facts", anAsk), [
+run("askgate-facts-off-2", askgate("facts", anAsk), [
   ...header,
   turn[0],
   askCall,
@@ -351,9 +353,13 @@ run("askgate-off-2", askgate("facts", anAsk), [
   factsGate("warn"),
 ]);
 // off, facts: no ask reached the issue.
-run("askgate-off-3", askgate("facts"), [...header, ...turn]);
+run("askgate-facts-off-3", askgate("facts"), [...header, ...turn]);
 // off, link: a pair the score does not judge.
-run("askgate-off-4", askgate("link", anAsk), [...header, ...turn]);
+run("askgate-link-off-1", askgate("link", anAsk), [...header, ...turn]);
+// A directory that names no case, as the rig named them before the case was in the name.
+run("askgate-on-1", askgate("facts"), [...header, ...turn]);
+// A directory whose case is not the one its case.txt records.
+run("askgate-upload-on-4", askgate("facts"), [...header, ...turn]);
 
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
@@ -408,31 +414,46 @@ test("a brainstorm run created its issue when Dispatch answered Created, whateve
 });
 
 test("askgate on, facts: passes when the gate refused the ask in block mode naming both facts", () => {
-  expect(out).toMatch(/askgate-on-1\tpass=true\t.*case=facts /);
-  expect(out).toMatch(/askgate-on-2\tpass=false\t.*verdictMode=warn /);
-  expect(out).toMatch(/askgate-on-3\tpass=false\t.*age=false contributors=false /);
+  expect(out).toMatch(/askgate-facts-on-1\tpass=true\t.*case=facts /);
+  expect(out).toMatch(/askgate-facts-on-2\tpass=false\t.*verdictMode=warn /);
+  expect(out).toMatch(/askgate-facts-on-3\tpass=false\t.*age=false contributors=false /);
 });
 
 test("askgate on, link: passes when the ask exists and the gate never sent an ask back", () => {
-  expect(out).toMatch(/askgate-on-4\tpass=true\t.*asks=1 revised=0 /);
-  expect(out).toMatch(/askgate-on-5\tpass=false\t.*revised=1 /);
-  expect(out).toMatch(/askgate-on-6\tpass=false\t.*asks=0 /);
+  expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 revised=0 /);
+  expect(out).toMatch(/askgate-link-on-2\tpass=false\t.*revised=1 /);
+  expect(out).toMatch(/askgate-link-on-3\tpass=false\t.*asks=0 /);
 });
 
 test("askgate on, upload: reads the first reviewed upload, past an unreadable one", () => {
-  expect(out).toMatch(/askgate-on-7\tpass=true\t.*decision=revise verdictMode=block fix=true /);
-  expect(out).toMatch(/askgate-on-8\tpass=false\t.*decision=allow /);
-  expect(out).toMatch(/askgate-on-9\tpass=false\t.*fix=false /);
+  expect(out).toMatch(
+    /askgate-upload-on-1\tpass=true\t.*decision=revise verdictMode=block fix=true /
+  );
+  expect(out).toMatch(/askgate-upload-on-2\tpass=false\t.*decision=allow /);
+  expect(out).toMatch(/askgate-upload-on-3\tpass=false\t.*fix=false /);
 });
 
 test("askgate off, facts: passes when the ask exists and the gate wrote nothing", () => {
-  expect(out).toMatch(/askgate-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
-  expect(out).toMatch(/askgate-off-2\tpass=false\t.*gateEntries=1 /);
-  expect(out).toMatch(/askgate-off-3\tpass=false\t.*asks=0 /);
+  expect(out).toMatch(/askgate-facts-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
+  expect(out).toMatch(/askgate-facts-off-2\tpass=false\t.*gateEntries=1 /);
+  expect(out).toMatch(/askgate-facts-off-3\tpass=false\t.*asks=0 /);
 });
 
-test("askgate: another label and case pair is unscored, saying why", () => {
-  expect(out).toContain("askgate-off-4\trig error: askgate scores off only with case facts");
-  expect(out).toContain("askgate\ton\t3/9\t");
-  expect(out).toContain("askgate\toff\t1/3\t");
+test("askgate: another label and case pair, a directory naming no case, and a case.txt that disagrees are unscored, saying why", () => {
+  expect(out).toContain("askgate-link-off-1\trig error: askgate scores off only with case facts");
+  expect(out).toContain(
+    "askgate-on-1\trig error: the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
+  );
+  expect(out).toContain(
+    "askgate-upload-on-4\trig error: case.txt names 'facts', but the run's directory names upload"
+  );
+});
+
+test("askgate: the counts are per case and label", () => {
+  expect(out).toContain("askgate:facts\ton\t1/3\t0/3\t0\n");
+  expect(out).toContain("askgate:link\ton\t1/3\t0/3\t0\n");
+  expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
+  expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\n");
+  expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\n");
+  expect(out).toContain("askgate\ton\t0/0\t0/0\t1\n");
 });
