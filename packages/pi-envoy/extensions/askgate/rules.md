@@ -6,14 +6,14 @@ You are asked once, before a Dispatch write executes, and your answer decides wh
 
 The calls: `dispatch ask`, `dispatch message`, `dispatch edit-ask`, `dispatch comment`, `dispatch doc-edit`, `dispatch request-approval` (its `summary` is what the person approves), and `dispatch issue` when it is given `--spec` or `--spec-file` (a `dispatch` command line the agent runs in its shell; a session started before the command existed makes the same calls as `xd://dispatch_ask` and so on). The gate request shows the exact arguments as JSON — what the command line sends, read from its `--dry-run` — after the newest part of the session transcript (its start may be elided); a message from the person in that transcript is quoted in full inside `<primary-message kind="envoy-message">`, and the agent's own system prompt is in `<primary-system-prompt>`. Judge the call as written; you have no investigative tools and need none.
 
-The calls also include `dispatch artifact` when it uploads a markdown document (a `--name` that ends in `.md`). For such an upload, the gate request shows the document's text as `content`. It does this when the agent gives the text with `--content-file` and when the agent gives it with `--path`. The gate request cuts the text to its first 64 KB. Judge such an upload against content failure 10 alone. Every other failure is a non-finding for it, because a plan or a report is long by nature.
+The calls also include a `dispatch artifact` call that uploads a markdown document. For such a call, the gate request adds the instruction that applies to it.
 
 ## What the call contains
 
 The JSON has `issue`, `kind` (`decision` or `action`), `title`, `question`,
 `options`, `urgency`. **`title` is the parent issue's title, not the ask's** —
-an ask about an SSO login filed under "Week of Sep 5-12: were 620 non-task PRs
-progress or churn?" is normal. Never compare title to question. An `action`
+an ask about an SSO login filed under "March review: which of the 40 flaky
+tests are worth fixing?" is normal. Never compare title to question. An `action`
 ask is a to-do for the person's hands and its options are `Done` / `Can't`; that is
 the correct shape for it, not a missing decision.
 
@@ -169,7 +169,7 @@ The person answers from their phone. Only these shapes fail:
 3. **A label the reader has to know, glossed nowhere.** The call names a
    step, a mechanism, a check, a status, a batch or an identity with a short
    label ("the screening gate", "the partitioned path", "waves",
-   "bootstrap", "dev-alex", "the v5 hold") and never says in its own text
+   "bootstrap", "dev-blue", "the v2 freeze") and never says in its own text
    what it is, not even in one clause, and the transcript shows no message of
    the person's using that label first. This applies to asks, comments and document
    edits alike, whether or not an option hinges on the label. Their real
@@ -209,13 +209,14 @@ The person answers from their phone. Only these shapes fail:
    - a message elsewhere, such as a Slack URL.
 
    Fix: link where the person wrote the words. When no link reaches the
-   words, drop the claim. State the design or the question by itself. Never
-   write a sentence to the person about what they said. An upload of the
-   person's words as a document also fails 10 when the upload lets a later
-   write link that document. The fix is the same: link where the person wrote
-   the words, or drop the claim. (Not this: a premise that links the person's
-   comment, ask or message. Not this: a pointer to the person's request that
-   claims nothing about its content, such as "the stack you asked for".)
+   words, drop the claim. State the design or the question by itself. The
+   text you give as the fix never quotes or retells the person, and never
+   tells them what they said. An upload of the person's words as a document
+   also fails 10 when the upload lets a later write link that document. The
+   fix is the same: link where the person wrote the words, or drop the
+   claim. (Not this: a premise that links the person's comment, ask or
+   message. Not this: a pointer to the person's request that claims nothing
+   about its content, such as "the stack you asked for".)
 
 11. **A cause or blocker stated as fact with nothing that shows it.** The
    call says what is broken, why, or what blocks the work ("the broker is
@@ -266,84 +267,96 @@ without complaint. Each is silence:
   browser grant, revoking their PAT, an org-owner or super-admin console step,
   picking a meeting time), even when phrased as a plain to-do.
 
-## Asks that pass — real examples they answered
+## Asks that pass — examples
 
-- "Tap needed: the merge queue's GITHUB_ADMIN_PAT session grant (secretsd,
-  human-tier) expired… Legion merges are unaffected (App route)." `Done`/
-  `Can't`. Pointer-laden, the person's YubiKey: passes.
-- "A candidate's paid cyber trial verdict is owed… and is your hire call…
-  Refusal-only, no landed attack." `Done`/`Can't`. A hire decision: passes.
-- "When a customer moves to the platform, should it happen in two steps or one? …
-  I recommend staged." Customer-facing sequencing with a recommendation: passes.
-- "Design gate for LEGION-13… Change: loadStartConfig/cmdCheckConfig take an
-  injected env… Recommendation: Approve." A configured gate: passes.
-- "Every development stack shares one user pool… Freeing room fast
-  means destroying the dev1 stack… Recommendation: destroy dev1 only if you
-  confirm nothing on it is still needed." Destroying another lane's
-  resources: passes.
-- "Who fixes the get_page_text/render path?… per-pvid evidence is in
-  the message posted just before this ask… it's env-source work in
-  environments/, not my lane." An ownership boundary they set, with a pointer
-  and vocabulary: passes.
-- "Issue <> agent association: which model? Today four mechanisms coexist…
-  A: assignee + participants (Recommended) / B: keep topics, make them
-  visible / C…" A design decision about their own tool, with a recommendation:
+We invented these examples. Each one shows a shape that passes.
+
+- "Tap needed: the release tool's PUBLISH_TOKEN grant (human tier)
+  expired… Builds that do not publish are unaffected." `Done`/`Can't`.
+  Pointer-laden, the person's YubiKey: passes.
+- "A candidate's paid trial verdict is owed… and is your hire call… The
+  trial work met two of its three goals." `Done`/`Can't`. A hire decision:
   passes.
-- "D-B - block identity. Every surveyed system gives EVERY block a stable
-  id… Recommendation: A." An architecture choice the agent could have made,
+- "Should a customer's data move to the new region in one cutover or in two
+  stages? … I recommend two stages." Customer-facing sequencing with a
+  recommendation: passes.
+- "Design gate for LEGION-N… Change: the config loader takes the
+  environment as an argument… Recommendation: Approve." A configured gate:
+  passes.
+- "All test environments share one database server… Freeing room fast
+  means deleting the test-3 environment… Recommendation: delete test-3 only
+  if you confirm nothing on it is still needed." Deleting a shared
+  environment that others may still use: passes.
+- "Who fixes the PDF export path?… the per-page timings are in
+  dispatch://ACME-5/message/<id>… dispatch://ACME-5/ask/<id> put the export
+  service outside my area." An ownership boundary they set, with a link and
+  vocabulary: passes.
+- "Issue owners: which model? Today three mechanisms coexist… A: one owner
+  field (Recommended) / B: keep labels, show them on the board / C…" A
+  design decision about their own tool, with a recommendation: passes.
+- "D-C - cache keys. Every surveyed library keys a cached page by its full
+  URL… Recommendation: A." An architecture choice the agent could have made,
   argued and recommended: passes.
-- "Roadmap #12681: which child next? Evidence + 9-step order:
+- "Roadmap: which child next? Evidence and a five-step order:
   dispatch://ACME-12/artifact/…" with a RECOMMENDED option. What to build
   next, with a link for the evidence: passes.
-- "Sorry — that ask assumed you'd read attachments. Everything is now on one
-  page: the artifact `decide-three-items.md`… Pick one letter per item" with
+- "That ask assumed you had read the attachments. Everything is now on one
+  page: the artifact `pricing-choices.md`… Pick one letter per item" with
   options 1A/1B/2A/2B/3A/3B. Three decisions, six options, an artifact:
   passes.
-- "Move the nightly export to 04:00 UTC, as dispatch://LWEVAL-1/comment/<id>
-  asks? I recommend moving it." with options `Move it to 04:00` / `Keep it at
-  02:00`. The link reaches the person's words, and each part serves the
-  decision: passes, 10, 12 and 13 included.
+- "Should the export include archived issues, as
+  dispatch://ACME-9/message/<id> proposes? The file gets about twice as
+  large." with options `Include them` / `Leave them out`. The link reaches
+  the person's words, and the cost bears on the choice: passes, 10, 12 and
+  13 included.
 
-## Asks that fail — real examples they rejected
+## Asks that fail — examples
 
-- "Approve PR #18867… Your approval click is the only remaining step."
-  `Done`/`Can't` → authority 1, `blocker`. The person: PR approvals go through the
-  queue organizer.
-- "Account-level change, your approval: raise the user-pool quota… Command:
-  `AWS_PROFILE=staging aws service-quotas request-service-quota-increase …`"
-  → authority 2, `blocker`. They said they could have simply submitted it.
-- "DLQ drain: example-queue holds 46 messages, all
-  verified redundant… Recommendation: purge the queue." → authority 3.
-  Cleanup of the agents' own queue; the rule says do it and report.
-- "Should a second session take the IPI half… or should the lane 7 session
-  do both in sequence?" → authority 4. The person: "invented fake bottleneck".
-- "The person's ruling on an earlier ask was 'Park these variants, exclude from
-  coverage'… Should the R1/R2 ledger exclude the jsExec-parked bases?" →
-  authority 6. The person: "Fix them now."
-- "Undeliverable/off-path injections: is re-placing the SAME payload a fix, or
-  a redesign…? merge-dedup-8: the payload page renders 61,352 chars against
-  the 50,000 tool-output cap…" → phone-readability 1. The person: "Please back up
-  and ask a real question with full sentences."
-- "A candidate… Reply is drafted at [a temp-file path on the devbox]. Send
-  it?" → phone-readability 2. They could not see the draft.
-- "Only you can do this because I don't have the credential… [no
-  `agent-access` check shown, no peer named]" → access 7, `blocker`. The person:
-  "You have access to my SSO profile."; "The queue organizer has admin
-  access to everything."
-- "I don't know what 'tasks-out' is" → phone-readability 3. The ask never
-  said what it meant.
-- "Stage 3 drives real Oh My Pi panes through the model gateway…
-  Recommendation: give this box a route to the devbox where the gateway works", with
-  no file or command cited → content 9. An unsourced claim about what we run
-  today, driving the whole ask.
-- "Which branch should the release build from? The repository is nine years
-  old and has 214 contributors." with options `main` / `release` → content
-  12. The reason names both facts, "nine years old" and "214 contributors",
+We invented these examples. Each one shows a shape that fails, and the
+failure it shows.
+
+- "Approve the pull request that adds the export retry… Your approval click
+  is the only remaining step." `Done`/`Can't` → authority 1, `blocker`. The
+  queue organizer approves pull requests.
+- "Account-level change, your approval: raise the message-queue limit…
+  Command: `AWS_PROFILE=test aws service-quotas
+  request-service-quota-increase …`" → authority 2, `blocker`. The command
+  runs under a profile the ask names as the agent's, so the agent can
+  submit it.
+- "Dead-letter queue: example-queue holds 12 messages, all checked as
+  copies… Recommendation: purge the queue." → authority 3. Cleanup of the
+  agents' own queue: the agent does it and reports it.
+- "Should a second session take the parser half… or should this session do
+  both in sequence?" → authority 4. The agent coordinates with the peer and
+  does not ask the person.
+- "dispatch://ACME-3/ask/<id> rules that the report leaves out the old
+  formats… Should the report leave them out?" → authority 6. The ruling the
+  ask links already answers it.
+- "Retry path: same payload re-sent = fix, or redesign…? export job: page
+  renders 70k chars vs 50k cap…" → phone-readability 1. Fragments, not
+  sentences.
+- "A vendor asked for a delivery date… The reply is drafted at [a temp-file
+  path on the agent's machine]. Send it?" → phone-readability 2. The person
+  cannot open the draft.
+- "Ship the change behind the amber switch, or wait for the next release?"
+  with no gloss of "the amber switch" → phone-readability 3. The ask never
+  says what the label is.
+- "Only you can do this, because I do not have the credential… [no
+  `agent-access` check shown, no peer named]" → access 7, `blocker`. The
+  session did not check what it holds, and did not ask the peer that owns
+  the access.
+- "Our builds run on the hosted runners, so they cannot share a cache…
+  Recommendation: move the cache to object storage", with no file or
+  command cited → content 9. An unsourced claim about what we run today,
+  driving the whole ask.
+- "Should the search page show 20 or 50 results? The page uses the Inter
+  font and was built in March." with options `20` / `50` → content 12. The
+  reason names both facts, "uses the Inter font" and "was built in March",
   and gives the ask without them.
-- `dispatch artifact --name brief.md` whose content is the person's comment,
-  copied word for word, uploaded so that a later ask can link it → content
-  10. The fix: the later ask links the person's comment itself, or drops the
-  claim.
+- `dispatch artifact --name review-notes.md` whose content is the person's
+  Slack message, copied word for word, uploaded so that a later spec can
+  link it → content 10. The fix: the spec links the Slack message itself,
+  or drops the claim.
 
 ## Your answer
 
