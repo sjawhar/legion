@@ -136,6 +136,82 @@ func TestEditNoticeNamesThePersonWhoEditedLast(t *testing.T) {
 	}
 }
 
+// The quiet window starts when the settlement writes the notice, not when its transaction began:
+// a settlement that waited on its locks longer than the quiet time still commits a notice that is
+// not due yet, so the card never goes out before the document has been quiet that long.
+func TestEditNoticeQuietStartsWhenTheNoticeIsWrittenNotWhenItsTransactionBegan(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	service.editNoticeQuiet = 500 * time.Millisecond
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, edited."))
+	service.afterSettleVersionWrite = func(room string) error {
+		if room == artifactID {
+			// The settlement's transaction began before this wait, as it begins before the owner
+			// and advisory locks a busy document makes it wait on.
+			time.Sleep(time.Second)
+		}
+		return nil
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	service.afterSettleVersionWrite = nil
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("alice's settled edit opened no edit notice")
+	}
+	if !row.dueAt.After(row.now) {
+		t.Fatalf("the notice was due at %v, %v before it could be read, want it still inside its quiet window", row.dueAt, row.now.Sub(row.dueAt))
+	}
+	if sent, err := service.sendDueEditNotices(context.Background()); err != nil || sent != 0 {
+		t.Fatalf("a sweep right after the settlement = %d sent, %v; want none sent", sent, err)
+	}
+}
+
+// A named version an agent writes over two people's edits names the person who edited last as the
+// notice's last editor, not the one whose id sorts last.
+func TestEditNoticeAnAgentsNamedVersionNamesThePersonWhoEditedLast(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("First.", "First, by zoe."))
+	editAsConnectedPeer(t, service, artifactID, 2, adam, replaceRun("Second.", "Second, by adam."))
+	waitForLandedAppends(t, service, artifactID)
+	commitNamedVersion(t, service, artifactID, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the named version that captured two people's edits opened no edit notice")
+	}
+	if !slices.Equal(row.editors, []string{adam.ID, zoe.ID}) || row.lastEditor != adam {
+		t.Fatalf("notice editors %v last %+v, want adam and zoe with adam, who edited last, last", row.editors, row.lastEditor)
+	}
+}
+
+// A snapshot version an agent writes over two people's edits names the person who edited last too.
+func TestEditNoticeASnapshotVersionNamesThePersonWhoEditedLast(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	zoe := model.Actor{Kind: "user", ID: "zoe@example.com"}
+	adam := model.Actor{Kind: "user", ID: "adam@example.com"}
+	editAsConnectedPeer(t, service, artifactID, 1, zoe, replaceRun("First.", "First, by zoe."))
+	editAsConnectedPeer(t, service, artifactID, 2, adam, replaceRun("Second.", "Second, by adam."))
+	waitForLandedAppends(t, service, artifactID)
+	snapshotAndCommitVersion(t, service, artifactID, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("the snapshot version that captured two people's edits opened no edit notice")
+	}
+	if !slices.Equal(row.editors, []string{adam.ID, zoe.ID}) || row.lastEditor != adam {
+		t.Fatalf("notice editors %v last %+v, want adam and zoe with adam, who edited last, last", row.editors, row.lastEditor)
+	}
+}
+
 // A zero quiet time in the service's dependencies is the 30-second default.
 func TestEditNoticeQuietDefaultsToThirtySeconds(t *testing.T) {
 	service, _ := newTestService(t)

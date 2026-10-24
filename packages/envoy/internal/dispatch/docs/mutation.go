@@ -721,7 +721,7 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 	if err != nil {
 		return VersionResult{}, err
 	}
-	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), actor); err != nil {
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
@@ -1193,7 +1193,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	}
 	// A person's credit in this version opens the edit notice: the owner lock this transaction
 	// holds keeps the sweep's lock order (INFRA-140 R8).
-	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), actor); err != nil {
+	if err := s.recordEditNotice(ctx, tx, artifactID, result.version.Number, actorSlice(capture.authors), capture.latest); err != nil {
 		return VersionResult{}, err
 	}
 	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil

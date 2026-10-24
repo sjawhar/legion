@@ -464,6 +464,10 @@ type authorCapture struct {
 	rAuthors []model.Actor
 	inflight []*inflightCredit
 	upload   *uploadHold
+	// latest is the room's latest edit source when the capture was taken (roomState.lastActor),
+	// nil when none is known: the person a version's edit notice names as the one who edited last
+	// (recordEditNotice), whoever writes the version.
+	latest *model.Actor
 }
 
 // uploadHold is what an upload's commit takes out of its room instance's record of the updates it
@@ -512,6 +516,9 @@ func captureAuthors(state *roomState, owed map[string]model.Actor, write *liveWr
 	}
 	if actor != nil {
 		capture.authors[actorKey(*actor)] = *actor
+	}
+	if state.lastActor != nil {
+		capture.latest = new(*state.lastActor)
 	}
 	return capture
 }

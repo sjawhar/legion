@@ -23,11 +23,14 @@ const defaultEditNoticeQuiet = 30 * time.Second
 // openEditNotice opens a document's quiet window at a person's settled version, or moves on the
 // one already open: from_version stays the version before the window's first person's version,
 // to_version becomes this one, the editors gain this version's people, and the window ends a
-// quiet time from now. It is a statement of its own so the sweep's delete (dueEditNotice) and it
-// are the only two writers of the table.
+// quiet time from the moment this statement runs. That moment is clock_timestamp(), never now():
+// now() is the transaction's start, before the owner and advisory locks a busy document makes the
+// writer wait on, so a window counted from it could already be over when the notice commits. It
+// is a statement of its own so the sweep's delete (dueEditNotice) and it are the only two writers
+// of the table.
 const openEditNotice = `
 	insert into document_edit_notices (artifact_id, from_version, to_version, editors, last_editor, due_at)
-	values ($1, $2 - 1, $2, $3, $4, now() + $5::interval)
+	values ($1, $2 - 1, $2, $3, $4, clock_timestamp() + $5::interval)
 	on conflict (artifact_id) do update set
 		to_version = excluded.to_version,
 		editors = (select coalesce(jsonb_agg(distinct e), '[]'::jsonb)
@@ -35,19 +38,21 @@ const openEditNotice = `
 		last_editor = excluded.last_editor,
 		due_at = excluded.due_at`
 
-// recordEditNotice opens or moves on artifactID's edit notice for the version a settlement has
-// just written, when that version lists a person: a person's browser edit is what the notice
-// tells the document's sessions about. A version that lists no person writes nothing.
+// recordEditNotice opens or moves on artifactID's edit notice for a version just written, when
+// that version lists a person: a person's browser edit is what the notice tells the document's
+// sessions about. A version that lists no person writes nothing.
 //
-// The settlement calls it in its own transaction, after it took the document owner's lock
-// (lockArtifactOwner) and wrote the version, so the row's lock comes second; the sweep
-// (sendEditNotice) takes the two in the same order. Only a settlement calls it: an agent's write,
-// an upload and a named version, which wakes the document's watchers itself (events.Broker.Notify),
-// open no window.
+// Every writer of a version that can list a person calls it in its own transaction, after it took
+// the document owner's lock (lockArtifactOwner) and wrote the version, so the row's lock comes
+// second; the sweep (sendEditNotice) takes the two in the same order. Those writers are the
+// settlement, NamedVersion and SnapshotVersion: a person's edit an agent's version captures before
+// the settlement runs is in that version, and the settlement then has nothing of it to version.
 //
-// The notice's last editor is the room's latest editor, who is actor when the version lists them
-// (settlementAuthors), and otherwise the last person authors lists.
-func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID string, version int, authors []model.Actor, actor model.Actor) error {
+// The notice's last editor is latest, the room's latest edit source when the version's authors
+// were taken (authorCapture.latest), when the version lists it as a person; otherwise the last
+// person authors lists. It is never the version's writer as such: an agent naming a version over
+// two people's edits did not edit, and the authors' order is their ids', not their edits'.
+func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID string, version int, authors []model.Actor, latest *model.Actor) error {
 	var editors []string
 	var last *model.Actor
 	for index := range authors {
@@ -59,8 +64,12 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 	if len(editors) == 0 {
 		return nil
 	}
-	if actor.Kind == "user" {
-		last = &actor
+	if latest != nil && latest.Kind == "user" {
+		for index := range authors {
+			if authors[index].SameAs(*latest) {
+				last = &authors[index]
+			}
+		}
 	}
 	editorsJSON, err := json.Marshal(editors)
 	if err != nil {

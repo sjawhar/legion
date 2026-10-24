@@ -1580,7 +1580,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		// A person's version opens or moves on the document's edit notice, under the owner lock
 		// this settlement took first (lockArtifactOwner above): the sweep takes the two in that
 		// order too (sendEditNotice).
-		if err := s.recordEditNotice(ctx, tx, room, result.version.Number, credit.authors, credit.actor); err != nil {
+		if err := s.recordEditNotice(ctx, tx, room, result.version.Number, credit.authors, credit.capture.latest); err != nil {
 			abandon(err)
 			return
 		}
