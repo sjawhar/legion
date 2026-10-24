@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -40,6 +42,15 @@ func newHubRig(t *testing.T, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	return hubOn(t, handler, database, deps, deliveryHubClock{}, configure)
+}
+
+// notifyChannel sends one notification on channel, as a trigger's commit does: the hub hears it
+// on the connection its listener holds (pglisten.Listener).
+func notifyChannel(t *testing.T, database *store.Store, channel, payload string) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `select pg_notify($1, $2)`, channel, payload); err != nil {
+		t.Fatalf("pg_notify(%q, %q): %v", channel, payload, err)
+	}
 }
 
 // newClockedHubRig is newHubRig on a clock the test moves.
@@ -707,7 +718,7 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	var blind atomic.Bool
 	rig := newHubRig(t, func(hub *deliveryHub) {
 		dial := hub.dial
-		hub.dial = func(ctx context.Context) (deliveryListenerConn, error) {
+		hub.dial = func(ctx context.Context) (*pgx.Conn, error) {
 			if blind.Load() {
 				return nil, context.DeadlineExceeded
 			}
@@ -1082,7 +1093,7 @@ func TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent(t *testing.T)
 	releaseOnce := sync.OnceFunc(func() { close(release) })
 	rig := newHubRig(t, func(hub *deliveryHub) {
 		// The listener never connects, so only the broker or the store can tell the hub of an event.
-		hub.dial = func(context.Context) (deliveryListenerConn, error) { return nil, context.DeadlineExceeded }
+		hub.dial = func(context.Context) (*pgx.Conn, error) { return nil, context.DeadlineExceeded }
 		hub.backoff = func(int) time.Duration { return time.Hour }
 		observe := hub.observe
 		hub.observe = func(note deliveryHubNote) {

@@ -262,8 +262,9 @@ done
 mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
 make_omp_home "$omp_home"
 # Every daemon of the run starts with the real tmux first on its PATH: the tmux runtime looks tmux
-# up on the pane PATH and runs it with the pane allow-list alone, where a shimmed tmux finds mise's
-# global config untrusted and exits 1 (lib/rig.sh, real_bin_path, which this script does not source).
+# up on the pane PATH and runs it with the pane allow-list alone, where a shimmed tmux, run
+# from a directory under the operator's real HOME, finds that HOME's mise config untrusted and exits 1
+# (lib/rig.sh, real_bin_path, which this script does not source).
 real_tmux=$(mise which tmux) || fail "mise has no tmux"
 mkdir -p "$work/realbin"
 ln -sfn "$real_tmux" "$work/realbin/tmux"

@@ -1,6 +1,6 @@
 ---
 title: Running Dispatch
-description: What the Dispatch server needs, how to run it, its health check, and its migrations.
+description: What the Dispatch server needs, how to run it, its health check, running more than one copy, and its migrations.
 sidebar:
   order: 8
 ---
@@ -40,7 +40,7 @@ docker buildx imagetools inspect ghcr.io/sjawhar/legion/envoy:<that commit>   # 
 | Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, and `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | The OpenID Connect issuer people sign in through, Dispatch's client there and that client's secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with Google itself as the issuer. Required for the default cookie sign-in. [Signing people in](#signing-people-in) covers both. |
 | The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. Dispatch's client at the issuer lists this address followed by `/auth/callback` as a callback URL. |
 | The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | Without it the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
-| A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the issuer's refresh tokens Dispatch stores. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Changing the key signs everyone out and leaves every stored refresh token unopenable, so each person signs in again, but revokes none at the issuer: after the key leaks, sign people out at the issuer too. |
+| A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the issuer's refresh tokens Dispatch stores. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Give every server the same key when you run more than one, or a cookie one made is refused by the other and nothing tells you so ([Running more than one copy](#running-more-than-one-copy)). Changing the key signs everyone out and leaves every stored refresh token unopenable, so each person signs in again, but revokes none at the issuer: after the key leaks, sign people out at the issuer too. |
 | An Envoy listener | `ENVOY_URL` | Where the Agents page finds live agent sessions. Defaults to `http://127.0.0.1:9020`. |
 | NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
 | An address to listen on | `DISPATCH_LISTEN_HOST`, `DISPATCH_PORT` | Port `8766` by default. |
@@ -242,6 +242,45 @@ Sign in, then open **Settings**:
   stamped.
 - `schema_version` is the newest database migration applied.
 
+## Running more than one copy
+
+Dispatch runs as more than one server against one database, so a new version rolls out without
+taking Dispatch away from everyone: start the new version, let it take traffic, then stop the old
+one. Two things have to be true first, and Dispatch can check neither of them for you.
+
+- **Give every server the same `DISPATCH_SIGNING_KEY`.** Left unset, each server makes a key of
+  its own in its own data directory, and a sign-in made by one server is then refused by the
+  other: everyone is signed out by whichever server answers next, and every stored refresh token
+  reads as missing. No server can see another's key, so nothing refuses to start, nothing is
+  logged, and the health check cannot report it. That is why this is a precondition rather than
+  something Dispatch tells you about.
+- **Every migration leaves the version before it able to read and write the database**
+  ([Migrations](#migrations)), because a rolling update runs both versions against the one
+  database while it lasts.
+
+A second server also costs connections, and Postgres counts them per server. Each server opens up
+to 16 connections for requests, up to 8 for the periodic work it runs once across the servers, up
+to 4 for loading documents, and one for the health check, and it holds three more open for as long
+as it runs: one each for the three things that wait on Postgres notifications, which are delivery,
+the live event stream, and closing a document session another server has written to. That is 32
+connections for one server at its ceiling, and twice that for two. Check the database's connection
+limit before you start the second server: a limit sized for one server, with whatever else uses
+that database counted in, is the thing that runs out.
+
+What a reader sees while two servers are serving:
+
+- Nothing they write is lost, whichever server takes it. Every edit of a document is appended
+  under that document's lock, edits made at the same time merge rather than overwrite, and the
+  stored history holds all of them. A server whose copy of a document is not the current one
+  writes no version from it and settles nothing on it; it reloads the document instead.
+- A document's live session belongs to one server. While someone has a document open on one
+  server, that session does not carry the other server's edits, so the people shown as present,
+  and their cursors, are the ones editing on that server. A write that lands on the other server
+  closes the session within a moment; their browser reconnects, re-syncs and shows the current
+  text. They see a brief reconnect, never stale text they can act on.
+- Live co-editing of one document across two servers — two live sessions with the typing flowing
+  between them — is not there yet; it is a separate piece of work.
+
 ## Migrations
 
 Dispatch applies its database migrations every time it starts, before it serves anything. Servers
@@ -260,13 +299,19 @@ sizes, and any long-running transactions in the way. Run before a deploy, it is 
 that refuses, such as one counting rows a migration would rewrite, should fail the deploy before
 any server moves. Dispatch repairs rows it already holds in code, at start, for that reason.
 
-Stop the running server before you start a new version, rather than rolling one into the other
-(on Kubernetes, `strategy: Recreate`). Once the new version has migrated, don't start the older
-one again: if the new version fails, fix it forward. Dispatch does not refuse to start against a
-schema newer than its own, so an older server keeps writing to the migrated database as if nothing
-changed. Some releases depend on that never happening: the one that adds each issue's repository
-(migration `0113`) holds every issue to 32 links below its root in its API alone, and an issue an
-older server puts deeper fails to load until you clear the parent of an ancestor that still loads.
+A new version rolls into the running one: every migration Dispatch ships is written to leave the
+version before it able to read and write the database, so both can run against it while the roll
+lasts ([Running more than one copy](#running-more-than-one-copy)). A change that cannot be
+written that way is called out in its pull request, and that deploy stops the running server
+before the new version starts (on Kubernetes, `strategy: Recreate`).
+
+Once a new version has migrated, don't start the older one again: if the new version fails, fix
+it forward. Dispatch does not refuse to start against a schema newer than its own, so an older
+server keeps writing to the migrated database as if nothing changed. Some releases depend on that
+never happening: the one that adds each issue's repository (migration `0113`) holds every issue to
+32 links below its root in its API alone, and an issue an older server puts deeper fails to load
+until you clear the parent of an ancestor that still loads. That release was deployed with the
+running server stopped first, and no server older than it has run against the database since.
 
 ## The HTTP API
 

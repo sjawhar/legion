@@ -29,6 +29,7 @@ configuration is:
 ```sh
 BROKER_LISTEN_ADDR=0.0.0.0:13380
 BROKER_PUBLIC_URL=https://secrets.internal.example
+BROKER_MACHINE_LOGIN_URL=https://dispatch.internal.example/credentials/machine
 BROKER_DATABASE_URL='postgres://broker:<password>@db.internal.example:5432/broker'
 BROKER_UI_TOKEN_FILE=/run/secrets/broker-ui-token
 BROKER_SECRETS_PREFIX=production/agent-secrets/
@@ -126,7 +127,8 @@ which carries it through brief contention for its address's bucket; a caller tha
 bucket drained for the rest of the credential's life stops it logging in.
 
 A service login a person approved through a device code before this broker keeps working until
-it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (7 days by default) after its approval.
+it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (30 days by default) after its approval:
+nothing refreshes it.
 
 ## Signing in to RDS by IAM token
 
@@ -189,12 +191,20 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 ## Network and trust
 
 - Agents, their helpers and launchers, and Dispatch's server reach the broker at
-  `BROKER_PUBLIC_URL`. Every signed proof names that URL, so clients' `AGENT_SECRETS_URL` must be
-  exactly it, and a proxy in front of the broker must not change the host or path.
+  `BROKER_PUBLIC_URL`. Every signed proof names that URL plus the request's path, so clients'
+  `AGENT_SECRETS_URL` must be exactly it, and a proxy in front of the broker must not change the
+  path. The broker checks each proof against `BROKER_PUBLIC_URL`, never against the `Host`,
+  `X-Forwarded-Proto` or `X-Forwarded-Host` a request arrives with: a proxy may rewrite `Host` or
+  terminate TLS without setting `X-Forwarded-Proto`, and a client that sends those headers itself
+  changes nothing. That holds for the machine login's token endpoint (`POST /v1/oauth/token`)
+  too, whose DPoP proofs name `BROKER_PUBLIC_URL/v1/oauth/token`.
 - The UI token is an approval credential: whoever holds it can approve as anyone. Give it to
   Dispatch's server and nothing else, and never to an agent.
-- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login and secret-reread
-  rate limiters see each caller's address rather than the proxy's.
+- Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login, token-endpoint
+  and secret-reread rate limiters see each caller's address rather than the proxy's. The token
+  endpoint (`POST /v1/oauth/token`) has its own per-address bucket, a burst of 60 refilled at two a
+  second, far above a machine's poll every five seconds and refresh about once a day; a refused
+  request is `429` `invalid_request` (`RATE_LIMITED: …`) with `Retry-After`.
 - The settings and reread routes take no credential. `GET /v1/settings` answers the store, the
   namespace prefix and, per store, the agent-secrets key's ARN with its AWS account and region, or
   the Cloud KMS key's name with the project number.
@@ -226,10 +236,10 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 The broker writes no secret. A person creates, changes and deletes agent secrets with
 `agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/)), which calls
 the store itself under that person's own cloud sign-in - AWS, their own IAM Identity Center
-sign-in; GCP, their own Application Default Credentials, refusing a service account's - so that
-cloud's own IAM is what decides who may change which secret, and with the tags (AWS) or
-annotations (GCP), who gets it. The CLI asks the broker only for its settings (`GET
-/v1/settings`) and, after each write, for a reread. Before anything else it refuses, on AWS, a
+sign-in; GCP, their own Application Default Credentials, refusing any but a person's own Google
+Account sign-in - so that cloud's own IAM is what decides who may change which secret, and with
+the tags (AWS) or annotations (GCP), who gets it. The CLI asks the broker only for its settings
+(`GET /v1/settings`) and, after each write, for a reread. Before anything else it refuses, on AWS, a
 sign-in in another account than the agent-secrets key's (GCP needs no equivalent: every GCP call
 already names the project explicitly, so the API itself refuses one in another project), and for
 a write any sign-in but a person's own; those checks are the CLI's, and the cloud's IAM is the

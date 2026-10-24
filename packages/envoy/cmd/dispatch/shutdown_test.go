@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -489,37 +491,76 @@ type dispatchProcess struct {
 	port int
 }
 
+// dispatchOptions is what a test varies about the Dispatch process it starts. Its zero value is
+// the shutdown tests' process: no NATS, no signing key of its own, the default settle delay.
+type dispatchOptions struct {
+	// NATSURL is the NATS server the process publishes to and reads its durables from. Empty
+	// sets DISPATCH_NATS_DISABLED=1 instead, which is what every test but the multiprocess
+	// ones wants: they have no NATS to reach.
+	NATSURL string
+	// SigningKey is DISPATCH_SIGNING_KEY, the HMAC key session cookies are signed with. Empty
+	// leaves it unset, so the process writes one of its own into its data dir.
+	SigningKey string
+	// SettleDelay is DISPATCH_TEST_SETTLE_DELAY; zero leaves the server's own default.
+	SettleDelay time.Duration
+	// Env overrides and adds to the rows below, by name: a row the caller names wins over the
+	// one here, and a name not here is added. It is how a test gives the process a GitHub App,
+	// a sign-in issuer or cookie identity without every other test growing those rows.
+	Env map[string]string
+}
+
 // startDispatchProcess builds Dispatch and starts it on a free loopback port against databaseURL,
 // with no NATS and nothing from the caller's environment or home, and kills it when the test ends if
 // it still runs. DISPATCH_TEST_HOOKS serves the agent conversation relay in-process, as the browser
 // harness does, since there is no NATS to relay it from.
 func startDispatchProcess(t *testing.T, databaseURL string) *dispatchProcess {
-	return startDispatchProcessWithSettleDelay(t, databaseURL, 0)
+	return startDispatchProcessWith(t, databaseURL, dispatchOptions{})
 }
 
 func startDispatchProcessWithSettleDelay(t *testing.T, databaseURL string, settleDelay time.Duration) *dispatchProcess {
+	return startDispatchProcessWith(t, databaseURL, dispatchOptions{SettleDelay: settleDelay})
+}
+
+// startDispatchProcessWith starts Dispatch under options: a free loopback port, a home of its
+// own, and nothing from the caller's environment.
+func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatchOptions) *dispatchProcess {
 	t.Helper()
 	home := t.TempDir()
 	port := cmdtest.FreeTCPPort(t)
 	cmd := exec.Command(cmdtest.Build(t, "envoy-dispatch"))
 	cmd.Dir = home
-	cmd.Env = []string{
-		"HOME=" + home,
-		"XDG_CONFIG_HOME=" + home,
-		"XDG_DATA_HOME=" + home,
-		"DATABASE_URL=" + databaseURL,
-		"DISPATCH_AGENT_TOKEN=shutdown-test-token",
-		"DISPATCH_IDENTITY=header:X-Dispatch-User",
-		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
-		"DISPATCH_NATS_DISABLED=1",
-		"DISPATCH_LISTEN_HOST=127.0.0.1",
-		"DISPATCH_PORT=" + strconv.Itoa(port),
-		"DISPATCH_WEB_DIST=" + home,
-		"DISPATCH_TEST_HOOKS=1",
+	environment := map[string]string{
+		"HOME":                             home,
+		"XDG_CONFIG_HOME":                  home,
+		"XDG_DATA_HOME":                    home,
+		"DATABASE_URL":                     databaseURL,
+		"DISPATCH_AGENT_TOKEN":             "shutdown-test-token",
+		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
+		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
+		"DISPATCH_LISTEN_HOST":             "127.0.0.1",
+		"DISPATCH_PORT":                    strconv.Itoa(port),
+		"DISPATCH_WEB_DIST":                home,
+		"DISPATCH_TEST_HOOKS":              "1",
 	}
-	if settleDelay > 0 {
-		cmd.Env = append(cmd.Env, "DISPATCH_TEST_SETTLE_DELAY="+settleDelay.String())
+	if options.NATSURL == "" {
+		environment["DISPATCH_NATS_DISABLED"] = "1"
+	} else {
+		environment["NATS_URLS"] = options.NATSURL
 	}
+	if options.SigningKey != "" {
+		environment["DISPATCH_SIGNING_KEY"] = options.SigningKey
+	}
+	if options.SettleDelay > 0 {
+		environment["DISPATCH_TEST_SETTLE_DELAY"] = options.SettleDelay.String()
+	}
+	maps.Copy(environment, options.Env)
+	cmd.Env = make([]string, 0, len(environment))
+	for name, value := range environment {
+		cmd.Env = append(cmd.Env, name+"="+value)
+	}
+	// Sorted, so a failure's process listing and a test's own log read the same whichever run
+	// printed them: Go's map iteration order is not.
+	slices.Sort(cmd.Env)
 	return &dispatchProcess{Process: cmdtest.Start(t, "Dispatch", cmd), port: port}
 }
 

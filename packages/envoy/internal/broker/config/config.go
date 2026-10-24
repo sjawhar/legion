@@ -54,6 +54,10 @@ type Config struct {
 	// path. Required. Every signed proof and request object names it, so a client's
 	// AGENT_SECRETS_URL must be exactly this.
 	PublicURL string
+	// BROKER_MACHINE_LOGIN_URL: the absolute http(s) URL of the page where a person types a
+	// machine login's code (Dispatch's /credentials/machine). Required. The device grant's
+	// verification_uri names it, so a machine shows its person where to go.
+	MachineLoginURL string
 	// BROKER_UI_TOKEN, BROKER_UI_TOKEN_FILE: the bearer token Dispatch's server presents on the
 	// broker's approval routes, given directly or as a file whose trimmed contents win over the
 	// variable. Required. It vouches for the approver each decision names, so only Dispatch's
@@ -135,8 +139,11 @@ type Config struct {
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
 	ProofSkewSeconds int
-	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once
-	// approved; past it the machine logs in again, with a new key, a new code and a new approval.
+	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login lasts without a refresh. An
+	// approval mints its credential for this long, and each refresh moves its expiry to this long
+	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
+	// A login through the earlier route (POST /v1/launcher-credentials), which cannot refresh,
+	// lasts seven days or this, whichever is shorter.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
@@ -326,6 +333,7 @@ func Load(getenv func(string) string) (Config, error) {
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
 		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
+		MachineLoginURL:    getenv("BROKER_MACHINE_LOGIN_URL"),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
@@ -348,6 +356,7 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.SecretsKMSKey = getenv(keyVar)
 	for _, req := range []struct{ name, value string }{
 		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
+		{"BROKER_MACHINE_LOGIN_URL", cfg.MachineLoginURL},
 		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {keyVar, cfg.SecretsKMSKey},
 	} {
 		if strings.TrimSpace(req.value) == "" {
@@ -360,6 +369,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
 		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
+	}
+	if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", cfg.MachineLoginURL)
 	}
 	switch cfg.SecretsStore {
 	case secrets.StoreAWS:
@@ -450,7 +462,7 @@ func Load(getenv func(string) string) (Config, error) {
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
-		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 1, 2592000},
+		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 	}
 	for _, i := range ints {

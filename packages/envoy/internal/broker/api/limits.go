@@ -37,6 +37,12 @@ var DefaultLauncherLimits = LauncherLimits{
 	PerLogin:   ratelimit.Limit{Every: time.Minute, Burst: 5},
 }
 
+// DefaultTokenLimit bounds POST /v1/oauth/token per source address, in a bucket of its own: a
+// burst of 60 and two a second. A machine polls its device code every five seconds while its
+// person decides and refreshes about once a day, so even many machines behind one address
+// never meet it; a flood from one address is refused before the provider does any work.
+var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
+
 // DefaultRereadLimit bounds POST /v1/secrets/{name}/reread per source address: a person's write
 // burst passes; a flood cannot make the broker hammer DescribeSecret.
 var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
@@ -140,6 +146,12 @@ func (l *launcherLimiter) addressAllows(r *http.Request) bool {
 	return l.perAddress.AllowAt(clientAddress(r, l.trustedProxyHeader), time.Now())
 }
 
+// tokenAllows spends one request of r's source address's token-endpoint bucket, reporting
+// whether it had one.
+func (s *server) tokenAllows(r *http.Request) bool {
+	return s.tokenLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), time.Now())
+}
+
 // refuseReread writes 429 RATE_LIMITED and reports true when r's source address, or the broker as
 // a whole, has no reread left in its bucket, naming the refusing bucket's Retry-After. A reread
 // spends a token in each bucket only when both allow it (ratelimit.Keyed.AllowBothAt): one address
@@ -156,10 +168,14 @@ func (s *server) refuseReread(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // refuseWithRetryAfter answers 429 RATE_LIMITED with the Retry-After a bucket refilled one every
-// every names: whole seconds rounded up, and never 0, which would invite an immediate retry the
-// bucket would refuse again.
+// every names (retryAfterSeconds).
 func refuseWithRetryAfter(w http.ResponseWriter, every time.Duration, msg string) {
-	seconds := max(int((every+time.Second-1)/time.Second), 1)
-	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(every)))
 	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", msg)
+}
+
+// retryAfterSeconds is the Retry-After a bucket refilled one every every names: whole seconds
+// rounded up, and never 0, which would invite an immediate retry the bucket would refuse again.
+func retryAfterSeconds(every time.Duration) int {
+	return max(int((every+time.Second-1)/time.Second), 1)
 }

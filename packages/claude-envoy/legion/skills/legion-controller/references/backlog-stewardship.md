@@ -26,8 +26,9 @@ Run this pass on the first turn of every UTC day and after every ruling from Sam
    `skill://dispatch/references/issues.md#board-rank-priority-and-assignee-on-a-read`.
 3. Reconcile the plan's one-owner map. For each listed owner, verify the named session is live.
    For unowned work, find a suitable live owner with `envoy_sessions` filtered by `title` or `dir`,
-   route the issue to that exact session, and tell it what it owns. Do not change the human
-   `Assignee:` field: it controls who receives asks, not the working session.
+   route the issue to that exact session, and tell it what it owns. Routing hands the work to that
+   session; it starts nothing on Legion and sets no label. Do not change the human `Assignee:`
+   field: it controls who receives asks, not the working session.
 4. Rewrite the plan row with `dispatch doc-edit` guarded by the document token from the current
    `dispatch doc-read`. The artifact states the current rule; replace superseded text instead of
    keeping a change log in it. A comment or message does not update the one-owner map.
@@ -54,7 +55,9 @@ Treat a session route as stopped only after the owner audit's two `no_holder` re
 minutes apart. Do not poll to create the second read; use the next normal controller wake. Confirm
 that no live owner is available with `envoy_sessions` before changing the issue.
 
-For work that the plan or its handoff says moves to Legion when its session stops, preserve its
-existing labels, add `legion`, then set it `todo` with the `legion` tool's `set_status`. The label comes first: it is what
+For work that a ruling of a person's, recorded in the plan with its link (the ruling section
+above), says moves to Legion when its session stops, preserve its existing labels, add `legion`,
+then set it `todo` with the `legion` tool's `set_status`. A plan row you wrote with no such ruling
+behind it moves nothing. The label comes first: it is what
 lets the daemon admit the root. Do not apply that recovery to an issue already in an active Legion
 tree; its architect and daemon own its lifecycle. Update the weekly-plan owner row after the move.

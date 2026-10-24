@@ -34,10 +34,21 @@ const (
 //
 // The intakes cannot share a client: a bus.Client holds one JetStream subscription, and refuses the
 // second intake's bind with bus.ErrSubscriptionHeld.
+//
+// Each intake reconciles its durable's configuration under a lease of that durable's own
+// (consumerLease), taken on the pool's lease connections, so that two envoy-dispatch processes
+// never reconcile one durable against each other -- and so that neither intake's reconciliation
+// can block the other's, which one lease over both durables did (the measurement is on
+// consumerLease). A pool that cannot open those connections is returned as the error, with
+// neither intake started: an intake that could not take its lease would reconcile nothing.
 func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client, broker *events.Broker) (stop func(), err error) {
 	if github == nil {
 		slog.Info("dispatch delivery: no GitHub App key — the intakes are idle")
 		return func() {}, nil
+	}
+	leases, err := pool.Leases()
+	if err != nil {
+		return nil, fmt.Errorf("open the lease pool for the intakes: %w", err)
 	}
 	intakeClient, err := connect(intakeConnectionName)
 	if err != nil {
@@ -49,8 +60,8 @@ func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, e
 		return nil, fmt.Errorf("connect the job intake: %w", err)
 	}
 	var running sync.WaitGroup
-	running.Go(func() { newIntake(intakeClient, pool, github, broker).Run(ctx) })
-	running.Go(func() { newJobIntake(jobClient, pool, github, realJobClock{}).Run(ctx) })
+	running.Go(func() { newIntake(intakeClient, pool, leases, github, broker).Run(ctx) })
+	running.Go(func() { newJobIntake(jobClient, pool, leases, github, realJobClock{}).Run(ctx) })
 	return sync.OnceFunc(func() {
 		running.Wait()
 		intakeClient.Close()

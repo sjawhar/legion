@@ -86,11 +86,16 @@ only the `dispatch` service. It retains the ten newest pre-deploy dumps. Its
 defaults target the devbox; set `REPO`, `COMPOSE_PROJECT`, or `BACKUPS` to run
 against another checkout, Compose project, or dump directory.
 
-Two releases of Dispatch never serve the database together here:
+Two releases of Dispatch never serve the database together in this compose deployment:
 `docker compose up -d --no-deps dispatch` stops and removes the old container before it starts the
-new one, which boots and migrates. A deployment that rolls Dispatch some other way must keep that
-order, and must never start an image older than its database's schema afterwards: migration `0113`
-requires both (`../cmd/dispatch/README.md`, "Database migrations").
+new one, which boots and migrates. That order is this deployer's own, not a rule every deployment
+keeps: a deployment that rolls Dispatch instead, running two processes against one database while
+it rolls, is supported under the preconditions the server's own guidance names — one
+`DISPATCH_SIGNING_KEY` every process is given, and every migration written to leave the release
+before it able to read and write the schema (`../cmd/dispatch/README.md`, "Running more than one
+process" and "Database migrations"). What no deployment does is start an image older than its
+database's schema: migration `0113` was deployed with no earlier release running, and none is
+started over it again.
 
 Run it continuously in its supervised host service, or use one pass for a
 smoke check:

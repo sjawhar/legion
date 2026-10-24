@@ -1005,6 +1005,50 @@ jobs:
         run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
         working-directory: packages/envoy
 
+  # The two-process tests (packages/envoy/cmd/dispatch/multiprocess_test.go, INFRA-66): each row
+  # starts two real envoy-dispatch processes against one Postgres and one NATS - which is what
+  # production runs - and drives them over HTTP, their own logs and NATS's own consumer and
+  # stream reads. They build only under the `multiprocess` tag, so envoy-go's unit run leaves
+  # them out, and they are a job of their own for the reason dispatch-memory is: envoy-go's unit
+  # step runs under go test's default ten-minute package deadline, which the memory tests
+  # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
+  # or a maintenance loop's tick, tens of seconds each. The job takes envoy-go's Ryuk setting and
+  # pre-pulls testnats.Image, for the reason .github/actions/pull-test-images gives: with no
+  # DISPATCH_TEST_NATS_URL set, each run starts its NATS in a container of its own.
+  dispatch-multiprocess:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - name: Pull the NATS test container image
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: packages/envoy/internal/testnats/nats.go Image
+      - name: Two-process tests of the Dispatch server
+        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
+        working-directory: packages/envoy
+
   # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
   # job, gated on envoy_image rather than envoy: the image is built from the Dispatch SPA and the
   # Bun workspace as well as the Go sources, so a Dispatch-only change changes the image and must

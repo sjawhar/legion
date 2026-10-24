@@ -648,6 +648,22 @@ append lands (`unusedLocked`). A forced eviction (`evictRoom`) forgets the state
 append still reaches the credit through its `UpdateCredit`, so it writes or skips the author all
 the same.
 
+Two `envoy-dispatch` processes do not share a live document session, and durable convergence does
+not depend on one: every edit is appended under the document's advisory lock, Yjs updates commute,
+and the stored history is their union, so no edit is lost whichever process took it. No process
+writes durable state for a document from a room that is not at the durable head: each resident
+instance carries the version it holds the document through, and an append, a settlement, a
+version, a fork of the live tree or a rebuild from a room behind the head is refused
+(`ErrRoomBehindHead`, `docs/pending_authors.go`), the live write taking the cold path instead.
+What is per-process is the room: while a room is resident in one process it receives none of the
+other's updates, so presence and cursors show only the peers on that process. Every durable
+change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory
+lock, and the other process's listener (`docs/stale_room.go`, over `internal/dispatch/pglisten`)
+closes the room that notification leaves behind the head, so within that round trip the browser
+reconnects, re-syncs and shows the current text - a brief reconnect, never stale text a reader
+can act on. Cross-process live co-editing of one document, two rooms with updates streaming
+between them, is a follow-up issue and out of scope here.
+
 The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms,
 never documents touched since the process started (LEGION-513). A room an `Apply` opened with no
 peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
@@ -2416,17 +2432,26 @@ secrets), and a write also refuses any ARN but `assumed-role/AWSReservedSSO_*/<s
 account (`requireWriteSignIn`, naming the ARN, in any AWS partition). `--owner me` is that session
 name lowercased; create and retag refuse it before writing unless it matches the broker's email
 rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
-(`gcloud auth application-default login`) and calls Secret Manager itself under
-`cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
-write. GCP's requireAccount is a no-op, unlike AWS's: every call already names
-`projects/<project number>/...` explicitly, so a wrong-project identity gets a real refusal from
-the API itself rather than silently reading another project's secrets - the hazard AWS's
-`ListSecrets` (which takes no project parameter) has and GCP's calls do not.
+(`google.FindDefaultCredentials`: the file `GOOGLE_APPLICATION_CREDENTIALS` names whenever it is
+set, else `~/.config/gcloud/application_default_credentials.json` whatever `CLOUDSDK_CONFIG` says,
+else the metadata server; a load that fails while `GOOGLE_APPLICATION_CREDENTIALS` is set names
+that variable and advises no sign-in, since no other file is read while it is set, and one that
+fails while it is unset advises the refusal's route below, `gcpPersonRoute`) and calls
+Secret Manager itself under `cloud.google.com/go/secretmanager`, so IAM in that project decides
+what the person may read or write. GCP's requireAccount is a no-op, unlike AWS's: every call
+already names `projects/<project number>/...` explicitly, so a wrong-project identity gets a real
+refusal from the API itself rather than silently reading another project's secrets - the hazard
+AWS's `ListSecrets` (which takes no project parameter) has and GCP's calls do not.
 A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
-service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC carries no
-JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
-the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
-lowercased.
+service account key file, a workload identity federation credential (a dev box's own), a workforce
+identity federation sign-in, or a GCE/GKE metadata-server identity (GKE Workload Identity's too),
+whose ADC carries no JSON at all - (`gcpBackend.requireWriteSignIn`). The refusal names what it
+found (`gcpCredsFound`) and `gcpPersonRoute`, the route that leaves the machine's identity alone:
+`gcloud auth login --no-activate` (which writes `legacy_credentials/<email>/adc.json` and keeps the
+active gcloud account), then the command again with `GOOGLE_APPLICATION_CREDENTIALS` naming that
+file, never `gcloud auth application-default login`, which replaces a machine's own ADC for every
+program that uses it. `--owner me` is the Google userinfo endpoint's `email` for the signed-in
+Application Default Credentials, lowercased.
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
@@ -2566,9 +2591,110 @@ answers locally, with no broker call and no registration, whether the calling pr
 session identity (exit 0 for a `key.pem`, a fresh marker, or the helper's sign probe answering OK
 or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but cannot be asked),
 for callers that choose between the broker and another backend. A helper holding no launcher
-credential, from every restart until the operator logs the machine in, enrolls no one: its sign
+credential (never logged in, or after it dropped its login, below, until the operator logs the
+machine in again) enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
 with the same not-logged-in notice naming `agent-secrets machine login`.
+
+The machine login is an OAuth 2.0 device authorization grant on the broker's own endpoints
+(`helper.Broker.Login`, client id `agent-secrets-helper`): a fresh P-256 key signs a
+`launcher_credential` request object naming the host and the operator file's login as
+`login_hint`, sent to `POST /v1/oauth/device_authorization` with the key's thumbprint as
+`dpop_jkt`; the CLI prints the user code and where to type it (`AGENT_SECRETS_APPROVE_URL`'s
+`/credentials/machine` when set, else the answer's `verification_uri`, which the socket's `login`
+answer relays), and the helper polls `POST /v1/oauth/token` with DPoP
+proofs from that key (`pollLogin`, `dpop.go`) until the person decides. An approval's token answer
+carries the refresh token and the broker's extras `credential_id` and `credential_expires_at`; the
+helper writes them with the key to `AGENT_SECRETS_MACHINE_FILE` (default
+`~/.config/agent-secrets/machine.json`, mode 0600, its directory created 0700 when the helper
+creates it, written through a fresh `os.CreateTemp` file renamed over it, so no planted path is
+followed; `helper.MachineFile`, whose `validate` both load and save check) before it installs the
+credential. A refresh whose answer the file cannot take is still installed (the old token is
+spent), and the failed save removes the file at once (`unsaveFile`; an unlink works on a full
+disk), since it names the rotated-away token and the helper cannot know how long ago that token
+was first rotated (a restart loses that), logging at ERROR that the login is held only in memory
+and a restart before the next good save needs a new approval. Until a save lands, the helper
+retries only the save every 15 s (`retrySave`) and makes no token request on any path (the
+refresh loop, `Start`, `settleRefused`); a save that lands writes the file back. When even the
+unlink fails (a read-only filesystem) the helper logs at ERROR that a restart before the disk is
+writable again presents a spent token, which the broker revokes as a reuse, ending the machine's
+sessions. A refresh that finds the credential already dropped returns `errNoOutcome`, which the
+loop treats as no outcome (`retrySchedule.after`): it neither resets the backoff nor clears
+`unknown`.
+`LoadMachineFile` refuses a file whose mode grants group or other any access, or that another
+user owns, naming it and `chmod 600`. `serve` first takes an exclusive flock on `<socket>.lock`
+(0600, beside the socket; `claimSocket`), then one on `<machine file>.lock` (`claimMachineFile`),
+and holds both for its lifetime, so a second `serve` on the socket, or on the machine file with
+any socket, exits 2 naming it, before any refresh; with the socket lock held it refuses a path at
+the socket that is not a unix socket or that a helper still answers on, and removes a socket only
+when a dial is refused. It then runs `Broker.Start` before it listens: Start first removes any
+`.machine-*.json.tmp` an interrupted save left beside the file, and a kept file is refreshed once,
+within 5 s, before it is installed, so the socket still listens inside `register`'s 10 s wait
+(answered: saved and installed `issued` with no code, or, when the save failed, installed and
+the file removed, its save retried 15 s later; `invalid_grant`: dropped and the file deleted, so a login the broker answered as ended is
+never resumed; an outcome the helper did not learn, the 5 s bound passing among them: the kept
+login installed as `issued`, though the broker may have ended it, and retried by the loop). A file
+that is there but is
+not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
+the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
+credential is installed; a refresh the broker did not answer (any transport error: a refused,
+unanswered or unresolved dial, a timeout, a lost answer, a cancelled request) or answered 5xx is
+retried every 15 s, with no backoff (`retrySchedule`), and so is every refresh after it until the
+broker settles one (a success or `invalid_grant`), answered 4xx and 429s between included (its
+`unknown` flag); otherwise a 429 (the token endpoint's rate limit) waits its `Retry-After`, at
+least 15 s and at most a minute, and keeps the login, and any other refusal but `invalid_grant`
+waits a minute, doubling to an hour. A token answer naming no new refresh token (`x/oauth2` copies
+the presented one into an answer without the field) is an error answer: nothing is saved, and the
+refresh is retried. A lost answer keeps the login only while a
+retry lands inside the broker's five-minute rotation grace: retrying every 15 s lands one there
+whenever the outage is shorter, and an outage longer than the grace right after a lost answer makes
+the next retry a reuse, which revokes the machine and ends its sessions. The cost is one request
+every 15 s per machine during an outage.
+A 401
+`LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
+dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
+since that 401 can also be a proof the broker could not verify; an answer whose save fails is
+installed, so the helper keeps working, and the file removed, as a refresh's is; while a login is
+unsaved, the settlement retries only its save before any refresh.
+Each refresh spends the refresh token
+for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
+the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)
+drops the login and deletes the file. A machine login installed while the helper held another
+credential, or after a 401 `LAUNCHER_INVALID` dropped one (`refusedCred`), retires that one
+(`retireReplaced`: `POST /v1/operator/machines/{id}/retire`
+signed with that credential's own launcher proof, `enroll.Service.RetireCredential`: its expiry set
+to now and its OAuth tokens deleted in one transaction, so a retired refresh token presented later
+is a plain `invalid_grant` that revokes nothing, its sessions left running and renewing with
+their own proofs), best effort, logging a failure at WARN. The
+helper no longer speaks the earlier
+`POST /v1/launcher-credentials` login, so it needs a broker that serves the OAuth routes.
+`agent-secrets-helper install [--url URL] [--restart-with-sessions]` (`install.go`) writes the
+helper's user unit to `helper.UnitPath` (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`,
+else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`,
+`Environment=AGENT_SECRETS_URL=<url>`, an `Environment=` line for each of
+`AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE` set in
+its environment, and `Restart=always`, refusing a URL, value or path a unit line
+would split or expand, and a relative path in any of those three variables (naming it: the
+unit's helper runs in another working directory). First, a helper answering on the socket while `systemctl --user
+is-active agent-secrets-helper.service` is not `active` was started some other way: `install`
+lists its sessions and exits 2 (`stop it, then re-run install`), writing and starting nothing,
+whether or not the unit file already matches. Then it writes the unit when its bytes differ, and
+runs `systemctl --user daemon-reload` and `enable --now` when it wrote it or the unit is not
+active. Last, it restarts a helper that was already answering when `--restart-with-sessions` is
+given, even with the unit unchanged, or, without it, only when the unit changed and the
+`drain` op finds it has no sessions (it then refuses every later register and
+`enroll-session-key` `DRAINING` until it exits or is sent `undrain`, so none starts between the
+check and the restart; `agent-secrets register` retries `DRAINING` every 250 ms until the larger
+of its 10 s connect patience and `--wait` has passed, and `agent-secrets enroll --helper` for 30 s
+(`enrollRetryingDrain`), so a session or box launched then registers or enrolls with the
+restarted helper; a restart that fails after a drain sends `undrain` and exits with the
+restart's error). An unchanged, active unit without the flag does nothing. With sessions it prints them and
+`not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
+--restart-with-sessions.` and exits 0. A helper older than `drain` answers it `unknown op`; it
+cannot refuse a register before the restart, so `install` never restarts it without
+`--restart-with-sessions`: it prints its `sessions`, then `not restarted: the running
+agent-secrets-helper predates drain, …`, and exits 0. `agent-secrets` reads that unit file as "the
+helper is installed" (`helperInstalled`).
 
 `agent-secrets renew --pod-token-file FILE` is the pod renewer: it re-reads and trims the
 projected token before every broker request, and sends it as `pod_token`. A blank or unreadable
@@ -2590,7 +2716,7 @@ lease, and the next renewal is `ENROLLMENT_NOT_LIVE`); `POD_TOKEN_EXPIRED`, retr
 the file holds next; and any other `PROOF_INVALID`, since a clock or URL correction can make the
 next proof valid.
 
-The login that installs a credential wakes every registered session's enrollment retry, so those
+The login that installs a credential, a resumed one included, wakes every registered session's enrollment retry, so those
 sessions reach the broker within about a second of it rather than when a backoff of up to a minute
 comes round. A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or
 an older broker's `PROOF_INVALID` saying `not live`) stops counting as enrolled at once, and its
@@ -2613,31 +2739,36 @@ exits 0 and prints `issued`, and stderr names the most recent login and its code
 (`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
-carries it. While a credential is held, login-status's last stderr line says when it expires and
-how long that is from now (`credential_expires_at`, from the `expires_at` the broker's issued poll
-carries); the broker has no renewal, so a new machine login a human approves must replace it before
-then, and a helper or broker from before that field gets a line saying the expiry is unknown.
+carries it. While a credential is held, login-status's last stderr line says when it lapses and
+how long that is from now (`credential_expires_at`, from the expiry the broker's latest token
+answer named): `the machine login renews itself; without a refresh it lapses at <RFC 3339> (in
+<d>d<h>h<m>m)`, and a helper or broker from before that field gets a line saying the expiry is
+unknown.
 With no credential held, login-status exits 1 and prints the most recent login's state
 (`pending`, `denied`, `expired`, or `none` before any login), except once the helper drops the
 held credential, because the broker refuses it (401 `LAUNCHER_INVALID`, which it answers for an
 expired or revoked credential and for any launcher proof it cannot verify, such as clock skew or
-an `AGENT_SECRETS_URL` that is not the broker's public URL) or because it reaches the expiry the
-broker named: from then until a login starts or settles, the helper reports every state but
+an `AGENT_SECRETS_URL` that is not the broker's public URL), refuses its refresh (`invalid_grant`),
+or because it reaches the expiry the broker last named: from then until a login starts or settles,
+the helper reports every state but
 `pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
 client exits 1 on it too, with `login_refused` and the cause (`credential_dropped`). Stderr says
 why the helper holds no credential in the words its journal uses for the same state
 (`helper.NoCredentialReason`): a login awaiting approval, the cause it dropped the credential for,
 a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for
 one), a denied login, a login that expired before anyone approved it, or no login since the
-helper started. A re-login pending at the drop reports its own outcome once it settles, so its
+helper started and none kept in its machine file. A re-login pending at the drop reports its own outcome once it settles, so its
 `machine login` prints `denied` for a denial. The helper logs every change of the credential:
 `machine login issued` (credential id, its `expires_at`, and the operator the login was signed
-with) when a login installs one, a WARN that it expires soon a day before its expiry (at once when
-less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a
-human approves a new machine login`, the cause being `the launcher credential reached its expiry`
-(with the expiry) or `the broker refused the launcher credential (…)` (with the broker's code); a
-broker that names no expiry gets a WARN that the helper cannot warn ahead. A refusal of a
-credential a newer login has already replaced drops nothing, and the enrollment it failed retries
+with) when a login installs one, `the helper resumed the machine login it kept` at start,
+`machine login refreshed` (credential id, new `expires_at`) on each refresh, a WARN when a refresh
+did not reach the broker and an ERROR when the refreshed login could not be written to the file, a
+WARN that it lapses soon a day before its expiry (at once when less is left), and one ERROR when it
+drops it, `<cause>; cleared: no session can enroll until a human approves a new machine login`, the
+cause being `the launcher credential reached its expiry` (with the expiry), `the broker refused the
+launcher credential (…)` (with the broker's code) or `the broker refused the machine login's
+refresh: it was revoked, lapsed, or its refresh token was reused`. A refusal of a
+credential a newer login or a refresh has already replaced drops nothing, and the enrollment it failed retries
 at once with the new one after the ordinary `enroll failed; retrying` WARN. While it holds none,
 every enrollment attempt, a session's or an `enroll-session-key`'s (and every revoke a re-pinned or lapsed
 session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`; an
@@ -2645,7 +2776,8 @@ attempt that failed for want of a credential a login has installed since logs th
 SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a WARN
 `agent-secrets-helper stopping on a signal` naming the signal, how many sessions it had
 registered (`sessions`) and whether it held a launcher credential (`launcher_credential`); the
-dotfiles unit restarts it unless systemd itself stopped it (`Restart=always`). The helper writes
+unit `install` writes restarts it unless systemd itself stopped it (`Restart=always`), and the
+restarted helper resumes its machine file. The helper writes
 these lines to stderr as slog text, so journald stores the ERROR lines at priority 6 (info), and
 `journalctl -p err` does not list them.
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
@@ -2698,6 +2830,8 @@ never the URL; `cmd/broker` then loads the AWS config once, before `store.Open`,
 imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new connection),
 `BROKER_PUBLIC_URL` (required; absolute URL, no path —
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
+`BROKER_MACHINE_LOGIN_URL` (required; absolute http(s) URL — Dispatch's `/credentials/machine`
+page, the device grant's `verification_uri`, where a person types a machine login's code),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
 `BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
@@ -2729,8 +2863,10 @@ it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
 `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
-(default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
-re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
+(default and max 2592000, 30 days — how long a machine login lasts without a refresh: an approval
+mints its credential for this long, and each refresh of its device login moves its expiry to this
+long from then; past it the machine logs in again, new key, new code, new human approval),
+`BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
 (optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
 limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
@@ -2754,7 +2890,8 @@ literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
-absolute URL with no path; a `BROKER_SECRETS_STORE` that is neither store's name; with the AWS
+absolute URL with no path; a `BROKER_MACHINE_LOGIN_URL` that isn't an absolute http(s) URL; a
+`BROKER_SECRETS_STORE` that is neither store's name; with the AWS
 store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or holds white space,
 and a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed elsewhere, and a
 bare key id names no account); with the GCP store, a prefix not of its form (a project id in place
@@ -3060,7 +3197,8 @@ authorization detail naming no service, and a `login_hint`, the approving operat
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
-pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
+pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`,
+which, like the decision's code check, takes the code as typed: `oauth.NormalizeUserCode`)
 — never the machine's opaque pending id — and this is the *only* route that selects a machine
 record (ruling 13: a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
@@ -3084,8 +3222,46 @@ under another record (a machine that signed two logins with one key) is `409
 KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
 poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
 the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
-only with proofs signed by the key the request object embedded. The broker has no renewal route:
-past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
+only with proofs signed by the key the request object embedded. `Login` and `Read`
+(`POST /v1/launcher-credentials` and its poll) are the login that helpers from earlier releases
+use; nothing refreshes a credential they issue, so past `expires_at` such a machine logs in again.
+
+The current helper logs in through `LoginDevice` instead, the OAuth provider's (`internal/broker/oauth`,
+storage `internal/broker/oauthstore`, migration 0016) device authorization step behind
+`POST /v1/oauth/device_authorization`: the same request object and refusals as `Login`, its
+`dpop_jkt` required to be the object's key thumbprint, the record's code the provider's user code,
+and no poll row. It runs in the provider's transaction, and so does its request object's `jti`
+(`enroll.Service.Replay` writes in the transaction its context carries, `oauthstore.TxFrom`, and on
+the pool only when it carries none): a device login holds that transaction's one pooled
+connection and never waits for a second, which a burst of logins as large as the pool would
+otherwise turn into a stall of every database route, `/healthz` among them
+(`TestDeviceLoginsNeedOnlyTheirTransactionsConnection`). Every step the provider's transactions
+run (`LoginDevice`, the token hooks, `Store.Reused`, `ApproveDevice` inside `ApplyDecision`)
+writes through the transaction it is handed, never the pool. `ApplyDecision` records each
+decision on the device code too (`decideDevice`), so the machine's poll of `POST /v1/oauth/token`
+gets `access_denied` or, on approval, a DPoP-bound token pair (RFC 9449) whose answer carries
+`credential_id` and `credential_expires_at` (`TokenHooks`). A refresh grant first moves the
+credential's expiry to
+`BROKER_LAUNCHER_CREDENTIAL_SECONDS` from now (`Refreshed`, under the credential's row lock) and
+is refused `invalid_grant` when the credential is revoked or past its expiry; the device code
+grant takes the same row lock without moving the expiry (`Live`) and is refused the same way, so
+a login revoked between its approval and its poll issues nothing. Only that ending
+(`oauth.ErrLoginEnded`, which `machine.ErrNotLive` wraps) is `invalid_grant`; any other failure
+of those steps (a lost database connection) is `500 server_error`, which the helper retries.
+Both run only in the token request's transaction, refusing without one. Refresh tokens
+rotate: a replaced one stays redeemable for five minutes (`oauthstore.refreshGrace`) so a lost
+answer can be retried, and redeeming it again within that time ends the tokens its earlier
+redemption issued, so the family has one live branch. One redeemed after its grace is a reuse: it
+revokes its whole family and, in the same transaction, the launcher credential the family names
+(`oauthstore.Store.Reused`, which is `enroll.RevokeReusedCredential`: revoked_at, its sessions and
+grants ended, audit actor `broker:refresh-token-reuse`), so a copied key enrolls nothing more. A revoke
+(`enroll.Service.RevokeCredential`) ends the credential's tokens in its own transaction
+(`oauthstore.EndCredential`), so the machine's next refresh is refused. Each sweeper tick
+(`requests.Sweeper`) runs `oauthstore.Store.Sweep`: it deletes device codes an hour past their
+expiry (a late poll still answers `expired_token`), DPoP proofs, nonces and access tokens past
+theirs, and a refresh token family only once none of its rows is still redeemable, so a replay
+of a rotated token still finds its family while any descendant lives. Each kind goes row by row
+in batches of 1,000, at most 10 batches per tick; a larger backlog finishes on later ticks.
 
 `GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person may revoke that
 can still reach a secret (id, host, service, `approved_by`, issued, expires, `expired`): every
@@ -3144,7 +3320,15 @@ is refused every one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an oper
 names the calling machine login, `record.LauncherActor(<credential id>)`, whose own row names its
 operator, since no Dispatch sign-in vouched for it; a UI revoke names `record.HumanActor(<login>)`.
 Revoking the calling credential itself ends that machine's access: its next launcher proof is
-`401 LAUNCHER_INVALID`.
+`401 LAUNCHER_INVALID`. `POST /v1/operator/machines/{id}/retire` (`retireOperatorMachine`) is the
+helper's after a new login replaced the calling one: `{id}` must be the calling credential (`403
+NOT_CALLING_CREDENTIAL` otherwise; it needs no operator, so it is the one machine route a service's
+login is not refused), and `enroll.Service.RetireCredential` sets its `expires_at` to now and deletes
+its OAuth tokens in one transaction (an inactive token would take the reuse path and revoke the
+credential), writing one `launcher_credential.retired` audit row, while its
+enrollments keep running: a session renews with its own proof, as an expired credential's
+sessions do. It answers `204`, but a credential already expired or revoked fails the route's
+launcher authentication first, so retiring one already ended answers `401 LAUNCHER_INVALID`.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/pglisten"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -129,9 +130,19 @@ func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
 	}
 }
 
+// The channels the delivery hub listens on. delivery_changes carries no payload and is notified
+// as a delivery_changes row commits (migration 0100); delivery_freshness carries the settings
+// row's freshness columns as JSON (0100); dispatch_events carries no payload and is notified as an
+// event commits (0107). The event stream relay listens on the third of them (event_stream_relay.go).
+const (
+	deliveryChangesChannel   = "delivery_changes"
+	deliveryFreshnessChannel = "delivery_freshness"
+	dispatchEventsChannel    = "dispatch_events"
+)
+
 // deliveryHub keeps every open Delivery and Pipeline page current (LEGION-690). It learns of a change
 // from Postgres (LISTEN delivery_changes, delivery_freshness, dispatch_events, on one connection of
-// its own, deliveryListener) and from the in-process event broker; marks dirty only the views the
+// its own, pglisten.Listener) and from the in-process event broker; marks dirty only the views the
 // change can touch; recomputes each dirty view once per burst, one recompute at a time, as the GET
 // routes' population read and pure compute; re-runs the compute alone, reading nothing, when
 // something leaves a preset window; and sends each subscriber only the keys whose revision differs
@@ -144,9 +155,9 @@ type deliveryHub struct {
 	server   *server
 	clock    hubClock
 	lifetime context.Context
-	// dial, listenIdle, pingTimeout and backoff are the listener's (deliveryListener); dial is the
+	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is the
 	// shared pool's Listener, and a test sets them otherwise before the first Subscribe.
-	dial                    func(ctx context.Context) (deliveryListenerConn, error)
+	dial                    func(ctx context.Context) (*pgx.Conn, error)
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
 	// observe, when set, is told of each recompute and catch-up; tests set it.
@@ -179,9 +190,6 @@ type deliveryHub struct {
 	sent  deliveryFreshnessVerdict
 	known bool
 }
-
-// deliveryListenerConn is what the hub's dial returns: one connection of its own for LISTEN.
-type deliveryListenerConn = *pgx.Conn
 
 // hubClock is the hub's clock: what time it is, and a timer that calls f once the clock reaches
 // at, at once when it already has. The timer names a moment rather than a wait, so a clock that
@@ -331,13 +339,17 @@ func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *delive
 // start runs the hub's goroutines once.
 func (h *deliveryHub) start() {
 	h.once.Do(func() {
-		listener := &deliveryListener{
-			dial: h.dial, listenIdle: h.listenIdle, pingTimeout: h.pingTimeout, backoff: h.backoff,
-			onConnected: func() { signal(h.connected) },
-			onNotify:    h.onNotify,
+		listener := &pglisten.Listener{
+			Dial:        h.dial,
+			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, dispatchEventsChannel},
+			ListenIdle:  h.listenIdle,
+			PingTimeout: h.pingTimeout,
+			Backoff:     h.backoff,
+			OnConnected: func() { signal(h.connected) },
+			OnNotify:    h.onNotify,
 		}
 		h.running.Add(3)
-		go func() { defer h.running.Done(); listener.run(h.lifetime) }()
+		go func() { defer h.running.Done(); listener.Run(h.lifetime) }()
 		go func() { defer h.running.Done(); h.intake(h.lifetime) }()
 		go func() { defer h.running.Done(); h.work(h.lifetime) }()
 	})

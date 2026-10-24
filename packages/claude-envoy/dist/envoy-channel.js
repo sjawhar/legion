@@ -39066,13 +39066,34 @@ function machineID() {
 
 // ../envoy-client/src/dispatch-cwd.ts
 var execFileAsync = promisify(execFile);
-var defaultExec = (file2, args, options) => execFileAsync(file2, args, { cwd: options.cwd, timeout: 5000 });
-async function tryExec(exec, file2, args, cwd) {
+var defaultExec = (file2, args, { cwd, signal }) => {
+  const call = execFileAsync(file2, args, { cwd, signal });
+  const kill = () => call.child.kill("SIGKILL");
+  if (signal.aborted)
+    kill();
+  else
+    signal.addEventListener("abort", kill, { once: true });
+  return call;
+};
+var REMOTE_LOOKUP_MS = 5000;
+var TMUX_PANE_LOOKUP_MS = 1000;
+async function tryExec(exec, file2, args, cwd, limitMs) {
+  const controller = new AbortController;
+  const expired = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    controller.abort();
+    expired.resolve(null);
+  }, limitMs);
   try {
-    const { stdout } = await exec(file2, args, { cwd });
-    return stdout;
+    const answer = await Promise.race([
+      exec(file2, args, { cwd, signal: controller.signal }),
+      expired.promise
+    ]);
+    return answer?.stdout ?? null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 function parseRemoteList(stdout) {
@@ -39111,12 +39132,12 @@ function parseGitHubRemoteUrl(url2) {
   return null;
 }
 async function resolveCwdRepo(cwd, exec) {
-  const jjOutput = await tryExec(exec, "jj", ["git", "remote", "list"], cwd);
+  const jjOutput = await tryExec(exec, "jj", ["git", "remote", "list"], cwd, REMOTE_LOOKUP_MS);
   if (jjOutput !== null) {
     const url2 = selectRemoteUrl(parseRemoteList(jjOutput));
     return url2 ? parseGitHubRemoteUrl(url2) : null;
   }
-  const originUrl = await tryExec(exec, "git", ["remote", "get-url", "origin"], cwd);
+  const originUrl = await tryExec(exec, "git", ["remote", "get-url", "origin"], cwd, REMOTE_LOOKUP_MS);
   return originUrl ? parseGitHubRemoteUrl(originUrl) : null;
 }
 async function resolveOrigin(env, exec, cwd) {
@@ -39126,7 +39147,7 @@ async function resolveOrigin(env, exec, cwd) {
   };
   const pane = env.TMUX_PANE;
   if (pane) {
-    const output = await tryExec(exec, "tmux", ["display-message", "-p", "-t", pane, "#S:#I.#P #{pane_id}"], cwd);
+    const output = await tryExec(exec, "tmux", ["display-message", "-p", "-t", pane, "#S:#I.#P #{pane_id}"], cwd, TMUX_PANE_LOOKUP_MS);
     const [target, paneId] = output?.trim().split(" ") ?? [];
     if (target)
       origin.tmux = target;
@@ -47394,14 +47415,15 @@ function claudeChannelGate(input) {
   if (allowlist === undefined) {
     return {
       loaded: false,
-      why: `${asked} is not on Claude Code's approved channels allowlist (an organization adds it with allowedChannelPlugins in managed settings; for one session use --dangerously-load-development-channels ${asked})`
+      why: `${asked} is not on Claude Code's approved channels allowlist (add it to allowedChannelPlugins in ${MANAGED_SETTINGS_HINT}; for one session use --dangerously-load-development-channels ${asked})`
     };
   }
   return allowlist.some((allowed) => allowed.marketplace === entry.marketplace && allowed.plugin === entry.name) ? { loaded: true } : {
     loaded: false,
-    why: `${asked} is not on your organization's approved channels list (allowedChannelPlugins in managed settings)`
+    why: `${asked} is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${MANAGED_SETTINGS_HINT})`
   };
 }
+var MANAGED_SETTINGS_HINT = `${join3(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
 function cacheDirectoryName(marketplace) {
   return marketplace.replace(/[^a-zA-Z0-9\-_]/g, "-");
 }
@@ -48190,7 +48212,7 @@ function isAncestor(candidate, pid = process.pid) {
 }
 function queryTmux(socket, pane, format) {
   try {
-    const answer = execFileSync("tmux", ["-S", socket, "display-message", "-p", "-t", pane, format], {
+    const answer = execFileSync("tmux", ["-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: TMUX_TIMEOUT_MS,

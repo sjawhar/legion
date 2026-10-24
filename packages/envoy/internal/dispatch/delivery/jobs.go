@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -32,6 +33,15 @@ type JobIntake struct {
 	pool   *store.Pool
 	github *githubapp.Client
 	clock  jobClock
+	// leases is the pool bind takes this durable's consumer lease on (consumerLease), so that one
+	// process at a time reconciles this durable's configuration (bindDurableConsumer). It is the
+	// delivery intake's lease pool, but not its lease: a lease name per durable, so that a
+	// reconciliation stuck on the other intake's durable does not keep this one from creating its
+	// own.
+	leases duty.Leases
+	// throttle is this intake's own bind-poll state: how recently it reconciled its durable and
+	// how recently it said it was standing by for it (bindThrottle).
+	throttle *bindThrottle
 
 	// ctx is Run's context: every read a timer starts runs under it, so a stopped process stops them.
 	ctx context.Context
@@ -92,29 +102,35 @@ func (realJobClock) At(at time.Time, f func()) jobTimer { return time.AfterFunc(
 
 // newJobIntake builds a JobIntake on natsClient, a connected client StartIntakes opens for it alone,
 // scheduling its reads by clock.
-func newJobIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client, clock jobClock) *JobIntake {
+func newJobIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client, clock jobClock) *JobIntake {
 	return &JobIntake{
-		nats: natsClient, pool: pool, github: github, clock: clock,
-		ctx: context.Background(), pending: map[runKey]*pendingRun{},
+		nats: natsClient, pool: pool, github: github, clock: clock, leases: leases,
+		throttle: &bindThrottle{},
+		ctx:      context.Background(), pending: map[runKey]*pendingRun{},
 		reads: make(chan struct{}, reconcilePartialConcurrency),
 	}
 }
 
-// Run binds the durable job consumer and handles job events until ctx is cancelled. A bind that
-// fails is tried again every settingsPollInterval.
+// Run binds the durable job consumer and handles job events until ctx is cancelled. An attempt
+// that binds nothing -- a failure, or the durable being another process's (bindStandby) -- is
+// made again every durableBindInterval, for the life of the process: a standby that outlives its
+// holder takes the durable over seconds later.
 func (j *JobIntake) Run(ctx context.Context) {
 	j.ctx = ctx
 	defer j.stopPending()
 	var sub *natsgo.Subscription
+	binds := time.NewTicker(durableBindInterval)
+	defer binds.Stop()
 	for sub == nil {
-		var ok bool
-		if sub, ok = j.bind(); ok {
+		bound, outcome := j.bind(ctx)
+		if outcome == bindBound {
+			sub = bound
 			break
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(settingsPollInterval):
+		case <-binds.C:
 		}
 	}
 	defer func() { _ = sub.Unsubscribe() }()
@@ -136,9 +152,10 @@ func jobConsumerConfig() natsgo.ConsumerConfig {
 	}
 }
 
-// bind creates (on first run) or resumes the durable and subscribes to it.
-func (j *JobIntake) bind() (*natsgo.Subscription, bool) {
-	return bindDurableConsumer(j.nats, jobConsumerConfig(), j.deliver)
+// bind creates (on first run) or resumes the durable and subscribes to it, throttling its own
+// reconciliation and standby line on this intake's own bindThrottle.
+func (j *JobIntake) bind(ctx context.Context) (*natsgo.Subscription, bindOutcome) {
+	return bindDurableConsumer(ctx, j.nats, j.leases, j.throttle, jobConsumerConfig(), j.deliver)
 }
 
 // deliver acks a job message on receipt, then hands its payload to receive. Acking first is safe:

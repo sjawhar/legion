@@ -86,14 +86,36 @@ events and sends them to the current Claude Code session as supported
 
   The check cannot see every reason Claude Code refuses a channel. Claude Code also turns channels
   off for the account (not signed in, or an account without the channels feature), for a
-  third-party provider (Bedrock, Vertex or Foundry), and for an organization whose managed settings
-  do not set `channelsEnabled: true`; outside Linux it cannot tell whether stdout is a terminal;
+  third-party provider (Bedrock, Vertex or Foundry), and when the managed settings do not set
+  `channelsEnabled: true`; outside Linux it cannot tell whether stdout is a terminal;
   Claude Code skips a channel on a connection that negotiated an MCP protocol revision with no
   unsolicited notifications. Claude Code then shows
   `--dangerously-load-development-channels ignored` (or `--channels ignored`) with the reason when
   the session starts, and drops every notification. The server still advertises Aside, so Dispatch
   records a message to that session as sent while the model never sees it. If the session shows
   that warning, start it with `ENVOY_CHANNEL_LOADED=0` so it advertises no delivery mode.
+
+  Two more cases turn on what Claude Code has cached in the profile, which the check does not
+  read (both measured on Claude Code 2.1.309, 2026-10-23). Read from Claude Code's code: it checks
+  each channel notification as it arrives, against the usage policy it fetches from Anthropic
+  (`policy-limits.json` in the profile) and its feature flags (`cachedGrowthBookFeatures` in the
+  profile's `.claude.json`), and draws the channel banner once, at startup.
+  - **A new profile's first launch with the key in `ANTHROPIC_API_KEY`** shows
+    `--channels waiting for your organization's policy` and "Messages are dropped until it loads",
+    even with the channel allowlisted in managed settings, and the banner does not clear once the
+    policy loads. That policy is Anthropic's, not `managed-settings.json`. The profile had cached
+    it a second after the prompt appeared, and an Aside sent 45 s in, under that banner, reached
+    the model. With `policy-limits.json` in the profile, messages arrive whatever the banner says,
+    and the next launch shows the channel loaded.
+  - **A new profile whose key comes only from an `apiKeyHelper`** had no feature flags on its
+    first launch in all four profiles tried, and showed `--channels ignored` and "Channels are not
+    currently available". The server still advertises Aside, and an Aside Dispatch recorded as sent
+    never reached the model. One profile loaded the channel on its second launch; another on its
+    third, its second (with the key in `ANTHROPIC_API_KEY`, quit 13 s in) still ignored; a third
+    was ignored on its second launch too, and the fourth was not launched again. The launch that
+    loaded the channel fetched the flags at startup, and an Aside then reached the model. With the
+    key in `ANTHROPIC_API_KEY` instead, two new profiles fetched the flags during their first
+    launch.
 
   The other way round, the check runs once at startup, so a channel an SDK host turns on later
   (`enableChannel`) is not seen: that session advertises no mode and Dispatch refuses messages
@@ -264,9 +286,13 @@ string, so a test holds both files to none.
 
 ## Enable the channel
 
-Channels are gated by managed settings on this fleet: an organization owner enables channels and
-allowlists the internal marketplace plugin in `/etc/claude-code/managed-settings.json`, and the
-user opts the plugin into each session with `--channels`:
+Channels are gated by Claude Code's managed settings: whoever administers the machine writes
+`/etc/claude-code/managed-settings.json` (on macOS,
+`/Library/Application Support/ClaudeCode/managed-settings.json`), which turns channels on and
+allowlists the plugin, and the user opts the plugin into each session with `--channels`. An
+account that receives server-managed settings (cached as `remote-settings.json` in the Claude Code
+config directory) takes these keys from them instead, and under the default
+`managedSourcesBehavior` the local file then changes nothing:
 
 ```json
 {
@@ -280,6 +306,15 @@ user opts the plugin into each session with `--channels`:
 ```bash
 claude --channels plugin:claude-envoy@legion-plugins
 ```
+
+Restart Claude Code once after its first launch on a new profile (a fresh `~/.claude` or a new
+`CLAUDE_CONFIG_DIR`), with the same flag, and read the banner it shows at startup.
+"Channels (experimental) messages from plugin:claude-envoy@legion-plugins inject directly in this
+session" means the channel is loaded. `--channels ignored` and "Channels are not currently
+available" mean it is not: the session drops every channel message while it still advertises
+Aside, so restart again. A first launch that says `--channels waiting for your organization's
+policy` keeps saying so after the policy has loaded, and its messages arrive (the channel check's
+limits, above).
 
 For a plugin outside the allowlist (a development marketplace, a bare `server:` entry) use
 `--dangerously-load-development-channels <entry>`; it bypasses the allowlist only, so
@@ -370,8 +405,9 @@ consent preconfigured and must not depend on local dialogs.
 Claude Code session, answers its startup dialogs unattended (folder trust, the development-channel
 warning, first-use MCP consent — in whatever order they appear), waits for the Envoy registration,
 sends an actual direct Envoy event, and asserts the model writes the unique payload before checking
-teardown. It requires a live Envoy listener, NATS, Claude authentication, a configured model, an
-organization that enables channels, and an installed plugin entry:
+teardown. It requires a live Envoy listener, NATS, Claude authentication, a configured model,
+managed settings that enable channels and allowlist the plugin (see "Enable the channel"), and an
+installed plugin entry:
 
 ```bash
 ENVOY_NATS_URL=nats://envoy-nats:4222 \

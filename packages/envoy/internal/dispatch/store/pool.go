@@ -135,6 +135,7 @@ type Pool struct {
 	rooms  *pgxpool.Pool
 	health *pgxpool.Pool
 	listen *pgxpool.Pool
+	leases *pgxpool.Pool
 	closed bool
 }
 
@@ -223,15 +224,22 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
-// listenerPoolSize bounds the pool Listener takes its connections from: each is hijacked as soon
-// as it is opened, so the pool never holds one, and one is all it ever opens at a time.
+// listenerPoolSize bounds the pool Listener takes its connections from. Three permanent
+// listeners dial through it - the delivery hub, the event stream relay and the stale-room
+// evictor - and each connection is hijacked as soon as it is opened, so it leaves with its
+// caller and the pool holds none between dials: what one bounds is dials in flight, not
+// connections held. A listener redialling while another dials waits that dial out, which is
+// what a loop that dials and then waits for notifications for the life of the process can
+// afford.
 const listenerPoolSize = 1
 
 // Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
 // shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
-// The delivery hub (api/delivery_live_hub.go) holds one for as long as it waits for notifications,
-// which is the life of the process: a connection of the shared pool held that long would be one
-// fewer for every request, and a LISTEN on a pooled connection would end when the pool recycled it.
+// The delivery hub (api/delivery_live_hub.go), the event stream relay (api/event_stream_relay.go)
+// and the document rooms' stale-room evictor (docs/stale_room.go) each hold one for as long as
+// they wait for notifications, which is the life of the process: a connection of the shared pool
+// held that long would be one fewer for every request, and a LISTEN on a pooled connection would
+// end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
 	if err != nil {
@@ -242,6 +250,33 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 		return nil, err
 	}
 	return conn.Hijack(), nil
+}
+
+// leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
+// (duty.Exclusive). One connection per caller that can be inside Exclusive at the same moment is
+// the whole requirement, and it is a caller and not a lease that needs one: Exclusive takes its
+// connection before it learns whether the lease is held, so a pass that skips because the other
+// process holds the lease holds a connection for that round trip too. INFRA-66 leases eight names
+// - the document compaction, the suggestion-outcome sweep, the reference-excerpt reconciliation,
+// the GitHub webhook redelivery sweep, the architecture import, the delivery reconcile and one
+// per delivery durable for the consumers' reconciliation (delivery.consumerLease, a name each for
+// delivery-events and delivery-jobs) - taken by eight callers, since each delivery intake takes
+// its own durable's name from a bind poll of its own, so eight callers can be inside Exclusive at
+// once. Eight connections are exactly those eight: the headroom is zero, not one, and the next
+// leased loop added here makes a ninth caller that waits for a connection rather than failing,
+// for as long as the longest pass then holding one. They cannot come from the shared pool:
+// a lease is held for the whole pass, which is minutes for the compaction, and sharedPoolSize's
+// sixteen are what every request reads through.
+const leasePoolSize = 8
+
+// Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
+// only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
+// it lives on one connection for the length of the pass and dies with it; a connection of the
+// shared pool held that long would be one fewer for every request, and a pass that then read
+// through the shared pool - which is what a pass does - would be a caller holding two of its
+// connections (ErrNestedAcquire).
+func (p *Pool) Leases() (*pgxpool.Pool, error) {
+	return p.separate(&p.leases, leasePoolSize, "loop leases")
 }
 
 // separate opens the pool held at field on demand, sized at size and copied from the shared
@@ -281,10 +316,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen := p.rooms, p.health, p.listen
-	p.rooms, p.health, p.listen = nil, nil, nil
+	rooms, health, listen, leases := p.rooms, p.health, p.listen, p.leases
+	p.rooms, p.health, p.listen, p.leases = nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases} {
 		if separate != nil {
 			separate.Close()
 		}

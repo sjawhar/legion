@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -198,7 +199,7 @@ func TestFetchKillsTheAttemptThatReachesItsBound(t *testing.T) {
 	req.Clock = clock
 
 	_, err := Fetch(context.Background(), run, req)
-	if err == nil || !strings.Contains(err.Error(), "command timed out: git clone") {
+	if err == nil || !strings.Contains(err.Error(), "command timed out: git -c gc.auto=0") {
 		t.Fatalf("Fetch = %v, want the last attempt's timeout", err)
 	}
 	if len(run.attempts) != 3 {
@@ -819,8 +820,14 @@ func TestFetchIntoAFeedThatHoldsTheRepositoryFetchesEveryBranch(t *testing.T) {
 			t.Fatalf("the second Fetch cloned again: %q", call.Argv)
 		}
 	}
-	fetch := findCall(t, calls, "git", "--git-dir="+feed, "fetch")
-	if want := []string{"git", "--git-dir=" + feed, "fetch", "--prune", "--quiet", "https://github.com/acme/widgets", "+refs/heads/*:refs/heads/*"}; !slices.Equal(fetch.Argv, want) {
+	var fetch Command
+	for _, call := range calls {
+		if commandWith(call.Argv, "git", "--git-dir="+feed, "fetch") {
+			fetch = call
+			break
+		}
+	}
+	if want := []string{"git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "--git-dir=" + feed, "fetch", "--prune", "--quiet", "https://github.com/acme/widgets", "+refs/heads/*:refs/heads/*"}; !slices.Equal(fetch.Argv, want) {
 		t.Fatalf("Fetch ran %q, want %q", fetch.Argv, want)
 	}
 	assertCredentialedEnvironmentBounded(t, fetch, FetchTimeout)
@@ -1067,6 +1074,109 @@ func TestFetchKeepsAFeedHoldingAKilledRepacksServerInfoFiles(t *testing.T) {
 	}
 }
 
+// A feed can be garbage-collected between pod starts. A completed gc and one killed while its
+// repack is running leave only files Git owns, so the next fetch keeps the feed instead of replacing
+// it.
+func TestFetchKeepsAFeedAfterGitGC(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gc   func(t *testing.T, feed string)
+	}{
+		{name: "completed", gc: func(t *testing.T, feed string) {
+			runSetup(t, feed, "git", "--git-dir="+feed, "gc", "--prune=now")
+		}},
+		{name: "killed during repack", gc: killGitGC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			req := fetchRequest(t)
+			var logged []string
+			req.Log = func(line string) { logged = append(logged, line) }
+			first, err := Fetch(context.Background(), run, req)
+			if err != nil {
+				t.Fatalf("first Fetch: %v", err)
+			}
+			tc.gc(t, first.Feed)
+			if why, err := foreignFeed(first.Feed); err != nil || why != "" {
+				t.Fatalf("foreignFeed after git gc = %q, %v; want the feed trusted", why, err)
+			}
+			before := len(run.Calls())
+
+			if _, err := Fetch(context.Background(), run, req); err != nil {
+				t.Fatalf("Fetch after git gc: %v", err)
+			}
+			if slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "is not one this fetch wrote") }) {
+				t.Errorf("Fetch refused a feed after git gc: %q", logged)
+			}
+			for _, call := range run.Calls()[before:] {
+				if commandWith(call.Argv, "git", "clone") {
+					t.Errorf("Fetch replaced the feed after git gc: %q", call.Argv)
+				}
+			}
+		})
+	}
+}
+
+// killGitGC runs a large, real repack and kills its process group after git wrote gc.pid. The kill
+// is deliberate: a pod can end at this point, leaving gc.pid.
+func killGitGC(t *testing.T, feed string) {
+	t.Helper()
+	slowGitGC(t, feed)
+	command := exec.Command("/usr/bin/git", "--git-dir="+feed, "gc", "--prune=now")
+	environment := without(os.Environ(), "PATH")
+	for _, key := range []string{"OMP_SESSION_ID", "PI_SESSION_FILE", "PI_TOOL_BRIDGE_URL", "AGENTBOX_SESSION"} {
+		environment = without(environment, key)
+	}
+	command.Env = append(environment, "PATH=/usr/bin:/bin")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start git gc: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	})
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for {
+		if _, err := os.Stat(filepath.Join(feed, "gc.pid")); err == nil {
+			if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil {
+				t.Fatalf("kill git gc: %v", err)
+			}
+			if err := command.Wait(); err == nil {
+				t.Fatal("git gc exited cleanly after its process group was killed")
+			}
+			return
+		}
+		select {
+		case <-deadline.C:
+			_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			_ = command.Wait()
+			t.Fatal("git gc did not write gc.pid during its repack")
+		case <-poll.C:
+		}
+	}
+}
+
+// slowGitGC adds a large incompressible loose object, keeping git gc's repack live long enough to
+// kill at the same point a pod shutdown can leave its gc.pid.
+func slowGitGC(t *testing.T, feed string) {
+	t.Helper()
+	blob, err := os.Create(filepath.Join(t.TempDir(), "large-blob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.CopyN(blob, rand.Reader, 64<<20); err != nil {
+		_ = blob.Close()
+		t.Fatal(err)
+	}
+	if err := blob.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, feed, "git", "--git-dir="+feed, "hash-object", "-w", blob.Name())
+}
+
 // writeExecutable writes an executable script at path, making its directory.
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
@@ -1154,12 +1264,9 @@ func (r *killedClone) Run(ctx context.Context, command Command) (Result, error) 
 	return Result{ExitCode: 137, Stderr: "killed mid-transfer"}, nil
 }
 
-// Nothing ever collects the feed's garbage: provisioning clones the issue's clone with its objects
-// in the feed (objects/info/alternates), so an object the feed dropped — one only a branch GitHub
-// deleted reached — would be gone from the clone too. And every fetch into the feed keeps what it
-// brings as a pack, never loose objects, so the repository cache's clone streams packs alone. The
-// feed's own configuration says both before the feed is in place, and a later fetch into it
-// writes no loose object.
+// Feed configuration prevents automatic maintenance from competing with the token-holding fetch,
+// and keeps each fetched object in a pack for the repository cache to stream. The clone owns its
+// history, so a feed refresh cannot remove objects from it.
 func TestFetchTurnsTheFeedsGarbageCollectionOffAndKeepsPacks(t *testing.T) {
 	run := newLocalRunner(t)
 	req := fetchRequest(t)
@@ -1490,7 +1597,9 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	}
 	var fetch Command
 	for _, call := range run.Calls() {
-		if len(call.Argv) > 2 && call.Argv[0] == "git" && strings.HasPrefix(call.Argv[1], "--git-dir="+feed+cloneSuffix) && call.Argv[2] == "fetch" {
+		if slices.Contains(call.Argv, "fetch") && slices.ContainsFunc(call.Argv, func(arg string) bool {
+			return strings.HasPrefix(arg, "--git-dir="+feed+cloneSuffix)
+		}) {
 			fetch = call
 		}
 	}
@@ -1648,7 +1757,7 @@ func cacheFetchStep(argv []string) string {
 		return "index-pack"
 	case slices.Contains(argv, "fsck"):
 		return "fsck"
-	case len(argv) > 2 && argv[0] == "git" && argv[2] == "fetch":
+	case argv[0] == "git" && slices.Contains(argv, "fetch"):
 		return "fetch"
 	}
 	return ""

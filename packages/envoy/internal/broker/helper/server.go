@@ -116,6 +116,18 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	case "sessions":
 		peer.Close()
 		resp = s.sessions()
+	case "drain":
+		// drain is `agent-secrets-helper install`'s restart guard: the sessions, and with none,
+		// a helper that refuses every later register until it exits.
+		peer.Close()
+		resp = s.drain()
+	case "undrain":
+		// undrain is install's undo of a drain whose restart then failed: the helper takes
+		// registrations again.
+		peer.Close()
+		s.Registry.Undrain()
+		s.Log.Info("undrained: taking new sessions again")
+		resp = Response{OK: true}
 	case "login":
 		// login, login-status, enroll-session-key and unenroll-session-key are pass-through broker
 		// calls, not registry-session ops: a key the helper does not hold is not a registry session
@@ -127,6 +139,10 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		resp = s.loginStatus()
 	case "enroll-session-key":
 		peer.Close()
+		if s.Registry.Draining() {
+			resp = drainingResponse
+			break
+		}
 		resp = s.enrollSessionKey(ctx, req.RuntimeID, req.Thumbprint, req.SessionID)
 	case "unenroll-session-key":
 		peer.Close()
@@ -172,7 +188,11 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 		peer.Close()
 		return Response{Code: CodeKeygen, Error: err.Error()}
 	}
-	existing, won := s.Registry.addRootIfAbsent(pid, sess)
+	existing, won, draining := s.Registry.addRootIfAbsent(pid, sess)
+	if draining {
+		peer.Close()
+		return drainingResponse
+	}
 	if peer.PID() != pid {
 		if won {
 			s.Registry.Remove(sess)
@@ -408,23 +428,40 @@ func (s *Server) unregister(ctx context.Context, peer *Peer, pid int) Response {
 }
 
 func (s *Server) sessions() Response {
-	list := s.Registry.List()
+	return Response{OK: true, Sessions: sessionInfos(s.Registry.List())}
+}
+
+// sessionInfos is list as the sessions a sessions or drain answer carries.
+func sessionInfos(list []*Session) []SessionInfo {
 	infos := make([]SessionInfo, 0, len(list))
 	for _, sess := range list {
 		infos = append(infos, sess.Info())
+	}
+	return infos
+}
+
+// drainingResponse answers a register or enroll-session-key on a helper that drain has marked
+// draining.
+var drainingResponse = Response{Code: CodeDraining, Error: "the helper is restarting; retry"}
+
+func (s *Server) drain() Response {
+	infos := sessionInfos(s.Registry.Drain())
+	if len(infos) == 0 {
+		s.Log.Info("draining: refusing new sessions until restart")
 	}
 	return Response{OK: true, Sessions: infos}
 }
 
 // login starts (or reports the running) machine login and returns its human-facing
-// confirmation code. A pass-through broker call: it needs no registered session, so the
+// confirmation code and the page where a person types it (the broker's verification_uri). A pass-through broker call: it needs no registered session, so the
 // dispatcher closes peer before calling it.
 func (s *Server) login(ctx context.Context) Response {
 	code, err := s.Broker.Login(ctx, s.Hostname)
 	if err != nil {
 		return Response{Code: CodeLoginFailed, Error: err.Error()}
 	}
-	return Response{OK: true, Code: code, LoginState: s.Broker.LoginStatus().State}
+	ls := s.Broker.LoginStatus()
+	return Response{OK: true, Code: code, LoginState: ls.State, VerificationURI: ls.VerificationURI}
 }
 
 // loginStatus reports the most recent machine login, current or settled, whether the helper holds
@@ -699,21 +736,22 @@ func (s *Server) save() {
 	}
 }
 
-// Recover runs at start: every recorded session whose process is still the same incarnation is
-// pinned again with a fresh key and adopted (enrolled and exit-watched); a recorded process that
-// is gone just has its enrollment revoked. A re-pinned session takes its recorded enrollment as
-// its lapsed id (setLapsed), so its own enrollLoop revokes that id before enrolling the fresh
-// key, exactly as after a refused renew: the real broker's idempotent-enroll conflict is keyed on
-// (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of the old row's revoke
-// can be refused outright (409 ALREADY_ENROLLED) even though it carries a fresh key. While the
+// Recover runs at start, after the Broker has resumed any machine login it keeps (Broker.Start):
+// every recorded session whose process is still the same incarnation is pinned again with a fresh
+// key and adopted (enrolled and exit-watched); a recorded process that is gone just has its
+// enrollment revoked. A re-pinned session takes its recorded enrollment as its lapsed id
+// (setLapsed), so its own enrollLoop revokes that id before enrolling the fresh key, exactly as
+// after a refused renew: the real broker's idempotent-enroll conflict is keyed on
+// (launcher_credential_id, runtime_id), so a fresh enroll racing ahead of the old row's revoke can
+// be refused outright (409 ALREADY_ENROLLED) even though it carries a fresh key. While the
 // re-pinned session lives, the lapsed id is on its record from the save below until the revoke
-// lands, so a second restart before then — a restart discards the launcher credential, so before
-// the next login no revoke can succeed — still revokes it. That revoke runs inside the one
-// goroutine adopt starts for the re-pinned session, never on this loop's own goroutine, so one
-// session waiting on its own revoke never blocks Recover from moving on to the next recorded
-// session. Should that session end while the revoke is still retrying, its record goes with it,
-// and revokeLapsed hands the id to the bounded independent revoke; before a login those three
-// tries cannot succeed either, and the id ends with its lease (see revokeLapsed's doc comment).
+// lands, so a second restart before then — with no machine login kept on disk, no revoke can
+// succeed before the next login — still revokes it. That revoke runs inside the one goroutine
+// adopt starts for the re-pinned session, never on this loop's own goroutine, so one session
+// waiting on its own revoke never blocks Recover from moving on to the next recorded session.
+// Should that session end while the revoke is still retrying, its record goes with it, and
+// revokeLapsed hands the id to the bounded independent revoke; with no login those three tries
+// cannot succeed either, and the id ends with its lease (see revokeLapsed's doc comment).
 func (s *Server) Recover(ctx context.Context) {
 	recs, err := LoadRecords(s.Registry.path)
 	if err != nil {

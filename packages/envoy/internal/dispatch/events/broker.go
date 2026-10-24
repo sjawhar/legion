@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"sync"
 
 	"github.com/jackc/pgx/v5"
 
@@ -20,15 +19,20 @@ const commitOrderAdvisoryLock int64 = 0x4449535041544348
 
 // Broker appends owner-scoped events transactionally and fans committed events
 // to local subscribers. NATS publication is an outbox concern owned by A5.
+//
+// Its fan-out is a Stream of its own (stream.go), so the one implementation of the overflow
+// contract serves both it and the reader's live feed. A Broker's subscribers are the ones that
+// want this process's own writes as it commits them: the outbox's local wake
+// (outbox/publisher.go) and the delivery hub's intake (api/delivery_live_hub_intake.go). An open
+// SSE connection is not one of them; it reads the relay's stream, which carries the other
+// process's events too.
 type Broker struct {
-	mu          sync.Mutex
-	nextID      uint64
-	subscribers map[uint64]chan model.Event
+	stream *Stream
 }
 
 // NewBroker creates an empty in-process broker.
 func NewBroker() *Broker {
-	return &Broker{subscribers: make(map[uint64]chan model.Event)}
+	return &Broker{stream: NewStream()}
 }
 
 // LockOwners locks all event owners in a deterministic order. A transaction
@@ -301,56 +305,15 @@ func namedVersion(payload any) bool {
 }
 
 // Subscribe returns a committed-event stream and a cancellation function.
-func (b *Broker) Subscribe() (<-chan model.Event, func()) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	id := b.nextID
-	b.nextID++
-	ch := make(chan model.Event, 64)
-	b.subscribers[id] = ch
-	var once sync.Once
-	return ch, func() {
-		once.Do(func() {
-			b.mu.Lock()
-			defer b.mu.Unlock()
-			if existing, ok := b.subscribers[id]; ok {
-				delete(b.subscribers, id)
-				close(existing)
-			}
-		})
-	}
-}
+func (b *Broker) Subscribe() (<-chan model.Event, func()) { return b.stream.Subscribe() }
 
 // SubscriberCount reports the active local fan-out subscriptions.
-func (b *Broker) SubscriberCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.subscribers)
-}
+func (b *Broker) SubscriberCount() int { return b.stream.SubscriberCount() }
 
-// Publish fans a committed event out to local subscribers. An overflowed SSE
-// client is disconnected before it can advance its replay cursor past an event.
-func (b *Broker) Publish(e model.Event) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for id, ch := range b.subscribers {
-		select {
-		case ch <- e:
-		default:
-			delete(b.subscribers, id)
-			close(ch)
-		}
-	}
-}
+// Publish fans a committed event out to local subscribers, which the caller does only once the
+// appending transaction has committed. An overflowed subscriber is dropped and its channel
+// closed (Stream.Publish).
+func (b *Broker) Publish(e model.Event) { b.stream.Publish(e) }
 
-// CloseAll disconnects every active local subscriber, ending their SSE response
-// bodies as if the server had restarted. Test-only: exercises a client's
-// reconnect-from-lastId path without seeding enough events to trip the replay cap.
-func (b *Broker) CloseAll() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for id, ch := range b.subscribers {
-		delete(b.subscribers, id)
-		close(ch)
-	}
-}
+// CloseAll disconnects every active local subscriber. Test-only.
+func (b *Broker) CloseAll() { b.stream.CloseAll() }

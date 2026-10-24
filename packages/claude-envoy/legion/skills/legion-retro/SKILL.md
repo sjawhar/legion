@@ -39,8 +39,8 @@ retrospective's durable output.
    that developed the change is responsible for testing it in production, once production carries
    the merge. The record is the pull request's `Production:` line and one pull-request comment,
    naming what was driven, how, what was observed, the merge commit and what woke the look; nothing
-   is written on the closed issue, since Dispatch refuses it. A defect the check finds is filed as
-   an issue of its own in the project, never as a child of the closed one
+   is written on the closed issue, since Dispatch refuses it. A defect the check finds is a
+   `dispatch ask` on the controller's report issue, never an issue the implementer files
    (`skill://legion-worker/references/merge-gate.md`, *The production check after the close*).
 
 Retro's commits sit above the reviewer's approved head and the approval stands: commits that change
@@ -86,18 +86,21 @@ Organize by reusable topic rather than by pull request, but never edit a documen
 write this retro — not its frontmatter, not its body. Two trees' retros can land within the same
 hour, and an in-place edit (another `related_issues` entry, a sharpened sentence, a `status`
 flip) conflicts with any other tree's edit to the same lines of the same file. Search
-`docs/solutions/` for the topic first; before relying on a hit, also search for
-`supersedes: docs/solutions/<its-path>` and `Extends docs/solutions/<its-path>` naming it —
-Legion runs no pass that reconciles these links, so a newer file that extends or supersedes the
-one you found is discoverable only by following them. Then write a new file of your own, named
-`docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md` so two trees never choose the same path:
+`docs/solutions/` for the topic first; before relying on a hit, also search `docs/solutions/` for
+its path (`docs/solutions/<its-path>`): a hit in another file's front matter under its
+`supersedes:` key (on that line, or as an item of the list below it) supersedes the one you found,
+and a line `Extends docs/solutions/<its-path>` extends it. Legion runs no pass that reconciles
+these links, so a newer file is discoverable only by following them. Then write a new file of
+your own, named `docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md` so two trees never choose
+the same path:
 
 - **A fresh topic:** state the rule in a few imperative lines; the incident goes in an Evidence
   section below, never in the rule.
 - **A topic an existing document already covers:** underneath its own H1 heading, the first line
   reads `Extends docs/solutions/<existing-path>.md.`; the rule states only the delta.
 - **A topic an existing document states wrongly:** frontmatter adds
-  `supersedes: docs/solutions/<existing-path>.md`; the first line under the H1 says why. Leave
+  `supersedes: docs/solutions/<existing-path>.md`, or, for several, a `supersedes:` list with one
+  `- docs/solutions/<existing-path>.md` item each; the first line under the H1 says why. Leave
   the old file's frontmatter and body untouched: Legion runs no pass that reconciles it, so the
   `supersedes:` link is the only thing that makes the correction discoverable from the old file.
 

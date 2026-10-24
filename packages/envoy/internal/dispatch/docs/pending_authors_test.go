@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -75,6 +77,74 @@ func editAsConnectedPeer(t *testing.T, service *Service, artifactID string, conn
 	service.addConnection(artifactID, connection, actor)
 	editAsPeer(t, service, artifactID, edit)
 	service.removeConnection(artifactID, connection)
+}
+
+// editAsBrowserPeer is editAsConnectedPeer for a document two processes serve, where a room can
+// stand behind the durable head. Such a room is refused its browser's append (ErrRoomBehindHead)
+// and fails, which closes its browsers; a browser's provider then reconnects, syncs the reloaded
+// room and sends its own state again, so the edit it made is not lost. A test peer is a document,
+// not a provider, so this does that for it: while the store does not hold the peer's edit it waits
+// for the room's recovery and sends the peer's state to the room that replaced it.
+func editAsBrowserPeer(t *testing.T, service *Service, artifactID string, connection uint64, actor model.Actor, edit func(*pmdoc.Node) *pmdoc.Node) {
+	t.Helper()
+	ctx := context.Background()
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("warm the room for %s's edit: %v", actor.ID, err)
+	}
+	service.addConnection(artifactID, connection, actor)
+	peer := editAsPeer(t, service, artifactID, edit)
+	service.removeConnection(artifactID, connection)
+	state := crdt.EncodeStateAsUpdateV1(peer, nil)
+	for range 5 {
+		quiet, cancel := context.WithTimeout(ctx, roomWait(t))
+		_ = service.waitForPendingUpdates(quiet, artifactID)
+		_ = service.waitForDurableAppends(quiet, artifactID)
+		cancel()
+		if storedHoldsPeerEdit(t, service.store, artifactID, peer) {
+			return
+		}
+		if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
+			t.Fatalf("wait for the room %s's browser was closed from: %v", actor.ID, err)
+		}
+		if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+			t.Fatalf("reload the room for %s's resent edit: %v", actor.ID, err)
+		}
+		service.addConnection(artifactID, connection, actor)
+		var applyErr error
+		if err := service.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			applyErr = crdt.ApplyUpdateV1(doc, state, "peer")
+		}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			t.Fatalf("resend %s's edit to the reloaded room: %v", actor.ID, err)
+		}
+		service.removeConnection(artifactID, connection)
+		if applyErr != nil {
+			t.Fatalf("apply %s's resent edit: %v", actor.ID, applyErr)
+		}
+	}
+	t.Fatalf("%s's edit never reached the store, resent five times", actor.ID)
+}
+
+// storedHoldsPeerEdit reports whether the stored document holds everything peer, a browser's own
+// document, has written: every clock of its state vector is covered by the stored history's.
+func storedHoldsPeerEdit(t *testing.T, database *store.Store, artifactID string, peer *crdt.Doc) bool {
+	t.Helper()
+	loaded, err := NewPgVersioned(database).Load(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("load the stored document: %v", err)
+	}
+	stored := newDocumentCopy()
+	if len(loaded.Update) > 0 {
+		if err := crdt.ApplyUpdateV1(stored, loaded.Update, nil); err != nil {
+			t.Fatalf("decode the stored document: %v", err)
+		}
+	}
+	have := stored.StateVector()
+	for client, clock := range peer.StateVector() {
+		if have[client] < clock {
+			return false
+		}
+	}
+	return true
 }
 
 // waitForLandedAppends waits until every update the room has recorded is durable.
@@ -249,7 +319,7 @@ func TestTwoProcessesListEveryEditorOnExactlyOneVersion(t *testing.T) {
 			peer := model.Actor{Kind: "user", ID: fmt.Sprintf("peer-%02d", len(peers))}
 			peers = append(peers, peer)
 			t.Logf("step %d: %s edits on task %s", step, peer.ID, name)
-			editAsConnectedPeer(t, task, artifactID, connection.Add(1), peer, appendBlocks(t, peer.ID+"'s paragraph.\n"))
+			editAsBrowserPeer(t, task, artifactID, connection.Add(1), peer, appendBlocks(t, peer.ID+"'s paragraph.\n"))
 			waitForLandedAppends(t, task, artifactID)
 		case op == 3:
 			t.Logf("step %d: task %s names a version", step, name)
@@ -457,11 +527,13 @@ func TestAnUploadClearsOnlyTheEditsItsForkHeld(t *testing.T) {
 	}
 }
 
-// An upload on one process clears only the pending authors whose edits its own room held. Task
-// A's room loads before bob types on task B, so the upload's replacement never saw his paragraph,
-// which the merge keeps: bob stays owed through the upload and a third process's version lists
-// him, the one version that does.
-func TestAnUploadOnOneProcessKeepsAnAuthorOnlyAnotherProcessHeld(t *testing.T) {
+// An upload whose room is behind the durable head is made on the stored document, which holds
+// every update: bob's paragraph, typed on task B after task A's room loaded, is in the text the
+// uploader replaced, so his row goes with the upload's commit and no version lists him. Before
+// INFRA-66's stale-room gate task A uploaded from its own room, which never held that paragraph:
+// the replacement deleted only what the room held, the paragraph survived the merge, and the
+// document kept text no version recorded while bob stayed owed for it.
+func TestAnUploadOnOneProcessClearsTheAuthorItReadFromTheStore(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	taskA, _ := newTestServiceInstance(t, database)
@@ -479,22 +551,29 @@ func TestAnUploadOnOneProcessKeepsAnAuthorOnlyAnotherProcessHeld(t *testing.T) {
 		t.Fatalf("pending authors before the upload = %+v, want bob, whose edit landed on task B", owed)
 	}
 
-	uploadOn(t, taskA, artifactID, "First.\n\nSecond, uploaded on task A.\n", uploader)
-	if owed := pendingAuthorRows(t, database, artifactID); !slices.Contains(owed, bob) {
-		t.Fatalf("pending authors after task A's upload = %+v, want bob: task A's room never held his edit", owed)
+	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
+	uploadOn(t, taskA, artifactID, uploaded, uploader)
+	if owed := pendingAuthorRows(t, database, artifactID); len(owed) != 0 {
+		t.Fatalf("pending authors after task A's upload = %+v, want none: the stored document it replaced held his edit", owed)
+	}
+	if stored := storedMarkdown(t, database, artifactID); stored != uploaded {
+		t.Fatalf("the stored document after the upload = %q, want %q", stored, uploaded)
 	}
 
 	taskC, _ := newTestServiceInstance(t, database)
 	commitNamedVersion(t, taskC, artifactID, model.Actor{Kind: "session", ID: "versioner-on-task-c"})
-	if listed := countVersionAuthor(t, database, artifactID, bob); listed != 1 {
-		t.Fatalf("bob is listed on %d versions, want exactly one", listed)
+	if listed := countVersionAuthor(t, database, artifactID, bob); listed != 0 {
+		t.Fatalf("bob is listed on %d versions, want none: the upload that replaced his paragraph took his row", listed)
 	}
 }
 
 // A room instance's record of the updates it holds stays bounded however many it takes: the run
 // of its own appends just past its load folds into the head it loaded, and an upload's commit drops
-// the entries whose pending authors it consumed. A row another process's append wrote, at a
-// version the room never took, stays pending through the upload.
+// the entries whose pending authors it consumed. The run is broken by an append of the room's own
+// that records no pending author - a browser edit that changed no rendered content - which is why
+// the hold is not the room's cursor: the room stands at the head throughout, and its upload is
+// made on the room it holds. A row another process's append wrote afterwards, at a version this
+// room never took, stays pending through it.
 func TestARoomsHeldUpdatesStayBoundedAcrossManyAppendsAndAnUpload(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -505,10 +584,11 @@ func TestARoomsHeldUpdatesStayBoundedAcrossManyAppendsAndAnUpload(t *testing.T) 
 		t.Fatalf("load task A's room: %v", err)
 	}
 	live := taskA.srv.GetDoc(artifactID)
-	hold := taskA.holdOf(live)
-	if hold == nil {
+	instance := taskA.instanceOf(live)
+	if instance == nil {
 		t.Fatal("task A's room lists no record of the updates it holds")
 	}
+	hold := &instance.hold
 	// The appends below reach the store directly, which touches no room, so the room is kept
 	// resident past ygo's idle timeout by reading it, and must stay the instance the hold is of.
 	keepResident := func() {
@@ -527,11 +607,12 @@ func TestARoomsHeldUpdatesStayBoundedAcrossManyAppendsAndAnUpload(t *testing.T) 
 		credited := creditOf(nil)
 		switch index {
 		case appends / 2:
-			appendCreditedTo(t, taskB, artifactID, creditOf(&bob, bob), nil)
+			// Uncredited, so the room's hold skips this version while its cursor takes it.
+			credited = nil
 		case appends * 3 / 4:
 			credited = creditOf(&alice, alice)
 		}
-		appendCreditedTo(t, taskA, artifactID, credited, hold)
+		appendCreditedTo(t, taskA, artifactID, credited, instance)
 		if index%200 == 0 {
 			keepResident()
 		}
@@ -545,8 +626,12 @@ func TestARoomsHeldUpdatesStayBoundedAcrossManyAppendsAndAnUpload(t *testing.T) 
 	if held > 1 {
 		t.Fatalf("task A's room holds %d entries past its loaded head after the upload, want at most 1", held)
 	}
+	if owed := pendingAuthorRows(t, database, artifactID); len(owed) != 0 {
+		t.Fatalf("pending authors after the upload = %+v, want none: the upload's room held every one of their appends", owed)
+	}
+	appendCreditedTo(t, taskB, artifactID, creditOf(&bob, bob), nil)
 	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{bob}) {
-		t.Fatalf("pending authors after the upload = %+v, want bob alone: task A's room held alice's append and not his", owed)
+		t.Fatalf("pending authors after task B's append = %+v, want bob alone", owed)
 	}
 }
 
@@ -667,19 +752,22 @@ func TestAFailedUploadLeavesItsRoomsHeldUpdatesAsTheyWere(t *testing.T) {
 	if err := taskA.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("load task A's room: %v", err)
 	}
-	hold := taskA.holdOf(taskA.srv.GetDoc(artifactID))
-	if hold == nil {
+	instance := taskA.instanceOf(taskA.srv.GetDoc(artifactID))
+	if instance == nil {
 		t.Fatal("task A's room lists no record of the updates it holds")
 	}
+	hold := &instance.hold
 	alice := model.Actor{Kind: "user", ID: "alice-on-task-a"}
 	bob := model.Actor{Kind: "user", ID: "bob-on-task-b"}
 	carol := model.Actor{Kind: "user", ID: "carol-on-task-a"}
-	// Two appends task A's room takes fold into its loaded head; bob's on task B breaks the run,
-	// so carol's after it is held one by one.
-	appendCreditedTo(t, taskA, artifactID, creditOf(nil), hold)
-	appendCreditedTo(t, taskA, artifactID, creditOf(&alice, alice), hold)
-	appendCreditedTo(t, taskB, artifactID, creditOf(&bob, bob), nil)
-	appendCreditedTo(t, taskA, artifactID, creditOf(&carol, carol), hold)
+	// Two appends task A's room takes fold into its loaded head; an uncredited append of its own,
+	// which records no pending author, breaks the run, so carol's after it is held one by one.
+	// The room stands at the head throughout - it took every one of these appends - so the upload
+	// below is made on the room (forkLive) rather than on the stored document.
+	appendCreditedTo(t, taskA, artifactID, creditOf(nil), instance)
+	appendCreditedTo(t, taskA, artifactID, creditOf(&alice, alice), instance)
+	appendCreditedTo(t, taskA, artifactID, nil, instance)
+	appendCreditedTo(t, taskA, artifactID, creditOf(&carol, carol), instance)
 	before := hold.snapshot()
 	if len(before.since) != 1 {
 		t.Fatalf("task A's room holds %v past its loaded head %d, want carol's append alone", before.since, before.through)
@@ -710,12 +798,14 @@ func TestAFailedUploadLeavesItsRoomsHeldUpdatesAsTheyWere(t *testing.T) {
 	if after := hold.snapshot(); after.through != before.through || !slices.Equal(after.since, before.since) {
 		t.Fatalf("task A's room holds %v past %d after the failed upload, want %v past %d as before it", after.since, after.through, before.since, before.through)
 	}
-	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{alice, bob, carol}) {
-		t.Fatalf("pending authors after the failed upload = %+v, want alice, bob and carol: nothing committed", owed)
+	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{alice, carol}) {
+		t.Fatalf("pending authors after the failed upload = %+v, want alice and carol: nothing committed", owed)
 	}
 
 	// The failed commit failed the room, which reloads; the next upload's room holds what that
-	// load read, every append so far, so its commit deletes every row.
+	// load read, every append so far. Task B's append after that load leaves the room behind the
+	// head, so the upload is made on the stored document instead, which holds every update
+	// (coldFork): its commit deletes every row, task B's included.
 	if err := taskA.awaitRoomRecovery(ctx, artifactID); err != nil {
 		t.Fatalf("await task A's room's recovery: %v", err)
 	}
@@ -726,8 +816,8 @@ func TestAFailedUploadLeavesItsRoomsHeldUpdatesAsTheyWere(t *testing.T) {
 	dave := model.Actor{Kind: "user", ID: "dave-on-task-b"}
 	appendCreditedTo(t, taskB, artifactID, creditOf(&dave, dave), nil)
 	uploadOn(t, taskA, artifactID, "First.\n\nSecond, uploaded again on task A.\n", uploader)
-	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{dave}) {
-		t.Fatalf("pending authors after the upload that committed = %+v, want dave alone: task A's room held every other row's update", owed)
+	if owed := pendingAuthorRows(t, database, artifactID); len(owed) != 0 {
+		t.Fatalf("pending authors after the upload that committed = %+v, want none: it was made on the stored document, which holds every append", owed)
 	}
 }
 
@@ -760,7 +850,8 @@ func uploadOn(t *testing.T, service *Service, artifactID, markdown string, uploa
 
 // A room loaded from a compacted history holds every update the compaction folded, so an upload
 // on it consumes exactly the pending authors of those updates: alice's, which landed before the
-// room loaded, and not bob's, which another task's room landed after.
+// room loaded and whose update the compaction folded into the state that load read. A row another
+// task's room writes after that upload is owed to the next version, not to it.
 func TestAnUploadOnARoomLoadedFromACompactedHistoryConsumesExactlyItsRoomsAuthors(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
@@ -781,12 +872,19 @@ func TestAnUploadOnARoomLoadedFromACompactedHistoryConsumesExactlyItsRoomsAuthor
 	if err := taskA.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("load task A's room from the compacted history: %v", err)
 	}
-	editAsConnectedPeer(t, taskB, artifactID, 2, bob, appendBlocks(t, "Bob's paragraph.\n"))
-	waitForLandedAppends(t, taskB, artifactID)
 
 	uploadOn(t, taskA, artifactID, "First.\n\nSecond, uploaded on task A.\n\nAlice's paragraph.\n", model.Actor{Kind: "session", ID: "uploader-on-task-a"})
+	if owed := pendingAuthorRows(t, database, artifactID); len(owed) != 0 {
+		t.Fatalf("pending authors after task A's upload = %+v, want none: its room held alice's folded edit", owed)
+	}
+	// Task B's browser types after the upload committed: its room stands behind the head that
+	// upload left, so its append is refused and its browser sends the edit again to the room that
+	// replaces it (editAsBrowserPeer). That row is owed to whichever version comes next, and task
+	// A's upload is not it.
+	editAsBrowserPeer(t, taskB, artifactID, 2, bob, appendBlocks(t, "Bob's paragraph.\n"))
+	waitForLandedAppends(t, taskB, artifactID)
 	if owed := pendingAuthorRows(t, database, artifactID); !slices.Equal(owed, []model.Actor{bob}) {
-		t.Fatalf("pending authors after task A's upload = %+v, want bob alone: task A's room held alice's edit and not his", owed)
+		t.Fatalf("pending authors after task B's edit = %+v, want bob alone", owed)
 	}
 }
 

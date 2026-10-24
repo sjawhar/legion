@@ -75,7 +75,7 @@ func cmdEnrollHelper(runtimeID, thumbprint, sessionID string, stdout, stderr io.
 	if sessionID != "" {
 		sessionIDPtr = &sessionID
 	}
-	resp, err := callSessionKeyOp(sock, "enroll", helper.Request{Op: "enroll-session-key", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr}, stderr)
+	resp, err := enrollRetryingDrain(sock, helper.Request{Op: "enroll-session-key", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr}, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
@@ -94,6 +94,24 @@ func cmdEnrollHelper(runtimeID, thumbprint, sessionID string, stdout, stderr io.
 	}
 	fmt.Fprintln(stdout, resp.EnrollmentID)
 	return 0
+}
+
+// enrollDrainWait is how long `enroll --helper` retries a DRAINING answer (a helper install is
+// about to restart the helper): the 30 s it already gives one call, so a box launched inside
+// install's drain-to-restart window enrolls with the restarted helper. Only tests shorten it.
+var enrollDrainWait = 30 * time.Second
+
+// enrollRetryingDrain is callSessionKeyOp for "enroll", retried every 250 ms while the helper
+// answers DRAINING, until enrollDrainWait has passed; the last answer is returned as it came.
+func enrollRetryingDrain(sock string, req helper.Request, stderr io.Writer) (helper.Response, error) {
+	deadline := time.Now().Add(enrollDrainWait)
+	for {
+		resp, err := callSessionKeyOp(sock, "enroll", req, stderr)
+		if err != nil || resp.OK || resp.Code != helper.CodeDraining || !time.Now().Before(deadline) {
+			return resp, err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // oldHelperSessionKeyOps names, for each kind-free op, the op an agent-secrets-helper from before

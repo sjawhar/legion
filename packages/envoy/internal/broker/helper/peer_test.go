@@ -105,7 +105,7 @@ func TestWaitExitStops(t *testing.T) {
 }
 
 func TestPeerOfUnixConnIsTheDialer(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestPeerOfUnixConnIsTheDialer(t *testing.T) {
 }
 
 func TestCallRoundTrip(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "h.sock")
+	sock := filepath.Join(shortTempDir(t), "h.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestCallRoundTrip(t *testing.T) {
 	if err != nil || !resp.OK || resp.Proof != "p" || resp.EnrollmentID != "e" {
 		t.Fatalf("round trip: %+v %v", resp, err)
 	}
-	if _, err := Call(filepath.Join(t.TempDir(), "absent.sock"), Request{Op: "sessions"}, time.Second); err == nil {
+	if _, err := Call(filepath.Join(shortTempDir(t), "absent.sock"), Request{Op: "sessions"}, time.Second); err == nil {
 		t.Fatal("an absent socket must error")
 	}
 }

@@ -58,9 +58,9 @@ Envoy, so nothing that reacts to Dispatch has to poll it.
 
 Legion's coordinator works only the issues handed to it, which are the ones carrying the Dispatch
 label `legion`. That lets Legion share a project with people and other agents. A person sets the
-label from the issue header, or an agent sets it with `dispatch issue-update`. Legion's own **controller**
-agent also hands over work: whenever an admission slot is free, it labels and admits the
-highest-priority `todo` leaf issue that nobody else is working.
+label from the issue header, or asks Legion's own **controller** agent to set it for them; the
+controller never hands over work on its own. An agent that finds a problem outside its own issue
+asks a person in a Dispatch ask whether it needs an issue, rather than filing one.
 
 Each admitted issue gets an **architect**, which owns the issue's tree. It writes the spec, splits
 large work into child issues, and runs each change through phase workers in turn: a **planner**, an
@@ -117,8 +117,7 @@ only where an event goes; what to do about it is the coordinator's and the agent
 ## An issue, start to finish
 
 1. Someone files an issue in a Dispatch project. It starts in Triage.
-2. When it is ready, it moves to Todo with the `legion` label, set by a person or by the controller
-   filling a free slot.
+2. When it is ready, a person moves it to Todo with the `legion` label, or asks the controller to.
 3. The coordinator admits it and starts its architect, which writes the spec.
 4. The architect requests approval. The request reaches the approver's Inbox, they approve that
    version, and Dispatch publishes the approval on Envoy. The coordinator opens the design gate.

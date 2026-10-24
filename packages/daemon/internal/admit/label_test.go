@@ -161,7 +161,7 @@ func TestTakingTheLabelOffAWaitingRootDequeuesItButStopsNoRunningTree(t *testing
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ACTIVE", Index: 0, AdmittedAt: fixedNow}})
 
 	// The only waiting root lost its label, so the finished tree's slot stays free: nothing starts,
-	// and the controller is woken to fill it.
+	// and the controller is woken about the free slot.
 	apply(t, pool, admission, "active-done", intake.DispatchIssue{Key: "LEGION-ACTIVE", ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "done", Title: "active", Rank: "A"}, engineStub{})
 	assertSlots(t, pool, nil)
 	assertEffects(t, pool, []effect{

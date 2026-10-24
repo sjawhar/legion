@@ -584,7 +584,8 @@ for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do comman
 [ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
 real_gh=$(mise which gh) || fail "mise has no gh"
 # The real tmux comes after the real gh on the daemon's PATH: the tmux runtime runs tmux with the
-# pane allow-list alone, where a shimmed tmux finds mise's global config untrusted and exits 1.
+# pane allow-list alone, where a shimmed tmux, run from a directory under the operator's real
+# HOME, finds that HOME's mise config untrusted and exits 1 (lib/rig.sh, real_bin_path).
 real_tmux=$(mise which tmux) || fail "mise has no tmux"
 mkdir -p "$work/realtmux"
 ln -sfn "$real_tmux" "$work/realtmux/tmux"

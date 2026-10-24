@@ -138,13 +138,12 @@ func awaitEnrollment(dir string, wait time.Duration) (gaveUp bool) {
 	return false
 }
 
-// helperInstalled reports whether this machine has the helper's user unit, the file Plan B's
-// launchers (dotfiles shims/omp, scripts/cld, scripts/oc) also read as "the helper is installed".
+// helperInstalled reports whether this machine has the helper's user unit, the file
+// `agent-secrets-helper install` writes and the agent launchers' shims also read as "the helper is installed".
 // Its socket being absent then means the helper is stopped (a clean stop removes the socket),
 // not that this machine has none.
 func helperInstalled() bool {
-	home, err := os.UserHomeDir()
-	return err == nil && exists(filepath.Join(home, ".config", "systemd", "user", "agent-secrets-helper.service"))
+	return exists(helper.UnitPath(os.Getenv))
 }
 
 // cmdIdentity implements "identity": exit 0 when this process has a broker identity, 1 when it
@@ -157,8 +156,8 @@ func helperInstalled() bool {
 // the helper's sign op — which signs a throwaway proof and changes nothing — answers OK (enrolled)
 // or NOT_ENROLLED (registered and still enrolling) for it. Such a process uses the broker even if
 // its enrollment later fails, and the failure is the broker call's. A registered session on a
-// helper holding no launcher credential (NO_CREDENTIAL: after a reboot or helper restart, until
-// the operator logs the machine in) has none, since that helper enrolls no one; it is exit 1 with
+// helper holding no launcher credential (NO_CREDENTIAL: never logged in, or its login lapsed or was
+// refused, until the operator logs the machine in) has none, since that helper enrolls no one; it is exit 1 with
 // the not-logged-in notice. A helper that cannot be asked — its socket refuses connections, is
 // absent although AGENT_SECRETS_HELPER_SOCK names it or the helper is installed, or gives no
 // answer within identityDeadline — is exit 1 with a notice on stderr, so a caller that then uses

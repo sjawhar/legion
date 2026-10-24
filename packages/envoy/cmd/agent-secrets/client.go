@@ -12,8 +12,8 @@
 // leaves agent-secrets-helper.
 // Enrollment issuance/revocation and launcher-credential issuance are helper-socket operations
 // (see cmdEnrollHelper/cmdUnenrollHelper in enroll.go, cmdMachineLogin in machine.go, and
-// internal/broker/helper): no route here ever carries a bearer launcher token, and POST/GET
-// /v1/launcher-credentials still carry no credential at all (a launcher has none yet). The
+// internal/broker/helper): no route here ever carries a bearer launcher token, and the helper's
+// machine login (an OAuth device grant) carries no launcher credential (a launcher has none yet). The
 // operator routes (/v1/operator/*) are signed with a launcher proof the helper's sign-launcher op
 // makes (launcherSigner). Every method that a subcommand may need to print verbatim under --json
 // (request, status, self, the operator lists) returns both its decoded result and the exact raw

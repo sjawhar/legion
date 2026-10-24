@@ -289,7 +289,7 @@ func TestIntakeWritesTheDeployedEvent(t *testing.T) {
 	fake.handle("GET /repos/acme/widgets/actions/runs/900/jobs", func(w http.ResponseWriter, r *http.Request) {
 		mustEncode(t, w, shippedRunJobs())
 	})
-	intake := newIntake(nil, pool, fake.newTestClient(), events.NewBroker())
+	intake := newIntake(nil, pool, deliveryTestLeases(t, pool), fake.newTestClient(), events.NewBroker())
 
 	envelope, err := json.Marshal(map[string]string{
 		"kind": "workflow", "action": "completed", "repo": "acme/widgets",
