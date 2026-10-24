@@ -2,170 +2,168 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-220",
-  "completed": "2026-10-24T23:05:00Z",
+  "completed": "2026-10-25T00:05:00Z",
   "requiredSkills": {
     "implement": [
-      "legion-worker: the implementer's rules here — references/pr-body.md (the proof and the PR body; the production-like surfaces reachable in a pod are the pinned Oh My Pi binary and the real MCP server over stdio), references/default-branch-check.md before each push, references/cleanup-deletion.md for the Go cut of packages/daemon/internal/claudebridge/stall.go and its pins, references/conflicts-and-rewrites.md only on a conflict.",
-      "ce-simplify-code: the simplify pass over the settled diff. The whole point of this change is that one machine replaces two, so the pass is where the shared module's seam (restore/saveEntry) and the two hosts' adapters are judged as one shape.",
+      "legion-worker: the implementer's rules here — references/pr-body.md (the proof and the PR body; the production-like surfaces reachable from a pod are the pinned Oh My Pi binary, the real MCP server over stdio, the real Claude Code binary against stand-ins, and `go test ./...`), references/default-branch-check.md before each push, references/cleanup-deletion.md for the Go cut of claudebridge/stall.go and for the tmux-only prose this change makes false, references/conflicts-and-rewrites.md only on a conflict.",
+      "ce-simplify-code: the simplify pass over the settled diff. Two copies are the risk this change exists to avoid: the phase-stall machine (already one, in @legion/pi-shared) and the Claude launch shapes, which the plan puts in packages/daemon/internal/claudelaunch for both runtimes to import.",
       "dispatch-first: search before any Dispatch write; a problem outside this issue is a dispatch ask, never an issue the implementer files (skill://legion-worker/references/findings.md)."
     ],
     "test": [
-      "legion-worker: references/pr-body.md — the tester drives the application and reads CI for everything static. Here the application is three real surfaces: LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts from packages/pi-legion, bun test from packages/claude-envoy (the real MCP server over stdio against stand-ins), and go test ./... from packages/daemon. The live Claude pane proof (scripts/e2e/claude-backend-tmux.sh) needs a devbox and cannot run in an issue pod; the tester records that rather than claiming it.",
+      "legion-worker: references/pr-body.md — the tester drives the application and reads CI for everything static. The pod-runnable surfaces are `go test ./...` in packages/daemon, `bun test` in pi-legion, pi-shared and claude-envoy, the pinned Oh My Pi real-binary test, and the real Claude Code probe; the two live proofs (scripts/e2e/claude-backend-tmux.sh and the new scripts/e2e/claude-backend-sandbox.sh) need a devbox and a cluster, as every live proof in this repository does, and the tester records that rather than claiming them.",
       "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
     ],
     "review": [
       "legion-worker: references/review-threads.md for one disposition reply and one resolution per thread, references/merge-gate.md for the order of the round.",
-      "ce-simplify-code: the reviewer judges whether the deleted Go copy really left one machine rather than two, and whether the new Claude Code hook endpoint earned its place on the pane's own server.",
+      "ce-simplify-code: the reviewer judges whether the Claude launch really has one definition rather than two, and whether the pod path grew a backend seam rather than a second runtime.",
       "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
     ]
   },
   "gapAnalysis": {
     "findings": [
       {
-        "finding": "F1 — the pane's Legion MCP server exposes no tool a hook could call, and spec v26 names neither the tool, its arguments, its answer, nor what happens when the model calls it (envoy-channel-server.ts:1090-1094).",
-        "answer": "D4: one new tool `legion_phase_hook` beside `legion` and the Envoy tools, taking `{event, …}` and answering one JSON text block (`{}` or `{\"decision\":\"block\",\"reason\":…}`). It is visible to the model (measured), so its description says it is Claude Code's hook endpoint, claude-mechanics.md gains a sentence, and a call with a missing or unknown `event` is refused and changes no state."
+        "finding": "F1 — the spec calls the model route out of scope on the strength of shim.go:380, but the documented pod route (deploy/kubernetes/operator-route/) is Oh My Pi's profile configuration, which Claude Code reads none of; the only variable route is provider_keys through the shim, and pod.env refuses a credential-shaped name.",
+        "answer": "D20: no new Legion surface. A deployment that runs Claude Code roles sets provider_keys for the Anthropic credential (the shim exports it into the child's environment) and the non-credential names ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env; the planner measured that Claude Code reads all three from its environment. The two consequences — the key reaching every role's child, and Oh My Pi's model configuration reaching Claude Code not at all — are written into the documents, and the departure is recorded for the architect."
       },
       {
-        "finding": "F2 — the server never sees the daemon's task (bridge.go:402-412 writes it to Claude Code's stdin), yet acceptance 3 requires the count to reset on a task.",
-        "answer": "D7: a `UserPromptSubmit` mcp_tool hook (measured to fire under Legion's invocation) is the server's sight of every turn start; it classifies the prompt as its own reminder (exact match on the line it last wrote), an Envoy delivery it wrote to the inbox, or a daemon task, and resets the count for the last two."
+        "finding": "F2 — the daemon API contract is defined as the pane and pod environment a worker reads, and this work adds four LEGION_STALL_* variables under both runtimes and three CLAUDE_* variables in a pod; the spec never mentions the contract.",
+        "answer": "D25: one bump to 36, in the same commit as the variables, with contracts/fixtures/daemon-api/version.json, pi-legion's and claude-envoy's legion.daemonApiVersion and pi-legion's daemon-api-version test; the boot gate then holds the daemon and the image's plugins together."
       },
       {
-        "finding": "F3 — a reminder written to the inbox during a turn becomes a step of that turn (bridge.go:430-441,604-630), which would lose the turn boundary the split exists for; the server has no idleness signal.",
-        "answer": "D9: the timer is armed only at a turn's end (`Stop`, `StopFailure`) or at a resume, and its callback does nothing when a `UserPromptSubmit` has arrived since; the claude-envoy suite drives a timer that fires after a prompt and asserts nothing is written."
+        "finding": "F3 — the earlier K10 named workerSpawnSpec for both edits, but the stale-plugin decision is in stalePluginInstall (reached from SpawnSpec, which also covers the controller), and workerSpawnSpec replaces spec.Env with the git identity's map rather than merging into it.",
+        "answer": "D26: the four variables are merged into spec.Env after `spec.Env = id.Env()`, and the Claude branch is inside stalePluginInstall, which gains the claim's backend from the resolver launchBackend uses."
       },
       {
-        "finding": "F4 — the shared runner's persistence is transcript-shaped (`restore(branch)`, `appendEntry`), which a Claude host has neither of.",
-        "answer": "D2: `PhaseReminderDeps` grows a persistence seam — `restore(entry)` and `saveEntry(entry)` — so the transcript scan stays in pi-legion and the state file stays in claude-envoy. Recorded as a departure (no acceptance line changes)."
+        "finding": "F4 — a Backend field on shimwire.LauncherStart buys nothing the child's environment does not already decide, and would be ignored silently by an image whose launcher predates it.",
+        "answer": "D21: no wire field. A Claude pod is simply not told OMP_SESSION_STORAGE and OMP_SESSION_SQL_DSN_FILE, so the in-pod launcher takes its file branch and stats the transcript."
       },
       {
-        "finding": "F5 — the across-deploy read needs the deployed Go writer's exact path and record (config.go:71, stall.go:92-135), which the spec does not restate.",
-        "answer": "D5: the same path `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, a superset record `{state,count,reported,reportKey}`, written through a temporary file renamed into place before the hook answers, reading `quiet`/`text-call` and a missing count as `{open,0}` through the mapping phase-stall.ts already makes."
+        "finding": "F5 — the claim's session for a Claude worker travels through four more code points than the spec names: what claude-envoy registers, validateSessionPath, SessionOnVolume with `legion sessions import`, and the store's IssueHasSessions.",
+        "answer": "D21 and D22 name each: the transcript under the pod's own Claude directory, a backend-aware validateSessionPath whose refusal names a backend change, `--resume <uuid>` in the argv, a refusal with a line of its own from `legion sessions import`, and expectVolume losing its sessionsInDatabase term for a Claude claim."
       },
       {
-        "finding": "F6 — nothing says what a hook answers before the claim boots, in an architect session, or when the record says the phase is over.",
-        "answer": "D6 and D11: the machine runs only while the claim's role is not `architect`; every hook answers `{}` otherwise, so the bridge's seeding turn is never reminded. The record check is the shared runner's: quiet when the record says the phase is over, fail open on any failure of the read."
+        "finding": "F6 — under Kubernetes nothing resolves claude, bun or the plugin directory: the three LEGION_CLAUDE_*/LEGION_BUN_PATH reads are tmux's boot alone.",
+        "answer": "D16: the pod's paths are image constants beside defaultAgent and join imageOwnedPaths so an operator mount cannot hide them; claudelaunch holds the shapes and not the paths, and docs/deployment.md's 'boot resolves three things' becomes tmux's boot alone."
       },
       {
-        "finding": "F7 — Claude Code may restart the server inside the same claude process, and a plain setTimeout would hold a shut-down server open.",
-        "answer": "D5 and D9: every count change is written to the file before the hook answers, so a restart loses nothing; the server cancels its pending timer when it arms another and clears them in `stop()`."
+        "finding": "F7 — a Claude-only pod variable makes the runtimeOwned pinning test red either way: in the list, the test's two specs do not set it; out of it, a spec or an operator could override the claim's own config directory.",
+        "answer": "D19: the three names join runtimeOwned and the test gains a Claude worker spec beside its Oh My Pi and controller ones; the operator's own CLAUDE_CODE_USE_FOUNDRY stays settable."
       },
       {
-        "finding": "F8 — the architect's instruction puts the hooks in the shared `packages/claude-envoy/hooks/hooks.json`, which is also loaded outside Legion where no `legion` MCP server exists.",
-        "answer": "D3 puts them in the generated Legion-only plugin `packages/claude-envoy/legion/hooks/hooks.json`, which a pane loads as a second --plugin-dir (claude.go:106-108). Recorded as a departure from the architect's instruction; one file move reverses it."
+        "finding": "F8 — ten more Go tests and eight pod goldens pin the pod's command line, environment, mounts, refusals and plugin install.",
+        "answer": "B8 lists them by file and line, and takes a ninth golden — a Claude worker pod — rather than editing the eight, so an Oh My Pi pod keeps proving it is unchanged."
       },
       {
-        "finding": "F9 — a Legion pane might run two servers from this package (the pane's `legion` and the plugin's own `envoy`), and the hook names one.",
-        "answer": "Measured (M7): with `--strict-mcp-config` the plugin's own `.mcp.json` server does not appear; the session's `mcp_servers` held only the one `--mcp-config` registers. No further work."
+        "finding": "F9 — a SiteImage capability row makes Claude Code mandatory in every image and moves the contracts fixture, the probe goldens and the docs; and nothing yet holds claude-envoy's declared contract to the daemon's.",
+        "answer": "D24 accepts the first and names it as risk 2, and gives the probe's Claude lane the second: it holds packages/claude-envoy's legion.daemonApiVersion to the daemon's contract as the pod lane holds pi-legion's."
       },
       {
-        "finding": "F10 — `/clear` mints a new session id and would orphan a state file keyed by the old one.",
-        "answer": "D5 declares `/clear` out of scope: a Legion pane runs `claude -p` with a `--session-id`/`--resume` the daemon names, and no worker runs it. The file keys on the Claude Code session id, as the deployed Go file does."
+        "finding": "F10 — the image workflow's paths allowlist covers only packages/claude-envoy/package.json, and check-image-trigger-paths.sh fails the lint job for a COPY it does not cover.",
+        "answer": "B2: packages/claude-envoy/** joins the allowlist with the new lockfile directory; the plan also records that the image's Bun ARG and .bun-version are already equal and kept so by check-bun-version.sh, which is what lets `bun run check-dist` run inside the build."
       },
       {
-        "finding": "F11 — what the `Stop` hook returns on the second Stop of a run, what an error answer costs, and whether the record check runs inside the hook.",
-        "answer": "D8 and D11: the block is used only when the count is 0; a later `Stop` answers `{}` and arms the timer. The record check runs inside the `Stop` hook, bounded at 5 s, with the hook's own timeout declared 30 s; a failed read fails open."
+        "finding": "F11 — nothing in a pod makes the claim's Claude directory, and the shim's directory-making list is pinned.",
+        "answer": "D19: the generation's start script makes it with one mkdir before the exec, which is the wrapper that already exists for installing launches and operator setup; the shim's pinned list is left alone."
       },
       {
-        "finding": "F12 — the Go deletion set is larger than the spec's three nouns and includes symbols that exist only to feed the machine.",
-        "answer": "D12 lists every one: stall.go whole; the bridge's `stall`, `lastAssistantText`, `handoffs`, their initialisation, both `setStall` calls, the `step` reset, the `assistant` accumulation, `isLegionTool`, `toolResults` and its `case \"user\"` caller, the settle branch and `setStall`; `Config.StallFile` and the `CLAUDE_CONFIG_DIR` refusal that exists only for it; and each named test, helper and surviving `FollowUp` use in bridge_test.go."
+        "finding": "F12 — the launcher's Files map is a legitimate home for a non-secret file, with two conditions.",
+        "answer": "D18 carries both: the entry is added in launcherCommand and never through spec.Secrets, and the argv names it as the generation directory's own file so a repeated start with the same id carries an unchanged payload."
       },
       {
-        "finding": "F13 — two live-proof scripts and the e2e README encode the old one-follow-up behaviour and parse the transcript entry.",
-        "answer": "T9: their prose changes; their predicates do not, because the entry keeps its `customType` and its `state` field and both assert only that no follow-up comes after a successful completion, which a closed phase still satisfies. Neither can be run from an issue pod, which the plan says."
+        "finding": "F13 — the pod baseline is Oh My Pi-shaped and would wrap a Claude child, including the turn-scoping overlay quiescence depends on.",
+        "answer": "D19: --pod-safety stays, because its scratch directories and state home are harness-neutral and its Oh My Pi variables are inert for a child that reads none of them; the two CLAUDE_CODE_DISABLE_* variables are named as Claude Code's analogue of the overlay rather than as a nicety."
       },
       {
-        "finding": "F14 — the move needs three new `exports` entries and a self-reference fix, and pi-legion's tsconfig wildcard would hide a missing entry until claude-envoy's bundle fails.",
-        "answer": "D1 names the three entries, the rewrite of phase-stall.ts's first import to `./interface`, the relative sibling imports, and `bun run typecheck` in packages/claude-envoy as the check that catches a missing entry."
+        "finding": "F14 — K6's `--check-config` half had no home, and nothing there prints anything about a per-launch plugin decision today.",
+        "answer": "D23: the existing plugin-pair line gains one sentence naming each Claude-backed role and saying its plugin comes from the image; a Claude claim with a stale recorded contract still relaunches, and the image probe is what refuses a wrong plugin."
       },
       {
-        "finding": "F15 — claude-envoy type-checks imported sources under stricter flags than pi-shared's.",
-        "answer": "D1 requires `bunx tsc --noEmit` in all three packages and keeps the moved files on pi-shared's own biome recipe."
+        "finding": "F15 — a Claude worker in a pod is told LEGION_WORKSPACE_RECREATED and nothing reads it; the only consumer is the Oh My Pi plugin.",
+        "answer": "Out of scope, named as risk 5 and reported to the architect: a Claude worker resumed into a recreated workspace is not told so."
       },
       {
-        "finding": "F16 — two committed generated trees (`dist/`, `legion/`) are pinned byte for byte to a fresh build on the pinned Bun.",
-        "answer": "T2 requires `bun run build` and the commit of both, with `bun run check-dist` as the check; the pod's Bun is 1.3.14, which is `.bun-version` (measured), so the build runs here."
+        "finding": "F16 — acceptance bullet 1's 'a live proof drives one on the cluster' reads as either a throwaway kind cluster or a real one, with different costs, locking and credential paths.",
+        "answer": "D27: a new devbox script against a real cluster by context with a digest-pinned image, carrying the tmux proof's scratch rig and its five assertions; the kind library is named as the iteration path, and the recorded run that satisfies acceptance is the cluster one."
       },
       {
-        "finding": "F17 — `tests/hooks-timeout.test.ts` assumes every hook is a command hook with `args` and pins exactly three rows.",
-        "answer": "T8 rewrites it to cover both hook kinds and both files, with the five mcp_tool timeouts D3 names."
+        "finding": "F17 — every pod proof needs a published image built from the branch head, and the image gate is the thing being changed.",
+        "answer": "D27 and risk 1: the proof pins the pull-request build's digest, and B2 and B3 land together so the image answers the probe it ships; a build that cannot be produced is a report to the architect, not a line marked proven."
       },
       {
-        "finding": "F18 — the shared module's comments say `reported`/`reportKey` are the Oh My Pi plugin's alone, while acceptance 9 requires the architect notice and its retry on Claude Code.",
-        "answer": "D11: both fields ride the Claude state file, and the two comments are corrected with the move."
+        "finding": "F18 — nine places state the tmux-only rule and one pinned refusal message.",
+        "answer": "D28 lists each document and B11 takes the refusals and their tests last."
       },
       {
-        "finding": "F19 — the four variables have no acceptance criterion, and `spec.Env` is replaced wholesale by the git identity's map, so anything added before that line is lost.",
-        "answer": "D13: `workerSpawnSpec` copies the four from the daemon's own environment into `spec.Env` after that line; both runtimes already forward `spec.Env`. The plan adds the missing acceptance criterion (§3, line 12) and three Go tests."
+        "finding": "F19 — the issue volume, roleStateHome and the one-line expectVolume change hold as assumed.",
+        "answer": "Recorded; D19 and D22 rely on it."
       },
       {
-        "finding": "F20 — four acceptance bullets cannot be decided in an issue pod, one of them only on a devbox, and the Claude e2e has no step today in which a worker ends a turn with its phase open.",
-        "answer": "§3 maps every bullet to a suite and a command and marks the live-pane line devbox-only; T3 adds the missing e2e step before the script's successful handoff_complete step and makes reporting the devbox need to the architect part of the work."
+        "finding": "F20 — `--permission-mode bypassPermissions` with a fresh CLAUDE_CONFIG_DIR under a non-root uid is unmeasured.",
+        "answer": "Risk 4: the real-binary Claude probe adds that flag set and a fresh directory under the pod's own uid, so the pod lane is measured before the cluster proof depends on it."
       },
       {
-        "finding": "F21 — three documents beyond the three the spec names state the behaviour being removed.",
-        "answer": "T9 lists them all: docs/deployment.md:198-202, packages/claude-envoy/AGENTS.md (a new section), workflow/review.go:431-435, the e2e README and the two script headers, both CHANGELOGs, the worker skill and headless.md."
+        "finding": "F21 — the spec's sentence that a launch carries 'a command line, an environment and its secrets and nothing else' overstates the constraint; it also carries files.",
+        "answer": "Departure 1 records the correction, which is what D18 uses."
       },
       {
-        "finding": "F22 — four named risks: the cosmetic stop-hook-error, the model-visible hook tool, a PostToolUse round-trip per tool call, and a deployed Claude Code older than the measured build.",
-        "answer": "§4 risks 1 and 3–5 accept and name each, with the live-pane proof as the only thing that settles the version question."
+        "finding": "F22 — the acceptance list holds thirteen bullets, not twelve, and its second uses `*` where the others use `-`.",
+        "answer": "Departure 5 and §3: the plan maps all thirteen and reads the last as the evidence clause of the other twelve; the owner decides whether it is a criterion of its own."
       },
       {
-        "finding": "F23 — five claims about Claude Code that the repository cannot establish (PostToolUse/PostToolUseFailure firing, StopFailure, a helper agent's id, and the hook arming).",
-        "answer": "Four of the five were measured in this pod on Claude Code 2.1.310 and are recorded as M1–M7 in the plan; `StopFailure` and a subagent's `agent_id` remain unmeasured and are §4 risks 2 and 7, with the live-pane proof as where they show."
-      },
-      {
-        "finding": "F24 — acceptance 1's \"the first reminder\" reads either as the first of a run or the first of the stall, and the two give different reminder counts on Claude Code.",
-        "answer": "D8 reads it as the first of the stall, keyed on the count being 0 exactly as the Oh My Pi half already is; recorded as a departure, since the acceptance test counts reminders."
+        "finding": "F23 — no acceptance bullet names a command except two, and four of them cannot be decided in an issue pod.",
+        "answer": "§3 maps all thirteen to a suite and a command, names the four suites that run in a pod and the two live proofs that do not, and says the implementer's own proof is the pod-runnable four."
       }
     ]
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 3
+    "rounds": 4
   },
   "specDepartures": [
     {
-      "spec": "\"the Legion plugin already ships hooks that Claude Code finds by itself (packages/claude-envoy/hooks/hooks.json), so the reminder needs no new flag and no new process: the hooks are entries in that file\" — and the architect's instruction repeating it.",
-      "plan": "The five hook entries are generated into the Legion-only plugin packages/claude-envoy/legion/hooks/hooks.json, which a Legion pane loads as its second --plugin-dir; the shared hooks/hooks.json is left as it is.",
-      "evidence": "A Legion pane loads both directories (packages/daemon/internal/runtime/tmux/claude.go:106-108), while @sjawhar/claude-envoy is installed as a plain Claude Code plugin elsewhere and ships hooks/** to every installer (package.json files list); outside a pane no `legion` MCP server exists, and Claude Code answers an mcp_tool hook whose server is not connected with a non-blocking hook error on every turn (https://code.claude.com/docs/en/hooks, \"When the server is still connecting\"). The cost of the change is one generated file in buildLegionPlugin, pinned by tests/legion-plugin-fresh.test.ts; one file move reverses it.",
-      "outcome": {
-        "kind": "changed",
-        "settledDecisions": [
-          {
-            "decision": "The new hooks are entries in packages/claude-envoy/hooks/hooks.json.",
-            "detail": "They are entries in the generated Legion-only plugin instead, so a non-Legion Claude Code session that loads this package never fires a hook against a server it does not have."
-          }
-        ]
-      }
-    },
-    {
-      "spec": "Acceptance 1: \"the first reminder as the end-of-turn hook's own continuation, every later one as a turn started for it\", with the Claude Code prose \"The first reminder of a run is the `Stop` hook's block\".",
-      "plan": "The block is the first reminder of the stall, not of each run: the `Stop` hook blocks only while the count is 0, so a reminder that arrived over the inbox does not earn a second block when its own run ends.",
-      "evidence": "Measured in this pod on Claude Code 2.1.310: a blocked Stop continues the turn and the next Stop carries stop_hook_active: true, so only within one run is a block distinguishable; every inbox reminder starts a run of its own, whose Stop would otherwise block again, giving two reminders per cycle and a count that climbs twice. The Oh My Pi half already keys the continuation on count === 0 (packages/pi-legion/src/phase-reminder.ts:329-342), and the acceptance test counts reminders.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "\"the first reminder as the end-of-turn hook's own continuation\" -> the first reminder of each stall is the end-of-turn hook's continuation (the Stop hook's block on Claude Code); every later reminder, including the one that ends the run a reminder started, is a turn started for the worker."
-        ]
-      }
-    },
-    {
-      "spec": "\"passing them to a worker that way is part of this work, since the daemon passes a pane and a pod only the variables it names\" — stated in the prose with no acceptance bullet.",
-      "plan": "The plan adds a twelfth acceptance criterion: a pane's -e pairs and a pod container's env carry each of the four LEGION_STALL_* variables the daemon's own environment holds, decided by Go tests in packages/daemon.",
-      "evidence": "No acceptance bullet of spec v26 mentions the variables; the seam is spec.Env (packages/daemon/internal/daemon/specs.go:125-166, forwarded at runtime/tmux/spawn.go:205-211 and runtime/sandbox/manifest.go:932-935), and spec.Env is replaced wholesale by the git identity's map at specs.go:160, so an implementer could satisfy the prose and leave nothing proven.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "added: a pane's -e pairs and a pod container's env carry each of LEGION_STALL_REMINDER_MS, LEGION_STALL_WAITING_MS, LEGION_STALL_RESUME_MS and LEGION_STALL_ARCHITECT_AFTER that the daemon holds, proven by go test ./... in packages/daemon."
-        ]
-      }
-    },
-    {
-      "spec": "\"packages/pi-legion/src/phase-stall.ts, phase-reminder.ts and stall-limits.ts move into @legion/pi-shared, where the Oh My Pi plugin and the pane's Legion server both import them.\"",
-      "plan": "They move as the spec says, and the runner's persistence changes shape with the move: restore(branch) becomes restore(entry) and appendEntry becomes saveEntry, so each host supplies its own storage (the Oh My Pi transcript, the Claude Code state file).",
-      "evidence": "packages/pi-legion/src/phase-reminder.ts:53-60,300-308 reads and writes an Oh My Pi transcript branch through pi.appendEntry and restorePhaseStall; a Claude Code host has neither, and the alternative — fabricating a one-entry branch in the server — would put a fake transcript entry in a program that has no transcript.",
+      "spec": "\"two files that launcher writes on the daemon's own disk … cannot be written into a pod at all, because a launch carries a command line, an environment and its secrets and nothing else\".",
+      "plan": "A launch also carries files: the plan delivers the Claude worker's mcp.json through shimwire.LauncherStart.Files, which the in-pod launcher writes 0600 into the generation's private directory.",
+      "evidence": "packages/daemon/internal/shimwire/frames.go:179-186 declares Files; packages/daemon/internal/launcher/launcher.go:371-412 writes each entry O_CREAT|O_EXCL|O_NOFOLLOW at 0600 into the 0700 generation directory and removes it when the generation ends; packages/daemon/internal/runtime/sandbox/launcher.go:414-426 is where launcherCommand already builds that map from the claim's secrets and boot token.",
       "outcome": {
         "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "\"What is not in scope is the operator's model route, which Legion does not hold for any harness: a pod's provider key already reaches whatever the worker runs, through the environment the shim gives the child (shim/shim.go:380).\"",
+      "plan": "The plan keeps that scope — no new configuration key and no Legion-held credential — but records that the sentence holds only through provider_keys, and writes the operator's duty into the documents: provider_keys for the Anthropic credential and the non-credential names ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env.",
+      "evidence": "The documented pod route is Oh My Pi's profile configuration — deploy/kubernetes/operator-route/pod.yml mounts models.yml into Oh My Pi's profile and names the overlay in PI_CONFIG_FILES — and Claude Code reads none of it; runtime.kubernetes.pod.env refuses a credential-shaped name (packages/daemon/internal/config/kubernetes.go:665-671), so the key can only arrive through provider_keys, which the shim exports into the child's environment (shim/shim.go:379-380, shim/config.go:69-100). The planner measured that Claude Code reads ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL and ANTHROPIC_MODEL from its environment. The consequence the spec does not state is that a provider key reaches every role's child, Oh My Pi's included, which is why the tmux proof's guard against ANTHROPIC_API_KEY in an agent's environment does not carry over to a pod.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "A deployment that runs Claude Code roles under Kubernetes must set provider_keys and two pod.env names it does not set today; the plan adds that to docs/kubernetes.md and deploy/kubernetes/daemon/legion.yaml.example rather than adding a Legion configuration key."
+      }
+    },
+    {
+      "spec": "The spec names neither the daemon API contract nor the plugin manifests.",
+      "plan": "api.DaemonAPIVersion is bumped to 36 in the same commit as the new worker variables, with the contracts fixture, pi-legion's and claude-envoy's declared legion.daemonApiVersion and pi-legion's pinning test.",
+      "evidence": "packages/daemon/internal/api/version.go:3-17 defines the contract as every variable the tmux runtime sets on a pane and the Sandbox runtime on a pod's worker container, and makes the bump mechanical for a change to either surface; this work adds four LEGION_STALL_* variables under both runtimes and three CLAUDE_* variables in a pod.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The daemon, the worker image and both plugin manifests ship together on contract 36; a pod of an older image under a daemon on 36 is refused by the boot gate, which is the intended loud failure."
+      }
+    },
+    {
+      "spec": "The spec names one pinned refusal and leaves the rest of the Kubernetes test surface unsaid.",
+      "plan": "The eight rendered pod manifests gain a ninth, a Claude worker pod, rather than being edited in place.",
+      "evidence": "packages/daemon/internal/runtime/sandbox/testdata/golden/{worker,root,root-enrolled,resume,recovered,controller,controller-resume,probe}.json are pinned byte for byte by TestManifestGoldens; an Oh My Pi pod's rendered manifest is the control that proves this work changed nothing for it.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The Acceptance section, read as twelve bullets.",
+      "plan": "The plan maps thirteen: the four-numbers bullet is written with `*` where the others use `-`, which renders as a second list, and the last bullet states how the others are proven rather than adding a behaviour, so the plan reads it as the evidence clause of the twelve.",
+      "evidence": "The Acceptance section of spec v30 as read on 2026-10-24: the `*` bullet is the second item, and the final bullet names the suites and the two live proofs rather than a behaviour of the system.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "the second bullet is written with `*` and should be `-` so the list renders as one",
+          "the thirteenth bullet is read as the evidence clause of the other twelve rather than a criterion of its own; the owner decides"
+        ]
       }
     }
   ]
