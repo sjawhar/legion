@@ -2616,6 +2616,7 @@ cd "${TMPDIR:-/tmp}"                                               # not the che
 kubectl apply -f workload.yaml                                     # the Job
 uid=$(kubectl get job <workload> -o jsonpath='{.metadata.uid}')    # what the Service must name
 sed "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -    # the name on the network
+kubectl wait --for=create pod -l job-name=<workload> --timeout=120s   # it does not exist yet
 kubectl wait --for=condition=Ready pod -l job-name=<workload> --timeout=300s
 ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
 python3 - "<workload>.$ns.svc.cluster.local" 5432 <<'PY'           # does it answer yet?
@@ -2670,17 +2671,31 @@ and a reader is owed the boundary rather than a uniform voice:
   `patch`/`update jobs`, `get`/`list endpoints`, `get`/`list`/`create services`, `create pods`
   `no`); the credential-less gate, with the in-cluster environment removed; the Job manifest
   above through the namespace's own admission, server-side with nothing created, together with
-  one deliberate breakage of each rule, each refused naming the rule; the reachability block, run
-  as published against a listener, against a port that refuses and then listens, and against an
-  address whose packets are dropped; and **the sequence's Job half for real** — applied and
-  created, the uid read, the pod Ready in about eighty seconds, its own log line read, the Job
-  deleted and the last line showing nothing of it left.
+  one deliberate breakage of each **enforced** rule, each refused naming the rule — the
+  reachability label has no breakage to record, since admission does not check it, which is the
+  whole of why that bullet is marked; the reachability block, run as published against a
+  listener, against a port that refuses and then listens, and against an address whose packets
+  are dropped; and **the sequence's Job half for real** — applied and created, the uid read, the
+  pod waited for into existence and then to Ready (87 s on a cold machine, 10 s on a warm one),
+  its own log line read, the Job deleted and the last line showing nothing of it left. Those are
+  the lines as they now stand: the single `wait` this section published before exited 1 at once
+  with `error: no matching resources found`, because the Job's pod does not exist the instant
+  the apply returns, which is why there are two waits above.
+- *Submitted deliberately against the gate's own rule*, and said rather than left to be noticed:
+  two of this deployment's three gate answers are `no`, so a role following this section submits
+  nothing — the run above was made anyway, to measure the half that does not depend on a
+  Service. What made it safe is what a reader can check: a fifteen-minute deadline and a
+  five-minute cleanup window rather than the twelve and twenty-four hours admission allows, a
+  name of its own, a `kubectl delete job` by hand at the end, and `kubectl get jobs,pods`
+  showing nothing of it left. Read the bolded rule as what it says for the sequence as a whole;
+  this was a bounded measurement of one half of it, not an exception anyone inherits.
 - *Not executed*: the Service steps, and they are refused rather than untried — `kubectl apply`
   of the Service ends `Forbidden` on the read of the live object, before any create is
   attempted. So nothing has yet given a workload of this namespace a name on the network, which
-  is why the one step that depends on it, the reachability check against a real workload, is
-  written from the declarations rather than from a run. Read that pair as a design until a role
-  has run it end to end and said so; everything above is a transcript.
+  is why the one step that depends on it — the reachability check against a workload reachable
+  **by its Service name** — is written from the declarations rather than from a run. Read that
+  pair as a design until a role has run it end to end and said so; everything above is a
+  transcript of the lines as published here.
 
 What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
 which belongs to another namespace and to one node at a time, and a role may not run a command
