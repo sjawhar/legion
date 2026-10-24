@@ -46,8 +46,8 @@ ENVOY_AGENTS = "packages/envoy/AGENTS.md"
 BODY_CONST = "DISPATCH_BODY_MAX"
 EMBED_CONST = "maxInputChars"
 
-BODY_PATTERN = rf"^\s*export\s+const\s+{BODY_CONST}\s*=\s*(\d+)\s*;\s*(?://.*)?$"
-EMBED_PATTERN = rf"^\s*{EMBED_CONST}\s*=\s*(\d+)\s*(?://.*)?$"
+BODY_PATTERN = rf"^\s*export\s+const\s+{BODY_CONST}\s*=\s*(0|[1-9][0-9]*)\s*;\s*(?://.*)?$"
+EMBED_PATTERN = rf"^\s*{EMBED_CONST}\s*=\s*(0|[1-9][0-9]*)\s*(?://.*)?$"
 
 problems: list[tuple[str, int | None, str]] = []
 
@@ -93,8 +93,8 @@ def declaration(path: str, lines: list[str], const: str, pattern: str) -> Declar
             None,
             f"{path} declares no {const} this check can read: no line matches {pattern}. A "
             f"renamed constant, a moved file, or the number written another way (digit "
-            f"separators, hexadecimal, an expression) is this failure. Restore a plain decimal "
-            f"declaration, or update this check's pattern with the sites that moved",
+            f"separators, a leading zero, hexadecimal, an expression) is this failure. Restore a "
+            f"plain decimal declaration, or update this check's pattern with the sites that moved",
         )
         return None
     if len(matches) > 1:

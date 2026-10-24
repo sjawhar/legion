@@ -149,7 +149,24 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the file" \
   "$(contains "$out" 'packages/contracts/src/dispatch-tools.ts declares no DISPATCH_BODY_MAX this check can read')"
-check "names the number written another way" "$(contains "$out" 'digit separators, hexadecimal, an expression')"
+check "names the number written another way" \
+  "$(contains "$out" 'digit separators, a leading zero, hexadecimal, an expression')"
+
+echo "case: a leading zero on maxInputChars, which Go reads as octal"
+root=$(fixture embed-octal 14500 017000)
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the file" \
+  "$(contains "$out" 'packages/envoy/internal/dispatch/embed/embed.go declares no maxInputChars this check can read')"
+check "refuses 017000 rather than reading it as 17000, because Go reads it as octal 7680" \
+  "$(contains "$out" 'digit separators, a leading zero, hexadecimal, an expression')"
+
+echo "case: a leading zero on the body limit, which TypeScript rejects outright"
+root=$(fixture body-octal 014500)
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "refuses 014500 rather than reading it as 14500, since no decimal number is written that way" \
+  "$(contains "$out" 'packages/contracts/src/dispatch-tools.ts declares no DISPATCH_BODY_MAX this check can read')"
 
 echo "case: two maxInputChars declarations"
 root=$(fixture ambiguous)
