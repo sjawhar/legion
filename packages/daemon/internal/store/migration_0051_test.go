@@ -68,6 +68,11 @@ func TestTheGatesChangesRequestArrivesWith0051(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 50)
+	if _, err := store.Pool().Exec(ctx, `insert into issues
+		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'admitted root', 'admitted', 1, 'in_progress', 'A', 1)`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.Pool().Exec(ctx, `insert into design_gates (issue, artifact_id, latest_version)
 		values ('LEGION-208', '7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26', 4)`); err != nil {
 		t.Fatal(err)
