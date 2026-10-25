@@ -11,7 +11,7 @@ import {
   setSheet,
 } from "./editor";
 import { resetDatabase } from "./seed";
-import { answeredPost, holdPosts, navigateInApp, refusePosts } from "./sends";
+import { answeredPost, holdPosts, navigateInApp, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 // The composer a selection-bar action opens holds a send's draft until the server answers, like
@@ -73,7 +73,7 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
     const refused = refusal(page, issue.key, 503);
     refuse();
     await refused;
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(page.getByText(stillSending)).toHaveCount(0);
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
     await expect(form.locator("blockquote")).toHaveText("quick");
@@ -158,7 +158,7 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
     await expect(connectedDot(page)).toHaveText("connected");
     await setSheet(page, project, true);
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("Kept for the return");
     await expect(form.locator("blockquote")).toHaveText("quick");
 
@@ -196,7 +196,7 @@ test("the Pinned tab while a margin send is out keeps the composer, its draft an
     await margin.getByRole("tab", { name: "Comments" }).click();
 
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("About brown");
     await expect(form.locator("blockquote")).toHaveText("brown");
   } finally {
@@ -228,7 +228,7 @@ test("collapsing the margin while its send is out keeps the composer, its draft 
     await page.getByRole("button", { name: "Show margin" }).click();
 
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("Through the rail");
   } finally {
     await alice.close();
@@ -302,7 +302,7 @@ test("on a phone, a margin thread opened while the margin's send is out keeps th
     await expect(thread).toHaveCount(0);
 
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
     await expect(form.locator("blockquote")).toHaveText("quick");
   } finally {

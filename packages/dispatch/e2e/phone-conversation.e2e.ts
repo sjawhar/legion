@@ -10,7 +10,7 @@ import {
 } from "./api";
 import { expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
-import { answeredPost, holdPosts, refusePosts } from "./sends";
+import { answeredPost, holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 // The phone layout on every project: on a phone a comment's thread opens full-screen over the
@@ -119,7 +119,7 @@ test("on a phone, Expand thread while a send is out keeps the draft and its refu
     await refused;
     await leaveThread(page);
 
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Keep this draft");
     await expect(field).toBeEnabled();
   } finally {
@@ -301,7 +301,7 @@ test("on a phone, a thread's own reply holds Back and Escape while it is out, an
     await expect(thread).toBeVisible();
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Inline reply");
     await expect(back).toBeEnabled();
   } finally {
@@ -332,7 +332,7 @@ test("on a phone, a thread's Reply over its card's refused reply keeps that draf
     await form.getByRole("button", { exact: true, name: "Send" }).click();
     await expect(field).toBeDisabled();
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
 
     await thread.getByRole("button", { exact: true, name: "Reply" }).click();
     const threadForm = thread.getByRole("form", { name: "Comment composer" });
@@ -340,7 +340,7 @@ test("on a phone, a thread's Reply over its card's refused reply keeps that draf
     await expect(field).toHaveCount(0);
     await threadForm.getByRole("button", { name: "Cancel reply" }).click();
 
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Card reply");
     await expect(field).toBeEnabled();
   } finally {
@@ -366,7 +366,7 @@ test("on a phone, Back and Escape from a thread reply's refusal drop its draft a
     const thread = threadView(page);
     const threadForm = thread.getByRole("form", { name: "Comment composer" });
     const field = threadForm.getByRole("textbox", { name: "Comment" });
-    const refusal = thread.getByText("Couldn't send — the server is down");
+    const refusal = thread.getByText(WRITE_REFUSED_TEXT);
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     refuse();
     const sendRefused = async (draft: string) => {
@@ -428,7 +428,7 @@ test("on a phone, the reader's own Resolve keeps a thread reply's refusal and it
     const field = thread
       .getByRole("form", { name: "Comment composer" })
       .getByRole("textbox", { name: "Comment" });
-    const refusal = thread.getByText("Couldn't send — the server is down");
+    const refusal = thread.getByText(WRITE_REFUSED_TEXT);
     const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
     refuse();
     await commentTurn(page, earlier.id).getByRole("button", { exact: true, name: "Reply" }).click();
@@ -480,7 +480,7 @@ test("on a phone, a thread reply refused after Back comes back in its own thread
     await commentTurn(page, second.id).getByRole("button", { exact: true, name: "Reply" }).click();
     await expect(thread.locator(`[data-turn="comment:${first.id}"]`)).toBeVisible();
     await expect(thread.locator(`[data-turn="comment:${second.id}"]`)).toHaveCount(0);
-    await expect(thread.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(thread.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Meant for the first");
   } finally {
     await alice.close();
@@ -517,7 +517,7 @@ test("on a phone, a thread's own reply out when the viewport widens keeps its th
     await expect(back).toBeDisabled();
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply through a widening");
     await expect(back).toBeEnabled();
     await back.click();
@@ -554,7 +554,7 @@ test("on a phone, a thread resolved while its own reply is out stays open with t
     await expect(field).toHaveValue("Reply under a resolve");
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply under a resolve");
     await expect(thread.getByRole("button", { name: "Back" })).toBeEnabled();
   } finally {
@@ -632,7 +632,7 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
     await field.fill("Kept through every refusal");
     await form.getByRole("button", { exact: true, name: "Send" }).click();
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
 
     await scrollToOldest(page);
     await expect(jump).toBeVisible();
@@ -680,7 +680,7 @@ test("on a phone, the connection pill covers none of the docked composer", async
     await form.getByLabel("Comment").fill("A draft\nover\nfour lines\nof text");
     await form.getByRole("button", { exact: true, name: "Send" }).click();
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
 
     await alice.setOffline(true);
     await expect(pill).toHaveText("Reconnecting…");
@@ -726,7 +726,7 @@ test("on a phone, the stuck live-updates pill covers none of the docked composer
     await form.getByLabel("Comment").fill("A draft\nover\nfour lines\nof text");
     await form.getByRole("button", { exact: true, name: "Send" }).click();
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(pill).toHaveText("Reconnecting…");
 
     await page.clock.fastForward(120_000);
@@ -769,7 +769,7 @@ test("on a phone, the connection pill covers none of a thread's composers", asyn
     await threadForm.getByLabel("Comment").fill("A draft\nover\nfour lines\nof text");
     await threadForm.getByRole("button", { exact: true, name: "Send" }).click();
     refuse();
-    await expect(threadForm.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(threadForm.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await alice.setOffline(true);
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, threadForm);
@@ -783,7 +783,7 @@ test("on a phone, the connection pill covers none of a thread's composers", asyn
       .filter({ has: page.getByRole("textbox", { name: "Reply" }) });
     await cardForm.getByRole("textbox", { name: "Reply" }).fill("A reply\nover\nfour lines");
     await cardForm.getByRole("button", { exact: true, name: "Send" }).click();
-    await expect(cardForm.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(cardForm.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await alice.setOffline(true);
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, cardForm);

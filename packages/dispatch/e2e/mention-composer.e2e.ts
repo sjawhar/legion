@@ -12,7 +12,7 @@ import {
 } from "./api";
 import { barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -84,7 +84,7 @@ async function sendBesideReply(page: Page, issueKey: string, parent: string): Pr
   await expect(field).toHaveValue("Status please");
   await expect(cancelReply).toHaveCount(0);
   refuse();
-  await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+  await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
   await expect(field).toHaveValue("Status please");
   await expect(cancelReply).toHaveCount(0);
 }
@@ -267,7 +267,7 @@ test("a conversation thread's own reply holds Collapse thread while it is out", 
     await expect(field).toBeDisabled();
     await expect(collapse).toBeDisabled();
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Thread reply");
     await expect(collapse).toBeEnabled();
   } finally {
@@ -388,7 +388,7 @@ test("an issue closed and reopened under a docked send leaves that send's compos
     await expect(field).toBeDisabled();
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Through the close");
     await field.fill("Typed after");
     await expect(field).toHaveValue("Typed after");
@@ -425,7 +425,7 @@ test("a thread resolved while its own reply is out stays open with the reply and
     await expect(field).toHaveValue("Reply under a resolve");
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply under a resolve");
     await expect(field).toBeEnabled();
   } finally {
@@ -459,7 +459,7 @@ test("a thread's own reply out when the viewport narrows to a phone keeps its dr
     await page.setViewportSize({ height: 844, width: 390 });
     await expect(field).toHaveValue("Reply through a narrowing");
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply through a narrowing");
   } finally {
     await alice.close();

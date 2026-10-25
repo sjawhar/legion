@@ -12,7 +12,7 @@ import {
 } from "./api";
 import { conversationFilter, threadCard } from "./editor";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 // "bob" names the session that opened the ask - authenticated over the API with
@@ -856,7 +856,7 @@ test("a suggestion accepted while its thread's own reply is out keeps the reply'
     await expect(field).toHaveValue("Reply under an accept");
 
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(field).toHaveValue("Reply under an accept");
     await expect(field).toBeEnabled();
 

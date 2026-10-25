@@ -42,34 +42,37 @@ export interface Refusal {
   readonly status: number;
 }
 
-/** A server that is down. */
-const SERVER_DOWN: Refusal = { code: "UNAVAILABLE", error: "the server is down", status: 503 };
+/** Dispatch's verdict refusing a write. Every write the page makes tries a 5xx, a 429 or a lost
+ *  answer again under its key until Dispatch answers, so only a verdict - a 4xx of Dispatch's
+ *  own - ends one refused. */
+export const WRITE_REFUSED: Refusal = {
+  code: "INPUT_REFUSED",
+  error: "Dispatch refused the write",
+  status: 400,
+};
 
-/** Dispatch's verdict on a message to one session. A send to one session tries a server that is
- *  down again under its key until Dispatch answers, so a row that needs that send refused refuses
- *  it with this. */
+/** What a composer says once Dispatch refuses its write with `WRITE_REFUSED`. */
+export const WRITE_REFUSED_TEXT = `Couldn't send — ${WRITE_REFUSED.error}`;
+
+/** Dispatch's verdict on a message to one session, with the code that route answers. */
 export const MESSAGE_REFUSED: Refusal = {
   code: "MESSAGE_INPUT",
   error: "Dispatch refused the message",
   status: 400,
 };
 
-/** A pattern naming the route of a message to one session, whose sends retry a 5xx or a 429. */
-const AGENT_MESSAGES = /\/api\/v1\/agents\/[^/]+\/messages$/;
-
-/** Holds every `POST` to `pattern` until the returned call, then refuses it with `refusal`: by
- *  default as a server that is down, 503 with a reason the composer shows. A send to one session
- *  tries a 5xx or a 429 again under its key rather than taking it as a refusal, so a row that would
- *  refuse that route with one is refused here, naming `MESSAGE_REFUSED`, rather than left waiting
- *  on a send that never gives up. */
+/** Holds every `POST` to `pattern` until the returned call, then refuses it with `refusal`,
+ *  `WRITE_REFUSED` by default. A 5xx or a 429 is no refusal: the page tries it again under the
+ *  write's key, so a row that would refuse with one is refused here, naming `WRITE_REFUSED`,
+ *  rather than left waiting on a write that never gives up. */
 export async function refusePosts(
   page: Page,
   pattern: string,
-  refusal: Refusal = SERVER_DOWN
+  refusal: Refusal = WRITE_REFUSED
 ): Promise<() => void> {
-  if (AGENT_MESSAGES.test(pattern) && (refusal.status >= 500 || refusal.status === 429)) {
+  if (refusal.status >= 500 || refusal.status === 429) {
     throw new Error(
-      `refusePosts: a ${refusal.status} to ${pattern} is no refusal - a send to one session tries it again under its key; refuse it with MESSAGE_REFUSED`
+      `refusePosts: a ${refusal.status} to ${pattern} is no refusal - the page tries it again under the write's key; refuse it with WRITE_REFUSED`
     );
   }
   const { promise: held, resolve: refuse } = Promise.withResolvers<void>();

@@ -3,14 +3,20 @@ import { expect, test } from "@playwright/test";
 import { agentRow, openAgents, plannerSession, seedAgents } from "./agents";
 import { createComment, createIssue, createProject } from "./api";
 import { resetDatabase } from "./seed";
-import { answeredPost, MESSAGE_REFUSED, navigateInApp, refusePosts } from "./sends";
+import {
+  answeredPost,
+  MESSAGE_REFUSED,
+  navigateInApp,
+  refusePosts,
+  WRITE_REFUSED_TEXT,
+} from "./sends";
 import { asUser } from "./users";
 
 // A composer holds its draft and its refusal while its send is out, whatever unmounts it. These
 // rows take the reader away from a composer in the middle of its send - another page, a collapsed
 // thread - let the server refuse it there, and expect the draft and the refusal back when the
 // reader returns to the composer.
-const refusedText = "Couldn't send — the server is down";
+const refusedText = WRITE_REFUSED_TEXT;
 
 test.beforeEach(async () => {
   await resetDatabase();

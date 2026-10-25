@@ -18,7 +18,8 @@ import { asUser } from "./users";
 // same way (`broadcast-queue.ts`). These rows run both against the real server: an attempt whose
 // answer the page never gets, and one a server that is down answers 503, each end in one message
 // per recipient and the composer cleared. Dispatch answers a repeat under a key it has answered
-// with the answer it stored, marked `Idempotency-Replayed: ?1`.
+// with the first answer's status, marked `Idempotency-Replayed: ?1`; on these two routes it first
+// sends whatever is still owed and reads the message or broadcast afresh.
 
 const messages = `/api/v1/agents/${plannerSession.session_id}/messages`;
 const broadcasts = "/api/v1/broadcasts";

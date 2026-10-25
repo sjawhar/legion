@@ -17,7 +17,7 @@ import {
 } from "./api";
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { insertExternalLink, resetDatabase } from "./seed";
-import { refusePosts } from "./sends";
+import { refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -299,7 +299,7 @@ test("a phone sheet trap wraps Shift+Tab from its first control past a held comp
     ).toBe(true);
     await expect(body).toHaveValue("Keep this draft");
     refuse();
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(body).toHaveValue("Keep this draft");
   } finally {
     await alice.close();

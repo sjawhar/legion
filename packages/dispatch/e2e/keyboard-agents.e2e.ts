@@ -3,7 +3,7 @@ import { expect, type Page, test } from "@playwright/test";
 import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createMessage } from "./api";
 import { resetDatabase } from "./seed";
-import { holdPosts, pasteFile, refusePosts } from "./sends";
+import { holdPosts, pasteFile, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 /** Resolves once every timer queued before it has run: the next task, the soonest a reader's
@@ -337,7 +337,7 @@ test.describe("agents page", () => {
       await expect(uploadRetry).toBeDisabled();
       refuse();
 
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
       await expect(field).toHaveValue("@Planner see attached");
       await uploadRetry.click();
       await expect(field).toHaveValue("@Planner see attached dispatch://CORE-1/artifact/notes-md");
