@@ -354,6 +354,32 @@ the proxy sends as one JSON line, and exits 1 when they advertise extended CONNE
 not or the proxy negotiates no HTTP/2, and 2 when it gets no answer (`scripts/e2e/README.md`). Run
 it after any change to the proxy.
 
+## Checking a deploy
+
+After a deploy, check through the front proxy that the live socket and the two keyed sends work.
+Run the two commands from a checkout of this repository with `bun install` run, and the two sends
+from a browser signed in to the deployment:
+
+1. `bun scripts/e2e/lib/h2-settings.ts https://<dispatch>/` exits 0: the proxy does not advertise
+   extended CONNECT (the section above).
+2. `bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch> --bearer-file <file> --until <marker> --timeout 4200`
+   holds one `events` subscription on `GET /ws/live` for up to 70 minutes, longer than the 30 to
+   60 minutes a socket lives, under the bearer the file holds (the shared agent token or a personal
+   token). It prints one JSON line per frame: `{"event": …}` for each event, `{"close": <code>,
+   "reason": "…"}` when the socket closes, `{"resubscribed": "<id>"}` when it opens the next socket
+   and resumes after the newest event it holds, and `{"duplicate": "<id>"}` for an event it already
+   printed. Once a `{"close":4001,"reason":"max age"}` line and the `resubscribed` line after it
+   have printed, comment on any issue with `<marker>` in the body: the probe exits 0 when that event
+   arrives on the new socket, and 1 when the 70 minutes end first (2 is a usage error).
+3. A send across a reload: on the Agents page, open a live agent's row, set the browser offline
+   (the developer tools' Network panel), send a message, and reload the tab, confirming the
+   browser's prompt to leave. Within five minutes set the browser online and open the Agents page
+   again in the same tab. The message lands: the row shows it once and the agent receives it once.
+4. A broadcast across an outage: tick two live agents, set the browser offline and press Send.
+   After 30 seconds the send's row reads `Still sending to 2 agents — Dispatch has not confirmed it
+   yet. It keeps trying, and the broadcast is made once.` with **Stop trying**. Set the browser
+   online: the page opens the broadcast, which lists each agent once with one delivery.
+
 ## Running more than one process
 
 Two `envoy-dispatch` processes serve one Postgres and one NATS, so a release rolls instead of

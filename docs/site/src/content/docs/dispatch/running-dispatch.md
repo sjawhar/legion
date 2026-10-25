@@ -249,9 +249,10 @@ from the six connections it opens to a host for ordinary requests, so a socket t
 never takes one of them. That holds only while the load balancer or proxy in front of Dispatch
 does not advertise HTTP/2 extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`): a browser that
 sees it runs the socket inside its HTTP/2 connection instead, and pages can hang until the tab is
-reloaded. From a checkout, `bun scripts/e2e/lib/h2-settings.ts https://<dispatch>` prints the
-settings the proxy sends and exits 1 when it advertises extended CONNECT. Run it after any change
-to the proxy.
+reloaded. From a checkout of this repository with `bun install` run,
+`bun scripts/e2e/lib/h2-settings.ts https://<dispatch>` prints the settings the proxy sends and
+exits 1 when it advertises extended CONNECT, 0 when it does not or speaks no HTTP/2, and 2 when it
+gets no answer. Run it after any change to the proxy.
 
 ## Running more than one copy
 
