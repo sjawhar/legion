@@ -506,6 +506,16 @@
 
 ### Changed
 
+- A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
+  connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
+  configured with and the error, with the first failure of an outage logged at once. nats.go
+  retries about once a second forever, so a broker that is down left no line at all in the
+  process's log, and thousands of identical lines would name the outage no better (INFRA-182).
+- A cache watcher that ends on its own logs `<cache> watcher stopped` at WARN, where it was an
+  ERROR. The ERROR is now `<cache> watcher was not repaired`, logged once with the bucket, the
+  recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
+  repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
+  moment later no longer raises one (INFRA-182).
 - **Breaking:** the secrets broker needs `BROKER_MACHINE_LOGIN_URL`, the absolute http(s) URL of
   Dispatch's machine-login page (`https://<dispatch>/credentials/machine`), and refuses to start
   without it. The device authorization answer's `verification_uri` names that page, where the
@@ -1028,6 +1038,13 @@
 
 ### Fixed
 
+- A listener whose durable consumer was deleted and created again under it, so that the durable
+  delivers to some other subscription, reports itself unhealthy and binds the durable again
+  instead of receiving nothing while every check passed. `GET /healthz` answers `503`
+  `unhealthy` with `durable consumer unavailable: not bound to this listener's subscription`,
+  and the self-health monitor treats an unbound durable as terminal: it confirms the reading
+  with a second one, rebinds, and reports success only once the server itself reports this
+  listener bound (INFRA-182).
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under

@@ -331,12 +331,12 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // healthzHandler is the listener's /healthz. It answers 200 "starting" until main publishes deps
 // once the durable consumer binds, which during a rolling deploy waits out the task being replaced
 // while /v1 already serves; 200 "healthy" with the durable consumer's lag once every dependency
-// answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a cache's
-// watcher has stopped, the durable consumer is gone, or the durable consumer is not bound to this
-// listener's subscription because it was recreated server-side and now delivers elsewhere; and 200
-// "degraded" for a transient KV failure the self-health monitor and the NATS reconnect retry. A
-// listener that mounts no GitHub webhook route keeps no CI cache, and its answer carries
-// "ci_cache": "not_applicable".
+// answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a
+// cache's watcher has stopped, the durable consumer is gone, or the durable consumer is
+// "not bound to this listener's subscription" because it was recreated server-side and now
+// delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
+// the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
+// and its answer carries "ci_cache": "not_applicable".
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
