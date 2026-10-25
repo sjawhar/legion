@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-141",
+  "completed": "2026-10-25T23:58:00Z",
+  "proof": [
+    {
+      "criterion": "A1/A2 — a session-addressed send and an agent delivery to a session only the session store holds (cold cache) succeed: 200 with the envelope delivered, and exactly one push with delivery_status=delivered",
+      "surface": "go test of ./cmd/listener against the in-process NATS test server (internal/testnats), the listener's real HTTP handlers and JetStream durable; no container runtime",
+      "command": "cd packages/envoy && go test ./cmd/listener -count=1 -v -run '^(TestSendReadsTheSessionStoreWhileTheCacheIsCold|TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold|TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable|TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer|TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish|TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable|TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus|TestUnplaceableAgentDeliveryRetriesThenGivesUp|TestUnplaceableRetryWindowFitsTheBoundsItDependsOn|TestUnplaceableDeferralsStopAtTheirCap|TestARedeliveryGivesItsDeferralSlotBack|TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack|TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther|TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal|TestListenerRecordsEverySendAndPublishRequest|TestGiveUpCounterSeparatesItsThreeCauses)$'",
+      "observed": "exit 0, ok 48.819s; all 16 named tests listed as --- PASS (A1 TestSendReadsTheSessionStoreWhileTheCacheIsCold 0.07s, A2 TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold 0.04s, A3 bus-unreachable 3.57s and store-read 1.05s, A4 three, A5 seven, A6 two)",
+      "headSha": "445fcfcdc08490808876200b9ab561474339c903 (code tree identical to 8be80926726bcf3ae2d372731f3902b0c019f712 outside .legion/: jj diff --stat --from 8be80926 --to 445fcfcd shows only .legion/INFRA-141/plan.json)",
+      "negativeControl": "go test -overlay replacing liveSessionEntry's store read (cmd/listener/api.go:624-630) with a cache-only answer (return nats.ErrKeyNotFound), workspace untouched (jj diff --stat empty after): exit 1, TestSendReadsTheSessionStoreWhileTheCacheIsCold fails 'status 404, body {\"error\":\"no live session ses_cold_cache_target\"}' and TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold fails 'the cold-cache delivery pushed 0 times ([])'"
+    },
+    {
+      "criterion": "A4 — a publish NATS denies or a publish with an ended context sends nothing and reports the denial",
+      "surface": "go test of ./internal/bus against the in-process NATS test server",
+      "command": "cd packages/envoy && go test ./internal/bus -count=1 -v -run '^(TestPublishCoreReportsAPublishNATSDenies|TestAnAdHocPublishNATSDeniesReturnsTheDenial|TestAPublishWithAnEndedContextSendsNothing|TestAPublishConfirmedWithASpentDeadlinePublishesNothing|TestAPublishCancelledWhileWaitingForAReconnectSendsNothing)$'",
+      "observed": "exit 0, ok 6.295s; all 5 named tests --- PASS",
+      "headSha": "445fcfcdc08490808876200b9ab561474339c903 (code tree identical to 8be80926 outside .legion/)",
+      "negativeControl": "TestAPublishWithAnEndedContextSendsNothing carries its control: the same call under a live context publishes and is received, so a bus that delivered nothing for every call would fail it (PR body, round five)"
+    },
+    {
+      "criterion": "A3/A5/A6/A6' — on the real envoy-listener binary: an absent destination gets 404 by name, every send is recorded, and with the bus down a send gets 503 inside the 3.5 s budget and the real client raises EnvoyApiError 503 rather than timing out; each bus-down request writes one WARN bus_unavailable record",
+      "surface": "the real envoy-listener binary against a real NATS server, through HTTP (curl) and @legion/envoy-client, driven by scripts/e2e-local.sh; evidence in packages/envoy/out/e2e/",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh; then jq -R -c 'fromjson? // empty | objects | select(.msg==\"listener send\" and .level==\"WARN\" and .outcome==\"bus_unavailable\" and .status==503 and .target_session==\"ses_e2e_local\") | {time,outcome,status}' out/e2e/listener.log",
+      "observed": "exit 0 with both PASS lines; 'bus-down send: HTTP 503 in 3.506826 seconds'; 'client refusal: EnvoyApiError 503 envoy: the message bus did not answer: bus: waiting for NATS to reconnect: context deadline exceeded'; the jq filter prints exactly three records at 23:55:20.008Z, 23:55:23.932Z and 23:55:27.689Z (curl plus the client's two attempts)",
+      "headSha": "445fcfcdc08490808876200b9ab561474339c903 (code tree identical to 8be80926 outside .legion/)",
+      "negativeControl": "The same script's identical send answered 200 (one INFO accepted record) before NATS was stopped; the three bus_unavailable records are all later than nats.log's 'Initiating Shutdown...' at 23:55:16.459Z, so none was written while the bus was up"
+    }
+  ],
+  "filesChanged": [
+    ".legion/INFRA-141/implement.json"
+  ],
+  "deviations": [
+    "No code change in generation 3, per plan.md's 'What this generation must not change': the code is the tree of 8be80926 outside .legion/, and this push carries only this handoff with the skip-checks trailer.",
+    "The working copy found at the turn's start held only the daemon's .legion/INFRA-141/workspace-recovered.json (recovery from f39471a2 after volume-missing). It was not committed: the turn started with jj new @- on 445fcfcd, leaving that commit as an unpushed sibling, so the recovery note never reaches the branch.",
+    "PR body: the Fast-follow line now cites dispatch://INFRA-410 in place of the INFRA-49 ask, as the architect asked; a generation-3 paragraph was added to the E2E (implementer) line naming this re-run; the CI line names the runs at the code head 8be80926."
+  ],
+  "openQuestions": []
+}
