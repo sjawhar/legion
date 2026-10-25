@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"regexp"
 	"slices"
@@ -242,6 +243,7 @@ func SlackEnvelope(input SlackEnvelopeInput) Envelope {
 	if channel == "" {
 		channel = "unknown"
 	}
+	text := slackDeliveredText(input.Body)
 	return Envelope{
 		EventID:        input.EventID,
 		Source:         "slack",
@@ -249,8 +251,8 @@ func SlackEnvelope(input SlackEnvelopeInput) Envelope {
 		Topic:          SlackSubject(team, channel, slackKind(input.Body)),
 		DedupeKey:      "slack." + stringValue(input.Body["event_id"]),
 		IssuedAt:       NowMillis(),
-		PayloadSummary: slackSummary(input.Body),
-		Payload:        slackPayload(input.Body),
+		PayloadSummary: slackSummary(input.Body, text),
+		Payload:        slackPayload(input.Body, text),
 		TraceID:        input.TraceID,
 	}
 }
@@ -949,17 +951,14 @@ func slackKind(body map[string]any) string {
 	return "message"
 }
 
-func slackSummary(body map[string]any) string {
+// slackSummary describes a message in one line, text being the words it delivers.
+func slackSummary(body map[string]any, text string) string {
 	event := mapValue(body["event"])
 	message := slackMessage(event)
 	subtype := stringValue(event["subtype"])
 	channel := slackEventString(event, message, "channel")
 	if channel == "" {
 		channel = "unknown"
-	}
-	text := ""
-	if subtype != "message_deleted" {
-		text = slackEventString(event, message, "text")
 	}
 
 	var summary string
@@ -1003,13 +1002,14 @@ func slackSummary(body map[string]any) string {
 	default:
 		summary = fmt.Sprintf("slack %s message in %s: %s", subtype, channel, first(text, 100))
 	}
-	if suffix := slackFilesSuffix(slackFiles(event, message)); suffix != "" {
+	if suffix := slackFilesSuffix(slackEventSlice(event, message, "files")); suffix != "" {
 		summary += suffix
 	}
 	return OneLineSummary(summary)
 }
 
-func slackPayload(body map[string]any) string {
+// slackPayload encodes a message's fields, text being the words it delivers.
+func slackPayload(body map[string]any, text string) string {
 	event := mapValue(body["event"])
 	message := slackMessage(event)
 	subtype := stringValue(event["subtype"])
@@ -1028,13 +1028,11 @@ func slackPayload(body map[string]any) string {
 	if subtype == "thread_broadcast" {
 		data["root_ts"] = nestedString(event, "root", "ts")
 	}
-	if subtype != "message_deleted" {
-		if text := slackEventString(event, message, "text"); text != "" {
-			capped, truncated := capBody(text)
-			data["text"] = capped
-			if truncated {
-				data["body_truncated"] = "true"
-			}
+	if text != "" {
+		capped, truncated := capBody(text)
+		data["text"] = capped
+		if truncated {
+			data["body_truncated"] = "true"
 		}
 	}
 	if subtype == "message_changed" {
@@ -1043,7 +1041,7 @@ func slackPayload(body map[string]any) string {
 	if subtype == "message_deleted" {
 		data["deleted_ts"] = stringValue(event["deleted_ts"])
 	}
-	files := slackFiles(event, message)
+	files := slackEventSlice(event, message, "files")
 	if len(files) > 0 {
 		data["file_count"] = strconv.Itoa(len(files))
 		var filePairs []string
@@ -1059,12 +1057,8 @@ func slackPayload(body map[string]any) string {
 		}
 		data["files"] = strings.Join(filePairs, ",")
 	}
-	if attachments := sliceValue(message["attachments"]); len(attachments) > 0 {
+	if attachments := slackEventSlice(event, message, "attachments"); len(attachments) > 0 {
 		data["attachment_count"] = strconv.Itoa(len(attachments))
-	} else if subtype == "message_changed" {
-		if attachments := sliceValue(event["attachments"]); len(attachments) > 0 {
-			data["attachment_count"] = strconv.Itoa(len(attachments))
-		}
 	}
 	return payloadJSON(data)
 }
@@ -1095,14 +1089,88 @@ func slackBotName(event map[string]any) string {
 	return stringValue(event["bot_id"])
 }
 
-func slackFiles(event, message map[string]any) []any {
-	if files := sliceValue(message["files"]); len(files) > 0 {
-		return files
+// slackEventSlice is the list a message carries under key, or, when the message carries none and
+// the event is an edit, the one the event carries beside the edited message.
+func slackEventSlice(event, message map[string]any, key string) []any {
+	if items := sliceValue(message[key]); len(items) > 0 {
+		return items
 	}
 	if stringValue(event["subtype"]) == "message_changed" {
-		return sliceValue(event["files"])
+		return sliceValue(event[key])
 	}
 	return nil
+}
+
+// slackDisplayFields are the field names an attachment or a block shows words under, in the order
+// Slack renders them; fallback is last because it is the plain-text copy of the rest.
+var slackDisplayFields = []string{"pretext", "author_name", "title", "text", "value", "footer", "fallback"}
+
+// slackDeliveredText is every word a Slack message delivers: its own text, then each display
+// string its attachments and its blocks carry that the text does not already hold, a line apiece.
+// An app posts its words there as often as in the message's own text, and a deleted message
+// delivers none.
+func slackDeliveredText(body map[string]any) string {
+	event := mapValue(body["event"])
+	if stringValue(event["subtype"]) == "message_deleted" {
+		return ""
+	}
+	message := slackMessage(event)
+	walk := slackTextWalk{text: slackEventString(event, message, "text")}
+	walk.walk(slackEventSlice(event, message, "attachments"))
+	walk.walk(slackEventSlice(event, message, "blocks"))
+	return walk.text
+}
+
+// slackTextWalk collects the display strings of an attachment or block tree into one text.
+type slackTextWalk struct {
+	text string
+	// full reports that the text has run past what an envelope carries, so nothing more is read.
+	full bool
+}
+
+// take appends a display string, unless it is empty or the text so far already holds it: Slack
+// repeats the same words across an attachment's fields and a block's nested text.
+func (w *slackTextWalk) take(piece string) {
+	if w.full || piece == "" || strings.Contains(w.text, piece) {
+		return
+	}
+	if w.text == "" {
+		w.text = piece
+	} else {
+		w.text += "\n" + piece
+	}
+	w.full = utf8.RuneCountInString(w.text) > maxEnvelopeTextRunes
+}
+
+// walk takes the display strings of an object, then descends in sorted key order into its values
+// that are not strings, so that a block's nested text reaches the output while a string under any
+// other name, or directly at an array index, stays out. An array is descended in index order.
+func (w *slackTextWalk) walk(value any) {
+	if w.full {
+		return
+	}
+	switch node := value.(type) {
+	case map[string]any:
+		for _, field := range slackDisplayFields {
+			w.take(stringValue(node[field]))
+		}
+		for _, key := range slices.Sorted(maps.Keys(node)) {
+			if _, isString := node[key].(string); isString {
+				continue
+			}
+			w.walk(node[key])
+			if w.full {
+				return
+			}
+		}
+	case []any:
+		for _, item := range node {
+			w.walk(item)
+			if w.full {
+				return
+			}
+		}
+	}
 }
 
 func slackFilesSuffix(files []any) string {
