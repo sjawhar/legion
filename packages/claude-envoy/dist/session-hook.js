@@ -19569,7 +19569,7 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
   }
 }
 var SESSION_TITLE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-async function pruneStaleSessionTitles(stateDirectory, now = Date.now(), maxAgeMs = SESSION_TITLE_MAX_AGE_MS) {
+async function pruneStaleSessionTitles(stateDirectory) {
   const titles = join3(stateDirectory, "titles");
   const entries = await readdir(titles).catch((error48) => {
     if (hasErrnoCode(error48, "ENOENT"))
@@ -19581,7 +19581,7 @@ async function pruneStaleSessionTitles(stateDirectory, now = Date.now(), maxAgeM
     const modified = await stat(file2).then((stats) => stats.mtimeMs, () => {
       return;
     });
-    if (modified === undefined || now - modified <= maxAgeMs)
+    if (modified === undefined || Date.now() - modified <= SESSION_TITLE_MAX_AGE_MS)
       continue;
     await rm(file2, { force: true });
   }
@@ -19621,14 +19621,15 @@ function appendOnce(envFile, line) {
 `);
 }
 async function recordChosenTitle(sessionId, title) {
-  const pluginData = process.env["CLAUDE_PLUGIN_DATA"];
-  if (pluginData === undefined || pluginData.trim().length === 0)
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
+  if (pluginData === undefined)
     return;
   const file2 = sessionTitleFile(pluginData, sessionId);
-  if (title === undefined || title.trim().length === 0)
+  const chosen = configuredValue(title);
+  if (chosen === undefined)
     await removeChosenTitle(file2);
   else
-    await writeChosenTitle(file2, title);
+    await writeChosenTitle(file2, chosen);
 }
 async function openAsks(raw) {
   const input = OpenAsksInput.parse(raw);

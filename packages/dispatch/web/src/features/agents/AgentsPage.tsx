@@ -639,7 +639,7 @@ function AgentRow({
   const machineAndDir = `${agent.host} · ${agent.dir}`;
   // The name takes the row's width, so above a phone the directory gives its own up and keeps
   // the segment that names the session's work, with the whole path on the hover its `title` is.
-  const shownDir = phoneViewport ? machineAndDir : `${agent.host} · ${lastPathSegment(agent.dir)}`;
+  const shownDir = `${agent.host} · ${phoneViewport ? agent.dir : lastPathSegment(agent.dir)}`;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);

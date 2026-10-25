@@ -1020,12 +1020,12 @@ export async function runEnvoyChannelServer(): Promise<void> {
       TMUX_PANE: process.env["TMUX_PANE"],
     },
     directory,
-    undefined,
-    undefined,
-    (sessionId) =>
-      pluginData === undefined
-        ? undefined
-        : readChosenTitleSync(sessionTitleFile(pluginData, sessionId)),
+    {
+      chosen: (sessionId) =>
+        pluginData === undefined
+          ? undefined
+          : readChosenTitleSync(sessionTitleFile(pluginData, sessionId)),
+    },
   )
   const stampTitle = (sessionId: string, value: string): void => {
     writeSessionTitle(dispatchSessionDirectory(process.env, sessionId), value)

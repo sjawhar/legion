@@ -47760,7 +47760,7 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
   }
 }
 var SESSION_TITLE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-async function pruneStaleSessionTitles(stateDirectory, now = Date.now(), maxAgeMs = SESSION_TITLE_MAX_AGE_MS) {
+async function pruneStaleSessionTitles(stateDirectory) {
   const titles = join4(stateDirectory, "titles");
   const entries = await readdir(titles).catch((error48) => {
     if (hasErrnoCode(error48, "ENOENT"))
@@ -47772,7 +47772,7 @@ async function pruneStaleSessionTitles(stateDirectory, now = Date.now(), maxAgeM
     const modified = await stat(file2).then((stats) => stats.mtimeMs, () => {
       return;
     });
-    if (modified === undefined || now - modified <= maxAgeMs)
+    if (modified === undefined || Date.now() - modified <= SESSION_TITLE_MAX_AGE_MS)
       continue;
     await rm(file2, { force: true });
   }
@@ -48274,9 +48274,14 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, query = queryTmux, ownPane = (panePid) => isAncestor(panePid), chosen = () => {
-  return;
-}) {
+function sessionTitle(environment, directory, sources = {}) {
+  const {
+    query = queryTmux,
+    ownPane = (panePid) => isAncestor(panePid),
+    chosen = () => {
+      return;
+    }
+  } = sources;
   const explicit = oneLine(configuredValue(environment.ENVOY_SESSION_TITLE) ?? "");
   if (visible(explicit))
     return () => explicit;
@@ -48856,7 +48861,9 @@ async function runEnvoyChannelServer() {
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
-  }, directory, undefined, undefined, (sessionId) => pluginData === undefined ? undefined : readChosenTitleSync(sessionTitleFile(pluginData, sessionId)));
+  }, directory, {
+    chosen: (sessionId) => pluginData === undefined ? undefined : readChosenTitleSync(sessionTitleFile(pluginData, sessionId))
+  });
   const stampTitle = (sessionId, value) => {
     writeSessionTitle(sessionDirectory(process.env, sessionId), value);
   };

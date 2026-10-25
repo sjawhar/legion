@@ -95,11 +95,12 @@ function appendOnce(envFile: string, line: string): void {
  * reads the record.
  */
 async function recordChosenTitle(sessionId: string, title: string | undefined): Promise<void> {
-  const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
-  if (pluginData === undefined || pluginData.trim().length === 0) return
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"])
+  if (pluginData === undefined) return
   const file = sessionTitleFile(pluginData, sessionId)
-  if (title === undefined || title.trim().length === 0) await removeChosenTitle(file)
-  else await writeChosenTitle(file, title)
+  const chosen = configuredValue(title)
+  if (chosen === undefined) await removeChosenTitle(file)
+  else await writeChosenTitle(file, chosen)
 }
 
 async function openAsks(raw: unknown): Promise<void> {

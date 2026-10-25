@@ -169,6 +169,16 @@ export function tmuxPaneTitle(
  *  `sessionId`; undefined when that session has none. */
 export type ChosenTitle = (sessionId: string) => string | undefined
 
+/** The seams a caller may inject; each defaults to what the running session uses. */
+export interface SessionTitleSources {
+  /** How a tmux server is asked for a pane's fields; by default a bounded `tmux` run. */
+  readonly query?: TmuxQuery
+  /** Whether a pane's first process is ours; by default one of this process's ancestors. */
+  readonly ownPane?: (panePid: string) => boolean
+  /** The name the user gave a session; by default none is recorded. */
+  readonly chosen?: ChosenTitle
+}
+
 /**
  * The title this session registers with the Envoy listener, which Dispatch's Agents page shows in
  * place of the session id: `ENVOY_SESSION_TITLE`; else the name the user gave the session, alone,
@@ -184,10 +194,13 @@ export type ChosenTitle = (sessionId: string) => string | undefined
 export function sessionTitle(
   environment: SessionTitleEnvironment,
   directory: string,
-  query: TmuxQuery = queryTmux,
-  ownPane: (panePid: string) => boolean = (panePid) => isAncestor(panePid),
-  chosen: ChosenTitle = () => undefined,
+  sources: SessionTitleSources = {},
 ): SessionTitle {
+  const {
+    query = queryTmux,
+    ownPane = (panePid: string) => isAncestor(panePid),
+    chosen = () => undefined,
+  } = sources
   const explicit = oneLine(configuredValue(environment.ENVOY_SESSION_TITLE) ?? "")
   // A title with nothing that shows once cleaned (a zero-width space, a colour code alone) would
   // be a blank row.

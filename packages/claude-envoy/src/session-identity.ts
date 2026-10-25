@@ -152,15 +152,11 @@ export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise
 export const SESSION_TITLE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000
 
 /**
- * Drop `titles/<session id>` files last written longer than `maxAgeMs` ago. Nothing else deletes a
- * file keyed by session id — a session's id dies with it, unmourned — so without this the
- * directory grows by one file per named session for ever.
+ * Drop `titles/<session id>` files last written longer than `SESSION_TITLE_MAX_AGE_MS` ago.
+ * Nothing else deletes a file keyed by session id — a session's id dies with it, unmourned — so
+ * without this the directory grows by one file per named session for ever.
  */
-export async function pruneStaleSessionTitles(
-  stateDirectory: string,
-  now: number = Date.now(),
-  maxAgeMs: number = SESSION_TITLE_MAX_AGE_MS,
-): Promise<void> {
+export async function pruneStaleSessionTitles(stateDirectory: string): Promise<void> {
   const titles = join(stateDirectory, "titles")
   const entries = await readdir(titles).catch((error: unknown) => {
     if (hasErrnoCode(error, "ENOENT")) return []
@@ -172,7 +168,7 @@ export async function pruneStaleSessionTitles(
       (stats) => stats.mtimeMs,
       () => undefined,
     )
-    if (modified === undefined || now - modified <= maxAgeMs) continue
+    if (modified === undefined || Date.now() - modified <= SESSION_TITLE_MAX_AGE_MS) continue
     await rm(file, { force: true })
   }
 }
