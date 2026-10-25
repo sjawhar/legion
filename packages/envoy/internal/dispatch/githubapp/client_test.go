@@ -705,12 +705,12 @@ func TestRefRefusesAnAnswerThatIsNotACommitSHA(t *testing.T) {
 	}{
 		{
 			name: "the commit's JSON",
-			fake: &fakeGitHub{t: t, ignoresSHAMediaType: true},
+			fake: &fakeGitHub{ignoresSHAMediaType: true},
 			body: []string{mainCommit, `"sha"`, "{"},
 		},
 		{
 			name: "a body that is no SHA",
-			fake: &fakeGitHub{t: t, commits: map[string]string{"main": "not-a-sha"}},
+			fake: &fakeGitHub{commits: map[string]string{"main": "not-a-sha"}},
 			body: []string{"not-a-sha"},
 		},
 	} {

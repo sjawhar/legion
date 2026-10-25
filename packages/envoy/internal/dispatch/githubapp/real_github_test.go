@@ -1,7 +1,6 @@
 package githubapp_test
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -95,28 +96,21 @@ func TestRealGitHubRefReadsALargeHead(t *testing.T) {
 // is never logged.
 func hostsFileToken(t *testing.T, path string) string {
 	t.Helper()
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("DISPATCH_REAL_GITHUB_HOSTS_FILE: %v", err)
 	}
-	defer file.Close()
-	inBlock := false
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line != "" && line[0] != ' ' && line[0] != '\t' {
-			inBlock = strings.TrimSpace(line) == "github.com:"
-			continue
-		}
-		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "oauth_token:"); inBlock && ok {
-			if token := strings.Trim(strings.TrimSpace(value), `"'`); token != "" {
-				return token
-			}
-		}
+	var hosts struct {
+		GitHub struct {
+			OAuthToken string `yaml:"oauth_token"`
+		} `yaml:"github.com"`
 	}
-	if err := scanner.Err(); err != nil {
-		t.Fatalf("DISPATCH_REAL_GITHUB_HOSTS_FILE: %v", err)
+	// The decode error is not printed: yaml errors can quote the file, and the file holds a token.
+	if err := yaml.Unmarshal(data, &hosts); err != nil {
+		t.Fatalf("DISPATCH_REAL_GITHUB_HOSTS_FILE %s does not parse as YAML", path)
 	}
-	t.Fatalf("DISPATCH_REAL_GITHUB_HOSTS_FILE %s holds no oauth_token for github.com", path)
-	return ""
+	if hosts.GitHub.OAuthToken == "" {
+		t.Fatalf("DISPATCH_REAL_GITHUB_HOSTS_FILE %s holds no oauth_token for github.com", path)
+	}
+	return hosts.GitHub.OAuthToken
 }

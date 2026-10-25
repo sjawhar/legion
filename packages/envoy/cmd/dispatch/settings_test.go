@@ -949,17 +949,13 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				wrapped.WriteString(line + "\n")
 			}
 			const garbageArmour = "-----BEGIN RSA PRIVATE KEY-----\nbm90IGEga2V5\n-----END RSA PRIVATE KEY-----\n"
-			load := func(value string, set bool) (*auth.AppConfig, error) {
-				values := map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env"}
-				if set {
-					values["DISPATCH_APP_PEM_B64"] = value
-				}
+			load := func(value string) (*auth.AppConfig, error) {
+				values := map[string]string{"DISPATCH_APP_CLIENT_ID": "Iv1.env", "DISPATCH_APP_PEM_B64": value}
 				app, _, err := loadAppCredentials(envGetter(values), t.TempDir())
 				return app, err
 			}
 			for _, tc := range []struct {
 				name, value string
-				unset       bool
 				want        string   // the PEM the App holds, when it loads
 				refusal     []string // what the error names, when it is refused
 			}{
@@ -970,10 +966,10 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				{name: "not base64", value: "not base64!", refusal: []string{"DISPATCH_APP_PEM_B64"}},
 				{name: "base64 of no key", value: base64.StdEncoding.EncodeToString([]byte("app private key")), refusal: []string{"DISPATCH_APP_PEM_B64", "base64 of a PEM"}},
 				{name: "PEM armour around garbage", value: garbageArmour, refusal: []string{"DISPATCH_APP_PEM_B64", "plain PEM"}},
-				{name: "unset", unset: true},
+				{name: "empty or unset"},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
-					app, err := load(tc.value, !tc.unset)
+					app, err := load(tc.value)
 					if tc.refusal == nil {
 						if err != nil || app == nil || app.PEM != tc.want {
 							t.Fatalf("err = %v, App loaded %t, PEM as given %t; want an App holding the case's PEM", err, app != nil, app != nil && app.PEM == tc.want)
