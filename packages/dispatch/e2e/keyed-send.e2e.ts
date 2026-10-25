@@ -210,7 +210,7 @@ test("a send held through a reload is resumed under its key, and delivered once"
         page.evaluate(
           () =>
             Object.keys(window.sessionStorage).filter((name) =>
-              name.startsWith("dispatch.keyed-send:")
+              name.startsWith("dispatch.write:")
             ).length
         )
       )
@@ -335,7 +335,7 @@ test("a broadcast held through a reload is resumed under its key, and each agent
         page.evaluate(
           () =>
             Object.keys(window.sessionStorage).filter((name) =>
-              name.startsWith("dispatch.keyed-send:")
+              name.startsWith("dispatch.write:")
             ).length
         )
       )
