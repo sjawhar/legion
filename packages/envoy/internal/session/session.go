@@ -22,14 +22,17 @@ var ErrWrongMachine = errors.New("session belongs to a different machine")
 // ErrNoSessionRecord is returned when no session entry was resolved for the session a delivery
 // names: as far as the resolution that produced it could tell, no record of that session exists.
 // A caller that resolved the entry from a cache alone cannot conclude the session is gone from
-// this - the cache trails the bucket it follows - which is why the two causes below are separate
-// errors: a caller may wait out a record that has not arrived yet, but waiting cannot grow a push
-// target onto a record that already exists without one.
+// this - the cache trails the bucket it follows - which is why the two causes are separate
+// errors: only this one says nothing of the session was found at all, and an operator reading a
+// give-up acts on the two differently.
 var ErrNoSessionRecord = errors.New("no session record")
 
 // ErrNoPushTarget is returned when a session entry exists and carries nothing this listener can
-// push to: no serve port, and not self-subscribed. The session registered and left no way to be
-// reached, so re-reading its record answers the same thing again.
+// push to: no serve port, and not self-subscribed. That is the record a session writes when it
+// registers before its server has bound its serve port, and binding the port rewrites it, so
+// re-reading it answers the same thing only until that write lands - a caller may wait the port
+// out rather than give the message up, and the listener's delivery does, deferring such a message
+// for its whole retry window (cmd/listener/delivery.go).
 var ErrNoPushTarget = errors.New("no reachable push target")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)

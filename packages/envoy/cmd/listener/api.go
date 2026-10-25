@@ -252,6 +252,14 @@ func writeNATSError(w http.ResponseWriter, err error, status int, message string
 // itself did not answer, and the two ask the caller for different actions.
 const busUnansweredPrefix = "envoy: the message bus did not answer"
 
+// publishDeniedPrefix opens the body of every answer this listener gives a publish the NATS server
+// refused under its connection's own publish permissions, so one string matches in a test and in a
+// deployed log filter. It is deliberately not busUnansweredPrefix: the bus answered this publish,
+// and answered it with a denial, so "the message bus did not answer" would be false of it, and the
+// operator reading it would go looking for an outage instead of for the grant that forbids the
+// subject.
+const publishDeniedPrefix = "envoy: the message bus denied the publish under this listener's own permissions"
+
 // writeBusUnavailable answers a send or a publish the bus did not serve, in the one place that
 // writes that 503, so the body's prefix and the hint never drift apart. Retry-After is set only
 // where retrying can help: bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy
@@ -259,7 +267,24 @@ const busUnansweredPrefix = "envoy: the message bus did not answer"
 // and writeNATSError answers those as the 413 and the 400 they are, so this one guard keeps the
 // header off exactly those two and off nothing else. The status writeNATSError settled on is
 // passed back for the record's sake, as that function's own comment explains.
+//
+// A publish the server denied (bus.ErrPublishDenied) is answered ahead of both, because it is
+// neither. bus.ErrRefused has exactly three members (internal/bus/nats.go): bus.ErrTooLarge,
+// bus.ErrInvalidSubject and bus.ErrInvalidKey, each of them this client's own refusal of the
+// caller's bytes, decided before anything is sent. A denial is the opposite: the publish reached a
+// server that answered `-ERR 'Permissions Violation for Publish to "<subject>"'` and dropped it,
+// which internal/bus/confirm.go names bus.ErrPublishDenied around nats.ErrPermissionViolation and
+// the server's own text. So it is not an outage and not a malformed request, and retrying it can
+// never succeed: the grant this listener connects with forbids the subject until an operator
+// changes it. 403 says exactly that - the request was understood and the server refuses to
+// authorise it - where 400 would blame the caller's bytes, which are fine, and where any 5xx would
+// be retried: packages/envoy-client/src/transport.ts retries every status at or past 500 and no
+// status below it. No Retry-After rides it for the same reason.
 func writeBusUnavailable(w http.ResponseWriter, err error) int {
+	if errors.Is(err, bus.ErrPublishDenied) {
+		writeJSONError(w, http.StatusForbidden, fmt.Sprintf("%s: %s", publishDeniedPrefix, err))
+		return http.StatusForbidden
+	}
 	if !errors.Is(err, bus.ErrRefused) {
 		w.Header().Set("Retry-After", "1")
 	}
@@ -328,6 +353,14 @@ const (
 	// two say different things about the claim behind it.
 	outcomeRoleUnclaimed requestOutcome = "role_unclaimed"
 	outcomeRoleLapsed    requestOutcome = "role_lapsed"
+	// outcomeRoleHolderChanged is the publish route's lost race for a role's claim
+	// (errRoleHolderChanged): every bus read answered, so it is deliberately not
+	// outcomeBusUnavailable, which keeps its meaning of a bus that did not answer.
+	outcomeRoleHolderChanged requestOutcome = "role_holder_changed"
+	// outcomePublishDenied is a publish the server refused under this listener's own publish
+	// permissions (bus.ErrPublishDenied). Both message routes can record it, and neither records
+	// it as outcomeBusUnavailable: the bus answered, with a denial no retry can get past.
+	outcomePublishDenied requestOutcome = "publish_denied"
 )
 
 // requestRecord is this listener's record of one inbound send or publish, and the only way either
@@ -376,8 +409,9 @@ func (rec *requestRecord) refuse(w http.ResponseWriter, status int, outcome requ
 
 // refuseBusUnavailable answers a bus that did not serve the request and records the outcome the
 // status it wrote implies: 413 is the caller's own oversized message, 400 the subject or key NATS
-// will not take however often it is sent, and anything else the bus not answering. The status is
-// read back from the write rather than classified a second time here, so the pair cannot drift.
+// will not take however often it is sent, 403 the publish this listener's own grant denies, and
+// anything else the bus not answering. The status is read back from the write rather than
+// classified a second time here, so the pair cannot drift.
 func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error) {
 	status := writeBusUnavailable(w, err)
 	outcome := outcomeBusUnavailable
@@ -386,8 +420,23 @@ func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error)
 		outcome = outcomeTooLarge
 	case http.StatusBadRequest:
 		outcome = outcomeInvalidRequest
+	case http.StatusForbidden:
+		outcome = outcomePublishDenied
 	}
 	rec.write(status, outcome)
+}
+
+// refuseRoleHolderChanged answers a publish whose role claim moved under the resolution
+// (errRoleHolderChanged). The 503 and the Retry-After are the same ask as a bus that did not
+// answer - a fresh read wins this race as soon as the replacement claim settles - but the body
+// and the record are not: every bus read answered, so naming it bus_unavailable would send an
+// operator after an outage that never happened, and the route's record is where "never
+// attempted" is told from "attempted and refused" afterwards.
+func (rec *requestRecord) refuseRoleHolderChanged(w http.ResponseWriter, role string) {
+	w.Header().Set("Retry-After", "1")
+	rec.refuse(w, http.StatusServiceUnavailable, outcomeRoleHolderChanged, fmt.Sprintf(
+		"envoy: the holder of role %s changed while this publish was resolving it", role,
+	))
 }
 
 // refuseRoleHolder answers the publish route's two role-holder refusals. A lapsed holder is the
@@ -590,6 +639,14 @@ func registered(session.SessionEntry) bool { return true }
 // write timeout (main.go) and the 10 s JetStream MaxWait the read would otherwise wait out.
 const roleHolderReadTimeout = 2 * time.Second
 
+// errRoleHolderChanged is resolveLiveRoleHolder's answer when every one of
+// roleHolderResolutionAttempts was spent on a supersession: each attempt found the claim's holder
+// session gone and lost its conditional release to a fresh claim another writer had already
+// installed. Every bus read answered, so this is a lost compare-and-swap against a live
+// replacement holder and not a bus failure, and a caller recognises it rather than sweeping it in
+// with the reads that did not answer (publishHandler).
+var errRoleHolderChanged = errors.New("role holder changed while resolving")
+
 func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
 		claim, err := registry.RoleClaim(role)
@@ -626,7 +683,7 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 			entry:  entry,
 		}, nil
 	}
-	return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
+	return roleHolderResult{}, errRoleHolderChanged
 }
 
 // sendRequestBudget is the bus work a send or a publish does under the request's own context: the
@@ -844,6 +901,14 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
 			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
+			if errors.Is(err, errRoleHolderChanged) {
+				// The claim moved while it was being resolved: the role has a holder, this
+				// publish simply never got a settled one to forward to. Retrying is right, so
+				// the 503 and the Retry-After stand, but the answer says the race rather than
+				// claiming the bus went quiet.
+				record.refuseRoleHolderChanged(w, role)
+				return
+			}
 			if err != nil {
 				// A role holder read that did not answer says nothing about the role: the claim is
 				// not resolved, so the caller is asked to try again rather than told the role has
