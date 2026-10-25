@@ -16546,9 +16546,17 @@ function architectureSyncLines(project, source) {
   if (source.last_error === null) {
     return `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${source.last_sync_at ?? "unknown time"}).`;
   }
+  let kept;
+  if (source.last_commit !== null) {
+    kept = `The previous model of ${source.repo} stays up (commit ${source.last_commit}).`;
+  } else if (source.components > 0) {
+    kept = `The previous model of ${source.repo} stays up (${source.components} ${source.components === 1 ? "component" : "components"}).`;
+  } else {
+    kept = `No model has ever imported from ${source.repo}.`;
+  }
   return [
     `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
-    source.last_commit === null ? `No model has ever imported from ${source.repo}.` : `The previous model of ${source.repo} stays up (commit ${source.last_commit}).`
+    kept
   ].join(`
 `);
 }

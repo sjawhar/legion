@@ -1503,6 +1503,15 @@ describe("executeDispatchTool", () => {
           last_error: "tools.md: missing title",
           components: 0,
         }),
+        // Re-saved on another branch: no recorded commit, its earlier components still up.
+        syncedSource({
+          repo: "acme/docs",
+          branch: "next",
+          last_sync_at: "2026-09-17T00:08:00Z",
+          last_commit: null,
+          last_error: 'component id "api" is already a component of CORE from legion/arch',
+          components: 1,
+        }),
       ])
     );
     const answered = await result;
@@ -1515,6 +1524,8 @@ describe("executeDispatchTool", () => {
         "The previous model of acme/infra stays up (commit beef01).",
         "Sync failed for CORE (acme/tools@main): tools.md: missing title",
         "No model has ever imported from acme/tools.",
+        'Sync failed for CORE (acme/docs@next): component id "api" is already a component of CORE from legion/arch',
+        "The previous model of acme/docs stays up (1 component).",
       ].join("\n")
     );
     expect(answered.details).toEqual({
@@ -1532,6 +1543,12 @@ describe("executeDispatchTool", () => {
           branch: "main",
           commit: null,
           error: "tools.md: missing title",
+        },
+        {
+          repo: "acme/docs",
+          branch: "next",
+          commit: null,
+          error: 'component id "api" is already a component of CORE from legion/arch',
         },
       ],
     });

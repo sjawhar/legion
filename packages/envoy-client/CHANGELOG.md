@@ -7,7 +7,9 @@
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
   repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
-  previous model of repo stays up (commit C).` or `No model has ever imported from repo.`; its
+  previous model of repo stays up (commit C).`, `The previous model of repo stays up (N
+  components).` (a source re-saved on another branch, whose earlier components stay until an
+  import replaces them) or `No model has ever imported from repo.`; its
   `details` are `{project, sources: [{repo, branch, commit, error}]}`. `--repo <owner/name>`
   imports that one source alone, and a credential or branch problem there is still an error exit
   (`409 SOURCE_ACCESS`); without it, every source is attempted and such a problem is that
