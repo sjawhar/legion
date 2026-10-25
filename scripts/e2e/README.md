@@ -2147,7 +2147,7 @@ and OMP's `logs/`).
 ### The natives download
 
 OMP's native module (`pi_natives.linux-x64-modern.node` or `…-baseline.node`, the one the CPU
-selects, ~112 MB at the pin; builds before 18.11.0 wrote every variant they embed, ~350 MB) lives in
+selects, 111 MiB at the pin; builds before 18.11.0 wrote every variant they embed, about twice that) lives in
 `$HOME/.omp/natives/<omp version>/` — `$XDG_DATA_HOME/omp/natives/` when `$XDG_DATA_HOME/omp`
 exists — and every profile under that `HOME` shares it (`getNativesDir`,
 `@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes it

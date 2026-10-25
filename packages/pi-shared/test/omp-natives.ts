@@ -59,13 +59,16 @@ function nativesCacheRoot(): string {
  * into place whole once every file in it is one the binary embeds, at its embedded size, so a
  * directory that exists is complete. A staging directory the lock's holder finds is a dead
  * filler's, which it removes.
+ *
  * Which natives a binary writes is its own choice: the pin writes only the variant its CPU
  * selects, and earlier binaries wrote every variant they embed. So the check reads what was
- * extracted rather than demanding each embedded name. What it still refuses is every way a write
- * can fail: the binary writes each native to a `.tmp.<pid>.<ms>` file and renames it only once it
- * is whole, so a failed write leaves nothing (refused as an empty extraction), or a leftover
- * temporary file when the cleanup fails too (refused by its name), and a file that is not what the
- * binary embeds at its embedded size is refused as well.
+ * extracted rather than demanding each embedded name. What it refuses is a file that is not a
+ * whole native of this binary: the binary writes each native to a `.tmp.<pid>.<ms>` file and
+ * renames it only once it is whole, so a failed write leaves nothing (refused as an empty
+ * extraction), or a leftover temporary file when the cleanup fails too (refused by its name), and
+ * anything that is not a regular file, or not at its embedded size, is refused as well. One fill
+ * it accepts that the name-by-name rule would not: a failed write of the selected variant whose
+ * fallback variant was then written whole. That set loads, so it is a usable cache.
  */
 export async function fillNativesCache(root: string, binary: string): Promise<string> {
   const { digest, embedded } = await readBinary(binary);
