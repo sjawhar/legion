@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-56",
+  "completed": "2026-10-25T00:38:00Z",
+  "proof": [
+    {
+      "criterion": "With the allowance forced to a value no database can meet, filing the ask still answers, and still answers with its suggestions envelope rather than nothing.",
+      "surface": "POST /api/v1/issues/{key}/asks, served by the real route table against PostgreSQL 17.11 with pgvector and every Dispatch migration applied, in this issue's worker pod (DISPATCH_TEST_DATABASE_URL, rig at /legion/scratch/infra56).",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run 'TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails/an_allowance_no_database_can_meet_still_answers_with_an_envelope' -count=5 -timeout 20m -v",
+      "observed": "5 of 5 '--- PASS:' for that subtest, no '--- FAIL:' (run together with the generous case and the pin: 10 subtest PASS lines, 5 pin PASS lines, 0 failures; log /legion/scratch/infra56/after-5x-simplified.log). The response is 201, carries an advice key, a non-nil suggestions envelope and a non-empty missing, with decision absent.",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "Mutation B at the same head: the branch in asks.go that attaches suggestions-only advice when the advice query failed is removed, so the route answers the ask with no advice at all. The case fails on 'response has no advice at all, want suggestions-only advice despite the failed write-advice query' (log mutation-b2.log), and jj diff is empty again after the restore."
+    },
+    {
+      "criterion": "With the allowance set generously, the already-answered question is found and its record is written.",
+      "surface": "The same route and rig; the record read straight from write_suggestions on the case's own database clone.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run 'TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails/a_generous_allowance_finds_the_answered_question_and_records_it' -count=5 -timeout 20m -v",
+      "observed": "5 of 5 '--- PASS:', no '--- FAIL:' (same run and log as above). The envelope carries decision, its id is the answered ask's, and 'select count(*) from write_suggestions where source_ask_id = $1' is non-zero for the newly filed ask.",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "Mutation A at the same head: suggestionsOnlyAdvice{Suggestions: &model.Suggestions{}} in asks.go, the mutated line printed back before the run. The case fails on 'advice.suggestions.decision = null, want the answered ask <id>' (log mutation-a2.log); jj diff empty after the restore."
+    },
+    {
+      "criterion": "The test as it stands today, run against the forced allowance, fails every one of five runs on its answered-question assertion (the before-and-after control the spec names).",
+      "surface": "The same route and rig, at the first head of this branch, with the seam applied and today's test body unchanged but its handler built at time.Nanosecond.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails -count=5 -timeout 20m -v",
+      "observed": "5 failures of 5, each at suggestions_test.go:374: 'advice.suggestions = &{Related:[] Decision:<nil> Missing:the project lookup behind it did not answer within 1ns}, want the decision ask <id> despite the failed write-advice query' (log /legion/scratch/infra56/before-control.log). This is the only way the spec's before-run can exist: the constant cannot be forced on the tree as it stands.",
+      "headSha": "the working copy that became 9ca67ae60968b2ff8b3e1a6a00a1bbbde6b5e3d1, before the test was rewritten into two cases",
+      "negativeControl": "The same body at a generous allowance passes, and the rewritten test passes 5 of 5 at the pushed head 3ae0a3c337ff615af2e152b94d7a406d62b98059, so the red is the allowance and not the corpus."
+    },
+    {
+      "criterion": "Emptying the branch's suggestions must redden the generous case on the answered-question assertion, and nothing else of the suggestion set.",
+      "surface": "The same route and rig, over the whole suggestion set rather than the new test alone.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run 'Suggest' -count=1 -timeout 15m -v, with asks.go:299 mutated to suggestionsOnlyAdvice{Suggestions: &model.Suggestions{}}",
+      "observed": "39 top-level PASS, 2 top-level FAIL: the generous case on 'advice.suggestions.decision = null, want the answered ask …', the forced case on 'advice.suggestions.missing = \"\", want a reason the suggestions are absent', and TestCreateAskOnProjectDocumentSuggests on 'related = [], want PDOC-1 from the document's project', which rides the same branch. Nothing else (log mutation-a2.log). The mutated line was printed back before the run, since a mutation that did not apply produces a green that is yours.",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "The same command with asks.go restored is green across the set, and jj diff --stat carries no asks.go afterwards."
+    },
+    {
+      "criterion": "Removing the branch altogether must redden the forced case on the missing envelope, and nothing else of the suggestion set.",
+      "surface": "The same route and rig, over the same set.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run 'Suggest' -count=1 -timeout 15m -v, with the 'if suggestions != nil { … }' branch of asks.go removed",
+      "observed": "39 top-level PASS, 2 top-level FAIL: both cases on 'response has no advice at all, want suggestions-only advice despite the failed write-advice query' and TestCreateAskOnProjectDocumentSuggests on 'advice.suggestions missing on a project-document ask'. Nothing else (log mutation-b2.log).",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "The same command with asks.go restored is green across the set; jj diff --stat empty afterwards."
+    },
+    {
+      "criterion": "The two sibling deadline tests must still pass against whatever the change makes the allowance.",
+      "surface": "computeAndPersistSuggestions called directly against the same Postgres, with asks and issues locked in access exclusive mode, exactly as those tests do.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run TestComputeAndPersistSuggestionsRespectsDeadline -count=5 -timeout 20m -v",
+      "observed": "10 of 10 '--- PASS:' (5 of each), 0 failures, both tests unedited and still reading writeSuggestionTimeout (log siblings2.log). Both build their server with directServer(deps), so they run the default path; their green is no-regression evidence, and the forced case through the ask route is what proves the seam is reached.",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "The same command with DISPATCH_TEST_DATABASE_URL unset skips both tests and still reports 'ok', which is why the PASS lines and not the 'ok' are the evidence here and in every run above."
+    },
+    {
+      "criterion": "The test is shown not to have become slow or fragile in another way.",
+      "surface": "The same route and rig under this repository's load recipe: one busy loop per processor plus a looping dd writer, all at nice -n 10, killed by a trap on exit (script /legion/scratch/infra56/loadrun.sh).",
+      "command": "bash /legion/scratch/infra56/loadrun.sh, which runs go test ./internal/dispatch/api/ -run TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails -count=40 -timeout 30m -v",
+      "observed": "80 '--- PASS:' subtest lines, 0 subtest failures, 40 top-level PASS, 0 top-level FAIL; busy=2 (nproc), wall 237 s, /proc/loadavg '0.00 0.00 0.00' at start and end, as it always reads in a gVisor pod, which is why the busy count and the wall seconds are recorded instead (log load-40.log).",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "The same 40-iteration command against the pre-change body under a forced allowance is the before-control above, red every run; and the mutation runs show the two cases still bite at this head."
+    },
+    {
+      "criterion": "A filed issue or ask still waits at most 300 milliseconds on its suggestions, and the two documents that promise it stay true.",
+      "surface": "The Go package with no database: the server a deployment builds, (&server{}), read through suggestionAllowance, which is the package's own idiom for pinning what a production-shaped server does.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound -count=1 -v, and jj diff --stat",
+      "observed": "PASS, and the diff carries neither packages/envoy/cmd/dispatch/README.md nor packages/envoy/CHANGELOG.md; writeSuggestionTimeout keeps its name, value and comment. register builds &server{deps: deps} and sets suggestionTimeout on no server, so the deployment runs the zero value.",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "The deployment's allowance was deliberately drifted to 10 * time.Millisecond in suggestions.go and the pin run again: '--- FAIL: … a server the deployment builds allows 10ms for its suggestions, want 300ms as cmd/dispatch/README.md and CHANGELOG.md promise' (log pin-control.log). Restored, jj diff empty."
+    },
+    {
+      "criterion": "Nothing else in Dispatch regressed.",
+      "surface": "The api package's own suite against the same real Postgres, plus the static checks the envoy-go job runs.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -count=1 -timeout 55m; gofmt -l .; go vet ./internal/dispatch/...",
+      "observed": "'ok github.com/sjawhar/envoy/internal/dispatch/api 851.152s' (log full-package-final.log), gofmt printing nothing, go vet clean.",
+      "headSha": "3ae0a3c337ff615af2e152b94d7a406d62b98059",
+      "negativeControl": "The first whole-package run on this rig failed TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses to run on a byte-ordered database and says so itself; recreating template1 with the ICU provider (icu_locale='en-US') turned it green, which is a property of the rig built with initdb --locale=C and nothing to do with this change."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/server.go: the unexported server gains suggestionTimeout, the allowance a test may set; zero, which every server the deployment builds leaves it, means writeSuggestionTimeout.",
+    "packages/envoy/internal/dispatch/api/suggestions.go: suggestionAllowance() reads that field through cmp.Or(s.suggestionTimeout, writeSuggestionTimeout); computeAndPersistSuggestions derives its deadline from it and both 'did not answer within …' reasons name it, so the server never reports a bound it did not run under. The constant keeps its name, value and comment.",
+    "packages/envoy/internal/dispatch/api/write_advice_test.go: newFailingAdviceHandler takes a third positional parameter, suggestionTimeout, and sets it on the server it builds; its two other callers pass 0.",
+    "packages/envoy/internal/dispatch/api/suggestions_test.go: TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails keeps its name and becomes two cases over one shared body, each with its own handler and database clone, one assertion per t.Fatalf; TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound pins the deployment's allowance against the literal 300 ms.",
+    "No change to packages/envoy/cmd/dispatch/README.md or packages/envoy/CHANGELOG.md: nothing a user of Dispatch meets changes."
+  ],
+  "trickyParts": [
+    "The 1 ns case ends at the project lookup, not at the search: the ask route passes an empty project, so resolveSuggestionProject runs first and a dead allowance ends the step there, with related empty and missing naming that lookup. Neither case exercises the search or the decision leg under a dead allowance, and after this change no test asserts the shape the wild failure showed - related populated, decision nil, the record then lost. The package's lock idiom cannot reach that state either: the fused search reads asks, so locking asks starves the search first (the planner measured 5 runs at a 5 s allowance, every one related=0 with missing naming the search), and firstAnsweredAsk reads the same table. This is on the pull request's Not proven / risk line in those words.",
+    "A Postgres-backed test in this package skips, and the run still reports 'ok', when DISPATCH_TEST_DATABASE_URL is unset (storetest.go:60). Every run quoted here is evidence only because its --- PASS:/--- FAIL: lines under -v were counted; a bare 'ok' proves nothing.",
+    "The forced case's absent decision is meaningful only because the generous case finds it in an identically seeded corpus; a comment in the test says so, because anyone who later trims the forced case's seeding turns that assertion green for the wrong reason.",
+    "The rig: the issue pod has no Postgres, no docker and no root, so PostgreSQL 17.11 with pgvector was unpacked from Debian packages under /legion/scratch/infra56 (docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md). One addition that doc does not carry: initdb --locale=C leaves every cloned test database byte-ordered, and TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves then refuses to run; recreating template1 with the ICU provider (locale_provider=icu icu_locale='en-US') is what makes the whole package green. Worth a docs/solutions line at retro."
+  ],
+  "deviations": [
+    "The plan's accessor body was 'if s.suggestionTimeout > 0 { return s.suggestionTimeout }; return writeSuggestionTimeout'. The ce-simplify-code pass replaced it with cmp.Or(s.suggestionTimeout, writeSuggestionTimeout), which the package already spells that way (agents.go:135). Identical for every value a caller can produce: the field is unexported and its only writer is newFailingAdviceHandler, called with 0, time.Nanosecond and 30 * time.Second; the two forms differ only for a negative duration, which nothing can set.",
+    "The two subtest names are written as prose with spaces rather than underscore-joined, which is how 41 of this package's 43 subtests spell theirs. testing rewrites a space to '_' when it builds the reported name, so every -run selector in the plan, in this handoff and on the pull request still selects them; the 5-run and mutation runs above used exactly those underscore-joined selectors.",
+    "The plan's load command gained -timeout 30m -v, as the plan itself records (Go's undeclared ten-minute default would kill a 40-iteration run, and -v is the only way the pass and fail counts can be read).",
+    "The architect's third instruction - measure whether the sibling tests' lock idiom can pin the middle failure state, and assert it there if it can - was settled before this phase's code was written: the planner measured that it cannot, and the architect answered 'add no assertion, and build no new rig; what remains is the record'. The record is the Not proven / risk line.",
+    "go.work.sum was modified in the working copy by earlier test runs rather than by this change; it was restored with jj restore and is in no commit."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The first whole-package run took 835 s and the second 851 s in this pod, well past Go's 10-minute default for a test binary, so every command above carries an explicit -timeout. The flaky test itself now costs about 4.8 s an iteration rather than 2.4, because each case seeds its own corpus on its own database clone. The ce-simplify-code efficiency reviewer proposed t.Parallel() on the two cases to halve that; it was declined, because making a test whose whole defect was contention sensitivity contend with itself to save 2.3 s is the wrong trade."
+  ]
+}
