@@ -1313,9 +1313,9 @@ The cutover, in this order:
    issue is one no person intends to resume: `kubectl -n legion delete sandbox <name>`, which
    takes the volume it owns with it. Step 6's list names them.
 9. **Audit the namespace.** The cutover is done when every claim in the namespace is a pod's own
-   or one of the three exceptions. `kubectl -n legion get pvc -l legion.dev/project=<PROJECT>`
-   answers this question with silence whether the cutover worked or not — an issue's disk carries
-   no label now — so read every claim and judge it by its owner:
+   or one of the three exceptions. No label selector can answer that: an issue's disk carries no
+   label at all, and the only claims Legion labels are exceptions, so read every claim and judge it
+   by its owner:
 
    ```sh
    kubectl -n legion get pvc -o json | jq -r --arg controller 'issue-legion-<project>-controller' --arg state '<the daemon state claim>' '

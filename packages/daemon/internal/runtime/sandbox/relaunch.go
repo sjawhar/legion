@@ -593,7 +593,7 @@ func (r *Runtime) replaceSupersededSandbox(ctx context.Context, l launch, s *san
 // no annotations of its own, so this sets the one key rather than the manifest threading it.
 func (r *Runtime) createSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	manifest := r.sandboxManifest(l)
-	held := r.strandedPod(l.name)
+	held, _ := r.strandedPod(l.name)
 	if held != "" {
 		manifest.Annotations = map[string]string{displacedAnnotation: held}
 	}
@@ -612,25 +612,29 @@ func (r *Runtime) createSandbox(ctx context.Context, l launch) (*sandbox, error)
 }
 
 // strand keeps uid as the pod the Sandbox name names as displaced while that Sandbox is away
-// (stranded).
+// (stranded), moving the record's generation (strandedGen).
 func (r *Runtime) strand(name, uid string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.stranded[name] = uid
+	r.strandedGen++
 }
 
-// strandedPod is the pod kept for the Sandbox name as displaced (stranded), "" when none is.
-func (r *Runtime) strandedPod(name string) string {
+// strandedPod is the pod kept for the Sandbox name as displaced (stranded), "" when none is,
+// beside the record's generation as of that read (strandedGen).
+func (r *Runtime) strandedPod(name string) (string, uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.stranded[name]
+	return r.stranded[name], r.strandedGen
 }
 
-// unstrand drops what is kept for the Sandbox name (stranded).
+// unstrand drops what is kept for the Sandbox name (stranded), moving the record's generation
+// (strandedGen).
 func (r *Runtime) unstrand(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.stranded, name)
+	r.strandedGen++
 }
 
 // awaitPodGone waits, bounded by the boot timeout, until no pod the Sandbox owns holds its name —

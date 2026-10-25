@@ -153,6 +153,14 @@ type Runtime struct {
 	// past the Create, it would set that name on whatever Sandbox the issue is next created as.
 	// Its writes run under the pod's launch turn, every read and write under mu.
 	stranded map[string]string
+	// strandedGen counts the writes to stranded: strand and unstrand each bump it under mu, and it is
+	// never reset for the runtime's life. evaluate takes it with the record before the read that
+	// confirms a Sandbox is absent and again after, so a record written or dropped while that read
+	// was out — a whole foreground delete may land inside one slow GET — is seen to have moved
+	// rather than read as settled. One counter serves every name, since a per-name one deleted with
+	// its record would read the same before a strand and after its unstrand; a write for another
+	// issue's name costs a read of this one an Uncertain, answered again a tick later.
+	strandedGen uint64
 	// occupiedCaches are the cache names RepositoryCache found held by another repository's cache and
 	// has logged, so each is logged once.
 	occupiedCaches map[string]bool

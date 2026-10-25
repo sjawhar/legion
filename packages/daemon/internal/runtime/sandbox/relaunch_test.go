@@ -505,6 +505,64 @@ func TestAGapReadOfARoleOfAnotherPodThanTheReplacementEndedIsNotDisplaced(t *tes
 	}
 }
 
+// The mirror of TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced, whose probe
+// begins inside the gap: here the confirming read is begun before the launch writes what it
+// keeps for the gap, and the API server answers it only once the launch has written that record
+// and seen its foreground delete through — a GET held up by load or a throttle spans the whole
+// delete. The Sandbox store has yet to hear of the suspension's patch naming the pod, since
+// nothing orders it after the pod store that shows the pod gone, so the probe asks the API server
+// with nothing held: the record it took is empty for the old reason and the absence the read
+// reports is true for the new one. Read as settled that is Gone and not Displaced, a final verdict
+// that takes the incarnation off the watch and charges the supervisor a death the daemon made. The
+// record moved while the read was out, so the observation is Uncertain, and the next one, with the
+// record settled, reads the displacement.
+func TestAConfirmingReadTheReplacementsDeleteOvertakesIsUncertain(t *testing.T) {
+	name := SandboxName(workerToken)
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	g := newRig(t, []k8sruntime.Object{
+		sandboxObject(t, name, "uid-sandbox-superseded", modeSuspended, claimLabels(claim.RoleTester)),
+	}, withoutController())
+	var armed, overtaken atomic.Bool
+	g.dyn.PrependReactor("get", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() != name || !armed.CompareAndSwap(true, false) {
+			return false, nil, nil
+		}
+		// The probe has taken the record and sent its read. Before the answer comes back the launch
+		// keeps the replaced pod's name for the gap and its delete completes, as
+		// replaceSupersededSandbox does, so the answer is the absence that delete made.
+		g.r.strand(name, "uid-pod-old")
+		if err := g.dyn.Tracker().Delete(sandboxGVR, testNamespace, name); err != nil {
+			return true, nil, err
+		}
+		overtaken.Store(true)
+		return true, nil, apierrors.NewNotFound(sandboxGVR.GroupResource(), name)
+	})
+	armed.Store(true)
+	obs, err := g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !overtaken.Load() {
+		t.Fatalf("the probe never sent the read that confirms the Sandbox's absence (%s: %s), so it proves nothing about that read", obs.Kind, obs.Detail)
+	}
+	if obs.Kind != runtime.Uncertain {
+		t.Fatalf("the reviewer recorded in the replaced pod, read by a confirming GET the replacement's delete overtook: %s, Displaced %t (%s); want Uncertain — the record taken before the read is not the one its absence belongs to, and a final verdict would charge a death the daemon made",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+	g.eventually("the Sandbox store to lose the deleted Sandbox", func() bool {
+		s, _ := g.r.storedSandbox(name)
+		return s == nil
+	})
+	obs, err = g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Kind != runtime.Gone || !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, read again once the record settled: %s, Displaced %t (%s); want Gone and Displaced",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+}
+
 // A replacement whose Create fails leaves the issue's name with no Sandbox until the issue's next
 // launch: the roles of the pod it replaced are read Displaced throughout, not only for the moment
 // a successful Create would have taken, and the Sandbox that next launch creates carries the name,

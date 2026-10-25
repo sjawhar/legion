@@ -207,6 +207,11 @@ port_session_db=${LEGION_E2E_SESSION_DB_PORT:-}
 # providers Secret key its URL reaches every pod under (runtime.kubernetes.session_dsn_secret).
 session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
 session_dsn_key=SESSION_DSN
+# The sessions directory of a pod's Oh My Pi profile (the runtime's ompSessionsDir). No pod keeps a
+# file there: a session's key in the session database is the path its file would have had, so this
+# is the prefix of every pod session's key, and collect_transcripts copies the table's sessions from
+# under it.
+pod_sessions_dir=/home/legion/.omp/profiles/legion/agent/sessions
 stream=ENVOY_NOTIFICATIONS
 # Roots the run's daemon runs at once. Trees 3 and 4 each take the slot the tree before them leaves,
 # so the run's roots never exceed the cap.
@@ -622,7 +627,6 @@ claim_view() {
 }
 claim_sandbox() { claim_view "$1" "$2" | jq -er '.locator.sandbox.name'; }
 claim_pod_uid() { claim_view "$1" "$2" | jq -er '.locator.sandbox.podUid'; }
-claim_container() { claim_view "$1" "$2" | jq -er '.locator.sandbox.container'; }
 # claim_moved_or_held ISSUE ROLE POD_UID: the daemon holds ISSUE, or ROLE's process now names
 # another pod - its reaction to the end of POD_UID.
 claim_moved_or_held() {
@@ -931,6 +935,69 @@ bash_legion_commands() {
         | select(test("(^|[^A-Za-z0-9_/-])(\\S*/)?legion([^A-Za-z0-9_-]|$)")) end'
 }
 
+# ---- agent sessions: every pod's Oh My Pi session is a row of the run's session database ----------
+
+# Every pod of the run keeps its Oh My Pi session in the run's own scratch Postgres
+# (runtime.kubernetes.session_store: postgres), never on its disk. Oh My Pi's table omp_session_files
+# keys a session by the path its file would have had (internal/ompsessions): the session file a
+# claim records is that key, and so is a subagent's <parent's stem>/<id>.jsonl beside it. No pod
+# holds a file at either, so every read of a pod's session goes to the table, through the database
+# container the run started (session_db_container), with no client on the devbox and no input
+# beyond the ones that start it. The operator's controller runs on this machine, outside the sandbox
+# runtime, and keeps its sessions as files in the run's profile, which are read as files.
+
+# session_psql NAME VALUE runs the SQL on stdin in the session database as its owner, legion, with
+# VALUE the psql variable NAME, which the SQL quotes as a literal (:'NAME'), so no value is ever
+# spliced into it; the SQL comes on stdin because psql interpolates no variable into a -c command.
+# The output is unaligned and tuples-only (-A -t): each value exactly as the server sent it, with no
+# padding, wrapping, quoting, escaping, header or row count, so a transcript's quotes, backslashes
+# and newlines arrive as Oh My Pi wrote them, and psql ends the last row with one newline of its own.
+# The aligned default pads and wraps a value of many lines, and COPY's text and CSV formats escape
+# or quote one, so each would corrupt the JSONL. ON_ERROR_STOP makes an SQL error psql's exit status.
+session_psql() {
+  docker exec -i -e PGCLIENTENCODING=UTF8 "$session_db_container" \
+    psql -X -q -A -t -v ON_ERROR_STOP=1 -U legion -d sessions -v "$1=$2"
+}
+# session_text PATH prints the session the table holds at PATH whole, as Oh My Pi reads it and
+# ompsessions.Read does: the row's content, then each of its parts in start_offset order, in one
+# statement so both come from one snapshot. The statement answers one row for a session the table
+# holds and none otherwise, so psql's closing newline is what tells a held session, however short,
+# from none: it is taken off, and none fails naming PATH, as the `cat` of a missing file did. The x
+# after psql's output keeps the substitution from stripping the session's own trailing newlines.
+session_text() {
+  local out
+  out=$(session_psql path "$1" <<<"SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset)
+    FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path';" && printf x) ||
+    { echo "the session database $session_db_container could not be read for the session $1" >&2; return 1; }
+  out=${out%x}
+  [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
+  printf '%s' "${out%$'\n'}"
+}
+# session_copy PREFIX DIR writes every session the table holds under the key prefix PREFIX into DIR,
+# each at its key after PREFIX, so the copy keeps the layout the files would have had.
+session_copy() {
+  local prefix=$1 dir=$2 paths path
+  paths=$(session_psql prefix "$prefix" <<<"SELECT path FROM omp_session_files WHERE left(path, length(:'prefix')) = :'prefix' ORDER BY path;") || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    mkdir -p "$(dirname "$dir/${path#"$prefix"}")"
+    session_text "$path" >"$dir/${path#"$prefix"}" || return 1
+  done <<<"$paths"
+}
+# claim_session_file ISSUE ROLE prints the session file the newest claim of ROLE on ISSUE records,
+# the session's key in the session database.
+claim_session_file() {
+  "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
+    jq -er --arg issue "$1" --arg role "$2" \
+      '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
+}
+# claim_session_text ISSUE ROLE prints the claim's session whole, as the session database holds it.
+claim_session_text() {
+  local file
+  file=$(claim_session_file "$1" "$2") || return 1
+  session_text "$file"
+}
+
 # ---- the review pair: the reviewer's two thermonuclear task dispatches, as its session shows them ----
 
 pair_agents="thermonuclear-deep-review thermonuclear-code-quality"
@@ -965,21 +1032,19 @@ pair_dispatch() {
          | ($d.text | [scan("<task-result [^>]*agent=\"" + $agent + "\"[^>]*>[\\s\\S]*?</task-result>")])[]
          | {timestamp: $d.timestamp, via: $d.via, content: .}]}'
 }
-# pair_text prints the reviewer's session, read from tree 1's root's own volume with no call to the
-# daemon, so the teardown can still read it after a signal to the run's process group has ended the
-# daemon.
+# pair_text prints the reviewer's session, the one tree-reviewed named (pair_session), from the
+# session database with no call to the daemon, so the teardown can still read it after a signal to
+# the run's process group has ended the daemon: the database runs in a container the docker daemon
+# keeps, outside that group, and the teardown removes it only after record_pair has run.
 pair_text() {
-  local pod
   [ -n "$pair_session" ] || return 1
-  pod=$(issue_pod "$tree1") || return 1
-  pod_exec "$pod" reviewer cat -- "$pair_session"
+  session_text "$pair_session"
 }
 # pair_settled: the reviewer dispatched both agents and each dispatch has an outcome: a refused call,
 # a task-result block naming the agent, or the subagent's own session ending in a yield.
 pair_settled() {
-  local text agent ids id pod
+  local text agent ids id sub
   text=$(pair_text) || return 1
-  pod=$(issue_pod "$tree1") || return 1
   for agent in $pair_agents; do
     ids=$(pair_dispatch "$agent" <<<"$text" | jq -r '
       if (.calls | length) == 0 then "none"
@@ -990,26 +1055,25 @@ pair_settled() {
       settled) continue ;;
     esac
     for id in $ids; do
-      pod_exec "$pod" reviewer grep -q '"toolName":"yield"' -- "${pair_session%.jsonl}/$id.jsonl" && continue 2
+      sub=$(session_text "${pair_session%.jsonl}/$id.jsonl") && grep -qF '"toolName":"yield"' <<<"$sub" && continue 2
     done
     return 1
   done
 }
-# record_pair keeps the reviewer's session, the sessions of the subagents it started, and each
-# agent's dispatch under $evidence/review-pair, once.
+# record_pair keeps the reviewer's session, the sessions of the subagents it started (every session
+# keyed under its stem), and each agent's dispatch under $evidence/review-pair, once.
 record_pair() {
-  local pod text agent
+  local text agent stem
   [ -z "$pair_recorded" ] || return 0
   text=$(pair_text) || return 1
-  pod=$(issue_pod "$tree1") || return 1
-  mkdir -p "$evidence/review-pair"
+  stem=$(basename "$pair_session" .jsonl)
+  mkdir -p "$evidence/review-pair/$stem"
   printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl"
-  op exec "$pod" -c reviewer -- tar -C "$(dirname "$pair_session")" -cf - "$(basename "$pair_session" .jsonl)" 2>/dev/null |
-    tar -C "$evidence/review-pair" -xf - 2>/dev/null || true
+  session_copy "${pair_session%.jsonl}/" "$evidence/review-pair/$stem" || return 1
   for agent in $pair_agents; do
     pair_dispatch "$agent" <<<"$text" >"$evidence/review-pair/$agent.json"
   done
-  printf '%s\n' "$(basename "$pair_session" .jsonl)" >"$evidence/review-pair/session-stem"
+  printf '%s\n' "$stem" >"$evidence/review-pair/session-stem"
   pair_recorded=1
 }
 # reviewer_decision CHANGES writes `approve` to $work/review-decision once the review App has
@@ -1024,18 +1088,6 @@ reviewer_decision() {
   else
     return 1
   fi
-}
-claim_session_file() {
-  "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
-    jq -er --arg issue "$1" --arg role "$2" \
-      '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
-}
-# claim_session_text ISSUE ROLE prints the claim's session as the pod holds it.
-claim_session_text() {
-  local issue=$1 role=$2 file pod
-  file=$(claim_session_file "$issue" "$role") || return 1
-  pod=$(claim_sandbox "$issue" "$role") || return 1
-  pod_exec "$pod" "$role" cat -- "$file"
 }
 # planning_tasks ISSUE counts the planning tasks in ISSUE's planner session: the user messages the
 # daemon's deliveries leave, `Issue: <ISSUE>. Phase: planning.` among their words, never a line the
@@ -2257,8 +2309,8 @@ full_agent_merger_message() {
 }
 # full_agent_task_id SESSION LOGIN prints the id of the first task-result block, in a task result
 # of the session that returned without error, whose text carries LOGIN; nothing when none does.
-# The id is the task's name, and the subagent's own session lies beside its parent's at <session
-# stem>/<id>.jsonl, where review-pair reads the pair's.
+# The id is the task's name, and the subagent's own session is keyed beside its parent's in the
+# session database, at <session stem>/<id>.jsonl, where review-pair reads the pair's.
 full_agent_task_id() {
   session_jq "$1" -r --arg want "$2" 'include "stage4b-tools";
     [tool_result_texts("task")[] | select(contains($want)) | capture("<task-result id=\"(?<id>[^\"]+)\"") | .id] | first // ""'
@@ -2432,19 +2484,14 @@ remove_run_branches() {
   while IFS= read -r line; do [ -z "$line" ] || note "$line"; done <<<"$out"
   return 0
 }
-# collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: each
-# issue pod's, from the issue's own volume (the roots' and tree 1's children's, a child's planner
-# container the one that ran there), and the operator's controller's, which lives in the run's own
-# profile on this machine and goes with that profile at teardown (transcripts/controller).
+# collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: every
+# pod's, from the session database, each at its key under pod_sessions_dir (a pod already gone, a
+# child's included), and the operator's controller's, which lives in the run's own profile on this
+# machine and goes with that profile at teardown (transcripts/controller). It runs before the
+# teardown removes the database's container.
 collect_transcripts() {
-  local issue role pod
-  for issue in $tree1 $tree2 $tree3 $tree4 $child1 $child2 $child3 $child4; do
-    pod=$(issue_pod "$issue") || continue
-    role=architect
-    case $issue in "$child1" | "$child2" | "$child3" | "$child4") role=planner ;; esac
-    op exec "$pod" -c "$role" -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
-      tar -C "$evidence/transcripts" -xf - 2>/dev/null || true
-  done
+  session_copy "$pod_sessions_dir/" "$evidence/transcripts" ||
+    note "the pods' sessions could not be copied from the session database $session_db_container into $evidence/transcripts"
   if [ -d "$profile_agent/sessions" ]; then
     mkdir -p "$evidence/transcripts/controller"
     cp -R "$profile_agent/sessions/." "$evidence/transcripts/controller/"
@@ -4508,11 +4555,9 @@ for role in architect planner implementer tester reviewer; do
   id=$(full_agent_task_id "$excerpt" "$app")
   [ -n "$id" ] || fail "$role: the task result carrying $app holds no <task-result id=…> block; its task results: $(tool_result_quotes "$excerpt" task)"
   session=$(claim_session_file "$tree1" "$role") || fail "$role on $tree1 has no session file"
-  pod=$(claim_sandbox "$tree1" "$role") || fail "$role on $tree1 has no Sandbox"
-  container=$(claim_container "$tree1" "$role") || fail "$role on $tree1 has no role container"
   sub="$evidence/full-agent-tools/$role-$id.jsonl"
-  pod_exec "$pod" "$container" cat -- "${session%.jsonl}/$id.jsonl" >"$sub" ||
-    fail "$role: its subagent's session ${session%.jsonl}/$id.jsonl is not beside its parent's in $pod/$container"
+  session_text "${session%.jsonl}/$id.jsonl" >"$sub" ||
+    fail "$role: its subagent's session ${session%.jsonl}/$id.jsonl is not in the session database beside its parent's"
   verdict=$(full_agent_subagent_verdict "$sub" "$app" "$other")
   jq -e '.login and .yield and (.other | not)' <<<"$verdict" >/dev/null ||
     fail "$role: its subagent $id's session must hold a bash result carrying $app, an accepted yield, and no bash result carrying $other: $verdict"
@@ -5532,9 +5577,13 @@ jq -e '.wrong == []' <<<"$up" >/dev/null || fail "the daemon logged a liveness l
 note "negative control: after line $up_mark of the daemon log, for $watched s with $launched_session holding the role, neither line"
 claim=$(claim_by_token "$controller_token")
 pod=$(jq -r .locator.sandbox.name <<<"$claim")
+# Its sessions are the session database's under its session file's directory, copied in the layout
+# its pod's sessions directory would have held.
+launched_file=$(jq -r '.sessionFile // ""' <<<"$claim")
+launched_dir=$(dirname "$launched_file")
 mkdir -p "$evidence/transcripts/daemon-controller"
-op exec "$pod" -c "$(jq -r .locator.sandbox.container <<<"$claim")" -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
-  tar -C "$evidence/transcripts/daemon-controller" -xf - 2>/dev/null || note "the session of the controller the daemon launched could not be copied from $pod"
+{ [ -n "$launched_file" ] && session_copy "$launched_dir/" "$evidence/transcripts/daemon-controller/$(basename "$launched_dir")"; } ||
+  note "the sessions of the controller the daemon launched could not be copied from the session database (its claim records session file '$launched_file')"
 if [ -n "$skip_controller" ]; then
   note "STAGE4B_SKIP_CONTROLLER: the daemon-launched controller's GitHub credential is not checked"
 else

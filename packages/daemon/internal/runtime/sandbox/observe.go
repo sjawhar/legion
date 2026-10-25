@@ -86,9 +86,14 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 // (stranded) stands in for the annotation. It is taken before the confirming read: it is kept from
 // before the delete is sent until after the Create is answered, so taken first it misses the gap
 // only if a whole foreground delete, garbage collection included, ran between the two, where taken
-// after it would miss a Create landing between them. Only an absence the API server confirmed lets
-// it answer; a Sandbox that exists answers for itself, as it does for a restarted daemon. It names
-// a pod by uid, so it can only call displaced a process of the pod the suspension ended.
+// after it would miss a Create landing between them. That one window is closed by the record's
+// generation (strandedGen), taken with it and again once the read answers: a GET the API server is
+// slow to answer can span the whole delete, and then the record taken before it is not the one the
+// absence it reports belongs to, so the observation is Uncertain and the claim is evaluated again a
+// tick later, when a Sandbox exists to answer for itself or the record has settled. Only an absence
+// the API server confirmed under a record that did not move lets it answer; a Sandbox that exists
+// answers for itself, as it does for a restarted daemon. It names a pod by uid, so it can only call
+// displaced a process of the pod the suspension ended.
 func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
 	uncertain := func(format string, args ...any) runtime.Observation {
 		return runtime.Observation{Locator: loc, Kind: runtime.Uncertain, At: r.now(), Detail: fmt.Sprintf(format, args...)}
@@ -101,7 +106,7 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 	obs := r.verdict(ctx, loc, v)
 	stranded := false
 	if ends(obs) && !names(v.sandbox, loc) {
-		held := r.strandedPod(name)
+		held, heldAt := r.strandedPod(name)
 		current, err := r.readSandbox(ctx, name)
 		if err != nil {
 			return uncertain("the stores report %s (%s); reading sandbox %s to learn whether the daemon replaced pod %s failed: %v",
@@ -112,6 +117,10 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 			v = r.viewOf(name, current)
 			obs = r.verdict(ctx, loc, v)
 		case current == nil:
+			if now, nowAt := r.strandedPod(name); nowAt != heldAt {
+				return uncertain("the stores report %s (%s); the API server holds no sandbox %s, but the daemon's record of the pods its sandbox replacements displaced moved while that read was out (pod %q held for it before, %q now), so whether the daemon replaced pod %s is read again",
+					obs.Kind, obs.Detail, name, held, now, loc.Sandbox.PodUID)
+			}
 			stranded = held != "" && held == loc.Sandbox.PodUID
 		}
 	}
