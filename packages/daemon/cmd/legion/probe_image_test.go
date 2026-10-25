@@ -667,9 +667,9 @@ func TestProbeImageRunsTheClaudeLaneForTheRootItIsGiven(t *testing.T) {
 }
 
 // Every way the image's Claude Code can be broken is refused before the capability table, naming
-// what to rebuild: a `claude` that does not run, a root missing either file a worker loads, and a
-// root whose manifest speaks another daemon API contract or cannot be read at all — the same
-// contract probe the Legion plugin's manifest gets.
+// what to rebuild: a `claude` that does not run, a root missing either file a worker loads or
+// holding a directory in its place, and a root whose manifest speaks another daemon API contract
+// or cannot be read at all — the same contract probe the Legion plugin's manifest gets.
 func TestProbeImageRefusesABrokenClaudeRoot(t *testing.T) {
 	for name, testCase := range map[string]struct {
 		breakIt func(t *testing.T, img image, root string)
@@ -684,6 +684,12 @@ func TestProbeImageRefusesABrokenClaudeRoot(t *testing.T) {
 		"no generated Legion plugin": {func(t *testing.T, _ image, root string) {
 			remove(t, filepath.Join(root, "legion", ".claude-plugin", "plugin.json"))
 		}, "holds no plugin.json"},
+		"a directory for the built channel server": {func(t *testing.T, _ image, root string) {
+			directoryFor(t, filepath.Join(root, "dist", "envoy-channel.js"))
+		}, "holds no envoy-channel.js ({{root}}/dist/envoy-channel.js is not a regular file (mode d"},
+		"a directory for the generated Legion plugin": {func(t *testing.T, _ image, root string) {
+			directoryFor(t, filepath.Join(root, "legion", ".claude-plugin", "plugin.json"))
+		}, "holds no plugin.json ({{root}}/legion/.claude-plugin/plugin.json is not a regular file (mode d"},
 		"another daemon API contract": {func(t *testing.T, _ image, root string) {
 			rewrite(t, filepath.Join(root, "package.json"), `"daemonApiVersion":`+thisBinarysContract, `"daemonApiVersion":2`)
 		}, "claude-envoy at " + "{{manifest}}" + " (package 1.0.0) speaks daemon API contract 2; this daemon requires " + thisBinarysContract + ". Build the worker image from this daemon's commit."},
@@ -696,7 +702,7 @@ func TestProbeImageRefusesABrokenClaudeRoot(t *testing.T) {
 			img.install(t, "claude", claudeStub)
 			root := claudeRoot(t, thisBinarysContract)
 			testCase.breakIt(t, img, root)
-			want := strings.ReplaceAll(testCase.want, "{{manifest}}", filepath.Join(root, "package.json"))
+			want := strings.NewReplacer("{{manifest}}", filepath.Join(root, "package.json"), "{{root}}", root).Replace(testCase.want)
 
 			code, stdout, stderr := probeImage(img.flags("--claude-root", root)...)
 
@@ -704,5 +710,14 @@ func TestProbeImageRefusesABrokenClaudeRoot(t *testing.T) {
 				t.Fatalf("probe-image --claude-root over %s = %d %q %q, want exit 1 saying %q and no table", name, code, stdout, stderr, want)
 			}
 		})
+	}
+}
+
+// directoryFor replaces the file at path with an empty directory of the same name.
+func directoryFor(t *testing.T, path string) {
+	t.Helper()
+	remove(t, path)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
 	}
 }

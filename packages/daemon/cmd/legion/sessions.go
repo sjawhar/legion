@@ -173,11 +173,14 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 }
 
 // missingSessions are the claims of the list, every tree's, that record a session the table does
-// not hold: under SQL storage each would fail every launch until it is copied or marked lost.
+// not hold: under SQL storage each would fail every launch until it is copied or marked lost. A
+// Claude Code transcript (sandbox.ClaudeSessionRefusal) is none of them: the table never holds
+// one, and a Claude claim resumes from its transcript on the volume whatever session_store says,
+// so it is neither missing nor a claim to mark lost.
 func missingSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim) ([]importedClaim, error) {
 	var missing []importedClaim
 	for _, c := range claims {
-		if c.SessionFile == "" {
+		if c.SessionFile == "" || sandbox.ClaudeSessionRefusal(c.SessionFile) != nil {
 			continue
 		}
 		_, found, err := ompsessions.Written(ctx, conn, c.SessionFile)
@@ -200,7 +203,9 @@ func missingSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim
 // volume is gone. Run it with the daemon that owns that database stopped, since a running daemon
 // holds its claims in memory and writes them back; stopped, its database is the record, so a claim
 // it records with a session file the list does not give that claim refuses the run before anything
-// is marked (unlistedClaims). Only a claim still recording the session the list says is marked.
+// is marked (unlistedClaims). Only a claim still recording the session the list says is marked. A
+// claim recording a Claude Code transcript is left as it is, with a line saying why: it is not
+// missing (missingSessions), and its transcript stays on the volume, as `sessions import` says.
 func runSessionsMarkLost(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("sessions mark-lost", sessionsMarkLostUsage, stderr)
 	input := addSessionsInput("mark-lost", sessionsMarkLostUsage, flags)
@@ -246,6 +251,11 @@ func runSessionsMarkLost(ctx context.Context, args []string, stdout, stderr io.W
 	if len(unlisted) > 0 {
 		fmt.Fprintf(stderr, "legion sessions mark-lost: the daemon's database records %d session file(s) the claims list lacks, so a claim launched after the list was saved; marked nothing: stop every writer, save the list again and copy again\n", len(unlisted))
 		return 1
+	}
+	for _, c := range claims {
+		if refusal := sandbox.ClaudeSessionRefusal(c.SessionFile); refusal != nil {
+			fmt.Fprintf(stdout, "%s not marked lost: %v\n", c.Token, refusal)
+		}
 	}
 	marked, failed := 0, 0
 	for _, c := range missing {

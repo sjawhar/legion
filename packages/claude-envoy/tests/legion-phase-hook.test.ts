@@ -108,7 +108,7 @@ async function harness(
     stateFile: file,
     claim: () => options.claim,
     booted: booted.promise,
-    readState: () => daemon.state(),
+    readState: (signal) => daemon.state({ signal }),
     inbox:
       options.inbox === false
         ? undefined

@@ -235,8 +235,13 @@ func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
 // manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; a relaunch whose
-// workspace is recovered after its volume was lost; the root enrolled with the secrets broker; and
-// the project controller's pod, launched fresh and resuming. Every one owns its volume.
+// workspace is recovered after its volume was lost; the root enrolled with the secrets broker; the
+// project controller's pod, launched fresh and resuming; and a worker on Claude Code, a case of its
+// own so every Oh My Pi one keeps pinning that pod unchanged by the Claude backend. The Claude
+// worker's Sandbox is the Oh My Pi worker's byte for byte: its lane is the launcher's start command
+// (launcherCommand), which TestAClaudeLaunchCarriesItsMCPDocumentAsALauncherFile holds, so a pod
+// change made for Claude Code alone shows in its golden and leaves worker's. Every one owns its
+// volume.
 // agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
 // (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
 // building that case's manifest, and restore nil after — every other case runs unenrolled).
@@ -257,6 +262,7 @@ func manifestCases(t *testing.T) map[string]struct {
 	}{
 		"root":              {rootSpec(t), nil},
 		"worker":            {workerSpec(t), nil},
+		"claude-worker":     {claudeWorkerSpec(t), nil},
 		"resume":            {resume, nil},
 		"recovered":         {recovered, nil},
 		"controller":        {controllerSpec(t), nil},
@@ -1689,10 +1695,10 @@ func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
 // pod — are exactly what Legion's own pods carry: every volume of every pod a launch or
 // the image probe runs, and every mount and variable of the containers the operator's pieces join
 // (the agent's and the probe's), with every optional piece the runtime adds configured and nothing
-// of a spec's or the operator's. A Claude Code worker joins the goldens' cases here, since three
-// of the variables are its alone and no golden is a Claude pod's. A piece added to a pod and not
-// to its list is one an operator could collide with unrefused; one left in a list that no pod
-// carries is refused for nothing.
+// of a spec's or the operator's. Among the goldens' cases is a Claude Code worker, whose container
+// alone carries three of the variables. A piece added to a pod and not to its list is one an
+// operator could collide with unrefused; one left in a list that no pod carries is refused for
+// nothing.
 func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
@@ -1715,11 +1721,8 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 			env[variable.Name] = true
 		}
 	}
-	specs := []runtime.SpawnSpec{claudeWorkerSpec(t)}
 	for _, tc := range manifestCases(t) {
-		specs = append(specs, tc.spec)
-	}
-	for _, spec := range specs {
+		spec := tc.spec
 		spec.Env, spec.Secrets = nil, nil
 		pod := podOf(t, r, spec)
 		carry(pod, workerOf(t, r, spec))

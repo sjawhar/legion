@@ -123,8 +123,9 @@ export interface PhaseHookDeps {
    * reminder and the recreated-workspace notice both need the claim, and neither is sent before
    * one exists. Never rejects. */
   readonly booted: Promise<void>
-  /** The daemon's whole state, for the reminder's record check. */
-  readonly readState: () => Promise<LegionState>
+  /** The daemon's whole state, for the reminder's record check, aborted with `signal` once the
+   * check's bound passes (`PhaseReminderDeps.readState`). */
+  readonly readState: (signal: AbortSignal) => Promise<LegionState>
   /** Writes one line into the session over the bridge's inbox, which turns it into a user turn,
    * and resolves once the bridge has queued it. Undefined for a session outside a Legion pane,
    * where nothing can reach the worker between its turns. */

@@ -624,12 +624,13 @@ its generation is told neither session variable and its launcher stats that file
 does; a replacement pod continues it with `--resume <session id>`, the id read from the recorded
 path. Two consequences hold whatever `session_store` says: `legion sessions import` refuses such a
 transcript, naming it (that one-off copy fills Oh My Pi's table, which holds no session of a
-transcript), and a Claude claim with a session to resume expects the issue's volume
-(`LEGION_EXPECT_ISSUE_VOLUME`), so a lost volume is `workspace-init`'s loud refusal rather than a
-quiet fresh agent. The recreated-workspace notice reaches it too: its own MCP server
-(`packages/claude-envoy`) reads `LEGION_WORKSPACE_RECREATED` at start and writes the same text
-into the session over the bridge's inbox, once per launch, recorded beside the phase reminder's
-state so a restarted server does not repeat it.
+transcript), and neither it nor `legion sessions mark-lost` counts the transcript `missing` from
+that table, so mark-lost leaves its claim as it is; and a Claude claim with a session to resume
+expects the issue's volume (`LEGION_EXPECT_ISSUE_VOLUME`), so a lost volume is `workspace-init`'s
+loud refusal rather than a quiet fresh agent. The recreated-workspace notice reaches it too: its
+own MCP server (`packages/claude-envoy`) reads `LEGION_WORKSPACE_RECREATED` at start and writes
+the same text into the session over the bridge's inbox, once per launch, recorded beside the phase
+reminder's state so a restarted server does not repeat it.
 
 The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
 volume projects another session store than a pod created now would — one created before
@@ -750,7 +751,9 @@ launches starts a fresh session.
    Then, for every claim of the list whose recorded session the table lacks, it clears the
    claim's session and session file and marks its workspace lost, as the daemon marks a claim
    whose volume was lost, but only while the claim still records that session file. It prints
-   `marked lost` or `failed to mark lost` per claim, then a count, and exits 1 on any failure.
+   `marked lost` or `failed to mark lost` per claim, and `not marked lost` for a claim recording a
+   Claude Code transcript, which is no session of the table and stays on the volume, then a count,
+   and exits 1 on any failure.
    Each such claim starts a fresh session, a workflow role's in a workspace recovered from its
    issue's branch.
 6. **Only then delete the old Sandboxes and their volumes**, then finish with steps 4 to 6 of

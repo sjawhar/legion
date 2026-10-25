@@ -1111,7 +1111,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
           stateFile: phaseStallFile(pane.configDir, identity.id),
           claim: () => claim?.capability(),
           booted: claimBooted.promise,
-          readState: () => daemon.state(),
+          readState: (signal) => daemon.state({ signal }),
           inbox:
             inbox === undefined
               ? undefined

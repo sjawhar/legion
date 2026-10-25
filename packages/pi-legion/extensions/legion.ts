@@ -166,7 +166,7 @@ export default function legionExtension(pi: PiApi): void {
       paneContext === undefined
         ? undefined
         : claimSession.capability(paneContext.sessionManager.getSessionId()),
-    readState: () => roleDaemon().state(),
+    readState: (signal) => roleDaemon().state({ signal }),
     publisher: () => {
       if (architectPublisher === undefined) {
         const envoy = sessionEnvoySettings(sessionConfigFile("omp", process.env), process.env, {

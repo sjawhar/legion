@@ -225,6 +225,60 @@ func TestSessionsImportMarksAClaimWhoseSessionTheTableLacksLost(t *testing.T) {
 	}
 }
 
+// A Claude Code transcript is no session Oh My Pi's table holds, so `sessions import` refuses it
+// and says it stays on the volume; mark-lost agrees in writing. It does not count the transcript
+// missing, leaves its claim's session, session file and workspace as they are, and names it with a
+// line saying why, beside an Oh My Pi session the table lacks, which it marks lost as before.
+func TestSessionsMarkLostLeavesAClaudeTranscriptOnTheVolume(t *testing.T) {
+	transcript := "/legion/scratch/state/tester/claude/projects/--legion-workspaces-sjawhar-legion-legion-1--/9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f.jsonl"
+	gone := agentSessions + "/--b--/2026-10-08T12-00-00-000Z_0002.jsonl"
+	r := newSessionsImportRig(t, []map[string]string{
+		{"token": "legion-legion-legion-1-tester", "tree": "LEGION-1", "sessionFile": transcript},
+		{"token": "legion-legion-legion-2-architect", "tree": "LEGION-2", "sessionFile": gone},
+	})
+	code, out, _ := r.run("--tree", "LEGION-1")
+	if code != 1 || !strings.Contains(out, "legion-legion-legion-1-tester failed "+transcript+": ") ||
+		!strings.Contains(out, "it stays on the volume its role's pod reads it from") ||
+		strings.Contains(out, "legion-legion-legion-1-tester missing") ||
+		!strings.Contains(out, "failed 1, refused 0, missing 1\n") {
+		t.Fatalf("import = %d:\n%s\nwant the transcript refused as staying on the volume, not missing, and only the other tree's session missing", code, out)
+	}
+	st, daemonDSNFile := stoppedDaemon(t,
+		suspendedClaim("legion", "legion-legion-legion-1-tester", "LEGION-1", legionclaim.RoleTester, transcript),
+		suspendedClaim("legion", "legion-legion-legion-2-architect", "LEGION-2", legionclaim.RoleArchitect, gone),
+	)
+	var stdout, stderr bytes.Buffer
+	code = run(context.Background(), []string{"legion", "sessions", "mark-lost", "--dsn-file", r.dsnFile, "--claims", r.claims, "--daemon-dsn-file", daemonDSNFile}, &stdout, &stderr)
+	for _, want := range []string{
+		"legion-legion-legion-1-tester not marked lost: the recorded session " + transcript + " is a Claude Code transcript, not an Oh My Pi session file: Oh My Pi's session table holds no session of it, and it stays on the volume its role's pod reads it from\n",
+		"legion-legion-legion-2-architect marked lost: the session table holds no " + gone,
+		"legion sessions mark-lost: marked lost 1, failed 0\n",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("mark-lost printed\n%s\nwant a line containing %q", stdout.String(), want)
+		}
+	}
+	if code != 0 || stderr.String() != "" {
+		t.Errorf("mark-lost = %d, stderr %q; want 0, a transcript left on its volume being no failure", code, stderr.String())
+	}
+	stored, err := st.Claims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range stored {
+		switch c.Token {
+		case "legion-legion-legion-1-tester":
+			if c.Session != "ses-LEGION-1" || c.SessionFile != transcript || c.WorkspaceLost {
+				t.Errorf("the Claude claim holds session %q, session file %q, workspace lost %t; want it as it was", c.Session, c.SessionFile, c.WorkspaceLost)
+			}
+		case "legion-legion-legion-2-architect":
+			if c.Session != "" || c.SessionFile != "" || !c.WorkspaceLost {
+				t.Errorf("the Oh My Pi claim holds session %q, session file %q, workspace lost %t; want it marked lost", c.Session, c.SessionFile, c.WorkspaceLost)
+			}
+		}
+	}
+}
+
 // With the daemon stopped its database is the record, and a claim it records with a session file
 // the claims list does not give that claim — one launched, or relaunched onto a new session, after
 // the list was saved — is one neither the copy nor mark-lost would reach, and under SQL storage

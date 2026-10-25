@@ -50,8 +50,10 @@ export interface PhaseReminderDeps {
   readonly saveEntry: (entry: PhaseStallEntry) => void;
   /** This session's own claim, or undefined before it has registered one. */
   readonly claim: () => ClaimCapability | undefined;
-  /** The daemon's whole state, read as the `legion` tool's `read_record` reads it. */
-  readonly readState: () => Promise<LegionState>;
+  /** The daemon's whole state, read as the `legion` tool's `read_record` reads it. `signal` is
+   * aborted once the record check's bound passes without an answer, and the read is to abort with
+   * it (`LegionDaemonClient.state`'s `signal`), so a daemon that hangs is left no open request. */
+  readonly readState: (signal: AbortSignal) => Promise<LegionState>;
   /** The Envoy listener the architect notice goes to, or undefined when Envoy is off for this
    * session. Built lazily and once by the caller. */
   readonly publisher: () => EnvoyPublish | undefined;
@@ -86,7 +88,8 @@ export interface PhaseReminder {
 }
 
 /** How long the record check waits for the daemon. `createLegionDaemonClient` puts no deadline on
- * its fetch, and `session_stop` is a hook the host awaits, so the check bounds the read itself. */
+ * its fetch, and `session_stop` is a hook the host awaits, so the check bounds the read itself and
+ * aborts it at the bound. */
 export const RECORD_READ_BOUND_MS = 5_000;
 
 /** The listener's "no live session holds that role": a 404 whose body names `unclaimed` or
@@ -104,13 +107,19 @@ function roleUnheld(error: unknown): boolean {
   return body.reason === "unclaimed" || body.reason === "holder_lapsed";
 }
 
-/** `work`'s answer, or a rejection once `ms` have passed without one (`withinBudget` in
+/** `work`'s answer, or a rejection once `ms` have passed without one, when the signal `work` was
+ * handed is aborted so what it started does not outlive the bound (`withinBudget` in
  * `src/capability-report.ts` is the same shape, with a fallback answer in place of the throw). */
-async function withBound<T>(work: Promise<T>, ms: number): Promise<T> {
+async function withBound<T>(work: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController();
   const deadline = Promise.withResolvers<T>();
-  const timer = setTimeout(() => deadline.reject(new Error(`no answer within ${ms}ms`)), ms);
+  const timer = setTimeout(() => {
+    const late = new Error(`no answer within ${ms}ms`);
+    deadline.reject(late);
+    controller.abort(late);
+  }, ms);
   try {
-    return await Promise.race([work, deadline.promise]);
+    return await Promise.race([work(controller.signal), deadline.promise]);
   } finally {
     clearTimeout(timer);
   }
@@ -185,7 +194,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     if (claim === undefined) return { reminds: true };
     let record: LegionIssue | undefined;
     try {
-      record = (await withBound(deps.readState(), boundMs)).issues[claim.issue];
+      record = (await withBound(deps.readState, boundMs)).issues[claim.issue];
     } catch (error) {
       deps.log.debug("legion: the daemon did not answer the phase reminder's record check", {
         issue: claim.issue,

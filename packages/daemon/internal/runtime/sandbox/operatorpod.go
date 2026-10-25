@@ -10,6 +10,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -34,7 +35,8 @@ type setter struct {
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
 // store's two variables named apart, since they are Legion's under either store, the controller's
-// Slack channel list, which the runtime sets in the controller's pod alone, and the name the
+// Slack channel list, which the runtime sets in the controller's pod alone, Claude Code's three
+// (claudelaunch.Environment), which it sets in a Claude role's container alone, and the name the
 // providers volume mounts the session database's URL under, sessionDSNFile), the worker image
 // (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
@@ -51,6 +53,10 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	}
 	add(sessionDSNFile, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
 	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
+	for _, pair := range claudelaunch.Environment("") {
+		name, _, _ := strings.Cut(pair, "=")
+		add(name, "Legion's runtime sets for a role it launches on Claude Code (worker_backends)", false)
+	}
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}

@@ -57,6 +57,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byBaseline   = "the pod baseline sets (internal/podsafety)"
 		byOperator   = "runtime.kubernetes.pod.env sets"
 		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
+		byClaude     = "Legion's runtime sets for a role it launches on Claude Code (worker_backends)"
 	)
 	// The operator route with its token audience filled in, as an operator and each live harness run
 	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
@@ -84,11 +85,11 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		// issue's volume, and its background tasks and scheduled prompts are off so nothing of the
 		// harness runs after a turn's last result (mainEnvironment).
 		{name: "a Claude Code worker's configuration directory", pod: env("CLAUDE_CONFIG_DIR", "/etc/operator/claude"),
-			want: envSets("CLAUDE_CONFIG_DIR", byRuntime)},
+			want: envSets("CLAUDE_CONFIG_DIR", byClaude)},
 		{name: "Claude Code's background tasks", pod: env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0"),
-			want: envSets("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", byRuntime)},
+			want: envSets("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", byClaude)},
 		{name: "Claude Code's scheduled prompts", pod: env("CLAUDE_CODE_DISABLE_CRON", "0"),
-			want: envSets("CLAUDE_CODE_DISABLE_CRON", byRuntime)},
+			want: envSets("CLAUDE_CODE_DISABLE_CRON", byClaude)},
 		// Every other variable of Claude Code's own is the operator's to set, as the model route's are.
 		{name: "an operator's Claude Code setting", pod: env("CLAUDE_CODE_USE_FOUNDRY", "1")},
 		{name: "the image's HOME", pod: env("HOME", "/tmp/elsewhere"), want: envSets("HOME", byImage)},

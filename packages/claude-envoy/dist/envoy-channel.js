@@ -44590,11 +44590,14 @@ function parseStrictly(schema, body) {
 }
 function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
   const endpoint = baseUrl.replace(/\/+$/, "");
-  const call = async (method, path2, body) => {
-    const response = await fetchFn(`${endpoint}${path2}`, body === undefined ? undefined : {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+  const call = async (method, path2, body, signal) => {
+    const response = await fetchFn(`${endpoint}${path2}`, {
+      ...body === undefined ? {} : {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      },
+      ...signal === undefined ? {} : { signal }
     });
     const text = await response.text();
     if (response.ok)
@@ -44606,8 +44609,8 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
     throw new LegionDaemonApiError(method, path2, response.status, undefined, `${JSON.stringify(text)} is not the daemon's refusal shape (${refusal.problem})`);
   };
-  const read = async (method, path2, schema, body) => {
-    const { status, text } = await call(method, path2, body);
+  const read = async (method, path2, schema, body, signal) => {
+    const { status, text } = await call(method, path2, body, signal);
     const parsed = parseStrictly(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path2, status, parsed.problem);
@@ -44622,7 +44625,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
   };
   return {
-    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    state: (options) => read("GET", "/legion/v1/state", LegionStateResponse, undefined, options?.signal),
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) => read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
@@ -48144,10 +48147,15 @@ function roleUnheld(error48) {
   return body.reason === "unclaimed" || body.reason === "holder_lapsed";
 }
 async function withBound(work, ms) {
+  const controller = new AbortController;
   const deadline = Promise.withResolvers();
-  const timer = setTimeout(() => deadline.reject(new Error(`no answer within ${ms}ms`)), ms);
+  const timer = setTimeout(() => {
+    const late = new Error(`no answer within ${ms}ms`);
+    deadline.reject(late);
+    controller.abort(late);
+  }, ms);
   try {
-    return await Promise.race([work, deadline.promise]);
+    return await Promise.race([work(controller.signal), deadline.promise]);
   } finally {
     clearTimeout(timer);
   }
@@ -48194,7 +48202,7 @@ function createPhaseReminder(deps) {
       return { reminds: true };
     let record3;
     try {
-      record3 = (await withBound(deps.readState(), boundMs)).issues[claim.issue];
+      record3 = (await withBound(deps.readState, boundMs)).issues[claim.issue];
     } catch (error48) {
       deps.log.debug("legion: the daemon did not answer the phase reminder's record check", {
         issue: claim.issue,
@@ -49491,7 +49499,7 @@ async function runEnvoyChannelServer() {
     stateFile: phaseStallFile(pane.configDir, identity.id),
     claim: () => claim?.capability(),
     booted: claimBooted.promise,
-    readState: () => daemon.state(),
+    readState: (signal) => daemon.state({ signal }),
     inbox: inbox === undefined ? undefined : (text) => inbox.notification({
       method: CHANNEL_NOTIFICATION_METHOD,
       params: { content: text, meta: {} }

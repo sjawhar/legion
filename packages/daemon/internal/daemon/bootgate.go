@@ -782,7 +782,8 @@ func (g pluginGate) verifySessionStorage(ctx context.Context) error {
 // worker on the `claude` backend runs Claude Code with that root as a plugin directory and the
 // root's own `legion/` as a second one, and its `dist/envoy-channel.js` as the worker's one MCP
 // server (packages/daemon/internal/claudelaunch). Three checks, in the order such a worker needs
-// them: `claude` runs; the root holds the two files Claude Code loads; and the root's manifest
+// them: `claude` runs; the root holds the two files Claude Code loads, each a regular file (a
+// directory at either path is no file a worker could load); and the root's manifest
 // declares this gate's contract, held exactly as the pod lane holds pi-legion's
 // (readDeclaredContract) — claude-envoy ships in the image alone, so the remedy is always a
 // rebuilt image, never an install.
@@ -814,7 +815,11 @@ func (g pluginGate) verifyClaude(ctx context.Context) error {
 		filepath.Join(root, "dist", "envoy-channel.js"),
 		filepath.Join(root, "legion", ".claude-plugin", "plugin.json"),
 	} {
-		if _, err := os.Stat(file); err != nil {
+		info, err := os.Stat(file)
+		if err == nil && !info.Mode().IsRegular() {
+			err = fmt.Errorf("%s is not a regular file (mode %s)", file, info.Mode())
+		}
+		if err != nil {
 			return fmt.Errorf("the claude-envoy root %s holds no %s (%v): a worker on the `claude` backend loads it as Claude Code's plugin directory; %s",
 				root, filepath.Base(file), err, rebuild)
 		}
