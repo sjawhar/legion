@@ -839,13 +839,13 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 
 // unmarkExpired removes from room's live document each of expired that it still holds. It unmarks
 // them all in one transaction on the room itself, which cannot be rolled back once begun, so a
-// document already past the decode cap is refused before that transaction opens (errPastDecodeCap)
-// and left as it was: each mark it removes writes new format items around the text it covered,
-// carrying the document further past what ygo can decode.
+// document whose state already could not be decoded is refused before that transaction opens
+// (Service.pastDecodeCap, errPastDecodeCap) and left as it was: each mark it removes writes new
+// format items around the text it covered, carrying the document further past what ygo can decode.
 func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
 	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		if pastDecodeCap(doc) {
+		if s.pastDecodeCap(room, doc) {
 			sweepErr = errPastDecodeCap
 			return
 		}

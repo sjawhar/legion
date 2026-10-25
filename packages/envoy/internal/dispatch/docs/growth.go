@@ -44,12 +44,25 @@ import (
 // (stampBlockIDs), the sweep of unrecorded marks (unmarkExpired), and settlement's own repair of a
 // returning answer (withholdAnswers, returnAnswersWithRoom), which is weighed for size the way a
 // caller's answer is. Each writes into the live document itself rather than a fork it could drop,
-// so each asks the cap before it writes instead - whether the document's clocks already sum past
-// it (pastDecodeCap), refuseUndecodable's own first question - and leaves a document past it as it
-// was (LEGION-545): settlement withholds the answer as it withholds one a full document has no
-// room for, so the ask keeps it and the settlement counts no failure; the stamp and the sweep
-// write nothing, settlement carries on without them, the backfill reports the document skipped,
-// and each logs it once a room rather than on every pass (errPastDecodeCap, logPastDecodeCap).
+// so each asks the cap of the document as it stands before it writes instead
+// (Service.pastDecodeCap), and leaves a document past it as it was (LEGION-545): settlement
+// withholds the answer as it withholds one a full document has no room for, so the ask keeps it
+// and the settlement counts no failure; the stamp and the sweep write nothing, settlement carries
+// on without them, the backfill reports the document skipped, and each logs it once a room rather
+// than on every pass (errPastDecodeCap, logPastDecodeCap).
+// The question is refuseUndecodable's, asked in the same two steps: whether the document's clocks
+// sum past the cap, and, only where they do, whether its whole state still decodes. The sum cannot
+// answer it alone, because it counts characters and the cap counts structs: ygo's state vector is
+// each client's last item's clock plus that item's length (crdt/store.go:190-200 in sjawhar/ygo
+// v1.51.3-sami.2), a string's length is its UTF-16 length (crdt/content.go:109), and one struct
+// holds a whole run of typing. Measured on 2026-10-25, the shape room_heap_test.go builds, typed
+// over as benchmarkLiveDocument types, sums to 52,575 clocks at 51 KiB, 538,306 at 524 KiB and
+// 1,050,470 at a mebibyte, past the 1,048,576 cap, where it holds 77,600 structs
+// (BenchmarkDecodeCapConfirmation); a 256 KiB document after a mebibyte of typing and deleting
+// sums to 1,310,720, and 1.5 MiB written in 1 KiB inserts to 1,572,864; and every one of them
+// decodes. A document's clocks never fall, so refusing on the sum alone would stop the
+// stamp, the sweep and the returning answers for good on the documents people work in hardest,
+// while applyLive, which decodes to confirm, went on writing to them.
 // Settlement's repair was the one of the three with a plausible route to the cap - two rounds of
 // a 50,000-byte answer added 24 clocks, so tens of thousands of repair cycles on one document -
 // and the other two had narrower triggers, not cheaper ones: the stamp runs only for a duplicate
@@ -340,49 +353,119 @@ func elements(size pmdoc.DocumentSize) string {
 // refuseUndecodable is the refusal of a write that leaves fork, its transaction's copy of the live
 // document, a state ygo could not decode as one update, or nil. ygo decodes at most maxUpdateItems
 // structs in one update, and each struct takes at least one clock tick, so a state whose clocks sum
-// to no more than that is not decoded (pastDecodeCap). A state past the cap is refused whether or
-// not the write grew the document: storing it would leave every read unable to load it.
+// to no more than that is not decoded (clockSum); past it the sum says nothing, since it counts
+// characters rather than structs (this file's doc comment gives the figures), and the state is
+// decoded to find out (stateDecodes). A state past the cap is refused whether or not the write grew
+// the document: storing it would leave every read unable to load it.
 func refuseUndecodable(fork *crdt.Doc) error {
-	if !pastDecodeCap(fork) {
+	if clockSum(fork) <= maxUpdateItems || stateDecodes(fork) {
 		return nil
 	}
-	state := crdt.EncodeStateAsUpdateV1(fork, nil)
-	if err := crdt.ApplyUpdateV1(newDocumentCopy(), state, nil); err != nil {
-		return fmt.Errorf("%w: this change would leave the document's live state past the %d items ygo decodes in one update; shorten the change, or split the document",
-			ErrDocumentTooLarge, maxUpdateItems)
-	}
-	return nil
+	return fmt.Errorf("%w: this change would leave the document's live state past the %d items ygo decodes in one update; shorten the change, or split the document",
+		ErrDocumentTooLarge, maxUpdateItems)
 }
 
-// pastDecodeCap reports whether doc's clocks sum past maxUpdateItems, the one question about the
-// decode cap that costs no encode. It is refuseUndecodable's first question, and the whole of the
-// one the server's writes outside applyLive ask before they write (errPastDecodeCap): those write
-// into the live document itself, where the sweep's single transaction (unmarkExpired) cannot be
-// rolled back once it has begun, so a check of what such a write leaves would come too late to
-// leave the document as it was. It is conservative: a document past it may still decode, since one
-// struct can span many clocks, but no document short of it can fail to.
-func pastDecodeCap(doc *crdt.Doc) bool {
+// clockSum is the sum of doc's state vector, the one measure of its size against the decode cap
+// that costs no encode. It bounds the structs doc holds from above, since every struct takes at
+// least one clock, and says nothing past that: a struct of typed text takes a clock for each
+// character (crdt/store.go:190-200, crdt/content.go:109 in sjawhar/ygo v1.51.3-sami.2).
+func clockSum(doc *crdt.Doc) uint64 {
 	var clocks uint64
 	for _, clock := range doc.StateVector() {
 		clocks += clock
 	}
-	return clocks > maxUpdateItems
+	return clocks
+}
+
+// stateDecodes reports whether doc's whole state decodes as one update: it encodes the state and
+// decodes it into a fresh document, which holds a whole copy of doc until it returns and is then
+// dropped. ygo refuses an update past maxUpdateItems structs as it reads the struct counts, before
+// it decodes the client that takes it past them (crdt/update.go:550-558), so a state past the cap is
+// refused for little more than its encode. Its caller holds no transaction on doc: the encode takes
+// doc's own lock.
+func stateDecodes(doc *crdt.Doc) bool {
+	return crdt.ApplyUpdateV1(newDocumentCopy(), crdt.EncodeStateAsUpdateV1(doc, nil), nil) == nil
+}
+
+// decodeCapRecheck is how far a room's clock sum may grow past the one its last confirmation was
+// taken at before pastDecodeCap confirms again: an eighth of the cap, about as many items as the
+// heaviest document one upload admits encodes to (maxUpdateItems).
+const decodeCapRecheck = maxUpdateItems / 8
+
+// decodeCapAnswer is pastDecodeCap's last confirmation of a room's document: whether its whole
+// state failed to decode, and the clock sum the document had when the confirmation was asked.
+type decodeCapAnswer struct {
+	clocks      uint64
+	undecodable bool
+}
+
+// pastDecodeCap reports whether doc, room's live document, holds a state ygo could not decode as
+// one update: the question each server write outside applyLive asks before it writes
+// (errPastDecodeCap). Those write into the live document itself, where the sweep's single
+// transaction (unmarkExpired) cannot be rolled back once it has begun, so a check of what such a
+// write leaves would come too late to leave the document as it was; the document is asked as it
+// stands instead. The question is refuseUndecodable's, in its two steps: the clock sum first, which
+// costs no encode and clears every document short of the cap, and past it a confirmation, the
+// state encoded and decoded into a fresh document (stateDecodes), which alone can refuse.
+//
+// A confirmation is paid at most once a room while its state lasts. Its answer is kept on the
+// room's state beside the writes that logged it (roomState.decodeCap) with the clock sum it was
+// asked at, and is taken again only once the sum has grown decodeCapRecheck past that, or has
+// fallen below it, which only a document a rebuild replaced can do. So between confirmations a
+// document confirmed to decode can take up to an eighth of the cap of browser edits, which nothing
+// here bounds, before the writes ask again; what the three writes add themselves is an item an id,
+// a format item a mark edge, an attribute an answer.
+//
+// A confirmation holds a whole copy of the document while it runs, which is the heap the room
+// budget exists to bound, so the service runs one at a time, in the measurer's turn
+// (elementMeasurer.decodes), which waits for an element count or another room's confirmation to
+// finish: two rooms never hold a copy each for it at once. Each of the three writes can wait for
+// it, on its own goroutine and never a peer's read loop: they are the server's own background
+// work, and the sweep and the backfill already leave a document and run again on the next pass.
+// What the wait and the confirmation hold meanwhile is the writer's own: the stamp's repair holds
+// its suppression slot, so the room's persistence worker waits at the room's next update, and its
+// close gate (applySuppressed); settlement's answer check holds the settlement's database
+// transaction. Measured alone on a two-processor pod on 2026-10-25 (BenchmarkDecodeCapConfirmation),
+// one confirmation took 182 to 222 ms and allocated 62 MB on a mebibyte of typed-over markdown,
+// and 1.54 to 1.56 s and 397 MB on a document of exactly maxUpdateItems structs, the heaviest that
+// decodes; one past the cap is refused as ygo reads its struct counts (stateDecodes).
+// The copy lives for the one check and is dropped, so it is charged to no room's budget entry
+// (roomCharge), and the budget's arithmetic does not count it. The caller holds no transaction on
+// doc, since the encode takes doc's lock, and a confirmation in the turn waiting on that lock while
+// the transaction waited on the turn would hold both for good.
+func (s *Service) pastDecodeCap(room string, doc *crdt.Doc) bool {
+	clocks := clockSum(doc)
+	if clocks <= maxUpdateItems {
+		return false
+	}
+	state := s.lockState(room)
+	answer := state.decodeCap
+	s.unlockState(room, state)
+	if answer != nil && answer.clocks <= clocks && clocks-answer.clocks < decodeCapRecheck {
+		return answer.undecodable
+	}
+	undecodable := !s.measurer.decodes(doc)
+	state = s.lockState(room)
+	state.decodeCap = &decodeCapAnswer{clocks: clocks, undecodable: undecodable}
+	s.unlockState(room, state)
+	return undecodable
 }
 
 // errPastDecodeCap is the refusal of a server write outside applyLive - the block-id stamp
-// (stampBlockIDs) and the sweep of unrecorded marks (unmarkExpired) - into a live document already
-// past the decode cap (pastDecodeCap), made before the write so it leaves the document as it was.
-// Neither write is a caller's, so neither answers it to one: settlement carries on without the
-// write, the backfill reports the document skipped, and each logs it once a room
-// (logPastDecodeCap). Settlement's repair of a returning answer asks the same question and
-// withholds the answer instead (withholdAnswers).
-var errPastDecodeCap = fmt.Errorf("the document's live state already sums past the %d items ygo decodes in one update", maxUpdateItems)
+// (stampBlockIDs) and the sweep of unrecorded marks (unmarkExpired) - into a live document whose
+// state already could not be decoded as one update (pastDecodeCap), made before the write so it
+// leaves the document as it was. Neither write is a caller's, so neither answers it to one:
+// settlement carries on without the write, the backfill reports the document skipped, and each
+// logs it once a room (logPastDecodeCap). Settlement's repair of a returning answer asks the same
+// question and withholds the answer instead (withholdAnswers).
+var errPastDecodeCap = fmt.Errorf("the document's live state already holds more than the %d items ygo decodes in one update", maxUpdateItems)
 
 // logPastDecodeCap logs that write, a server write outside applyLive, left room's document alone
-// because it is past the decode cap (errPastDecodeCap). A document's clocks never fall, so it
-// stays past the cap until it is rebuilt, and the sweep and settlement's stamp would otherwise log
-// it on every settlement's pass: each write logs it once while the room's state lasts
-// (roomState.pastDecodeCap), and again only once a release or a restart has dropped that state.
+// because it is past the decode cap (errPastDecodeCap). A document past the cap stays past it,
+// short of a rebuild or a deletion ygo folds into fewer structs, and the sweep and settlement's
+// stamp would otherwise log it on every settlement's pass: each write logs it once while the
+// room's state lasts (roomState.pastDecodeCap), and again only once a release or a restart has
+// dropped that state.
 func (s *Service) logPastDecodeCap(room, write string) {
 	state := s.lockState(room)
 	_, logged := state.pastDecodeCap[write]

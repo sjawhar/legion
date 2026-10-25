@@ -387,7 +387,7 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.repairAsk(block.node, block.id, ask, "", &repaired)
 		}
 	}
-	reconciled.withholdAnswers(artifactID, live, tree, before)
+	reconciled.withholdAnswers(artifactID, func() bool { return s.pastDecodeCap(artifactID, live) }, tree, before)
 
 	for _, ask := range rows {
 		// Only an open ask is retracted: an answered or resolved one is already closed, its

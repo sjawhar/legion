@@ -209,8 +209,9 @@ type Service struct {
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
 	// measurer counts, one at a time for the whole service, the elements of the renderings rooms
-	// publish, off their update observers, for the room budget (elementMeasurer). Its zero value is
-	// ready, and Shutdown stops it.
+	// publish, off their update observers, for the room budget, and runs the decode-cap
+	// confirmations of the server's writes outside applyLive in the same turn (elementMeasurer).
+	// Its zero value is ready, and Shutdown stops it.
 	measurer elementMeasurer
 	// budget charges every open room the heap it holds and refuses a browser one more room past
 	// roomBudgetBytes (roomBudget). New readies it; Shutdown joins its sweeps (evictWG).
@@ -1041,11 +1042,12 @@ func ArtifactVersionEventPayload(
 // id it changed. Its caller decides from a read of its own whether any id needs repair, so a
 // document that needs none opens no transaction, and records the stamped asks
 // (recordStampedAskBlocks) once it holds the room's state lock, which no Yjs transaction takes.
-// A document already past the decode cap is stamped nothing and opens no transaction: the stamp
-// adds an item for every id it mints, so it would carry such a document further past what ygo can
-// decode, and it returns errPastDecodeCap before it writes.
-func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, []stampedAsk, error) {
-	if pastDecodeCap(doc) {
+// A document whose state already could not be decoded is stamped nothing and opens no
+// transaction: the stamp adds an item for every id it mints, so it would carry such a document
+// further past what ygo can decode, and it returns errPastDecodeCap before it writes. That is
+// asked of room's document as it stands, before rewriteLive's transaction (Service.pastDecodeCap).
+func (s *Service) stampBlockIDs(room string, doc *crdt.Doc, origin any) (*pmdoc.Node, int, []stampedAsk, error) {
+	if s.pastDecodeCap(room, doc) {
 		return nil, 0, nil, errPastDecodeCap
 	}
 	minted := 0
@@ -1363,7 +1365,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		slot, update, err := s.applySuppressed(ctx, room, doc, func(doc *crdt.Doc, origin any) (bool, error) {
 			var minted int
 			var stampErr error
-			reconciled, minted, renamed, stampErr = stampBlockIDs(doc, origin)
+			reconciled, minted, renamed, stampErr = s.stampBlockIDs(room, doc, origin)
 			return minted > 0, stampErr
 		})
 		keep(slot, update)
@@ -1793,7 +1795,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 			s.afterBackfillRead(artifactID)
 		}
 		before, beforeErr := renderTree(read)
-		stamped, minted, stampRenamed, err := stampBlockIDs(doc, origin)
+		stamped, minted, stampRenamed, err := s.stampBlockIDs(artifactID, doc, origin)
 		report.Stamped = minted
 		renamed = stampRenamed
 		if err != nil {

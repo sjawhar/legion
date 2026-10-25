@@ -6,6 +6,8 @@ import (
 	"time"
 	"weak"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
@@ -36,7 +38,23 @@ import (
 // to take the rendering and to store the result, never across the parse. So the one thing of a
 // room it can keep past the room's retirement is the rendering of the count it is in, until that
 // count ends.
+//
+// The one count at a time is a turn the counts take (turn), and the same turn runs the decode-cap
+// confirmations of the server's writes outside applyLive (Service.pastDecodeCap), for the same
+// reason: each decodes a whole room's state into a fresh copy of the document. A confirmation must
+// answer before its write goes on, where a count is queued and stored later, so it does not join
+// the queue: it takes the turn on its writer's goroutine and waits for it (decodes). Both hold
+// turn, a mutex rather than a place in the queue, because a queued confirmation would need the
+// worker started for a job no replica owns and a channel back to its writer, while the mutex keeps
+// the measurer's zero value ready and leaves stop as it is: a confirmation is never queued, so a
+// stop has nothing of it to drop, and one in flight holds nothing but its own copy, which goes when
+// it returns.
 type elementMeasurer struct {
+	// turn is held for each count's parse and each confirmation's decode, so that no two run at
+	// once. No one holding it waits on a room: a count parses a string it already holds, and a
+	// confirmation takes only the lock of the document it encodes, which its caller does not hold.
+	turn sync.Mutex
+
 	mu sync.Mutex
 	// queue lists, once each, the replicas whose latest rendering waits to be counted.
 	queue []weak.Pointer[renderedReplica]
@@ -137,7 +155,8 @@ func (m *elementMeasurer) next() (weak.Pointer[renderedReplica], bool) {
 
 // count counts the rendering replica has waiting, stores the count where the room budget reads it,
 // and re-bases the room's charge on it. A replica already collected, or one whose waiting rendering
-// a later publication withdrew (one the room could not read), has nothing to count.
+// a later publication withdrew (one the room could not read), has nothing to count. The parse runs
+// in the measurer's turn.
 func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	markdown, publication, updates := takeUncounted(replica)
 	if markdown == nil {
@@ -146,10 +165,21 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	if m.beforeCount != nil {
 		m.beforeCount(*markdown)
 	}
+	m.turn.Lock()
 	elements := countElements(*markdown)
+	m.turn.Unlock()
 	if held := replica.Value(); held != nil {
 		held.storeCounted(int64(len(*markdown)), elements, publication, updates)
 	}
+}
+
+// decodes reports whether doc's whole state decodes as one update (stateDecodes), once it has
+// waited for the measurer's turn: the decode-cap confirmation of a server write outside applyLive
+// (Service.pastDecodeCap), which holds a whole copy of doc while it runs.
+func (m *elementMeasurer) decodes(doc *crdt.Doc) bool {
+	m.turn.Lock()
+	defer m.turn.Unlock()
+	return stateDecodes(doc)
 }
 
 // stop ends the measurer for Shutdown: no worker starts after it, the queue is dropped, a room

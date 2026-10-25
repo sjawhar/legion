@@ -3,8 +3,6 @@ package docs
 import (
 	"log/slog"
 
-	"github.com/reearth/ygo/crdt"
-
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -64,13 +62,14 @@ type serverRewrite struct {
 // render cannot be weighed, so its answers all stay out, and the settlement that renders it next
 // fails as it would have.
 //
-// live is the room's document the repairs will be written into (writeLive). One already past the
-// decode cap (pastDecodeCap) has no room for any answer whatever its rendering weighs, since an
-// answer's text is new items in it, so every answer stays out and none is given back. It is asked
-// here, before anything is written, and answered the way a full document is rather than as a
-// failed write: three failures in a row fail the room (maxSettleFailures, retrySettleLocked), and
-// the ask already keeps the answer.
-func (r *settlementReconciliation) withholdAnswers(artifactID string, live *crdt.Doc, tree *pmdoc.Node, before string) {
+// pastDecodeCap asks whether the room's document the repairs will be written into (writeLive)
+// already holds a state ygo could not decode (Service.pastDecodeCap). One that does has no room for
+// any answer whatever its rendering weighs, since an answer's text is new items in it, so every
+// answer stays out and none is given back. It is asked here, before anything is written, only when
+// an answer would be written back, since past the clock sum it confirms by decoding the whole
+// state, and answered the way a full document is rather than as a failed write: three failures in
+// a row fail the room (maxSettleFailures, retrySettleLocked), and the ask already keeps the answer.
+func (r *settlementReconciliation) withholdAnswers(artifactID string, pastDecodeCap func() bool, tree *pmdoc.Node, before string) {
 	var answered []int
 	for index, rewrite := range r.rewrites {
 		if rewrite.answer {
@@ -82,7 +81,7 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, live *crdt
 	}
 	var err error
 	rendered := false
-	if pastDecodeCap(live) {
+	if pastDecodeCap() {
 		err = errPastDecodeCap
 	} else {
 		var after string
