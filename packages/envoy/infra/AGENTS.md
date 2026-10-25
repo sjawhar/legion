@@ -125,18 +125,19 @@ versions. Never add the module to the root `go.work`.
   `gcp:Dispatch` follows the same shape: `NewDispatch` refuses a seed in its own name first
   (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
   string input the component carries (`gcp.dispatchSeededInput`, one row each in
-  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret`,
-  `natsSeedSecret` and `agentSecretsTokenSecret` are checked for a seed once they resolve, before
-  any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret` and
+  `natsSeedSecret` are checked for a seed once they resolve, before any child takes them
+  (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
   `TestConstructRefusesASeedInADispatchInput`); the two credentials `tailnetAuthKey` and
   `signInClientSecret` are also refused blank or whitespace-only then, through the one rule both
   run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since neither
-  can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker token
-  (`agentSecretsTokenSecret`, a Secret Manager resource path read through a second
-  SecretProviderClass, with its own per-secret accessor member) and the GitHub App key
+  can work blank. No secret value is a `gcp:Dispatch` input beyond those two: the broker relay
+  takes no credential at all, since `envoy-dispatch` presents its own ServiceAccount's projected
+  token, which the kubelet mints for `agentSecretsAudience` and nothing stores
+  (`TestDispatchStoresNoBrokerTokenWhenSet`), and the GitHub App key
   (`appPrivateKeySecretName` and `appPrivateKeySecretKey`, a Kubernetes Secret GKE SecretSync
-  creates at run time, which the component never parses, creates or waits on) enter by reference,
-  so their values never enter the component or Pulumi state
+  creates at run time, which the component never parses, creates or waits on) enters by
+  reference, so its value never enters the component or Pulumi state
   (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`); the GitHub App's four inputs come together,
   each missing one named (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
   inside the `ApplyT` that renders the listener container's environment, where core's `Env`

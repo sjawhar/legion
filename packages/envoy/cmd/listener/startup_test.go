@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -547,7 +546,7 @@ func do(t *testing.T, request *http.Request) (int, string) {
 // mounts the GitHub route, so all three caches warm up.
 func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	const machineID = "logger-split"
-	container, uri := testnats.Start(t)
+	server, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
@@ -597,9 +596,7 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 
 	// internal/bus logs its connection lines through the default logger. Taking the server away is
 	// how this test gets one to read.
-	if err := container.Stop(context.Background(), nil); err != nil {
-		t.Fatalf("stop the listener's NATS: %v", err)
-	}
+	server.Stop(t)
 	textLine := regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} .*envoy nats disconnected`)
 	deadline := time.Now().Add(30 * time.Second)
 	for !textLine.MatchString(listener.Output.String()) {

@@ -1,12 +1,9 @@
 package bus_test
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -20,15 +17,13 @@ import (
 	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testsocks5"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-// startNATS launches a real NATS container and returns it with the connection
-// URI. The container is terminated when the test completes.
-func startNATS(t *testing.T) (*tcnats.NATSContainer, string) {
+// startNATS runs a NATS server for the test and returns it with the connection
+// URI. The server is shut down when the test completes.
+func startNATS(t *testing.T) (*testnats.Server, string) {
 	t.Helper()
-	ctr, uri := testnats.Start(t)
-	return ctr, uri
+	return testnats.Start(t)
 }
 
 // waitFor polls a condition with timeout. Returns true if condition was met.
@@ -89,17 +84,14 @@ func TestPublishBoundsReconnectWhenNATSUnavailable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctr, uri := startNATS(t)
+			srv, uri := startNATS(t)
 			client, err := bus.ConnectOwningStream([]string{uri})
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
 			t.Cleanup(client.Close)
 
-			ctx := context.Background()
-			if err := ctr.Terminate(ctx); err != nil {
-				t.Fatalf("stop NATS: %v", err)
-			}
+			srv.Terminate(t)
 			client.Conn.Close()
 
 			result := make(chan error, 1)
@@ -979,41 +971,14 @@ func TestAClosedConnectionIsReplacedOnceAndCloseLeavesNoneOpen(t *testing.T) {
 // body; through, when not nil, gives the client's connect options for the server at uri.
 func closedConnectionIsReplacedOnce(t *testing.T, through func(uri string) []bus.ConnectOption) {
 	unsetNkeyEnvironment(t)
-	ctr, uri := testnats.StartImageConfig(t, testnats.Image, "jetstream {}\nhttp_port: 8222\n", []string{"-js"}, true)
-	ctx := context.Background()
-	host, err := ctr.Host(ctx)
-	if err != nil {
-		t.Fatalf("NATS host: %v", err)
-	}
-	port, err := ctr.MappedPort(ctx, "8222/tcp")
-	if err != nil {
-		t.Fatalf("NATS monitoring port: %v", err)
-	}
+	srv, uri := testnats.StartConfig(t, "jetstream {}\n", []string{"-js"}, true)
 	const name = "replaced-once"
+	byName := serverConnections(t, srv)
 	// connections is how many connections the server holds under the client's name, which nats.go
 	// sends in its CONNECT, so the observer's own connection is not counted.
 	connections := func() int {
 		t.Helper()
-		response, err := http.Get("http://" + net.JoinHostPort(host, port.Port()) + "/connz")
-		if err != nil {
-			t.Fatalf("read /connz: %v", err)
-		}
-		defer response.Body.Close()
-		var connz struct {
-			Connections []struct {
-				Name string `json:"name"`
-			} `json:"connections"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
-			t.Fatalf("decode /connz: %v", err)
-		}
-		open := 0
-		for _, connection := range connz.Connections {
-			if connection.Name == name {
-				open++
-			}
-		}
-		return open
+		return len(byName()[name])
 	}
 	// settle waits up to within for the server to hold want of the client's connections, and fails
 	// with the count it last read.

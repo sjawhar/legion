@@ -107,9 +107,9 @@ func TestCoreSubOKIsFalseWhileTheServerRefusesTheResentSubscription(t *testing.T
 	)
 	seed, public := testnats.User(t)
 	granted := testnats.SubscribeGrantConfig(public, subject, "_INBOX.>")
-	server := testnats.StartRestartableConfig(t, granted)
+	server, uri := testnats.StartConfig(t, granted, []string{"-js"}, false)
 	t.Setenv("NATS_NKEY_SEED", seed)
-	client, err := bus.Connect([]string{server.URL})
+	client, err := bus.Connect([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestCoreSubOKIsFalseWhileTheServerRefusesTheResentSubscription(t *testing.T
 	if err := client.Conn.Flush(); err != nil {
 		t.Fatalf("flush the re-sent subscription: %v", err)
 	}
-	publisher, err := bus.Dial("refusal-publisher", []string{server.URL}, os.LookupEnv)
+	publisher, err := bus.Dial("refusal-publisher", []string{uri}, os.LookupEnv)
 	if err != nil {
 		t.Fatalf("connect the publisher: %v", err)
 	}
@@ -171,4 +171,58 @@ func TestCoreSubOKIsFalseWhileTheServerRefusesTheResentSubscription(t *testing.T
 	if !client.CoreSubOK() {
 		t.Fatal("CoreSubOK is false after the server accepted the subscription and delivered to it")
 	}
+}
+
+// A reload that takes the grant away revokes the core subscription the server had accepted, and
+// the server says so in a refusal of its own form (`Permissions Violation for Subscription to
+// "<subject>" (sid "<sid>")`), naming no queue group: CoreSubOK reads it as refused while the
+// connection stays up, though nats.go keeps the subscription valid and leaves the refusal of a
+// queue subscription unrecorded. A restart onto a configuration that grants it again, to which the
+// client re-sends the subscription, makes it OK again.
+func TestCoreSubOKIsFalseOnceAReloadRevokesTheSubscription(t *testing.T) {
+	const (
+		subject = "notifications.>"
+		queue   = "revocation-test"
+	)
+	seed, public := testnats.User(t)
+	granted := testnats.SubscribeGrantConfig(public, subject, "_INBOX.>")
+	server, uri := testnats.StartConfig(t, granted, []string{"-js"}, false)
+	t.Setenv("NATS_NKEY_SEED", seed)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	held, err := client.SubscribeCore(subject, func(*natsgo.Msg) {}, queue)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush the subscription: %v", err)
+	}
+	if !client.CoreSubOK() {
+		t.Fatal("CoreSubOK is false on a server that grants the subscription")
+	}
+
+	if err := server.Reload(t, testnats.SubscribeGrantConfig(public, "_INBOX.>")); err != nil {
+		t.Fatalf("reload without the grant: %v", err)
+	}
+	waitFor(t, 30*time.Second, "CoreSubOK to read the reload's revocation of the subscription", func() bool {
+		return !client.CoreSubOK()
+	})
+	if !client.Connected() {
+		t.Fatal("the client lost its connection to a server that only reloaded")
+	}
+	if !held.IsValid() {
+		t.Fatal("nats.go dropped the revoked subscription; the test proves nothing about a refusal it keeps valid")
+	}
+	if err := client.Conn.LastError(); !errors.Is(err, natsgo.ErrPermissionViolation) ||
+		!strings.Contains(err.Error(), `Permissions Violation for Subscription to "`+subject+`" (sid "`) {
+		t.Fatalf("the server's last error is %v, want its revocation of %s naming the sid", err, subject)
+	}
+
+	server.Restart(t, granted)
+	waitFor(t, 30*time.Second, "CoreSubOK once a restarted server that grants the subscription has it again", func() bool {
+		return client.Connected() && client.CoreSubOK()
+	})
 }

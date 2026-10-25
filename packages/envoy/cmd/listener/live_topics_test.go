@@ -478,7 +478,7 @@ authorization {
   users = [ { user: listener, password: listener, permissions: { subscribe: { allow: ["_INBOX.>", %q] } } } ]
 }
 `, contracts.RoleTopicPrefix+"> "+bus.ListenerQueue(machineID))
-	_, uri := testnats.StartImageConfig(t, testnats.Image, config, []string{"-js"}, false)
+	_, uri := testnats.StartConfig(t, config, []string{"-js"}, false)
 	uri = strings.Replace(uri, "nats://", "nats://listener:listener@", 1)
 
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, "ENVOY_SUBSCRIBE_ALL_TOPICS=1")

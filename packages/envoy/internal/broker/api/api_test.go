@@ -1,8 +1,9 @@
 // api_test.go mounts the real broker handlers (api.Register) on a real Postgres test store — no
 // fakes: every dependency (enroll.Service, requests.Machine, machine.Service) is the genuine
 // article, wired exactly as cmd/broker/main.go wires it, with real signed request/proof JWS
-// objects. A human decision is a UI-route call naming the approver's login, the body Dispatch's
-// server sends. It rebuilds route-level coverage for every row of routes_table.go's table.
+// objects. A human decision is a call from a listed service account, presenting its own projected
+// token, naming the approver's login in the body — the request Dispatch's server sends. It
+// rebuilds route-level coverage for every row of routes_table.go's table.
 package api_test
 
 import (
@@ -42,10 +43,15 @@ import (
 )
 
 const (
-	testUIToken = "test-ui-token-0123456789abcdef"
 	// testApprover owns DEEL_API_KEY, a human-tier secret, so every request for it is an approval
 	// request to them; they are also every machine login's login_hint below.
 	testApprover = "sami@example.com"
+	// dispatchAccount is the ServiceAccount BROKER_API_ACCOUNTS names as the caller "dispatch",
+	// the one that reaches the routes Dispatch's server calls; unlistedAccount is a real account
+	// of the same cluster that it does not name.
+	dispatchAccount = "system:serviceaccount:example-ns:example-dispatch"
+	dispatchCaller  = "dispatch"
+	unlistedAccount = "system:serviceaccount:example-ns:example-stranger"
 )
 
 // testServer is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to
@@ -59,6 +65,9 @@ type testServer struct {
 	Secrets   *secrets.Local
 	podIssuer *oidctest.Issuer
 	podKey    *oidctest.Key
+	// uiToken is dispatchAccount's own projected token, the credential the routes Dispatch's
+	// server calls take; minted once per server so a test may send it from a goroutine too.
+	uiToken string
 	// ServiceLogins is the broker's live BROKER_SERVICE_LOGINS, daemonAccount and
 	// otherDaemonAccount each logging in as legion-daemon; a test removes an entry to take an
 	// account off it.
@@ -120,7 +129,7 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
-	provider := brokertest.NewOAuthProvider(t, st)
+	provider := brokertest.NewOAuthProvider(t, st, issuer)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
@@ -128,8 +137,10 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	}
 
 	deps := api.Deps{
-		PublicURL: srv.URL, UIToken: testUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		PublicURL:     srv.URL,
+		APIAccounts:   map[string]string{dispatchAccount: dispatchCaller},
+		AccountTokens: enroll.K8sPodVerifier{Verifier: podVerifier},
+		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
@@ -137,7 +148,9 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	adjust(&deps)
 	api.Register(mux, deps)
 
-	return &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey, ServiceLogins: serviceLogins}
+	ts := &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey, ServiceLogins: serviceLogins}
+	ts.uiToken = ts.accountToken(t, dispatchAccount, "", time.Hour)
+	return ts
 }
 
 // newSessionEnrollment inserts a live session enrollment (and its backing launcher_credentials
@@ -209,9 +222,11 @@ func (ts *testServer) req(t *testing.T, method, path string, headers map[string]
 	return resp.StatusCode, respBody
 }
 
+// ui is req as the listed caller of the routes Dispatch's server calls, presenting that
+// account's own projected ServiceAccount token.
 func (ts *testServer) ui(t *testing.T, method, path string, body any) (int, []byte) {
 	t.Helper()
-	return ts.req(t, method, path, map[string]string{"Authorization": "Bearer " + testUIToken}, body)
+	return ts.req(t, method, path, map[string]string{"Authorization": "Bearer " + ts.uiToken}, body)
 }
 
 func (ts *testServer) session(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, method, path string, body any) (int, []byte) {
@@ -402,25 +417,37 @@ func TestHealthzFailsWhileDrainingAndNothingElseDoes(t *testing.T) {
 	}
 }
 
-// TestUIRouteWithoutBearerIsUnauthorized pins uiAuth's own contract: no bearer, or the wrong one,
-// is 401 UI_INVALID — never silently open.
-func TestUIRouteWithoutBearerIsUnauthorized(t *testing.T) {
+// TestARouteDispatchCallsRefusesAnyOtherCredential pins accountAuth's own contract: no bearer, a
+// bearer that is not a ServiceAccount token, and a sound token of an account BROKER_API_ACCOUNTS
+// does not name are each refused — never silently open. An expired token and one that lives
+// longer than an hour from its issue are refused too, each by its own code.
+func TestARouteDispatchCallsRefusesAnyOtherCredential(t *testing.T) {
 	ts := newTestServer(t)
-	for name, headers := range map[string]map[string]string{
-		"no header":    {},
-		"wrong bearer": {"Authorization": "Bearer wrong-token"},
-		"empty bearer": {"Authorization": "Bearer "},
+	longLived := ts.podIssuer.Claims(dispatchAccount, podAudience)
+	longLived["iat"] = time.Now().Add(-time.Hour).Unix()
+	longLived["exp"] = time.Now().Add(2 * time.Hour).Unix()
+	for name, tc := range map[string]struct {
+		headers map[string]string
+		status  int
+		code    string
+	}{
+		"no header":        {map[string]string{}, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID"},
+		"wrong bearer":     {map[string]string{"Authorization": "Bearer wrong-token"}, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID"},
+		"empty bearer":     {map[string]string{"Authorization": "Bearer "}, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID"},
+		"expired token":    {map[string]string{"Authorization": "Bearer " + ts.accountToken(t, dispatchAccount, "", -time.Minute)}, http.StatusUnauthorized, "ACCOUNT_TOKEN_EXPIRED"},
+		"long-lived":       {map[string]string{"Authorization": "Bearer " + ts.podIssuer.Mint(t, ts.podKey, longLived)}, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED"},
+		"unlisted account": {map[string]string{"Authorization": "Bearer " + ts.accountToken(t, unlistedAccount, "", time.Hour)}, http.StatusForbidden, "ACCOUNT_NOT_LISTED"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			status, body := ts.req(t, http.MethodGet, "/v1/pending?approver=sjawhar", headers, nil)
-			if status != http.StatusUnauthorized {
-				t.Fatalf("GET /v1/pending (%s) = %d, want 401: %s", name, status, body)
-			}
-			werr := decode[wireError](t, body)
-			if werr.Code != "UI_INVALID" {
-				t.Fatalf("code = %q, want UI_INVALID", werr.Code)
+			status, body := ts.req(t, http.MethodGet, "/v1/pending?approver=sjawhar", tc.headers, nil)
+			if werr := decode[wireError](t, body); status != tc.status || werr.Code != tc.code {
+				t.Fatalf("GET /v1/pending (%s) = %d %q, want %d %s", name, status, werr.Code, tc.status, tc.code)
 			}
 		})
+	}
+	// The listed account's own token reaches the route.
+	if status, body := ts.ui(t, http.MethodGet, "/v1/pending?approver="+testApprover, nil); status != http.StatusOK {
+		t.Fatalf("GET /v1/pending as the listed caller = %d: %s", status, body)
 	}
 }
 
@@ -1028,11 +1055,11 @@ func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
 }
 
 // TestDecisionsTakeOnlyTheApproversLogin pins that only the record's approver decides it, and
-// only through Dispatch: the approver's own login sent without the UI bearer is 401 UI_INVALID,
-// another login's approve and deny are both 403 NOT_APPROVER, a missing approver is 400
-// APPROVER_REQUIRED, all of them leave the record pending, the approver's deny succeeds, and a
-// second decision on the now-terminal record is 409 RECORD_TERMINAL for its approver and still 403
-// NOT_APPROVER for another login.
+// only through Dispatch: the approver's own login sent with no ServiceAccount token is 401
+// ACCOUNT_TOKEN_INVALID, another login's approve and deny are both 403 NOT_APPROVER, a missing
+// approver is 400 APPROVER_REQUIRED, all of them leave the record pending, the approver's deny
+// succeeds, and a second decision on the now-terminal record is 409 RECORD_TERMINAL for its
+// approver and still 403 NOT_APPROVER for another login.
 func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
@@ -1044,8 +1071,8 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 
 	status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
 		map[string]any{"approver": testApprover})
-	if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "UI_INVALID" {
-		t.Fatalf("approve without the UI bearer = %d %s, want 401 UI_INVALID", status, body)
+	if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+		t.Fatalf("approve with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
 	}
 	for _, route := range []string{"approve", "deny"} {
 		status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/"+route,

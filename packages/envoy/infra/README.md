@@ -138,7 +138,7 @@ the listener may dial the proxy, and the app alone may dial the listener.
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
-| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount (and, with `agentSecretsTokenSecret`, a second SecretProviderClass, `<hostname>-agent-secrets-token`, for the broker token). |
+| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pods' configuration, tailnet state permission, generated application secrets, the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the Serve configuration, and the NATS seed mount. |
 | Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
 | Three Deployments | The app at `replicas` pods, `Recreate` at one and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, with a 35-second termination grace period — a five-second pre-stop wait and the thirty seconds `envoy-dispatch`'s shutdown is built for; the front door and the listener at one pod each, always `Recreate`. Every container has equal requests and limits. All three pod templates carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: without it the cluster autoscaler evicts these pods whenever it consolidates a node, and the one-replica front door takes Dispatch off the tailnet until its replacement is ready. Autopilot honours the annotation as [extended-duration](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods) protection: for up to seven days, from scale-down and node auto-upgrade only (node repair, Compute Engine maintenance and drains still evict), with each such pod on a node of its own whenever possible and raised to at least 500m CPU and 512Mi memory, so the front door and the listener each request 500m and 512Mi. |
 
@@ -173,28 +173,50 @@ durable. There is no strategy, surge or front-door-replica input for that reason
 strategy follows from its replica count, and every value but one is wrong for the other two
 workloads.
 
-Two optional groups each come as all their inputs or none. Neither takes a secret value: workloads
-read secrets at run time, so no broker token or App key ever enters the component or its Pulumi
-state. Both reach the app's `envoy-dispatch` container alone; the front door and the listener are
-the same with them as without.
+Two optional groups each come as all their inputs or none. Neither takes a secret value: the
+broker relay's credential is a token the kubelet mints and the App key is read at run time, so no
+broker credential or App key ever enters the component or its Pulumi state. Both reach the app's
+`envoy-dispatch` container alone; the front door and the listener are the same with them as
+without.
 
-`agentSecretsUrl` (plain) with `agentSecretsTokenSecret` (a Secret Manager secret's resource path,
-`projects/<project>/secrets/<id>`, a Pulumi input that is not secret, as `natsSeedSecret` is) turns
-on Dispatch's secrets-broker relay: the URL must be absolute http(s) with a host and no path, as
-Dispatch requires of `DISPATCH_AGENT_SECRETS_URL` (a trailing slash is trimmed, as Dispatch trims
-it), and is rendered as that plain env var. The token is read at run time through a second
-SecretProviderClass, `<hostname>-agent-secrets-token` (provider `gke`, `/versions/latest` appended
-to the path, written to the file `agent-secrets-token`), and its own CSI volume, mounted read-only
-into `envoy-dispatch` at `/var/run/secrets/dispatch/agent-secrets-token`, which
-`DISPATCH_AGENT_SECRETS_TOKEN_FILE` names. The component grants the pods' principal
-`roles/secretmanager.secretAccessor` on that secret (`<hostname>-agent-secrets-token-accessor`), as
-it does for the NATS seed, and the app Deployment waits for the grant. The URL must be reachable
-from the app pod's own network, because Dispatch's broker client dials it directly, never through
-the front door's SOCKS5 proxy (which only the NATS clients use): an Internet host through Cloud
-NAT, an in-cluster Service, or a name a private DNS zone on the cluster's VPC resolves to one. A
-name only the tailnet resolves fails at request time, not at boot. The URL is rendered as a plain
-environment variable, so one carrying a user, a password, a query or a fragment is refused, and no
-refusal quotes it.
+`agentSecretsUrl` with `agentSecretsAudience` (both plain) turns on Dispatch's secrets-broker
+relay: the URL must be absolute http(s) with a host and no path, as Dispatch requires of
+`DISPATCH_AGENT_SECRETS_URL` (a trailing slash is trimmed, as Dispatch trims it), and is rendered
+as that plain env var. Dispatch calls the broker as its own Kubernetes ServiceAccount,
+`system:serviceaccount:<namespace>:<hostname>`, never with a bearer it shares with the broker: the
+app pod gets a projected volume of its own, `agent-secrets-account-token`, whose one source is a
+`serviceAccountToken` for the audience `agentSecretsAudience` names, with `expirationSeconds: 3600`
+(the broker refuses a token living longer than an hour from its issue), written to the file
+`agent-secrets-account-token` and mounted read-only into `envoy-dispatch` at
+`/var/run/secrets/dispatch`; `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` names
+`/var/run/secrets/dispatch/agent-secrets-account-token`. The kubelet rewrites that file in place
+before the token expires and Dispatch reads it on every call, so nothing stores the token, no
+rotation restarts a pod, and no Secret Manager secret, grant or SecretProviderClass exists for it.
+The URL must be reachable from the app pod's own network, because Dispatch's broker client dials
+it directly, never through the front door's SOCKS5 proxy (which only the NATS clients use): an
+Internet host through Cloud NAT, an in-cluster Service, or a name a private DNS zone on the
+cluster's VPC resolves to one. A name only the tailnet resolves fails at request time, not at
+boot. The URL is rendered as a plain environment variable, so one carrying a user, a password, a
+query or a fragment is refused, and no refusal quotes it.
+
+The broker accepts that token only once its own configuration names it, so the broker's
+deployment changes in the same deploy as this component's:
+
+- `BROKER_K8S_OIDC_AUDIENCE` is the value given here as `agentSecretsAudience`;
+- `BROKER_K8S_OIDC_ISSUER` is the issuer of this component's cluster, which GKE gives as
+  `https://container.googleapis.com/v1/projects/<project>/locations/<region>/clusters/<hostname>`;
+- `BROKER_API_ACCOUNTS` lists Dispatch's account, as
+  `dispatch=system:serviceaccount:<namespace>:<hostname>`, in place of the `BROKER_UI_TOKEN` it
+  once shared with Dispatch.
+
+A broker started with `BROKER_UI_TOKEN` or `BROKER_UI_TOKEN_FILE` set refuses it by name, as
+Dispatch refuses `DISPATCH_AGENT_SECRETS_TOKEN` and `DISPATCH_AGENT_SECRETS_TOKEN_FILE`, and a
+Dispatch whose account the broker does not list is answered 403 `ACCOUNT_NOT_LISTED` on every
+call, so move the component, the Envoy image and the broker's configuration together. A stack that
+set the removed `agentSecretsTokenSecret` sets `agentSecretsAudience` in its place; its next update
+deletes the SecretProviderClass `<hostname>-agent-secrets-token` and the grant
+`<hostname>-agent-secrets-token-accessor`, and the Secret Manager secret that held the old bearer
+is the consumer's to delete.
 
 `appClientId`, `appId` (the App's numeric ID, as a string of digits), `appPrivateKeySecretName`
 and `appPrivateKeySecretKey` (plain: the name and key of an existing Kubernetes Secret in the
@@ -214,15 +236,15 @@ Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 component refuses invalid hostnames, tailnet DNS names, tags, image references, sign-in domains,
 namespaces, allowed namespaces, missing inputs, and nkey seeds in its own name and in plain inputs
 before it registers a resource; it refuses an
-`agentSecretsUrl` or an `agentSecretsTokenSecret` whose partner input is missing, an `appClientId`,
+`agentSecretsUrl` or an `agentSecretsAudience` whose partner input is missing, an `appClientId`,
 `appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
 input named), an `appId` that is not digits or is 0, an `appPrivateKeySecretName` that is not a DNS
 subdomain, an `appPrivateKeySecretKey` outside `[-._a-zA-Z0-9]+`, and an `agentSecretsUrl` that is
 not an absolute http(s) URL with no path. Once each Pulumi input resolves, before any child takes
-it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret` and
-`agentSecretsTokenSecret`; a blank or whitespace-only `tailnetAuthKey` or `signInClientSecret`,
-neither of which can work blank (the front door cannot join the tailnet, Dispatch refuses a blank
-sign-in secret at boot) — each a refusal naming the input and never echoing it; and a `natsUrl`
+it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret` and `natsSeedSecret`; a blank or
+whitespace-only `tailnetAuthKey` or `signInClientSecret`, neither of which can work blank (the
+front door cannot join the tailnet, Dispatch refuses a blank sign-in secret at boot) — each a
+refusal naming the input and never echoing it; and a `natsUrl`
 that holds a seed, is local (the pods reach NATS only through the front door's SOCKS5 proxy), is
 empty, or holds a comma or a control character, each a refusal naming `natsUrl`. It requires both `gcp` and `random` providers. It
 creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the machine
@@ -241,9 +263,8 @@ accepts that member before the project's first Workload Identity cluster creates
 unproven (`docs/plans/2026-10-14-dispatch-gcp-plan.md`, the hardening ledger); if it refuses it,
 the first apply stops at the app's readiness wait, and a grant made then lets the next apply
 finish. The component itself grants that
-principal `roles/secretmanager.secretAccessor` only on the NATS seed secret (and on the broker token
-secret when `agentSecretsTokenSecret` is set), and the app and the listener, which mount the seed,
-wait for that grant to be written, as the app waits for the broker token's. IAM can take minutes to apply
+principal `roles/secretmanager.secretAccessor` only on the NATS seed secret, and the app and the
+listener, which mount the seed, wait for that grant to be written. IAM can take minutes to apply
 a new binding (Google cites typically two, sometimes seven or more), and a pod restarts until it
 can mount. The three Deployments share that one Kubernetes service account, whose Role lets it
 read and update the Tailscale state Secret and create Secrets in its namespace, since Tailscale
@@ -265,17 +286,18 @@ keeps it in the Secret `<hostname>-listener`, and gives the same value to `envoy
 `ENVOY_TOKEN`. The listener runs as machine `<hostname>`, so the hub's user for this deployment
 sets `dispatchMachineId` to the component's `hostname`. Both Envoy containers mount the NATS seed
 at `/var/run/secrets/envoy/nats-seed`; the seed remains outside Pulumi state. With
-`agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts the broker token,
-read-only, at `/var/run/secrets/dispatch/agent-secrets-token`.
+`agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts its projected
+ServiceAccount token, read-only, at `/var/run/secrets/dispatch/agent-secrets-account-token`.
 
-Dispatch reads every value of the `<hostname>-dispatch` Secret, the broker token file and the
-NATS seed once, at boot, as the listener reads the seed and the listener's bearer, and rotating a
-secret's value changes only the Secret, never the pod template, so no rotation restarts a pod on
-its own — this holds for every secret the component renders, the original four keys as much as
-the broker token, the App key and the listener's bearer. After rotating one, restart the
-Deployments that read it so their pods boot on the new value:
+Dispatch reads every value of the `<hostname>-dispatch` Secret and the NATS seed once, at boot, as
+the listener reads the seed and the listener's bearer, and rotating a secret's value changes only
+the Secret, never the pod template, so no rotation restarts a pod on its own — this holds for every
+secret the component renders, the original four keys as much as the App key and the listener's
+bearer. The projected broker token is the exception: Dispatch reads it on every call, so the
+kubelet's rewrite needs no restart. After rotating one of the others, restart the Deployments that
+read it so their pods boot on the new value:
 
-- the `<hostname>-dispatch` Secret's keys, the broker token and the App key: the app alone reads
+- the `<hostname>-dispatch` Secret's keys and the App key: the app alone reads
   them (`kubectl -n <namespace> rollout restart deployment/<hostname>`). `DISPATCH_AGENT_TOKEN`
   is also the `agentToken` output, so a consumer that hands it to its agents passes them the new
   value too;
