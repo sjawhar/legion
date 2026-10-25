@@ -68,9 +68,12 @@ async function timed(
   }
 }
 
-/** readAgentReplay as `page.evaluate` runs it: its source, evaluated by an indirect `eval`, which
- *  reads only the global scope. */
-const inPage = (0, eval)(`(${readAgentReplay.toString()})`) as typeof readAgentReplay;
+/** readAgentReplay as `page.evaluate` runs it: its source, evaluated in the global scope, where
+ *  nothing of this module or of agent-replay.ts is reachable. Evaluating that source is the point
+ *  of these rows, and the source is this repository's own, not a value from anywhere else. */
+// biome-ignore lint/security/noGlobalEval: these rows exist to run the function's own source as the page does
+const evaluateInGlobalScope = eval;
+const inPage = evaluateInGlobalScope(`(${readAgentReplay.toString()})`) as typeof readAgentReplay;
 
 const read = (url: string, timeoutMs = 10_000) =>
   inPage({ emptyAfterMs: 300, sessionId: SESSION, timeoutMs, url });
