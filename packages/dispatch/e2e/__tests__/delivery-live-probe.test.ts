@@ -437,36 +437,51 @@ test(
   PROCESS_TEST_MS
 );
 
-test(
-  "after a rotation close the probe reconnects at once and resumes with the change and revisions it holds",
-  async () => {
-    const dispatch = fakeDispatch({
-      onSubscribe(socket, sub, count) {
-        if (count > 1) return;
-        socket.send(forSub(snapshot, sub));
-        socket.send(forSub(delta, sub));
-        socket.close(4001, "max age");
-      },
-    });
-    const run = runProbe(args(dispatch));
-    await run.until(() => dispatch.received.length === 2);
-    run.kill("SIGINT");
-    expect(await run.exited()).toBe(0);
+// Dispatch's rotation (4001) and its restart (1012) are the two closes the probe answers by opening
+// again at once; any other waits out a backoff whose first step is at least 750 ms (1 s, jittered by
+// a quarter either way), so a second subscribe within 500 ms of the close is the at-once reopen.
+for (const [code, reason, what] of [
+  [4001, "max age", "rotation"],
+  [1012, "service restart", "restart"],
+] as const) {
+  test(
+    `after a ${what} close the probe reconnects at once and resumes with the change and revisions it holds`,
+    async () => {
+      let closedAt = 0;
+      let reopenedAt = 0;
+      const dispatch = fakeDispatch({
+        onSubscribe(socket, sub, count) {
+          if (count > 1) {
+            reopenedAt = performance.now();
+            return;
+          }
+          socket.send(forSub(snapshot, sub));
+          socket.send(forSub(delta, sub));
+          closedAt = performance.now();
+          socket.close(code, reason);
+        },
+      });
+      const run = runProbe(args(dispatch));
+      await run.until(() => dispatch.received.length === 2);
+      run.kill("SIGINT");
+      expect(await run.exited()).toBe(0);
 
-    expect(dispatch.received).toEqual([
-      { sub: "probe", type: "subscribe", view },
-      { resume: { revs: next.revs, seq: change.seq }, sub: "probe", type: "subscribe", view },
-    ]);
-    expect(
-      run.lines.map((line) => {
-        if (line.type === "open") return `open ${line.resume}`;
-        if (line.type === "close") return `close ${line.code}`;
-        return line.type;
-      })
-    ).toEqual(["open null", "snapshot", "delta", "close 4001", `open ${change.seq}`]);
-  },
-  PROCESS_TEST_MS
-);
+      expect(reopenedAt - closedAt).toBeLessThan(500);
+      expect(dispatch.received).toEqual([
+        { sub: "probe", type: "subscribe", view },
+        { resume: { revs: next.revs, seq: change.seq }, sub: "probe", type: "subscribe", view },
+      ]);
+      expect(
+        run.lines.map((line) => {
+          if (line.type === "open") return `open ${line.resume}`;
+          if (line.type === "close") return `close ${line.code}`;
+          return line.type;
+        })
+      ).toEqual(["open null", "snapshot", "delta", `close ${code}`, `open ${change.seq}`]);
+    },
+    PROCESS_TEST_MS
+  );
+}
 
 test(
   "a refused upgrade ends the probe with exit 1, naming the refusal",
