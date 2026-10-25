@@ -2,67 +2,45 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T16:05:00Z",
-  "round": "the fifth implementing round, answering the tester's single failure at f4f64586fbab: the third way a fixed session name moves",
+  "completed": "2026-10-25T16:40:00Z",
+  "round": "the sixth implementing round, answering the tester's single failure at 2fa337992ae8: the mid-rollout alternation the body denied",
   "proof": [
     {
-      "criterion": "A rollout that re-points a fixed session name cannot leave the entry the configuration fixes it for locked out of its own name (the tester's failure, found on two broker processes against one database).",
-      "surface": "Real compiled broker processes against one Postgres, driven through the rollout sequence, as the tester found the defect.",
+      "criterion": "What a mid-rollout really does to a fixed session name is written in the body as it is, and is something a reviewer can run rather than has to trust (the tester's failure; the architect's ruling: describe it, do not engineer against it).",
+      "surface": "Real compiled broker processes against one Postgres, as the tester drove it.",
       "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -tags multiprocess -count=1 -run TestAFixedSessionNameAcrossARollout -v ./cmd/broker",
-      "observed": "--- PASS, all three subtests, ok github.com/sjawhar/envoy/cmd/broker 6.772s. The third drives the defect: a process started with the OLD configuration mid-rollout serves an exchange of its own, and afterwards the name is still the new entry's -- the new entry answers 200 and the old entry 400 invalid_grant -- where before the fix the old process took the name back and the new entry was refused until a replica restarted. The restarted process logs no takeover and one 'left with its holder' line naming both principals.",
-      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
-      "negativeControl": "The same test run against the two changed functions in their pre-fix form fails, and only in that third subtest. A single-process test cannot see this at all, which is why the proof is two processes."
+      "observed": "--- PASS, all four subtests, ok github.com/sjawhar/envoy/cmd/broker 7.318s. The fourth, added this round, is the tester's sequence: for three turns the old entry's exchange on a surviving old-configuration process takes the name back and the new entry's exchange on the new process takes it again, each take logged with both principals; while either holds it, that holder is answered 200 on every process, including the one whose configuration fixes the name for the other; the old process is then stopped, the holder does not move at the stop, and the new entry's next exchange leaves the name with the new entry while the old entry -- which no running configuration fixes it for now -- is refused 400 invalid_grant.",
+      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
+      "negativeControl": "Throughout that alternation a principal no running configuration fixes the name for is refused it, which is subtest 1 holding over the whole sequence; and the third subtest still fails against the pre-fix code, so the lockout this pull request removed is still pinned."
     },
     {
-      "criterion": "A stranger is still refused a fixed name its entry has never claimed -- the property that could have been lost when reserving stopped taking (the architect's second condition).",
-      "surface": "The same two-process test, as its first subtest, and the first exchange the database ever sees.",
-      "command": "the same command, subtest 1_AStrangerIsRefusedAFixedNameItsEntryHasNeverClaimed",
-      "observed": "PASS: with a process up whose configuration fixes the name for an entry that has never exchanged, a pod of another account asking for that name is refused 400 invalid_grant, 'The session name … belongs to another identity', and the binding row is the fixed entry's permanent hold.",
-      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
-      "negativeControl": "The same row then shows the name moving to the entry the configuration fixes it for, at that entry's own claim, so the refusal is a reservation rather than a name nobody can use."
+      "criterion": "No sentence of the body claims more than the code, and a reader finishes the paragraph knowing the binding is strong and the rollout window is untidy (the architect's standard, and its explicit request about the wording).",
+      "surface": "The body's session-name bullet, read against the two statements that implement it.",
+      "command": "the body, read against BindSession and ReserveSessions in internal/broker/oauthstore/exchange.go",
+      "observed": "The bullet reaches for no count at all: it says what moves a name (the retention running out; the caller a running broker's configuration fixes the name for taking it at its exchange) and says plainly that starting a replica moves nothing. It then states the two things a reader would otherwise discover: a re-point takes effect at the new entry's first exchange, so an entry that never exchanges leaves the name with its previous holder; and during a rollout the name alternates between the two generations' entries, with its bound named -- it lasts as long as any process of the old configuration still serves, so a stalled rollout prolongs it. It keeps the narrower true statement in place of the deleted clause (neither generation can leave the other's entry locked out), and says why the binding is not weakened: at every moment the name is held by an entry some running configuration fixes it for, and a principal no configuration designates is refused throughout.",
+      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
+      "negativeControl": "The phrases the tester and the reviewer caught are gone from the body: 'exactly two ways' and 'cannot take a name from each other' each return zero hits."
     },
     {
-      "criterion": "Two replicas of one generation never take the name from each other (the architect's third condition: shown, not argued).",
-      "surface": "The same two-process test, as its second subtest, asserting on the processes' own logs as well as their answers.",
-      "command": "the same command, subtest 2_TwoProcessesOfOneGenerationNeverTakeTheNameFromEachOther",
-      "observed": "PASS: two processes of the same generation serve the fixed entry's exchanges in turn, including the second process's first exchange; every answer is 200, the binding row stays that entry's permanent hold after every turn, and neither process's log carries the takeover line.",
-      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
-      "negativeControl": "The third subtest shows the same log line being written when a take really happens, so its absence here is the property and not a line that never appears."
-    },
-    {
-      "criterion": "Every sentence of the pull request body is true of the code, including what the fix leaves (the architect: 'a third correction of the same kind is not acceptable on this slice').",
-      "surface": "The body's Change bullet and its Look-at-first line, read against the two statements they describe.",
-      "command": "the body, read against oauthstore/exchange.go's BindSession and ReserveSessions",
-      "observed": "The bullet now says a name leaves its holder in exactly two ways and that nothing else in the code moves one: the retention running out, and the caller the configuration fixes the name for taking it when it exchanges, which is how an operator re-points an entry. It then states the two consequences rather than leaving them to be found: a re-point takes effect at the new entry's first exchange, so an entry that never exchanges leaves the name with its previous holder; and while that is true the name follows the ordinary rule, so if the previous holder's claim then runs out a third principal could claim it, with the fixed entry taking it back at its next exchange. It also states that reserving takes nothing, what that buys mid-rollout, and that the test above proves all three.",
-      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
-      "negativeControl": "The architect's question, answered in the body and checkable there: after this fix there is no other path by which a name is held by a principal the current configuration does not fix it for. The two named are the whole of it, and both end at that entry's next exchange."
-    },
-    {
-      "criterion": "The change the earlier rounds proved still holds at this head.",
-      "surface": "The broker suites and the live-binary test, on a real Postgres.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/... ./cmd/broker/",
-      "observed": "Every package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors. cmd/broker, which carries the live-binary exchange test, ok 101.423s.",
-      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
-      "negativeControl": "gofmt -l prints nothing; go vet ./... and go vet -tags multiprocess ./cmd/broker are clean; check-private-names passes over 4985 files."
+      "criterion": "No behaviour changed this round.",
+      "surface": "The working copy and the broker suites.",
+      "command": "jj diff --stat ; cd packages/envoy && gofmt -l . ; go vet ./... ; go vet -tags multiprocess ./cmd/broker ; BROKER_TEST_DATABASE_URL=... go test -count=1 ./cmd/broker/ ./internal/broker/oauth/ ./internal/broker/oauthstore/",
+      "observed": "One file changed, packages/envoy/cmd/broker/multiprocess_test.go, +102/-1, and it is a test. gofmt silent, both vets clean, cmd/broker ok 112.367s, internal/broker/oauth ok 38.254s, internal/broker/oauthstore ok 18.481s.",
+      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
+      "negativeControl": "The architect called this a body round and not a code round; the only file that changed is a test, so the behaviour the body now describes is the behaviour the previous head already had."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/broker/oauthstore/exchange.go: ReserveSessions holds a fixed name only where no other principal holds it, takes nothing, and answers the names it left with their holders; BindSession takes a `fixed` argument -- this process's configuration fixes this name for this caller -- holds the name with no expiry when it is set, and answers the principal it took the name from.",
-    "packages/envoy/internal/broker/oauth/exchange.go: reserveSessions logs each name it left with its holder and goes on serving; claimSession passes `fixed` and the takeover is logged after the commit.",
-    "packages/envoy/cmd/broker/multiprocess_test.go: TestAFixedSessionNameAcrossARollout, the rollout proof on real processes.",
-    "packages/envoy/internal/broker/oauth/{exchange_test.go,provider_test.go} and oauthstore/exchange_test.go: the in-process cases for the same rules, and a second provider on one database."
+    "packages/envoy/cmd/broker/multiprocess_test.go: a fourth subtest of TestAFixedSessionNameAcrossARollout pinning the mid-rollout alternation, its holder answered on every process, and its bound once the last old-configuration process stops. No behaviour changed."
   ],
   "trickyParts": [
-    "The defect was invisible to every single-process test, because it needs two processes with configurations that disagree and an order between their first exchanges. That is why the proof is in cmd/broker under the multiprocess tag, beside TestTwoBrokers, rather than in the provider's own package.",
-    "Moving the take from seeding to the claim is what removes the race rather than narrowing it: two configurations can no longer take a name from each other at all, because only the caller a configuration fixes the name for ever takes it, and that is also the moment that carries the operator's intent."
+    "The alternation is not a defect and engineering against it would cost more than it buys: ordering configurations needs a generation an operator sets on every change, a column to carry it and a comparison at every claim, and a generation that goes backwards would pin a name to the old entry for good -- the lockout two rounds were spent removing. The architect and I reached that costing independently."
   ],
   "deviations": [
-    "The architect's round cap said a new finding after round 3 goes to a child issue. This one is fixed here instead, which the architect and I reached independently and the architect confirmed: it is the feature built in this slice failing on the deployment's own two replicas at its first rollout, locking out the entry the configuration fixes, and the alternative was a body sentence describing a lockout that lasts until an unrelated restart."
+    "The architect's ruling for this round was 'no code, the body'. One test was added anyway, which the architect then said was the thing it would have asked for next: after three corrections on this slice, a body claim a reviewer can run is worth more than one they must trust. Nothing but that test changed."
   ],
   "openQuestions": [
     "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal."
   ],
-  "discoveredComplexity": [
-    "The schema did not move: migration 0018 is unchanged, and the fix is two statements and the argument that tells them apart."
-  ]
+  "discoveredComplexity": []
 }
