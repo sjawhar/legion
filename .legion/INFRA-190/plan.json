@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-190",
+  "completed": "2026-10-25T15:20:21Z",
+  "planDocument": "dispatch://INFRA-190/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the push, PR body and proof rules (references/pr-body.md, default-branch-check.md) and the production check after the close (references/merge-gate.md)",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled diff before completion",
+      "dispatch: writing the production record and any finding on Dispatch after the merge"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md defines what the tester verifies and records (drive the browser suite, the differential and the websocket on the pod harness; read CI for static checks)"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and review-threads.md for the review round, approval of the head by SHA and thread handling"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The stale-editor check must go in the token path. The Hocuspocus Auth token decision replaces the upgrade-time query decision in both directions. An old bundle always sends token=String(fetchedVersion). If the server checks a new capability only on the query, authorizeSchemaVersion admits an old bundle that presents token \"<new N>\" read-write, and the fence is bypassed. So the signal an old bundle cannot present has to be a token format and a query parameter that old code never emits, for example a new query field plus a new token shape. Echoing a fetched value is not enough.",
+        "answer": "Decision 3 and step 5: new query field editor_schema and token '<schema>:<editor>' from the compiled contracts constant DOCUMENT_EDITOR_SCHEMA_VERSION; schemaReadOnly requires both in authorize and authorizeSchemaVersion; one docstest helper updates every writing dialer (docs/websocket_test.go:30, api/browser_peer_test.go:87, api/storable_text_test.go:706, cmd/dispatch/memory_harness_test.go:348, cmd/dispatch/shutdown_test.go:694); websocket_test table covers old/new query and token shapes and asserts both the upgrade decision and the auth scope."
+      },
+      {
+        "finding": "A5 assumes two schema versions ('presents the schema version from before the change and ... the new version it fetched'), but Design 3 never says to bump blocks.json's version. A compiled-in capability fences old code without a bump. Without a bump the two A5 cases are the same case.",
+        "answer": "Planner decided (build choice, outcome unchanged): blocks.json version rises 2 -> 3 and api/schema_test.go:31 moves, so A5's two cases (old bundle presenting 2, and presenting the 3 it fetched) are both real and both read-only through the missing editor_schema capability."
+      },
+      {
+        "finding": "A4's gates cannot catch the new failures. The engine is run from the working tree for both revisions, so every document with a linked image makes base 'incorrect'. The existing classes all depend on base.correct (regression, churn) or on base refusing (misread). Two failures therefore pass every gate today: head disagreeing with the engine on a linked image, for example on emphasis, whitespace or table-cell shapes, and head refusing a write base takes. Design 5 names only the second. A4's 'reads every link around one whole image ... back with its link and link title' has no gate at all.",
+        "answer": "Step 4: new gated classes 'head refuses a write the base takes' (base.stores && !head.stores), 'head loses a whole-image link' (engine image with attrs.link and head not correct), 'head changes a linked image the base stored' (stay-as-today shapes); per-document counts 'engine links a whole image' and 'linked image kept'; all code uses only base pmdoc API."
+      },
+      {
+        "finding": "For an unlinked image, the editor's markdown runner must pass link and linkTitle as explicit null, as Milkdown passes `title: node.title`. It must not leave them to the '' default. If the engine emits link:\"\" for every image, three things break. Go's tree has no link key and attrsEqualBut treats missing == nil but not == \"\", so base fails ReadsAsEngine on every image document, which hides regressions on the Theorem corpus's 8 images. TestParseMatchesMilkdownForFixtures and TestRead* fail on every image fixture. The Yjs updates in fixtures.json change. Even with null, toJSON adds `link`/`linkTitle` keys to every image's pm_json, so fixtures.json must be regenerated; CI runs `bun run check` in pmdoc/gen.",
+        "answer": "Decision 2: editor runner passes null when absent (as title), schema default ''; Go parseImage sets link/linkTitle nil; liveNulls gains ''; fixtures.json, splices.json, typed-fence-lines.json regenerated with gen.ts; update_test.go mirror updated."
+      },
+      {
+        "finding": "Design 5's 'in-repo corpus gains ... the shapes that stay as today' cannot be done in testdata/corpus/*.md. That directory feeds both differential.sh and gen.ts. The engine's pm_json for `[a ![x](i) b](u)`, `- **[![x](i)](u)**` or `[**![x](i)**](u)` carries marks on the image node. FromJSON calls Validate, which refuses marks on non-text nodes, so TestFixturesAreWithinSchema and every fixture loop fail. No corpus file today contains an image under a mark.",
+        "answer": "Decision 8: stay-as-today shapes go in new pmdoc/testdata/diffcorpus/*.md, read by differential.sh by default, not by gen.ts; only unmarked whole-image shapes go in testdata/corpus/linked-image.md (added to wantNames). A4's command is unchanged."
+      },
+      {
+        "finding": "Pasting into the editor uses toDOM and parseDOM, not only the markdown reader. Milkdown's clipboard plugin parses a text/plain markdown paste with the markdown parser, serializes the result with DOMSerializer (toDOM), and re-parses that DOM with DOMParser.parseSlice (parseDOM). An HTML paste, including a copy and paste inside the editor, goes through parseDOM directly. Milkdown's image parseDOM reads only src/alt/title, and its toDOM spreads every attr onto <img>. The link mark's `a[href]` rule then puts a mark on the image, and y-prosemirror drops that mark. So with only a markdown reader, a pasted linked image loses its link at the next reload. If parseDOM reads the link and the `a[href]` mark rule still fires, the image carries both the attr and a mark in the session, and the clipboard text serializer writes `[[![x](i)](u)](u)`. Also, the planner's note 'Dispatch web never calls serializeMarkdown' is wrong: clipboardTextSerializer calls serializerCtx on every copy.",
+        "answer": "Step 2: image toDOM wraps <img data-link data-link-title> in a sanitized <a>; parseDOM reads the data attributes or a parent <a> whose only child is the img; linkSchema's a[href] rule skips such an anchor so no link mark doubles; tests cover text/plain paste through handlePaste, HTML copy-paste and external <a><img></a> paste."
+      },
+      {
+        "finding": "A3's 'imports a linked image into a document' has two readings. Reading 1: written through the API (createIssue spec or editArtifact). This runs pmdoc → Yjs → editor attrs and never exercises the editor's markdown reader or paste path. Reading 2: pasted into the live editor. This exercises toDOM/parseDOM (finding 6) and the editor's Yjs write. Only reading 2 tests the editor half of the bug. In the live document the editor's markdown reader runs only on paste; VersionView's setMarkdown is read-only.",
+        "answer": "Step 7: A3 covers both an in-editor text paste (D1) and an API write (D2), each followed by reload."
+      },
+      {
+        "finding": "'opens ... as a text link does' does not settle every view and link kind, and some combinations do not open today. (a) Read-only view: VersionView sits outside the <article> whose onClick navigates dispatch:// links. markdownLinkClickPlugin returns false for an empty href (a sanitized dispatch:// link), so a dispatch:// link, text or image, opens nothing in a past version today. (b) Editable live document: dispatch:// text links open on a plain click through the article handler, which returns when the DOM selection is not collapsed. A click on a selectable atom image makes a NodeSelection, so [INFERENCE] a plain click on a dispatch://-linked image will not navigate unless the handler changes. Also, Ctrl/Cmd-click on a dispatch:// link goes to the plugin, which refuses href \"\". (c) 'the read-only view' could mean a past version (VersionView) or a closed issue's live editor (inside the article).",
+        "answer": "Decision 5 and the step 7 matrix: wrapper carries the link mark's attributes (data-dispatch-href); live article handler also navigates for a click inside a linked picture under a node selection; dispatch:// click handling moves to a shared helper VersionView also uses, so text and image dispatch:// links open in-app from a past version; matrix of view x link kind x gesture with expected outcomes, each an e2e assertion."
+      },
+      {
+        "finding": "Wrapping a Dispatch picture in its link nests anchors, or empties the outer one. In comments, pictureSerializer turns a pinned picture into `<a data-dispatch-picture href=artifact page>`. Under an outer link, a click hits the inner anchor, so the image's own link never opens. An unpinned picture, or one that fails to load, renders RefLink, another anchor. collectReferenceAnchors matches every a:not([data-dispatch-picture]) whose target is dispatch:// or a same-origin Dispatch URL, and calls replaceChildren(). An outer dispatch:// link around an image therefore loses the image, against A3's 'with the picture still shown'. In documents, the fallback link (unpinned picture, or img error) would sit inside the outer anchor.",
+        "answer": "Decision 6 and step 6: a linked Dispatch picture opens the image's link; inside a link its placeholder and fallback are spans (no nested anchors); collectReferenceAnchors keeps the children of an anchor holding an img or picture placeholder while still rewriting its href; unit tests in MarkdownBody.test.tsx and picture-view.test.ts."
+      },
+      {
+        "finding": "Several shapes need one shared rule in pmdoc and the editor, and the remark transforms must run in the right order in both pipelines. Shapes: `[**![x](i)**](u)` (strict 'only child' leaves the link dropped, while the Non-goal 'other marks on an image' reads as keep link, drop bold); `[ ![x](i) ](u)` (whitespace text children); `[![x](i)]()` (empty URL, which equals the liveNulls 'none'); reference-style `[![x][i]][u]`; table cells (pmdoc unescapes the href only in cells); a linked image inside an Ask span; text ending in `!` right before a linked image. Order: in the browser, commonmark's remark-inline-links (lib.ts:295) runs before dispatchMarks (:315); in the headless pipeline it runs after (lib-headless.ts:130-141). The new transform must run after both, in both. Ask spans: renderInlineNode prints link `[text](href)` and image `![alt](src)` without titles, so a linked image in an Ask span loses both titles on the TS side. inlineSignature ignores image attrs, so runReadsBack cannot c",
+        "answer": "Decision 1: one rule in both readers (link with exactly one child, an image, non-empty destination; references resolved first; the editor transform runs after inline-links and dispatchMarks in both pipelines); every listed shape goes in the corpora; inlineSignature gains link/linkTitle; writer escapes a '!' before a linked image; Ask-span titles knowingly left as today (decision 7: TS clipboard serializer only, stored attrs keep titles)."
+      },
+      {
+        "finding": "Design 4's '' default adds two attributes to every image element in the live document. liveAttrs writes link:\"\" and linkTitle:\"\" into Yjs for every image the server writes (updateElement sets each differing attribute), and the editor writes them for every image it builds. The memory suite's heaviest admitted 'images' shape (`![](u)`, imageWeight=3, whose comment counts 'source, alt text and title') was measured for three attributes. Linked images, previously dropped, now store a link string, and no heaviest-admitted shape covers `[![](u)](v)`. A null default would store nothing for unlinked images and leave liveNulls alone, but the approved Design 4 fixes ''.",
+        "answer": "Step 3: keep Design 4's '' default; imageWeight comment updated; '[![](u)](v)' added to heaviestAdmittedShapes; memory tests rerun; a moved bound is reported to the architect before any bound changes."
+      },
+      {
+        "finding": "A3's 'document cases fail at the commit before the change' names no command and no expected failing assertion, and a pod cannot run it as is. The pod has no Postgres; the documented recipe unpacks Debian packages onto the issue volume. Per INFRA-42, Playwright's browsers are not installed and need system libraries the image lacks. INFRA-43 ran Playwright with PLAYWRIGHT_BROWSERS_PATH on the volume, so the two documents conflict. A base run needs base's Go server, built by run-server.sh from the checkout, and base's web/dist, which needs proof-sdk-upstream's src/ copied in per INFRA-42 step 4. The harness's ports are fixed. A base failure must also be the link assertion, not a missing helper (LEGION-752 red-on-base doc).",
+        "answer": "Proving section: base run is git archive of BASE into $TMPDIR, only the new spec copied in (it uses only base helpers), bun install, build:web, Playwright with the pod harness (INFRA-42/INFRA-43 recipes, LEGION-752 for Go suites); D1-D4 and C2 must fail at base on the picture-inside-link assertions; both runs quoted on the PR."
+      },
+      {
+        "finding": "A5 says neither how a machine checks 'an editor built before the change', nor that 'no edit it sends removes an image's link'. It also misses one path. The IndexedDB pending store keeps every local Yjs update, from any client ID, across reloads. On the first writable admission it replays every row for the document, judging rows only for 'parking', not content. So rows an old bundle stored are sent later by a new bundle, possibly from another tab in the same browser, which A5's 'edit it sends' does not cover. [INFERENCE] The risk is low: a read-only old editor cannot edit an image, rows saved before the deploy predate any link attribute, and y-prosemirror rewrites only image nodes that actually changed. The plan should argue this or test it.",
+        "answer": "Decision 9 and step 5: Go admission tests with exactly the old bundle's query and token; TestAStaleEditorsUpdateLeavesALinkedImageAlone proves a read-only peer's link-removing update leaves /text unchanged (positive control from a new-bundle peer); connection.test.ts asserts both values sent; pending-sync judge refuses a saved row that deletes an image's link/linkTitle key, with a test using a stock-schema editor row."
+      },
+      {
+        "finding": "A3's negative control 'a linked image whose address is javascript: is not clickable' has no checkable meaning. The sanitizer turns the href into \"\" and keeps the <a>. In a comment, or in a read-only editor where the plugin refuses an empty href, a click on <a href=\"\"> navigates to the current URL. The existing external-links e2e checks a different surface (an issue's external links, no href).",
+        "answer": "Decision 4: an unsafe (non-dispatch) link draws no anchor; e2e N2 asserts no ancestor a[href], no popup, window.__pwned undefined and URL unchanged, in the live document, past version and a comment."
+      },
+      {
+        "finding": "Documents and changelogs the change must update that the notes do not list in full. packages/proof-editor/AGENTS.md lists copied files and allows 'Fifteen kinds of edit ... and no others' in them; edits to lib.ts, lib-headless.ts and dispatch-marks.ts need a new listed kind. A new legion-own file joins the 'Nine files' table and is biome-checked, and any new import across the upstream boundary is added to tests/upstream-boundary.ts. Also: envoy AGENTS.md:1456-1457 (LEGION-365 drop); dispatch AGENTS.md:656-659 (admission), :752 and :1161-1163 (picture view and serializer); elements.go:158-163 imageWeight comment; envoy CHANGELOG (it records Dispatch server behaviour, e.g. :1437); and, if a contracts constant is added, the contracts CHANGELOG plus a row in contracts AGENTS.md's shared-constant table.",
+        "answer": "Documentation section and step 2: proof-editor AGENTS.md (new legion-own file, sixteenth edit kind for lib.ts/lib-headless.ts, upstream-boundary.ts if needed), envoy AGENTS.md:1456-1457, cmd/dispatch AGENTS.md:494, dispatch AGENTS.md admission/picture/serializer/pending-edits passages, elements.go imageWeight comment, envoy and contracts CHANGELOGs."
+      },
+      {
+        "finding": "R2 ('adds no refusal: every write Dispatch takes today ... it still takes') conflicts in its wording with Design 3 and A5. An old tab's live edits, which Dispatch takes today, are held after the deploy because the tab is admitted read-only. They are kept in IndexedDB until a reload.",
+        "answer": "Answered in the plan: R2 covers pmdoc and documents-API writes; read-only admission of a stale bundle is the spec's own Design 3/A5, not a refusal under R2."
+      },
+      {
+        "finding": "Claims I checked and claims I could not check. Confirmed in code: parse.go:967-976 drops the link on purpose; parse_test.go:100-104 rows; websocket.go:285-301; liveNulls at update.go:196-201; connection.ts:145 and :195; the stopEvent scope in picture-view; pictureSerializer; RefLink replaceChildren; ygo drops a read-only peer's updates (peer.go applySyncUpdate). '119 documents' matches the LEGION-365 copy (legion-365-spec.md:11). Not verified: R1's source, Sami's answer in dispatch://INFRA/artifact/export-review-editor-server-md, which I cannot read without Dispatch read access (the LEGION-365 copy shows the ask as state=resolved but not its answer); the Theorem census (evidence.md, not re-run); and that a linked external image in a comment is clickable today (DispatchUiScout, inferred, with no test). The planner's note that web never serializes markdown is wrong (finding 6).",
+        "answer": "No plan change; unverified items (R1's source answer, the corpus census) are treated as cited by the spec."
+      },
+      {
+        "finding": "Rolling the server back after this ships would strip stored links. base updateElement deletes every live attribute its tree lacks (update.go:181-185), and base Render ignores the link. Worth one line in the PR or deploy notes, not a plan change.",
+        "answer": "The pull request states that rolling the server back strips stored links on the next write (Documentation section)."
+      },
+      {
+        "finding": "differential.sh builds --head <rev> from git archive but always runs the engine from the working tree. The A4 run must be made from a working tree at <fix>.",
+        "answer": "A4 is run from the workspace at the head commit (Proving section)."
+      },
+      {
+        "finding": "MarkdownPreview.inertLinks turns every link in a one-line preview into a span. A linked image there stays inert, as text links do, which matches 'keeps a text link's protections'.",
+        "answer": "Kept: MarkdownPreview stays inert for linked images as for text links (step 6)."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [],
+  "decisions": [
+    "Rule in both readers: a link whose children are exactly one image with a non-empty destination becomes image attrs link/linkTitle; everything else stays as today.",
+    "Editor reader passes null when absent; schema default ''; liveNulls gains link:'' and linkTitle:''.",
+    "Stale-editor fence: compiled contracts constant DOCUMENT_EDITOR_SCHEMA_VERSION=1 sent as ?editor_schema= and in the token '<schema>:<editor>'; blocks.json version 2 -> 3.",
+    "Unsafe non-dispatch link draws no anchor; dispatch:// links open in-app in the live document and (shared helper) the past-version view.",
+    "Linked Dispatch picture opens the image's link; inner placeholder/fallback are spans.",
+    "Ask-span markdown titles stay as today (clipboard serializer only).",
+    "Stay-as-today shapes in new pmdoc/testdata/diffcorpus read by differential.sh by default.",
+    "pending-sync replay refuses a saved row that deletes an image's link/linkTitle key."
+  ],
+  "harness": "Pod has no Postgres server or Playwright browser: follow docs/solutions/testing/*INFRA-42*.md and *INFRA-43*.md on the issue volume under $TMPDIR/infra190/harness; Go suites per *LEGION-752*.md. The differential corpus export lives at /legion/scratch/tmp/infra190/theorem.jsonl (never committed)."
+}
