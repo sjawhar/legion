@@ -652,10 +652,13 @@ pane. The checks:
 
 - `claude-implementer-registers`: the implementer's claim registers its Claude Code transcript,
   `<state>/claude/<claim token>/projects/<cwd>/<session id>.jsonl`, as its session file and the
-  session id as its session; its `claude` runs as a child of `legion claude-bridge`, started with
-  `--session-id <that id>`. The parent's command line, which holds the pane's whole system prompt
-  (past 64 KB, with newlines), is matched in the shell rather than piped to `grep -q`, whose early
-  exit would end the writer with SIGPIPE under `pipefail`; a failure prints the claude's ancestry.
+  session id as its session; its `claude` runs as a child of the run's `legion claude-bridge`,
+  started with `--session-id <that id>`. The parent counts as the bridge only when its executable
+  (`/proc/<pid>/exe`) is the run's `legion` and its arguments, read whole from the NUL-delimited
+  `/proc/<pid>/cmdline` in the shell, are `claude-bridge`, `--` and the run's `claude`, in that
+  order, after the executable's name: no other word of the command line counts, the pane's system
+  prompt (past 64 KB, with newlines) included, and no pipe can end early on it. A failure prints
+  the claude's ancestry.
 - `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write
   and push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records
   the completion's commit, which the implement App authored and committed, which is on
@@ -667,7 +670,9 @@ pane. The checks:
   marker its earlier instruction carried, quotes it, so the earlier turns are in its context and
   not only on disk.
 - `every-launch-endpoint-checked`: every pane the daemon launched, Oh My Pi or Claude Code, was
-  checked by the watcher before it registered.
+  checked by the watcher before it registered. The watcher reads an agent's environment once,
+  NUL-delimited; an environment it cannot read is not checked, never clean, and is recorded with
+  why in the evidence's `pane-endpoints-unchecked.txt`, which this check's failure names.
 
 Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
 Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
