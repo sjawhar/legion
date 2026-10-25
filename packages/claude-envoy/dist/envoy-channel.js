@@ -38404,16 +38404,37 @@ function humanEditHead(edit) {
   return `${edit.name ?? "document"} v${edit.from_version ?? "?"} to v${edit.to_version ?? "?"}${by}`;
 }
 var HUMAN_EDIT_DIFF_CUT_NOTE = "(diff cut at 4,096 bytes)";
+var HUMAN_EDIT_DIFF_MAX = 4096;
 function humanEditDiffBlock(diff, cut) {
   if (diff === undefined || diff === "")
     return cut === true ? HUMAN_EDIT_DIFF_CUT_NOTE : "";
-  const longestRun = Math.max(0, ...(diff.match(/`+/g) ?? []).map((run) => run.length));
+  const bytes = new TextEncoder;
+  let shown = diff;
+  let note = cut === true;
+  if (bytes.encode(shown).length > HUMAN_EDIT_DIFF_MAX) {
+    let kept = "";
+    let size = 0;
+    for (const line of shown.split(`
+`).slice(0, -1)) {
+      size += bytes.encode(`${line}
+`).length;
+      if (size > HUMAN_EDIT_DIFF_MAX)
+        break;
+      kept += `${line}
+`;
+    }
+    shown = kept;
+    note = true;
+  }
+  if (shown === "")
+    return HUMAN_EDIT_DIFF_CUT_NOTE;
+  const longestRun = Math.max(0, ...(shown.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(Math.max(3, longestRun + 1));
-  const body = diff.endsWith(`
-`) ? diff : `${diff}
+  const body = shown.endsWith(`
+`) ? shown : `${shown}
 `;
   return `${fence}diff
-${body}${fence}${cut === true ? `
+${body}${fence}${note ? `
 ${HUMAN_EDIT_DIFF_CUT_NOTE}` : ""}`;
 }
 
