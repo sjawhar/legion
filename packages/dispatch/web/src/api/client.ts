@@ -119,10 +119,12 @@ export class ApiError extends Error {
   }
 }
 
-/** How long the page waits for Dispatch to answer a GET - its response's headers to arrive -
- *  before it gives the request up (`RequestTimeoutError`). A read Dispatch never answers would
- *  otherwise hold its page loading for good; given up, it is retried by the queries' shared
- *  policy, as a dropped connection is. Once the headers are in, the body downloads without it. */
+/** How long the page waits for Dispatch - first for a GET's response headers, then between the
+ *  pieces of its body - before it gives the request up (`RequestTimeoutError`). A read Dispatch
+ *  never answers, or stops answering halfway, would otherwise hold its page loading for good;
+ *  given up, it is retried by the queries' shared policy, as a dropped connection is. A body that
+ *  keeps arriving downloads however long it takes: the deadline is on the silence, not the
+ *  download. */
 export const REQUEST_DEADLINE_MS = 30_000;
 
 /** A request Dispatch did not answer within its deadline, which the page then aborted. It is no
@@ -139,8 +141,8 @@ export class RequestTimeoutError extends Error {
 }
 
 /** How a caller bounds one attempt of a request: how long Dispatch may take to answer it, its body
- *  included (`null` for no limit; left out, a GET waits `REQUEST_DEADLINE_MS` for its headers and
- *  every other method has no deadline). */
+ *  included (`null` for no limit; left out, a GET is held to `REQUEST_DEADLINE_MS` of silence -
+ *  its headers, then each piece of its body - and every other method has no deadline). */
 export interface RequestBounds {
   readonly deadlineMs?: number | null;
 }
@@ -304,15 +306,43 @@ async function errorFrom(response: Response): Promise<ApiError> {
   return new ApiError(response.status, payload);
 }
 
+/** `response` with its body watched: `arrived` runs as each piece of it does, for a reader that
+ *  bounds the silence between them (`exchange`'s idle deadline) rather than the download. A
+ *  response with no body - a 204, a 304 - is handed back as it is. */
+function watchBody(response: Response, arrived: () => void): Response {
+  const body = response.body;
+  if (body === null) return response;
+  const pieces = body.getReader();
+  const watched = new ReadableStream<Uint8Array>({
+    async pull(toReader) {
+      const piece = await pieces.read();
+      if (piece.done) {
+        toReader.close();
+        return;
+      }
+      arrived();
+      toReader.enqueue(piece.value);
+    },
+    cancel: (reason) => pieces.cancel(reason),
+  });
+  return new Response(watched, {
+    headers: response.headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
 export class DispatchApiClient {
   constructor(private readonly fetchImpl: FetchImplementation) {}
 
   /** One request to Dispatch, answered with what `read` makes of its response. A GET is held to
-   *  `REQUEST_DEADLINE_MS` until its response's headers arrive, and its body then downloads on its
-   *  own time; every other method has no deadline. A caller's `deadlineMs` (`null` for none) holds
-   *  the whole answer instead, `read` included: it bounds one attempt of a request the caller makes
-   *  again (`sendUnderKey`), so a body that stalls fails as headers that never come do. A caller's
-   *  `init.signal` still aborts the request, as itself. */
+   *  `REQUEST_DEADLINE_MS` of silence: that long for its response's headers, and that long again
+   *  between the pieces of its body, so a body that keeps arriving downloads however slowly and
+   *  one that stops arriving fails as headers that never come do, the error body `errorFrom`
+   *  reads included. Every other method has no deadline. A caller's `deadlineMs` (`null` for
+   *  none) holds the whole answer instead, `read` included: it bounds one attempt of a request
+   *  the caller makes again (`sendUnderKey`). A caller's `init.signal` still aborts the request,
+   *  as itself. */
   private async exchange<T>(
     path: string,
     init: RequestInit,
@@ -327,15 +357,23 @@ export class DispatchApiClient {
           : null;
     if (limit === null) return read(await this.answered(path, init));
     const deadline = new AbortController();
-    const timer = setTimeout(() => deadline.abort(), limit);
+    let timer = setTimeout(() => deadline.abort(), limit);
     const caller = init.signal ?? undefined;
-    // The read deadline is the wait for Dispatch's answer: once its headers are in, a large body on
-    // a slow line downloads in full rather than being cut off and asked for again from the start.
-    const headersArrived = deadlineMs === undefined ? () => clearTimeout(timer) : undefined;
+    // The default deadline is on Dispatch's silence: it starts over as the headers arrive and as
+    // each piece of the body does, so a large read on a slow line is never cut off and asked for
+    // again from the start. A caller's own deadline bounds the whole answer, since the caller
+    // repeats the request rather than waiting it out.
+    const arrived =
+      deadlineMs === undefined
+        ? () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => deadline.abort(), limit);
+          }
+        : undefined;
     try {
       const signal =
         caller === undefined ? deadline.signal : AbortSignal.any([caller, deadline.signal]);
-      return await read(await this.answered(path, { ...init, signal }, headersArrived));
+      return await read(await this.answered(path, { ...init, signal }, arrived));
     } catch (error) {
       // An answer Dispatch gave stays its answer and the caller's abort stays the caller's: only
       // what the deadline cut short is a timeout.
@@ -348,19 +386,19 @@ export class DispatchApiClient {
     }
   }
 
-  /** Dispatch's response to one request, or its refusal as an `ApiError`. `headersArrived` runs as
-   *  the response's headers do, before its body is read. */
-  private async answered(
-    path: string,
-    init: RequestInit,
-    headersArrived?: () => void
-  ): Promise<Response> {
-    const response = await this.fetchImpl(path, {
+  /** Dispatch's response to one request, or its refusal as an `ApiError`. `arrived` runs as the
+   *  response's headers do and as each piece of its body does, the body of a refusal included. */
+  private async answered(path: string, init: RequestInit, arrived?: () => void): Promise<Response> {
+    const answer = await this.fetchImpl(path, {
       credentials: "same-origin",
       ...init,
     });
-    headersArrived?.();
-
+    if (arrived === undefined) {
+      if (!answer.ok) throw await errorFrom(answer);
+      return answer;
+    }
+    arrived();
+    const response = watchBody(answer, arrived);
     if (!response.ok) {
       throw await errorFrom(response);
     }

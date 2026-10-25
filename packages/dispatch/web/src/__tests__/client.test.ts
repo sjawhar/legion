@@ -2,6 +2,7 @@ import { expect, jest, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 
 import {
+  ApiError,
   apiErrorMessage,
   createApiClient,
   type FetchImplementation,
@@ -136,6 +137,111 @@ test("a GET whose headers arrive at 29 s reads a body that streams for another 2
     stream?.close();
 
     expect(await read).toEqual({ key: "CORE-1", title: "Slow line" } as never);
+  });
+});
+
+// W13. The deadline is on Dispatch's silence, not on the download: a body that keeps arriving is
+// read however long it takes, so a slow line is never cut off and asked for again from the start.
+test("a GET whose body streams a chunk every 10 s for a minute is read in full", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+    const encoder = new TextEncoder();
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    const read = outcome(api.getIssue("CORE-1"));
+    const signal = stub.requests[0]?.init?.signal;
+    stub.answer(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(body) {
+            stream = body;
+            signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      )
+    );
+    await Promise.resolve();
+    const pieces = ['{"key":', '"CORE-1",', '"title":', '"Slow', ' line"', "}"];
+    for (const piece of pieces) {
+      jest.advanceTimersByTime(10_000);
+      await Promise.resolve();
+      expect(stub.requests[0]?.init?.signal?.aborted).toBe(false);
+      stream?.enqueue(encoder.encode(piece));
+      await Promise.resolve();
+    }
+    stream?.close();
+
+    expect(await read).toEqual({ key: "CORE-1", title: "Slow line" } as never);
+  });
+});
+
+// W13. And the silence between pieces is bounded as the wait for the headers is: a body that
+// stops arriving is given up as a timeout, which the shared retry policy asks again, rather than
+// holding one of the browser's few connections to Dispatch for good.
+test("a GET whose body stalls past the deadline fails with RequestTimeoutError", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const read = outcome(api.getIssue("CORE-1"));
+    const signal = stub.requests[0]?.init?.signal;
+    stub.answer(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(body) {
+            body.enqueue(new TextEncoder().encode('{"key":'));
+            signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      )
+    );
+    await Promise.resolve();
+    jest.advanceTimersByTime(REQUEST_DEADLINE_MS - 1);
+    await Promise.resolve();
+    expect(stub.requests[0]?.init?.signal?.aborted).toBe(false);
+    jest.advanceTimersByTime(1);
+
+    const error = await read;
+    expect(error).toBeInstanceOf(RequestTimeoutError);
+    expect(isRetryableQueryError(error)).toBe(true);
+  });
+});
+
+// A refusal's own body is read under the same deadline: `errorFrom` reads it before the error is
+// raised, so a 500 whose reason never finishes arriving would otherwise hold the request, and
+// one of the browser's few connections to Dispatch, for good. Given up, the request settles as
+// the refusal Dispatch's headers named, with whatever reason reached the page.
+test("a refusal whose body stalls is given up at the deadline and settles as the refusal", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const read = outcome(api.getIssue("CORE-1"));
+    const signal = stub.requests[0]?.init?.signal;
+    stub.answer(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(body) {
+            body.enqueue(new TextEncoder().encode('{"error":'));
+            signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
+          },
+        }),
+        { headers: { "Content-Type": "application/json" }, status: 500 }
+      )
+    );
+    await Promise.resolve();
+    jest.advanceTimersByTime(REQUEST_DEADLINE_MS - 1);
+    await Promise.resolve();
+    expect(signal?.aborted).toBe(false);
+    jest.advanceTimersByTime(1);
+
+    const error = await read;
+    expect(signal?.aborted).toBe(true);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 500 });
   });
 });
 
