@@ -204,6 +204,97 @@ func TestARepeatedKeyAnswersTheMessageItMadeAndDeliversOnce(t *testing.T) {
 	}
 }
 
+// A deploy's signal cancels Dispatch's Lifetime before http.Server.Shutdown drains the requests in
+// flight, and Shutdown waits for each of them. A send the listener is still answering at that
+// signal therefore finishes inside the drain: its attempt settles sent, and the page's retry under
+// its key is answered 200 with that message and hands the session nothing more. A send cut off at
+// the signal left its attempt pending under a live claim, which that retry reads as a sender still
+// in flight: it answered 200 with nothing on its way, and the page stopped trying.
+func TestASendInFlightAtShutdownStillSettles(t *testing.T) {
+	held := make(chan struct{})
+	release := make(chan struct{})
+	cut := make(chan struct{})
+	var holding atomic.Bool
+	listener, sends := newBroadcastListener(t, agentSessions, func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages/send" || !holding.CompareAndSwap(false, true) {
+			return false
+		}
+		close(held)
+		select {
+		case <-release:
+			return false
+		case <-r.Context().Done():
+			// Dispatch gave the send up: the listener never answers it.
+			close(cut)
+			return true
+		}
+	})
+	lifetime, shutDown := context.WithCancel(t.Context())
+	defer shutDown()
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: lifetime})
+	const body = "Ship it once the checks are green."
+	send := func() *httptest.ResponseRecorder {
+		return postAgentMessage(t, handler, "s1", map[string]any{
+			"body": body, "delivery": "steer", "idempotency_key": "press-1",
+		}, "alice")
+	}
+
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answered <- send() }()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send never reached the listener")
+	}
+	// The deploy's signal, while the listener holds the send. A send cut off by it ends its
+	// listener request at once; given that long, the listener then answers the send the drain
+	// waits for.
+	shutDown()
+	select {
+	case <-cut:
+	case <-time.After(500 * time.Millisecond):
+	}
+	close(release)
+	var created *httptest.ResponseRecorder
+	select {
+	case created = <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send in flight at shutdown never answered")
+	}
+
+	var messageID string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select id::text from messages where body = $1`, body,
+	).Scan(&messageID); err != nil {
+		t.Fatalf("read the send's message: %v", err)
+	}
+	if attempts := messageAttempts(t, database, messageID); len(attempts) != 1 || attempts[0].State != "sent" {
+		t.Fatalf("the message's attempts = %#v, want its one attempt settled sent inside the drain", attempts)
+	}
+	if created.Code != http.StatusCreated {
+		t.Fatalf("the send in flight at shutdown: status=%d body=%s, want 201", created.Code, created.Body.String())
+	}
+	if message := decodeBody[model.Message](t, created); len(message.Deliveries) != 1 || message.Deliveries[0].State != "sent" {
+		t.Fatalf("the send's deliveries = %#v, want its one sent attempt", message.Deliveries)
+	}
+
+	retry := send()
+	if retry.Code != http.StatusOK {
+		t.Fatalf("the retry under the key: status=%d body=%s, want 200 with the message", retry.Code, retry.Body.String())
+	}
+	replayed := decodeBody[model.Message](t, retry)
+	if replayed.ID != messageID || len(replayed.Deliveries) != 1 || replayed.Deliveries[0].Attempt != 1 ||
+		replayed.Deliveries[0].State != "sent" {
+		t.Fatalf("the retry answered %#v, want message %s with its one sent attempt", replayed, messageID)
+	}
+	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
+		t.Fatalf("listener sends = %v, want the one send and no second", got)
+	}
+	if attempts := messageAttempts(t, database, messageID); len(attempts) != 1 {
+		t.Fatalf("the message's attempts = %#v, want the one", attempts)
+	}
+}
+
 // A key names one request. Reused for a different one - another message, mode, session or reply -
 // it is refused naming the message that used it, and nothing is written or sent: that message says
 // something else, so answering with it would tell the caller a message it never sent had gone out.

@@ -22,8 +22,9 @@
   message's life, and is stored in the message transaction. A matching retry returns `200` with
   the first message and its deliveries, ensuring an unattempted or stranded delivery resumes
   without a second message; a conflicting request is `409 MESSAGE_KEY_REUSED` with `message_id`.
-  The delivery runs after commit on the server lifetime rather than the request context, so an
-  aborted request cannot cancel it. During a rolling deploy, a page loaded before this release
+  The delivery runs after commit on a context detached from the request, so an aborted request
+  cannot cancel it, and a deploy lets it finish: shutdown waits for the request, and the listener
+  client's receipt timeout bounds it. During a rolling deploy, a page loaded before this release
   reports `Live updates unavailable`; copy an unsent message and reload. Its one-session sends
   have no required key and are refused until it reloads.
 

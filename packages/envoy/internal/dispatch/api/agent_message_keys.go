@@ -122,15 +122,14 @@ func (s *server) answerHeldAgentMessageKey(
 // both find it owed, one sends and the other finds the attempt taken and sends nothing. A pending
 // attempt whose claim is live is in flight and left to its sender; an attempt that settled, and a
 // message with more than one attempt, which a person has already retried from the agent card, owe
-// nothing. The send runs on a context detached from the request, as the original's does, and a
-// listener it cannot reach is recorded on the attempt, never returned.
+// nothing. The send runs on past the request, as the original's does, and a listener it cannot
+// reach is recorded on the attempt, never returned.
 func (s *server) sendHeldMessageOn(ctx context.Context, message model.Message, delivery string, actor model.Actor) error {
 	attempt, err := s.attemptOwed(ctx, message.ID)
 	if err != nil || attempt == 0 {
 		return err
 	}
-	sending, stop := s.detachedFromRequest(ctx)
-	defer stop()
+	sending := context.WithoutCancel(ctx)
 	if _, err := s.deliverMessageResuming(sending, message, delivery, nil, actor, nil, attempt); err != nil &&
 		!errors.Is(err, errAttemptNotPending) {
 		return err

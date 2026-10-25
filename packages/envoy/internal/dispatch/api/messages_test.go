@@ -1426,11 +1426,12 @@ func TestTargetedMessageAttemptIsPendingAcrossItsSend(t *testing.T) {
 	}
 }
 
-// A slow listener and a server that shuts down mid-send strand a pending attempt: a send's delivery
-// runs on past a client that gives up, but not past the server's own lifetime. The retry must
-// resume it under its original idempotency key - the listener deduplicates that key against the
-// send that did land - rather than allocating a new attempt, whose new key delivers the message a
-// second time to an agent that already has it.
+// A sender that stalls past its claim's lease - its process died mid-send, or its listener is
+// slower than the lease - strands a pending attempt. The retry must resume it under its original
+// idempotency key - the listener deduplicates that key against the send that did land - rather
+// than allocating a new attempt, whose new key delivers the message a second time to an agent that
+// already has it. The stalled sender, answered at last, finds the attempt resumed by someone else
+// and leaves it as the retry settled it.
 func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	var listenerState struct {
 		sync.Mutex
@@ -1438,6 +1439,8 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 		delivered map[string]struct{}
 	}
 	listenerState.delivered = map[string]struct{}{}
+	held := make(chan struct{})
+	release := make(chan struct{})
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
@@ -1458,8 +1461,10 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 			listenerState.delivered[request.IdempotencyKey+"@"+request.TargetSession] = struct{}{}
 			listenerState.Unlock()
 			if first {
-				// The slow listener this whole change exists for: the server stops first.
-				time.Sleep(1500 * time.Millisecond)
+				// The stalled sender: the listener has the frame, and answers only once the
+				// sender's claim has lapsed and the retry has resumed the attempt.
+				close(held)
+				<-release
 			}
 			_, _ = w.Write([]byte(`{"event_id":"target-envelope","recipient":"s1"}`))
 		default:
@@ -1467,12 +1472,12 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	lifetime, shutDown := context.WithCancel(t.Context())
-	defer shutDown()
-	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: lifetime})
+	letGo := sync.OnceFunc(func() { close(release) })
+	defer letGo()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Stranded targeted attempt", "before")
 
-	body := "The server stops while the listener is still answering."
+	body := "The sender stalls while the listener is still answering."
 	payload, err := json.Marshal(map[string]any{"body": body, "target": "session:s1", "delivery": "steer"})
 	if err != nil {
 		t.Fatalf("encode targeted message: %v", err)
@@ -1482,12 +1487,21 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Dispatch-User", "alice")
-	recorder := httptest.NewRecorder()
-	// A deploy stops the server 700ms into the 1.5s send.
-	time.AfterFunc(700*time.Millisecond, shutDown)
-	handler.ServeHTTP(recorder, request)
-	if recorder.Code == http.StatusCreated {
-		t.Fatalf("the send should not have completed past the server's shutdown: body=%s", recorder.Body.String())
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		answered <- recorder
+	}()
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send never reached the listener")
+	}
+	select {
+	case recorder := <-answered:
+		t.Fatalf("the send should not have completed while its listener holds it: status=%d body=%s", recorder.Code, recorder.Body.String())
+	default:
 	}
 
 	var messageID string
@@ -1507,7 +1521,8 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 		t.Fatalf("stranded attempt = %d/%q, want attempt 1 left pending", attempt, state)
 	}
 
-	// The sender never came back: its claim is old enough to be plainly abandoned.
+	// The sender has not come back within its lease: its claim is old enough to be plainly
+	// abandoned.
 	if _, err := database.Pool.Exec(context.Background(), `
 		update message_deliveries set claimed_at = now() - interval '5 minutes' where message_id = $1
 	`, messageID); err != nil {
@@ -1523,6 +1538,23 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	resumed := decodeBody[model.MessageDelivery](t, retry)
 	if resumed.Attempt != 1 || resumed.State != "sent" {
 		t.Fatalf("retry of a stranded attempt = %#v, want the original attempt 1 completed", resumed)
+	}
+
+	// The stalled sender is answered at last. Its claim is no longer the row's, so it records
+	// nothing and answers with the attempt as the retry settled it.
+	letGo()
+	var late *httptest.ResponseRecorder
+	select {
+	case late = <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled sender never answered")
+	}
+	if late.Code != http.StatusCreated {
+		t.Fatalf("the stalled sender: status=%d body=%s", late.Code, late.Body.String())
+	}
+	if stalled := decodeBody[model.Message](t, late); len(stalled.Deliveries) != 1 ||
+		stalled.Deliveries[0].Attempt != 1 || stalled.Deliveries[0].State != "sent" {
+		t.Fatalf("the stalled sender's deliveries = %#v, want attempt 1 as the retry settled it", stalled.Deliveries)
 	}
 
 	listenerState.Lock()

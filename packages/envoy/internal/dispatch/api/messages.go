@@ -226,10 +226,10 @@ func (s *server) createStoredMessage(
 	s.publish(event)
 	if message.Target != nil {
 		// The delivery runs on past the request: a page that gives up on a send, or retries it
-		// under its key, never cuts off a frame in flight or strands its attempt pending; only the
-		// server's own shutdown stops it.
-		sending, stop := s.detachedFromRequest(ctx)
-		defer stop()
+		// under its key, never cuts off a frame in flight or strands its attempt pending. Nor does
+		// a deploy: http.Server.Shutdown waits for this handler, so the send finishes inside the
+		// drain, and the listener client's receipt timeout bounds it there.
+		sending := context.WithoutCancel(ctx)
 		// Bound to the message's first attempt: a repeat of a keyed send that found this message
 		// committed with no attempt yet may open it first (sendHeldMessageOn), and then this send
 		// sends nothing and answers with the attempt that repeat opened.
@@ -248,18 +248,6 @@ func (s *server) createStoredMessage(
 		}
 	}
 	return message, advice, nil
-}
-
-// detachedFromRequest is ctx with its values, the pool's tracking mark among them, and without its
-// cancellation, cancelled instead when the server's lifetime ends: work a request starts that must
-// not stop when its caller gives up, and must stop when the server shuts down.
-func (s *server) detachedFromRequest(ctx context.Context) (context.Context, context.CancelFunc) {
-	detached, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	stopWatching := context.AfterFunc(s.lifetime(), cancel)
-	return detached, func() {
-		stopWatching()
-		cancel()
-	}
 }
 
 func messageEvent(message model.Message, eventType string, actor model.Actor, payload any) model.Event {
