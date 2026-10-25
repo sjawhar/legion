@@ -62,6 +62,12 @@ the same `apply.sh` command; nothing in this repository changes. Pods started af
 new file. A running pod keeps the files it started with until it restarts, because `pod.yml` mounts
 both by `subPath`, which the kubelet never refreshes.
 
+A bump of `.omp-pin` moves each `modelRoles` line in `overlay.yml` to the newest model of the same
+family the new pin catalogues (`omp models anthropic` on the new build), never to another family,
+and adds that model to `enabledModels` and to `models.yml` and `models-key-file.yml`. The older
+models stay in all three, because a resumed session restores its own model and the pinned Oh My
+Pi refuses to resume one the profile no longer has (`docs/kubernetes.md`).
+
 `apply.sh` writes with a server-side apply under its own field manager,
 `legion-operator-route-apply`, and forces conflicts. When another tool wrote the ConfigMap before
 (an earlier client-side apply, or an infrastructure tool's server-side apply), the script takes the

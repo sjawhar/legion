@@ -9,7 +9,7 @@
 # provider a pod could reach without the gateway is disabled: Bedrock twice (a node's instance role
 # is its key), Google and the local servers Oh My Pi uses with no key, as
 # scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs, and OpenAI. enabledModels names
-# the five standard models one by one rather than by a pattern, so no new session starts on one of
+# the standard models one by one rather than by a pattern, so no new session starts on one of
 # the -legion aliases models.yml keeps until the gateway retires them. Records merge key by key
 # across settings layers, so every role Legion's prompts reach is named: the shipped review, oracle
 # and deep-worker agents' @review, @oracle and @deep (the planner's plan-reviewer and
@@ -19,7 +19,9 @@ enabledModels:
   - anthropic/claude-fable-5-1
   - anthropic/claude-opus-4-8
   - anthropic/claude-opus-5
+  - anthropic/claude-opus-5-5
   - anthropic/claude-sonnet-5
+  - anthropic/claude-sonnet-5-5
 disabledProviders:
   - amazon-bedrock
   - bedrock-mantle
@@ -28,18 +30,23 @@ disabledProviders:
   - llama.cpp
   - lm-studio
   - openai
+# Each role runs the newest model of its family the pinned Oh My Pi catalogues (.omp-pin): Fable
+# 5.1, Opus 5.5, Sonnet 5.5. A pin bump moves each line to the newest model of the same family the
+# new pin catalogues, never to another family, and keeps the older models in enabledModels and
+# models.yml so a session started on one still resumes (docs/kubernetes.md, the resume of a
+# session's own model).
 modelRoles:
   default: anthropic/claude-fable-5-1:xhigh
   plan: anthropic/claude-fable-5-1:max
-  slow: anthropic/claude-opus-5:xhigh
-  smol: anthropic/claude-sonnet-5
-  task: anthropic/claude-sonnet-5
-  vision: anthropic/claude-sonnet-5
-  commit: anthropic/claude-sonnet-5
-  tiny: anthropic/claude-sonnet-5
-  advisor: anthropic/claude-sonnet-5:medium
-  review: anthropic/claude-opus-5:high
-  oracle: anthropic/claude-opus-5:high
+  slow: anthropic/claude-opus-5-5:xhigh
+  smol: anthropic/claude-sonnet-5-5
+  task: anthropic/claude-sonnet-5-5
+  vision: anthropic/claude-sonnet-5-5
+  commit: anthropic/claude-sonnet-5-5
+  tiny: anthropic/claude-sonnet-5-5
+  advisor: anthropic/claude-sonnet-5-5:medium
+  review: anthropic/claude-opus-5-5:high
+  oracle: anthropic/claude-opus-5-5:high
   deep: anthropic/claude-fable-5-1:xhigh
 retry:
   # A failed model call is retried on another model (Sami's ruling of 2026-10-08 on
@@ -48,3 +55,9 @@ retry:
   # the repository's to add, as retry.fallbackChains keys (a record), under the models.yml route
   # above.
   modelFallback: true
+  # Claude Opus 5.5 refuses some attack-path review briefs (`Refusal (cyber)`) that Claude Opus 5
+  # answers; Oh My Pi walks a role's chain on such a refusal, so the review and oracle roles fall
+  # back to Opus 5. Measured against Anthropic's API and the pinned Oh My Pi on 2026-10-25.
+  fallbackChains:
+    review: [anthropic/claude-opus-5:high]
+    oracle: [anthropic/claude-opus-5:high]
