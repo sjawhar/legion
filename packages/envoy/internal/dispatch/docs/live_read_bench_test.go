@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -195,32 +196,120 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 	}
 }
 
+// BenchmarkPeerUpdateWeighing measures what the peer update hook costs the browser whose keystroke
+// it weighs (Service.weighPeerUpdate), with an update of the size a keystroke sends against a 524
+// KiB room, the size BenchmarkKeystrokeBesideReads types into. It is weighed twice: against a room
+// whose published measurement is under the bound, which is the two atomic loads and the addition
+// every keystroke pays, and against a room whose measurement is at pmdoc.MaxDocumentBytes, where
+// the hook decodes that one update and nets what it inserts against the room's state vector
+// (insertedBeyond). The apply the hook is handed does nothing: what is timed is the weighing this
+// change adds to the peer's read loop, where the room's own apply runs with the hook or without
+// it. The percentiles are reported in milliseconds, as BenchmarkKeystrokeBesideReads reports a
+// keystroke's, so the hook's cost can be read against the keystroke it rides on.
+//
+// The room is residentRoomDocument's rather than benchmarkLiveDocument's, which is the same shape
+// and the same size but makes more elements than a document may hold at 524 KiB, so no room
+// renders it and none would publish a measurement for the hook to weigh at all (room_heap_test.go,
+// residentRoomMarkdown). What the hook costs turns on the measurement and the update, not on the
+// document under them, and this one is a document a room can hold.
+func BenchmarkPeerUpdateWeighing(b *testing.B) {
+	const weighings = 1_000
+	live := residentRoomDocument(b, 524<<10)
+	rendering, err := renderDocument(live)
+	if err != nil {
+		b.Fatal(err)
+	}
+	service := &Service{}
+	replica := service.keepReplica(live, &rendering)
+	update := benchmarkKeystrokeUpdate(b, live)
+	published, elements, measured := replica.size()
+	if !measured || published+int64(len(update)) >= pmdoc.MaxDocumentBytes || elements >= pmdoc.MaxDocumentElements {
+		b.Fatalf("the room published %d bytes and %d elements, want a measurement under the bound", published, elements)
+	}
+	for _, room := range []struct {
+		name  string
+		bytes int64
+	}{
+		{"under-the-bound", published},
+		{"at-the-bound", pmdoc.MaxDocumentBytes},
+	} {
+		b.Run(room.name, func(b *testing.B) {
+			// A room at the bound is made by publishing a measurement at it, which is all the
+			// hook reads of a room (renderedReplica.publishSize): a document whose own rendering
+			// measured pmdoc.MaxDocumentBytes would be a document twice this one's size, and what
+			// this weighs is the hook's branch rather than the document under it.
+			replica.bytes.Store(room.bytes)
+			info := websocket.PeerUpdateInfo{Room: "bench", Doc: live, Update: update}
+			latencies := make([]time.Duration, weighings)
+			for b.Loop() {
+				for weighing := range latencies {
+					start := time.Now()
+					if err := service.weighPeerUpdate(info, func() error { return nil }); err != nil {
+						b.Fatal(err)
+					}
+					latencies[weighing] = time.Since(start)
+				}
+				slices.Sort(latencies)
+				for _, percentile := range []int{50, 90, 99, 100} {
+					at := min(len(latencies)*percentile/100, len(latencies)-1)
+					b.ReportMetric(float64(latencies[at])/float64(time.Millisecond), fmt.Sprintf("p%d-ms", percentile))
+				}
+			}
+		})
+	}
+}
+
+// benchmarkKeystrokeUpdate is the update a browser sends for one typed character into live's first
+// paragraph, built on a copy of the room as the browser's own document is.
+func benchmarkKeystrokeUpdate(b *testing.B, live *crdt.Doc) []byte {
+	b.Helper()
+	browser, err := snapshotDocument(live)
+	if err != nil {
+		b.Fatal(err)
+	}
+	texts := paragraphTexts(browser)
+	if len(texts) == 0 {
+		b.Fatal("the document holds no paragraph text")
+	}
+	browser.Transact(func(txn *crdt.Transaction) { texts[0].Insert(txn, 0, "y", nil) })
+	return crdt.EncodeStateAsUpdateV1(browser, live.StateVector())
+}
+
 // benchmarkLiveDocument is a live document holding about size bytes of a spec's markdown - headings,
 // marked paragraphs, lists, tables and code - after 2,000 keystrokes typed and deleted across it,
 // so its delete set is a document's that people have edited.
-func benchmarkLiveDocument(b *testing.B, size int) *crdt.Doc {
-	b.Helper()
+//
+// Each paragraph runs on in ordinary words past the sentence that names it, and that is what makes
+// the document one a room can hold: the shape without those words makes 0.28 elements a byte, so
+// 524 KiB of it measures 147,552 elements where a document may hold pmdoc.MaxDocumentElements,
+// and pmdoc.Update refused to write it at all - the benchmark could not build its own document,
+// at this commit or before it. With them the same 524 KiB measures 60,864 elements, which the
+// write takes and the room renders, so a keystroke here costs what a keystroke on a document of
+// this size costs a room.
+func benchmarkLiveDocument(tb testing.TB, size int) *crdt.Doc {
+	tb.Helper()
+	running := " " + strings.Repeat("word ", 99) + "word"
 	var markdown strings.Builder
 	for section := 0; markdown.Len() < size; section++ {
 		fmt.Fprintf(&markdown, "## Section %d\n\n", section)
 		fmt.Fprintf(&markdown, "Paragraph %d holds **bold text**, `inline code`, *emphasis* and a "+
-			"[link](https://example.com/%d) among the ordinary words a spec's paragraph runs to.\n\n",
-			section, section)
+			"[link](https://example.com/%d) among the ordinary words a spec's paragraph runs to.%s\n\n",
+			section, section, running)
 		markdown.WriteString("- the first item\n- the second item with `code`\n- the third item\n\n")
 		fmt.Fprintf(&markdown, "| Column | Value |\n| --- | --- |\n| row %d | cell |\n| other | cell |\n\n", section)
 		markdown.WriteString("```go\nfunc example() int {\n\treturn 1\n}\n```\n\n")
 	}
 	tree, err := pmdoc.Parse(markdown.String())
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	update, err := encodeDocumentTree(tree)
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	live := newDocumentCopy()
 	if err := crdt.ApplyUpdateV1(live, update, nil); err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	texts := paragraphTexts(live)
 	for keystroke := range 2_000 {
