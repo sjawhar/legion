@@ -512,6 +512,41 @@ func TestANeverStartedChildHandedOverFromAFinishedTreeIsStillChecked(t *testing.
 	assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
 }
 
+// The same hand-over of a child its tree still holds on an unfinished blocker, where the child ran
+// a phase in an earlier run of its tree: it left the workflow (a person moved it to backlog, or it
+// closed) and was set back to todo, which re-entered it at admitted, held by the blocker added
+// meanwhile. It carries no run into its tree of its own — it stands at admitted — and it is not a
+// tree Legion takes back, since its tree was another root's: the approved spec has the blocked-root
+// rule admit such a child "once its blockers are done", so the run it had before exempts it from
+// nothing and the blocker holds it in the waiting line.
+func TestAHeldChildThatRanBeforeHandedOverFromAFinishedTreeIsStillChecked(t *testing.T) {
+	const root, child, blocker = "LEGION-208", "LEGION-209", "LEGION-BLOCKER"
+	pool := migratedPool(t)
+	admission := quiet(t, 1)
+	seedLingeringHandovers(t, pool, root, child)
+	// Re-entered after an earlier run: held at admitted, marked as having stood in a phase.
+	rerun := issue(t, pool, child)
+	rerun.Phase, rerun.TakenBack = phase.Admitted, true
+	putIssue(t, pool, rerun)
+	seedMirror(t, pool, child, "todo", blocker)
+	seedMirror(t, pool, blocker, "in_progress")
+
+	applyMirrored(t, pool, admission, "handover", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets",
+		Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: handed,
+		DaemonActor: true, Blockers: []string{blocker}}, admission.engine)
+
+	if got := issue(t, pool, child); got.Tree != child || got.Phase != phase.Admitted {
+		t.Fatalf("the handed-over child = %#v, want a root of its own at admitted", got)
+	}
+	assertSlots(t, pool, nil)
+	assertWaiting(t, pool, []string{child})
+
+	applyMirrored(t, pool, admission, "blocker-done", intake.DispatchIssue{Key: blocker, ResolvedRepo: "acme/widgets",
+		Seq: 5, Type: "issue.updated", Status: "done", Title: blocker, Rank: "Z"}, engineStub{})
+
+	assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
+}
+
 // What promotion exempts is never reported as waiting: the tick notice and the state's `blocked`
 // are the deciders' own rule read rather than made (blockers.Blocked, blockers.Exempt), so a tree
 // Legion took back is named in neither while a blocker of it stands unfinished. The mark is
