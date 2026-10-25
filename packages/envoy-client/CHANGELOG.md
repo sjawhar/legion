@@ -12,6 +12,15 @@
 
 ### Added
 
+- `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
+  the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
+  the move rides along with any other change in the same call, and the printed result gains
+  `rank -> before KEY`, `rank -> after KEY`, or `rank -> after KEY, before KEY`. It sends a `rank`
+  key only when at least one neighbour is named: a `rank` with neither is not a no-op, since the
+  server ranks the issue last in its project, so an ordinary status update would otherwise drop its
+  issue to the bottom of the board. The flags follow from the tool's schema, so the command itself
+  needed no change (INFRA-188).
+
 - `ENVOY_PASS_DEADLINE_MS` resolves `passDeadlineMs`, the bound on one task of the pi-envoy
   plugin's serial queues, so a task that never settles cannot hold the next heartbeat tick, session
   event or Legion claim behind it. A finite value above 0 is used, floored at 25 ms; anything else

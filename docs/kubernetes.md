@@ -390,9 +390,10 @@ running the published image locally is fine. A failed build is retried with `gh 
 whole-run rerun of a `release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a
 `legion-v` tag, re-executes `legion_build` and `legion_publish`, which release that tag again: the image is
 rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
-that digest. `release-envoy-listener.yaml` is the exception to `--failed`: when its `release_publish` fails at
-"Confirm the version" because another run took the tag first, only a whole-run re-run (`gh run rerun <run-id>`
-without `--failed`) heals it, since `release_build` must compute the version again and re-stamp the binaries.
+that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
+version", that another run took the tag first: it publishes nothing and, when its commit still needs a release
+and no later run on main still running holds it, starts a new run on main itself, which decides the version again
+and re-stamps the binaries.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is

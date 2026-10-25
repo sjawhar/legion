@@ -23,11 +23,14 @@ related_issues:
 ## The rule
 
 1. **Probe a workflow key or runner fact in a sandbox repository before editing the real
-   workflow.** Push one throwaway branch (`on: push: branches: [<that branch>]`; a
-   `workflow_dispatch` would need the file on the default branch) with one workflow holding the
-   probe job and, in the same file, a control job identical but for the thing under test. Read
-   the run with `gh run view <id> --log`, record the exact lines, delete the branch; the run
-   outlives it and is the proof's link. Two pushes give the control a saved cache to restore.
+   workflow.** Push one throwaway branch (`on: push: branches: [<that branch>]`) with one
+   workflow holding the probe job and, in the same file, a control job identical but for the
+   thing under test. Read the run with `gh run view <id> --log`, record the exact lines, delete
+   the branch; the run outlives it and is the proof's link. Two pushes give the control a saved
+   cache to restore. A `workflow_dispatch` of that file on that branch works too, through the
+   API, though the file is not on the default branch: sjawhar/legion-smoke run 40157672926, a
+   push run, dispatched it with its own `GITHUB_TOKEN` as `gh workflow run <file> --ref
+   <branch>`, and GitHub created run 40157678321 (dispatch://INFRA-281, 2026-10-25).
 2. **Put every step that first executes in production on that run.** Once the sandbox exists,
    list the steps of the change that no pre-merge surface reaches — a registry write, a binary
    the runner alone can execute, an action dropped on a measurement of its sibling — and probe
