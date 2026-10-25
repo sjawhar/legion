@@ -2009,7 +2009,7 @@ test("checked: a background check's report in a wait result or an async-result m
   expect(scoresOf("spec-writing-head-65")).toEqual(allPass);
   // A `wait` that found the check still running, then its completion.
   expect(scoresOf("spec-writing-head-67")).toEqual(allPass);
-  // A `── Job …` line quoted in another job's report frames nothing.
+  // A `── Job …` line the check's own report quotes frames nothing, so its section is whole.
   expect(scoresOf("spec-writing-head-68")).toEqual(allPass);
   // `followed`'s checks are blocking, each with a completed `<task-result>` block.
   expect(scoresOf("spec-writing-head-1")).toEqual(allPass);
