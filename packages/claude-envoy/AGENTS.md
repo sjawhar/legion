@@ -48,6 +48,7 @@ Dispatch asks stay on Dispatch.
 | Manual `/clear` smoke | `scripts/smoke-clear-rebind.sh` | Real `/clear` against the live listener with the build in `CLAUDE_PLUGIN_DIR` (default: this package); checks the registry entry moves to the new id without the old direct subject. Sends no prompt to the model; excluded from CI. |
 | Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts`, `src/legion-phase-hook.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). `src/legion-phase-hook.ts` is the endless phase reminder's Claude Code host (the section below). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of channel notifications. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
 | Generated Legion plugin | `legion/`, `scripts/build.ts` | Never edit by hand: `scripts/build.ts` stages pi-legion's skills, converts `packages/pi-legion/agents` (tool names mapped to Claude Code's, `glob`/`grep`/`todo` dropped) and writes the phase reminder's five hook entries (`LEGION_HOOKS` → `legion/hooks/hooks.json`, the section below). `scripts/build.ts --check` and `tests/legion-plugin-fresh.test.ts` fail on drift. `tests/legion-pane-mcp.test.ts` runs a Legion pane's server end to end against stand-ins. |
+| The phase reminder on the real Claude Code binary | `tests/legion-phase-hook-claude.test.ts` | The one check that Claude Code arms the generated `legion/hooks/hooks.json` entries at all: it runs the real binary under Legion's own agent command (`claudelaunch.Argv`, `--debug` added for the log it reads), with the generated `legion/` tree and this package's own `dist/envoy-channel.js` as the `legion` MCP server, against stand-ins for the Anthropic API, the daemon, the listener and NATS. `LEGION_TEST_CLAUDE` names the binary — in a worker pod, the one installed from `packages/daemon/docker/claude-code/package-lock.json`, at `node_modules/@anthropic-ai/claude-code-linux-x64/claude` (the `node_modules/.bin/claude` symlink is a `.exe` shim that does not exec on Linux): `cd packages/claude-envoy && LEGION_TEST_CLAUDE=<that path> bun test tests/legion-phase-hook-claude.test.ts`. A run without it skips the file, and nothing in CI installs the binary. |
 
 ## The Legion phase reminder
 
@@ -122,7 +123,11 @@ through this server's own listener client). A worker whose launcher recreated it
 told so over the same inbox, once per launch, as an Oh My Pi worker is
 (`LEGION_WORKSPACE_RECREATED`, `@legion/pi-shared/workspace-recreated`). `tests/legion-phase-hook.test.ts`
 drives the endpoint over a real state file, and `tests/legion-pane-mcp.test.ts` proves the tool is
-on a Legion pane's server.
+on a Legion pane's server. Both drive this package alone: that Claude Code arms these hook entries
+at all, reaches the server under the bare name `legion`, turns the `Stop` block into one more turn
+of the same session, and fires `PostToolUse` for the model's own call and not for the hook's own
+MCP call, is proved only on the real binary, by `tests/legion-phase-hook-claude.test.ts` (the row
+above says how to run it).
 
 ## Critical conventions
 
