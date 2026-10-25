@@ -239,11 +239,13 @@ reviewing until you finish.
     previous release, a daemon still running the previous commit, a deploy nobody has run): the
     summary names what is missing, and the `Production:` line stays at
     `pending deploy of <merge sha>`.
-  - `fail`, for a defect: open a `dispatch ask` for it on the controller's report issue, as
-    `skill://legion-worker/references/findings.md` says, publish its reference to the controller
-    topic, and file no issue. It names this issue, the pull request, the merge commit, what you
-    drove and what failed. Name the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the `Production:`
-    line and in the summary.
+  - `fail`, for a defect: file no issue, and take the path
+    `skill://legion-worker/references/findings.md` gives it. A defect with a clear fix goes to the
+    controller topic, with its evidence comment on the controller's report issue. A defect that
+    needs a decision is a `dispatch ask` on the report issue, and you publish its reference to the
+    controller topic. Either names this issue, the pull request, the merge commit, what you drove
+    and what failed. Name the message or the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the
+    `Production:` line and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look: the daemon suspends
   your claim with its session and the issue's volume kept, the pod goes, and the daemon wakes the
   check (the pod comes back and your session resumes with a new check task) on Dispatch's

@@ -39,8 +39,9 @@ retrospective's durable output.
    that developed the change is responsible for testing it in production, once production carries
    the merge. The record is the pull request's `Production:` line and one pull-request comment,
    naming what was driven, how, what was observed, the merge commit and what woke the look; nothing
-   is written on the closed issue, since Dispatch refuses it. A defect the check finds is a
-   `dispatch ask` on the controller's report issue, never an issue the implementer files
+   is written on the closed issue, since Dispatch refuses it. A defect the check finds is never an
+   issue the implementer files: a clear defect goes to the controller, and one that needs a
+   decision is a `dispatch ask` on the controller's report issue
    (`skill://legion-worker/references/merge-gate.md`, *The production check after the close*).
 
 Retro's commits sit above the reviewer's approved head and the approval stands: commits that change

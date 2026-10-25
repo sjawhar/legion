@@ -1,9 +1,43 @@
-# Finding asks
+# Finding asks and clear defects
 
-Read this when a finding ask's reference reaches you on the controller topic, when one you follow
-is answered, and at every start. What a finding ask is and where it goes is
+Read this when a clear defect or a finding ask's reference reaches you on the controller topic,
+when a finding ask you follow is answered, and at every start. What each is and where it goes is
 `skill://legion-worker/references/findings.md`; what you may file is the skill's "Findings, and
 the issues you file" section.
+
+## File a clear defect
+
+A role sends a clear defect as a message on the controller topic: the defect, the issue it came
+from, where the fix belongs, the fix, and its evidence comment on the report issue. You file one
+you find yourself the same way.
+
+1. Check that it is clear: the fix needs no choice a person must make, and it belongs in a
+   repository your addressing line lists. Otherwise it is a finding that needs a decision: open an
+   ask for it, as `findings.md` says.
+2. Search first, as `skill://dispatch-first` says. When an open issue already tracks it, comment
+   the evidence there, reply under the evidence comment with that issue's reference, and file
+   nothing.
+3. File it in the project the repository maps to:
+
+   ```text
+   dispatch issue --project <KEY> --title '<the defect, as a title>' --label legion --spec-file -
+   ```
+
+   The spec states the defect, where the fix belongs and the fix, cites the evidence by its
+   `dispatch://` reference, and ends with the line `Filed for Legion from <role> on <issue>:
+   <evidence>`. `<role>` is the sending role's token, or `controller` for one you found.
+   `<issue>` is the `dispatch://<KEY>` it came from. `<evidence>` is the evidence comment's
+   reference, or `envoy message` when the evidence came in the message. The issue opens in
+   `triage` with the label, so its triage wake brings it back to you (the skill's "New issue
+   triage").
+4. Reply under the evidence comment, its first line exactly `Filed dispatch://<NEW KEY>`:
+
+   ```text
+   dispatch comment --issue <REPORT KEY> --reply-to '<comment id>' --body-file -
+   ```
+
+   When the evidence came in the message, there is no comment to reply under: the `Filed for`
+   line and this session's own filing are the record.
 
 ## Follow it
 

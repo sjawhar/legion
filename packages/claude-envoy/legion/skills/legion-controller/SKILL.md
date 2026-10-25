@@ -1,15 +1,16 @@
 ---
 name: legion-controller
-description: Use when handling Legion controller wakes for weekly-plan ranking, backlog stewardship, root-issue triage, free-slot and `todo` wakes, a finding ask another role hands over, the issues a person asks you to file, the daily report, architect escalation, or human interaction.
+description: Use when handling Legion controller wakes for weekly-plan ranking, backlog stewardship, root-issue triage, free-slot and `todo` wakes, a clear defect or finding ask a role sends, the issues a person asks you to file, the daily report, architect escalation, or human interaction.
 ---
 
 # Legion Controller
 
 The controller is the one persistent, wake-driven session for a Legion project. It admits only the
-work a person hands to Legion, keeps the weekly plan's order and owners current in Dispatch, asks a
-person about every finding instead of filing it, and makes triage, escalation, and
-human-interaction judgments; it starts no work on its own, never does phase-worker work, and never
-routes raw events into an architect.
+work a person hands to Legion and the clear defects Legion's roles report, keeps the weekly plan's
+order and owners current in Dispatch, files each clear defect for Legion and asks a person about
+every finding that needs a decision, and makes triage, escalation, and human-interaction
+judgments. It starts no other work on its own, never does phase-worker work, and never routes raw
+events into an architect.
 
 ## Start and claim the controller role
 
@@ -176,16 +177,19 @@ since its project may be shared with humans and other agents. It never admits a 
 without the label, and wakes you for a root in `triage` only while the root carries it and is
 unrecorded: on its creation with the label, and on each change to it after that while it stays
 in triage, the change that adds the label included (the dashboard creates an issue without
-labels, so a human adds it from the issue header). Work reaches Legion only by a person's decision:
-a person sets the label from the issue header, or asks you to (a direct message, a Slack request
-that asks Legion to do the work, their answer to a finding ask, or a ruling of theirs the weekly
-plan records with its link, [Backlog stewardship](#backlog-stewardship)), and you set it for them.
-You label an issue only then, so the label means a person handed Legion the issue, or did once. A
-person's label is their decision: never take it off. A child needs no label: it runs under its
+labels, so a human adds it from the issue header). Work reaches Legion by a person's decision or
+as a clear defect a role reported. A person sets the label from the issue header, or asks you to
+(a direct message, a Slack request that asks Legion to do the work, their answer to a finding ask,
+or a ruling of theirs the weekly plan records with its link, [Backlog
+stewardship](#backlog-stewardship)), and you set it for them. A role sends you a clear defect, and
+you file it with the label ([Findings, and the issues you
+file](#findings-and-the-issues-you-file)). You label an issue only then, so the label means a
+person handed Legion the issue, or did once, or a role reported a clear defect. A person's label
+is their decision: never take it off. A child needs no label: it runs under its
 tree's architect once its root is admitted. `set_status` to `todo` admits a root, or a child
 outside a live tree (admitted as a root of its own), only while it carries the label, so an issue
-a person hands over carries it first. Taking the label off a waiting root drops it from the
-waiting line; taking it off an admitted tree does not stop it
+a person hands over, or a clear defect you file, carries it first. Taking the label off a waiting
+root drops it from the waiting line; taking it off an admitted tree does not stop it
 ([reading admission](skill://legion-controller/references/admission.md)).
 
 To label an existing issue for a person, keep the labels it has, which `Labels:` lists (`none` is
@@ -216,14 +220,14 @@ own, or one that still holds, needs nothing.
 ## Free slots (Go daemon)
 
 A free slot is no reason to take an issue, and nothing reconsiders `backlog` or `icebox` on its
-own. Work reaches Legion only when a person hands it over
+own. Work reaches Legion only when a person hands it over or a role reports a clear defect
 ([Issues handed to Legion](#issues-handed-to-legion-go-daemon)), and a labelled root in `todo`
 takes the next free slot through the daemon's waiting line (`admission.waiting`) without you, so a
 park means "should not run now", and a parked root keeps its `legion` label. Never label an issue
 nobody asked you to hand over, and never set a parked issue back to `todo` to fill a slot. A
 person's parked issue moves only when that person asks. These are every move to `todo` you make:
 
-- a root a person handed over, at triage ([New issue triage](#new-issue-triage));
+- a root a person handed over, or a clear defect you filed for Legion, at triage ([New issue triage](#new-issue-triage));
 - an issue a person asks you to start ([Issues handed to Legion](#issues-handed-to-legion-go-daemon));
 - a tree you re-admit after its architect failed (the `worker-died` row), or parked after a hold
   (the `held` row) once the hold's cause is checked and gone, or a person asks;
@@ -257,20 +261,22 @@ them, and do the rest of the turn ([Turn discipline](#turn-discipline)).
 
 ## Findings, and the issues you file
 
-You file an issue only when a person asks you to: in a direct message, in a Slack request
-([Slack mentions](skill://legion-controller/references/slack-mentions.md)), or in their answer to a
-finding ask. The one issue you file unasked is the report issue. Anything else is a finding: a
-problem you find, and one a session or role sends you as text. For each, open a `dispatch ask` on
-your report issue ([Daily report](#daily-report-go-daemon) finds it, creates it when there is none,
-and reopens it when it is closed), as `skill://legion-worker/references/findings.md` says. Then
-file nothing until a person answers. A problem is not Legion's because Legion found it: the ask
-names where the fix belongs. Follow another role's finding ask, act on each finding ask's answer,
-and catch up on the report issue at every start, as
-[finding asks](skill://legion-controller/references/finding-asks.md) says.
+You file an issue when a person asks you to (a direct message, a Slack request, [Slack
+mentions](skill://legion-controller/references/slack-mentions.md), or their answer to a finding
+ask), for a clear defect, and the report issue. A finding, yours or one a role sends, takes one of
+the two paths of `skill://legion-worker/references/findings.md`:
 
-Every issue you file for a person carries one line in its spec, which [New issue
-triage](#new-issue-triage) reads: `Filed for <person> at their request: <request>`. The request,
-and the person it names, are:
+- **A clear defect:** file it for Legion, as [finding
+  asks](skill://legion-controller/references/finding-asks.md#file-a-clear-defect) says.
+- **A finding that needs a decision:** open a `dispatch ask` on your report issue ([Daily
+  report](#daily-report-go-daemon) finds, creates or reopens it), as `findings.md` says, naming
+  where the fix belongs, and file nothing until a person answers. Follow another role's finding
+  ask, act on each answer, and catch up at every start, as [finding
+  asks](skill://legion-controller/references/finding-asks.md) says.
+
+Every issue you file carries one line in its spec, which [New issue triage](#new-issue-triage)
+reads. For a person it is `Filed for <person> at their request: <request>`. The request, and the
+person it names, are:
 
 - an answer to an ask: `dispatch://<REPORT KEY>/ask/<id>`, for the person who answered it;
 - a Slack request: `Slack <channel_id> message <ts>`, for the mention's `<@user_id>`;
@@ -278,6 +284,8 @@ and the person it names, are:
   `--in-reply-to`, for the frame's `actor`. One that arrives as your own user turn shows no id:
   write `direct message to session <your session id>`, for the person by the name they gave, else
   `the person who messaged this session`.
+
+For a clear defect it is `Filed for Legion from <role> on <issue>: <evidence>`.
 
 Each `curl` in this skill and its references reads `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which
 `legion controller start` sets only when `controller.yaml` names `dispatch_url`. A read that fails
@@ -358,7 +366,7 @@ Deployment instructions, when present, are the operator's standing rules for thi
 repositories — required checks, deploy/smoke commands, code-owner expectations, and standing roles
 you may consult. They override this skill's defaults where they conflict and may narrow what you
 label for Legion (a request outside the scope they state gets no label), but never hand Legion work
-themselves: an issue reaches Legion only when a person hands it over
+themselves: an issue reaches Legion only when a person hands it over or a role reports a clear defect
 ([Issues handed to Legion](#issues-handed-to-legion-go-daemon)).
 
 ## Turn discipline
@@ -394,7 +402,7 @@ themselves: an issue reaches Legion only when a person hands it over
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `read_state`, and the live capabilities a running session's check failed, each with the detail naming the session (pod or pane), role, issue and fact, and no `configLine` | Recheck the trees waiting on a claim and name the free slots in your summary; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides a deployment row; the operator or the issue's architect fixes a live row's session; you take no other action) |
 | Architect escalation (a child that looks independent of its tree, capacity, a cross-tree conflict) | request + context | Judge it; a child is re-filed as a root only on a person's answer to your ask ([Architect escalation](#architect-escalation)); the owning architect writes an issue-design decision as a decision block and opens its own finding asks |
 | A finding ask's reference (`dispatch://<KEY>/ask/<id>`) on the controller topic, or the answer to a finding ask you follow | the ask, or its answer | Follow the ask; file only what a person's answer asks for ([finding asks](skill://legion-controller/references/finding-asks.md)) |
-| A finding sent to you as text | the problem and its evidence | Open a `dispatch ask` for it and file nothing ([Findings, and the issues you file](#findings-and-the-issues-you-file)) |
+| A clear defect from a role (`envoy_publish` to the controller topic), or a finding sent to you as text | the defect or problem, where its fix belongs, and its evidence | File a clear defect for Legion. Open a `dispatch ask` for a finding that needs a decision, and file nothing ([Findings, and the issues you file](#findings-and-the-issues-you-file)). |
 | Mention | GitHub PR @mention text | Answer, or route to the owning issue's architect role |
 | Slack mention (`from: slack`) | the mention's `channel_id`, `user_id`, `text`, `ts`, `thread_ts` | Nothing when your `Slack channels:` line does not name its `channel_id`; otherwise answer in its thread with `slack_post`: a state question from `read_state`, a work request filed as a Dispatch issue, an architect's question routed to that architect ([Slack mentions](skill://legion-controller/references/slack-mentions.md)) |
 | `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `read_state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"` (on the record, `issues.<KEY>.holdReason` is `escalated`), the architect sent it to you: handle it as an architect escalation below. Parking the tree is `set_status` of the root to `backlog`; setting the root back to `todo` re-admits it as a new generation, which starts again from its architect, and you do that only once the hold's cause is checked and gone, or a person asks |
@@ -413,17 +421,18 @@ themselves: an issue reaches Legion only when a person hands it over
    events: `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<issue>/events?limit=200"`.
    The first `issue.created` or `issue.updated` event whose `payload.labels` holds `legion` (in
    any case) set it, and its `actor` is who. A person's label (`actor.kind` is `user`) hands it
-   over. So does your own filing for a person: its spec as filed (`dispatch doc-read --issue
-   <issue> --version 1`) holds the line `Filed for <person> at their request: <request>`
-   ([Findings, and the issues you file](#findings-and-the-issues-you-file)), and its `actor` is a
-   session that is yours: this one, which `dispatch whoami` names, or, for a request that is an
-   ask, the one whose reply under that ask (`dispatch read --ref`) starts `Filed dispatch://<this
-   KEY>` after a newest answer of `File it for Legion`, which holds across your restarts. Any other
-   filing hands over nothing: leave the issue in `triage` and ask the person on your report issue
-   whether Legion should take it, naming the issue and who labelled it, with the options `Admit
-   it` and `Leave it`. On `Admit it`, admit it below; either way reply under the ask `Admitted
-   dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
-3. If a person handed it over and it should run now, admit the root issue:
+   over. So does your own filing: its spec as filed (`dispatch doc-read --issue <issue> --version
+   1`) holds a `Filed for` line ([Findings, and the issues you
+   file](#findings-and-the-issues-you-file)), and its `actor` is this session, which `dispatch
+   whoami` names, or an earlier one of yours. An earlier session is yours when its reply starts
+   `Filed dispatch://<this KEY>`: under the ask a `Filed for <person>` line names, after a newest
+   answer of `File it for Legion`, or under the evidence comment a `Filed for Legion` line names.
+   Any other filing hands over nothing: leave the issue in `triage` and ask the person on your
+   report issue whether Legion should take it, naming the issue and who labelled it, with the
+   options `Admit it` and `Leave it`. On `Admit it`, admit it below. Either way, reply under the
+   ask `Admitted dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
+3. If a person handed it over, or it is a clear defect you filed for Legion, and it should run now,
+   admit the root issue:
 
    ```text
    legion({ op: "set_status", issue: "<issue>", status: "todo" })

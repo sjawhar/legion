@@ -35,9 +35,9 @@ separate coordinator to finish necessary work.
   risk the person would weigh, or needs what only that person can provide. Decide the rest: write
   the decision and its reason in the spec, and go on. A design that crosses one of `STRATEGY.md`'s
   Boundaries goes to its owner before you build it.
-  When you are unsure, take the option that is easy to undo. A finding outside the tree is always
-  an ask, as `skill://legion-worker/references/findings.md` says. The root's one design-gate
-  approval stays.
+  When you are unsure, take the option that is easy to undo. A finding outside the tree that is a
+  clear defect goes to the controller, and one that needs a decision is an ask, as
+  `skill://legion-worker/references/findings.md` says. The root's one design-gate approval stays.
 - The daemon starts each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
   `legion-<project>-<key>-<role>` with the issue key lower-cased; for example, project `acme`,
@@ -49,8 +49,9 @@ separate coordinator to finish necessary work.
   `dispatch request-approval` — not a label and not an ask. Never attempt to apply a label.
 - Deferring necessary work is failure. The sole valid deferral is a new child issue you create
   and continue to own, or, on a root's split, a `dispatch ask` for the rest. A child that looks
-  independent goes to the controller (*Escalation judgment*); a problem outside the tree is a
-  `dispatch ask`, never an issue you file (`skill://legion-worker/references/findings.md`).
+  independent goes to the controller (*Escalation judgment*). A problem outside the tree is never
+  an issue you file: a clear defect goes to the controller, and a problem that needs a decision is
+  a `dispatch ask` (`skill://legion-worker/references/findings.md`).
 
 ## Deployment instructions
 
@@ -466,8 +467,9 @@ are architect-only and never go to an active phase worker.
 Three matters go to the controller, with `envoy_publish` to the controller topic your `Legion
 addressing` line names: a child that looks independent of the tree (the controller asks a person
 whether to re-file it as a root of its own, and does so only on their yes), capacity, and a
-cross-tree conflict. A problem outside the tree is a `dispatch ask` you open, never an issue you
-file (`skill://legion-worker/references/findings.md`). Handle everything else in the
+cross-tree conflict. A problem outside the tree is never an issue you file: a clear defect goes to
+the controller, and a problem that needs a decision is a `dispatch ask` you open
+(`skill://legion-worker/references/findings.md`). Handle everything else in the
 tree. A product, scope, or design decision that needs the human, yours or one a worker escalated,
 is a decision block you write (section 1 says what one does to the root spec's gate). A standalone
 human to-do may use `dispatch ask`; workers may reach the human directly with it the same way. Do not

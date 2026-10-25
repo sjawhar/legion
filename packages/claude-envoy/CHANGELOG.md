@@ -80,6 +80,9 @@
 
 ### Changed
 
+- The `legion/` plugin's skills send a clear defect outside a role's issue to the controller, which
+  files it for Legion, and keep a `dispatch ask` for a finding that needs a decision (INFRA-140).
+
 - The `legion/` plugin's `plan-reviewer` reviews a spec as well as a plan, checking each factual
   claim, and it and `plan-gap-analyst` get `Bash` for read-only commands (INFRA-140). Its
   `legion-architect` runs both on a root spec before every approval request, and ends the

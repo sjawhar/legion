@@ -113,6 +113,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- A finding outside a role's own issue that is a defect with a clear fix goes to the controller
+  over Envoy with its evidence, and the controller files it with the `legion` label (INFRA-140).
+  A `dispatch ask` to a person is now only for a finding that needs a decision, with one
+  recommendation. The issue the controller files carries the line `Filed for Legion from <role> on
+  <issue>: <evidence>`, and the controller's triage admits a labelled root that carries it and that
+  the controller's own session filed. `legion-worker/references/findings.md` holds the two paths.
+  `legion-controller`, `legion-architect`, `legion-worker`, `legion-retro`, the production check's
+  `fail` in `merge-gate.md`, and the daemon's role prompts and production-check task say the same.
+  This reverses part of #2130: the owner had to approve every clear defect by hand.
+
 - `legion-architect`, `legion-worker` and `legion-controller` point to
   `skill://dispatch-writing-specs` (INFRA-140) for a spec's outline, its questions, its approval and
   the rules for text a person reads, and `legion-architect` drops its own copy of those rules. The

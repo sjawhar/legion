@@ -68,8 +68,8 @@ above), carrying the verified facts and the decision needed. A `write` to `agent
 agents inside your own process, not the architect's separate one. Never write a decision block
 into a spec yourself: the architect decides whether the human must answer it and writes the block,
 since a new version of an approved root spec closes the tree's design gate. A standalone to-do
-only a human can do is a `dispatch ask`, and its replies return to your own session. So is a
-problem outside your tree, never an issue you file: `skill://legion-worker/references/findings.md`.
+only a human can do is a `dispatch ask`. File no issue for a problem outside your tree: send a
+clear defect to the controller, and ask about a decision (`skill://legion-worker/references/findings.md`).
 
 Because the same agent works its role until the issue closes, you may receive more than one
 assignment across your lifetime: your session stays live after your phase ends, and when a later
