@@ -2819,6 +2819,20 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "[Triggered] CPU load high\nhost web-1 is at 97%",
 		},
 		{
+			name: "an attachment's author name and subname",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"attachments": []any{map[string]any{
+						"author_name": "grafana", "author_subname": "alerting", "text": "p99 is 3.2s",
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: grafana",
+			wantText:    "grafana\nalerting\np99 is 3.2s",
+		},
+		{
 			name: "words only in a block",
 			body: map[string]any{
 				"team_id": "T01234567",
@@ -2962,6 +2976,54 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "Build failed\nFAIL TestFoo at line 42: want 3, got 4",
 		},
 		{
+			name: "an app's plain-text copy beside its rich-text formatting",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567",
+					"text": "Build failed\nFAIL TestFoo at line 42",
+					"blocks": []any{map[string]any{
+						"type": "rich_text",
+						"elements": []any{map[string]any{
+							"type": "rich_text_section",
+							"elements": []any{
+								map[string]any{"type": "text", "text": "Build failed"},
+								map[string]any{"type": "text", "text": "FAIL TestFoo at line 42"},
+								map[string]any{"type": "text", "text": "see logs"},
+							},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Build failed",
+			wantText:    "Build failed\nFAIL TestFoo at line 42\nsee logs",
+		},
+		{
+			name: "a rich-text block nested in one already measured",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567",
+					"text": "Build failed on web-1",
+					"blocks": []any{map[string]any{
+						"type": "rich_text",
+						"elements": []any{
+							map[string]any{
+								"type":     "rich_text",
+								"elements": []any{map[string]any{"type": "text", "text": "web-1"}},
+							},
+							map[string]any{
+								"type":     "rich_text_section",
+								"elements": []any{map[string]any{"type": "text", "text": "see logs"}},
+							},
+						},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Build failed on web-1",
+			wantText:    "Build failed on web-1\nweb-1\nsee logs",
+		},
+		{
 			name: "an app's rich text beside a section block",
 			body: map[string]any{
 				"team_id": "T01234567",
@@ -3048,8 +3110,8 @@ func TestSlackDeliveredText(t *testing.T) {
 					}},
 				},
 			},
-			wantSummary: "slack message in C01234567 from U01234567: CPU high",
-			wantText:    "CPU high\nCPU high on host-a",
+			wantSummary: "slack message in C01234567 from U01234567: CPU high on host-a",
+			wantText:    "CPU high on host-a\nCPU high",
 		},
 		{
 			name: "an attachment's label and value fields",
@@ -3069,7 +3131,25 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567: <@U0LEG> page: incident 4213",
-			wantText:    "<@U0LEG> page: incident 4213\nDisk check\nSeverity\n1\nHosts down\n2\nAction\npage oncall",
+			wantText:    "<@U0LEG> page: incident 4213\nDisk check\nSeverity: 1\nHosts down: 2\nAction: page oncall",
+		},
+		{
+			name: "two fields sharing a value keep their labels",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "Deploy failed",
+					"attachments": []any{map[string]any{
+						"fields": []any{
+							map[string]any{"title": "Primary", "value": "oncall-a"},
+							map[string]any{"title": "Secondary", "value": "oncall-a"},
+							map[string]any{"title": "Escalation", "value": "oncall-b"},
+						},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Deploy failed",
+			wantText:    "Deploy failed\nPrimary: oncall-a\nSecondary: oncall-a\nEscalation: oncall-b",
 		},
 		{
 			name: "a section's own text before its fields",
@@ -3108,6 +3188,21 @@ func TestSlackDeliveredText(t *testing.T) {
 			},
 			wantSummary: "slack message in C01234567 from U01234567: Acknowledge",
 			wantText:    "Acknowledge\nack:alert-77",
+		},
+		{
+			name: "an image block's alt text",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type": "image", "image_url": "https://g/x.png",
+						"alt_text": "CPU chart: 97% for 10 minutes",
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: CPU chart: 97% for 10 minutes",
+			wantText:    "CPU chart: 97% for 10 minutes",
 		},
 		{
 			name: "an edited message",
