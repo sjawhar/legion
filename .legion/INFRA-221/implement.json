@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T07:19:52Z",
+  "completed": "2026-10-25T07:26:22Z",
   "proof": [
     {
       "criterion": "A role that needs a tool its work requires can get it, in one documented step, without a person — the image half: the five clients are in the pod.",
@@ -59,6 +59,14 @@
       "observed": "The nine resolve to /legion/scratch/{cache,data,state/implementer,tmp,bun/install/cache}, /legion/go/{build,mod} and /legion/uv/{cache,python/infra-221}: none is /legion/harness, the INFRA-43 harness root. /legion is one v9fs mount of 49G holding all of them, while $HOME and /tmp are on the container's /. The condition now reads 'lands on the issue's own volume, under /legion … whether through a variable the runtime sets for you there or under a path on that volume your harness names itself', so the worked case the page says 'passes both conditions' (:182) does; the old phrase counts 0 now and 1 at b4ebc2dd. The second condition is unchanged. check-dist printed 'dist/ and legion/ match a fresh build' and diff -r is empty. The INFRA-43 note's subshell example is gone (0) and the note keeps the scope claim, labelled as a statement of scope, not a change to the recipe. Image: this round changes skills/ text, which the image copies, but neither the Dockerfile nor a Go file, so the five-clients Job proof above holds by those inputs being byte-identical; the new image tag was still building at completion and was not driven.",
       "headSha": "417d96141003ba5bad7dc6fd5f45aa983975c61f",
       "negativeControl": "At b4ebc2dd the condition required 'through one of the variables the runtime actually sets for you', and /legion/harness is under none of the nine printed above, so by its own words (:93 'It is the withheld capability when either condition fails') the page classed its worked case as the withheld capability."
+    },
+    {
+      "criterion": "The first condition admits the worked case (/legion/harness) without admitting the issue's shared workspace, which the INFRA-43 learning forbids, and the INFRA-43 note carries its measured scope clause without the unmeasured example (tester round 12).",
+      "surface": "This live role container's issue volume and jj workspace, and the tree at 3061dbb55729: tools.md :84-99, the INFRA-43 note :41-47, and the claude-envoy bundle.",
+      "command": "ls -la /legion; jj config get snapshot.auto-track; git check-ignore -v node_modules packages/dispatch/node_modules; grep -c \"outside the issue's workspace\" skills/legion-worker/references/tools.md (now and at 417d9614); grep -c 'not into the shell you go on working in' and grep -c 'env.sh &&' on the INFRA-43 note; (cd packages/claude-envoy && bun run build && bun run check-dist); diff -r skills/legion-worker packages/claude-envoy/legion/skills/legion-worker",
+      "observed": "/legion holds feed, go, repos, scratch, sessions, workspaces; $LEGION_WORKSPACE is /legion/workspaces/sjawhar/legion/infra-221, /legion/repos holds the issue's clone and /legion/sessions its sessions. snapshot.auto-track is all(), so a new file under the workspace is added to the shared change (the tester drove it: a two-file root showed as A in jj status), while node_modules/ is ignored by .gitignore:109, which is where a repository's own dependency install writes. The condition now excludes the issue's workspace and /legion/repos, /legion/feed, /legion/sessions, keeps the variable paths and the harness-named path, and keeps a repository's own dependency install into its ignored directories; /legion/harness, the worked case, is outside all of them. The INFRA-43 note says the env file goes to the harness's commands, 'not into the shell you go on working in' (1), with no subshell example (0). check-dist printed 'dist/ and legion/ match a fresh build'; diff -r is empty. Image: this round's skills/ text ships in the image, and its tag (Worker Image run 40172748564) was still building at completion, so the image half is not proven at this round's tag.",
+      "headSha": "3061dbb55729ab84c4add0c9ff983a7c12864e7e",
+      "negativeControl": "At 417d96141003 the condition reads 'under a path on that volume your harness names itself' with no exclusion (the phrase 'outside the issue's workspace' counts 0 and LEGION_WORKSPACE 0 in tools.md), so $LEGION_WORKSPACE qualified, and a root written there showed as added in the shared working copy."
     }
   ],
   "filesChanged": [
