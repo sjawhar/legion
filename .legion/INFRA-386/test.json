@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-386",
+  "completed": "2026-10-25T15:46:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
+  "testedHead": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran its commands on my own copies of the page fetched with gh api at 97e9883b and at base 371d6c87 (A1-A8 with the plan's helper scripts written verbatim from plan.md section 4), the A9 sweep and check-private-names.sh, and P1 plus its cpu \"1\" control under a new generated name and run label (infra-386-postgres-8fjwv / sequence-run=93c425ec; refused create sequence-run=3f60de65). Every observation matched the implementer's."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1-A3, A7, A8, A11 grep: the trap paragraph drops the unconditional clean-up, names the unmeasured sub-case and the label re-list/delete, dates its evidence; the bullet drops 'exactly as published above'; no paragraph line over 100 characters",
+      "surface": "docs/kubernetes.md as a role reads it, fetched from GitHub at the head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=97e9883bca93f2ed8f6e0a7bb2e52f8c41791453\" -H \"Accept: application/vnd.github.raw\" > k-head.md; awk -f trap.awk k-head.md | tr '\\n' ' ' then grep -c / grep -cF / grep -o per plan.md section 4",
+      "observed": "A1 0; A2 1 each for the delete command, the get command, 'No run measured', '3600 s', 'cleanup: no Job name was read'; A3 date 4, dispatch://INFRA-232 1, '0.33 s and 0.35 s' 1, '0.318 s and 0.320 s' 1; A7 0; A8 0; A11 grep 0. Timings checked at source: INFRA-232 implement.json@64dcfb2d gives 0.33 s and 0.35 s inside the create; test.json@54084043 and #2195's tester line give 0.318 s and 0.320 s; the SIGKILL label recovery 31 s",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "same commands at ref 371d6c87: A1 1; A2 0 for the first four patterns; A3 date 2, others 0; A7 1"
+    },
+    {
+      "criterion": "A4-A6: the block is identical in every non-comment line; only the trap paragraph, the two block comments and the bullet's lead change",
+      "surface": "the page at the head and the branch's diff against main@origin (still 371d6c87 after jj git fetch)",
+      "command": "bash code.sh k-head.md | sha256sum; diff -U0 k-base.md k-head.md | awk -f hunks.awk; jj diff --stat --from main@origin --to legion/INFRA-386@origin; bash a6.sh k-base.md k-head.md",
+      "observed": "A4 abe1b4cf246007dcaeb06de73bff62a3b372ee50b0aa8b1b0e8d77dbe076195c (base value); A5 hunks old 3022, 3131, 3155-3165, 3260-3261 all ok, exit 0; stat docs/kubernetes.md and .legion/INFRA-386/{plan,implement}.json only; A6 no NONCOMMENT line, old-closing 0, old-listing 1. Read the 4-hunk diff by eye: line 3022's code part byte-identical, 3131-3132 comment lines only",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "copy with --ignore-not-found changed at 3020 hashes ad3e40e0... and a6.sh prints two NONCOMMENT lines; copy of base with line 3200 changed prints 'OUT old 3200-3200', exit 1; base against itself old-closing 1, old-listing 2"
+    },
+    {
+      "criterion": "A10: the edited block still runs end to end",
+      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool; kubectl auth can-i create jobs / create services / get services each yes",
+      "command": "bash fill.sh k-head.md t-p1.sh (block.awk, fences dropped, three bracketed lines filled from the deployment's declaration at its main, bash -n, 0 unfilled brackets, 6 diff lines vs the raw block = the three bracketed lines); bash t-p1.sh (the block's own flock ... setsid -f then flock ... cat), started 2026-10-25T15:42:30Z",
+      "observed": "run: sequence-run=93c425ec; workload: infra-386-postgres-8fjwv; service created; pod condition met twice; answered; job deleted; No resources found; sequence: exit 0 at 15:43:59Z; afterwards 0 jobs or services named infra-386-postgres- and kubectl get jobs -l sequence-run=93c425ec 'No resources found'",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "same filled block with cpu \"1\" (15:44:03Z): create refused by admission naming the four-processor rule (policy name elided), 'cleanup: no Job name was read; deleting by label sequence-run=3f60de65', 'No resources found' twice, sequence: exit 1; recovery listing kubectl get jobs -l sequence-run=3f60de65 'No resources found'; 0 jobs or services left"
+    },
+    {
+      "criterion": "A11: a reader of the page no longer concludes the clean-up is total",
+      "surface": "a fresh scout subagent given only the head's trap paragraph file and the output of an in-create SIGTERM stop (run label, 'cleanup: no Job name was read; deleting by label ...', 'No resources found', 'sequence: exit 143')",
+      "command": "task(agent=scout) with trap-head.txt = awk -f trap.awk k-head.md; question: can anything this run created still exist, and what should the role run now",
+      "observed": "\"Possibly yes. A Job labelled sequence-run=5c1e9a07, and its pod, could still exist. The paragraph says: 'A create the server finishes only after that listing ... leaves a Job the delete never saw. No run measured that case, and none rules it out.' The trap printed `No resources found`, but that does not settle it ... the role should run: `kubectl get jobs -l sequence-run=5c1e9a07` and, if that lists a Job: `kubectl delete job -l sequence-run=5c1e9a07 --cascade=foreground`\"",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "same question on trap-base.txt: \"Based only on the paragraph, nothing this run created should still be in the cluster, so the role doesn't need to run any commands. The stop came while `kubectl create` was running, and for that case the paragraph says the trap 'finds the Job the create made' and deletes it.\""
+    },
+    {
+      "criterion": "A9: no private name enters the change",
+      "surface": "the repository at the head, the diff's added lines, the branch's commit messages, the live PR title and body (before and after the tester's edit), both committed handoffs",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh (patterns read into shell variables from the projected namespace file and the deployment's declaration, never printed) over each file",
+      "observed": "check-private-names exit 0 (5003 files); sweep 0 literal, 0 whole-word for every file; CI's check-pr-text runs in the Tests run's lint job, in progress when read",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "the sweep over a scratch file holding one live pattern gives whole-word 1"
+    }
+  ],
+  "ci": "Tests run 40207963512 in progress at 97e9883b (typecheck success, pi-legion success, lint and test in progress); Legion Envoy and Contracts 40207963538 success; PR Title 40207963524 success. Cited, not waited for.",
+  "regressionTests": "Docs-only change: no test suite reads this prose, and the deployment instructions bar tests that assert a file's contents; nothing for a red test to pin.",
+  "notesForReviewer": [
+    "docs/kubernetes.md:3022's new trailing comment makes that code line 108 characters (the plan's draft was shorter); the block already holds 8 lines over 100 at base, and A8 bounds only the trap paragraph, so this is not recorded as a failure.",
+    "'neither the listing nor the block's closing comment covers it' (3172): the closing comment now names this exception itself, so 'covers' reads as 'promises to remove'; the A11 reader drew the intended conclusion from it."
+  ]
+}
