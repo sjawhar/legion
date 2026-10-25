@@ -658,7 +658,9 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 // controller's agent one by the same rule; workspace-init, which runs alone, keeps the plain
 // home-directory state home. The value is on the issue's volume, deliberately: Oh My Pi's logs,
 // Chromium's profiles and the installed plugin generation are charged to neither the pod's memory
-// nor the gigabyte of ephemeral storage the container is admitted with, and they outlive the pod.
+// nor the gigabyte of ephemeral storage the container is admitted with, and they outlive a role
+// container's restart (an issue's disk is its pod's own and goes with the pod; the controller's is
+// its Sandbox's and outlives its pod).
 // Which mount holds it is the argument above, not housekeeping: a state home reached through a
 // sub-path mount, or one overlapping the workspace or uv's directories, is a directory whose
 // contents are no longer the role's alone, and the broker-lock reasoning quietly stops holding.

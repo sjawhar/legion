@@ -28,8 +28,9 @@ func shortenResumeLookup(t *testing.T) {
 	t.Cleanup(func() { resumeLookupBackoff, resumeLookupTimeout = savedBackoff, savedTimeout })
 }
 
-// Under SQL session storage (the runtime's session_store postgres: OMP_SESSION_STORAGE=sql and
-// OMP_SESSION_SQL_DSN_FILE in the generation's environment) a resume is held to the session table,
+// Under SQL session storage (either database kind of the runtime's session_store, postgres or
+// cloudsql-iam: OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE in the generation's
+// environment) a resume is held to the session table,
 // where the child's Oh My Pi will read it, never to the volume: a session the table does not hold is
 // refused before anything starts, even when a file of that name is on disk, and a session the table
 // holds starts with no file on disk at all.

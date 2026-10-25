@@ -197,11 +197,11 @@ bind=0.0.0.0
 port_daemon=${LEGION_E2E_DAEMON_PORT:-13372}
 port_worker_stream=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 # The session database's port, a third of the lane's own, which every pod dials as it dials the
-# worker stream: the daemon loads one session store and it is Postgres
-# (runtime.kubernetes.session_store), since an issue pod's disk dies with the pod and a session
-# kept on it would die too. It must be a port the devbox's security group admits from the Legion
-# nodes, like the two above, and it is never defaulted: a run that would quietly share another
-# lane's database is refused in prerequisites instead.
+# worker stream: the daemon requires a session store that keeps sessions in a database, since an
+# issue pod's disk dies with the pod and a session kept on it would die too, and this run's is
+# Postgres (runtime.kubernetes.session_store postgres). It must be a port the devbox's security
+# group admits from the Legion nodes, like the two above, and it is never defaulted: a run that
+# would quietly share another lane's database is refused in prerequisites instead.
 port_session_db=${LEGION_E2E_SESSION_DB_PORT:-}
 # The session database's image, the pinned Postgres the repository's CI tests against, and the
 # providers Secret key its URL reaches every pod under (runtime.kubernetes.session_dsn_secret).
@@ -979,40 +979,70 @@ session_text() {
 # otherwise place a file anywhere on this machine. The name is the key after PREFIX with every byte
 # outside [A-Za-z0-9._-] made `_` (bytes, so LC_ALL=C), so it holds no `/` and cannot name a
 # directory: a subagent's <id>/<sub>.jsonl is written as <id>_<sub>.jsonl. A key whose name would be
-# empty, `.` or `..`, or one an earlier key of this call already took, is refused by name, as is a
-# name that does not resolve directly inside DIR resolved with pwd -P, a symlink already there
-# followed, so the guarantee holds even if the derivation is wrong. Every key is checked before any
-# session is written, and a refusal names the key, never the session's bytes. The listing gives each
-# key as hex, one line a key even when the key holds a newline, decoded here byte for byte.
+# empty, `.` or `..` is refused, and so is every key of a name two keys under PREFIX derive: written
+# first-come, an agent's row that sorts first would put its own bytes at the name of the session it
+# collides with. A name that does not resolve directly inside DIR resolved with pwd -P, a symlink
+# already there followed, is refused too, so the guarantee holds even if the derivation is wrong.
+# Each key is judged by its own name alone, so a refused key, or one whose session cannot be read,
+# is named (never the session's bytes) and skipped while every other is still copied: one agent's
+# row cannot cost the run the rest of its transcripts. Any key not copied fails the call at the end,
+# so the caller still sees the loss. The listing gives each key as hex, one line a key even when the
+# key holds a newline, decoded here byte for byte.
 session_copy() {
-  local prefix=$1 dir=$2 LC_ALL=C hex line path name dest resolved i
+  local prefix=$1 dir=$2 LC_ALL=C hex line path name other dest resolved i lost=
   local -a keys=() names=()
-  local -A taken=()
+  local -A first=() also=()
   hex=$(session_psql prefix "$prefix" <<<"SELECT encode(convert_to(path, 'UTF8'), 'hex') FROM omp_session_files WHERE left(path, length(:'prefix')) = :'prefix' ORDER BY path;") || return 1
   [ -n "$hex" ] || return 0
   mkdir -p -- "$dir" && dest=$(cd -- "$dir" && pwd -P) || return 1
+  # Every name is derived before any is written, so a key whose name a later key also derives is
+  # known to collide before either is copied. An empty name is no array subscript, and it, `.` and
+  # `..` are refused below whatever else derives them.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf -v path '%b' "$line"
     name=${path#"$prefix"}
     name=${name//[!A-Za-z0-9._-]/_}
     case $name in
-      "" | . | ..)
-        echo "the session key $path names no file of its own in $dest (its name would be '$name'); no session is copied" >&2
-        return 1 ;;
+      "" | . | ..) ;;
+      *)
+        if [ -z "${first[$name]+x}" ]; then
+          first[$name]=$path
+        elif [ -z "${also[$name]+x}" ]; then
+          also[$name]=$path
+        fi ;;
     esac
-    [ -z "${taken[$name]+x}" ] ||
-      { echo "the session key $path would be written as $name in $dest, as the key ${taken[$name]} is; no session is copied" >&2; return 1; }
-    taken[$name]=$path
-    resolved=$(realpath -m -- "$dest/$name") || return 1
-    [ "${resolved%/*}" = "${dest%/}" ] ||
-      { echo "the session key $path would be written at $resolved, outside $dest; no session is copied" >&2; return 1; }
     keys+=("$path")
     names+=("$name")
   done < <(sed 's/../\\x&/g' <<<"$hex")
   for i in "${!keys[@]}"; do
-    session_text "${keys[$i]}" >"$dest/${names[$i]}" || return 1
+    path=${keys[$i]}
+    name=${names[$i]}
+    case $name in
+      "" | . | ..)
+        echo "the session key $path names no file of its own in $dest (its name would be '$name'); it is not copied" >&2
+        lost=1
+        continue ;;
+    esac
+    if [ -n "${also[$name]+x}" ]; then
+      other=${first[$name]}
+      [ "$other" != "$path" ] || other=${also[$name]}
+      echo "the session key $path would be written as $name in $dest, as would the key $other; neither is copied" >&2
+      lost=1
+      continue
+    fi
+    resolved=$(realpath -m -- "$dest/$name") ||
+      { echo "the session key $path could not be resolved as $name in $dest; it is not copied" >&2; lost=1; continue; }
+    if [ "${resolved%/*}" != "${dest%/}" ]; then
+      echo "the session key $path would be written at $resolved, outside $dest; it is not copied" >&2
+      lost=1
+      continue
+    fi
+    # session_text names the key it cannot read; the empty file the redirection made goes, so no
+    # file in DIR stands for a session it does not hold.
+    session_text "$path" >"$dest/$name" || { rm -f -- "$dest/$name"; lost=1; }
   done
+  [ -z "$lost" ]
 }
 # claim_session_file ISSUE ROLE prints the session file the newest claim of ROLE on ISSUE records,
 # the session's key in the session database.
@@ -2518,14 +2548,19 @@ remove_run_branches() {
 # pod's, from the session database, each at the name session_copy derives from its key under
 # pod_sessions_dir, <cwd dir>_<file> (a pod already gone, a child's included), and the operator's
 # controller's, which lives in the run's own profile on this machine and goes with that profile at
-# teardown (transcripts/controller). It runs before the teardown removes the database's container.
+# teardown (transcripts/controller). It runs before the teardown removes the database's container,
+# so a pod's session it does not copy is gone for good: it fails when session_copy left any out (a
+# key refused or unreadable, each named on stderr) or could not list them, after copying every
+# other session and the controller's all the same, and cleanup makes that the teardown check
+# `transcripts`, never a note a passing run reads past.
 collect_transcripts() {
-  session_copy "$pod_sessions_dir/" "$evidence/transcripts" ||
-    note "the pods' sessions could not be copied from the session database $session_db_container into $evidence/transcripts"
+  local copied=1
+  session_copy "$pod_sessions_dir/" "$evidence/transcripts" || copied=
   if [ -d "$profile_agent/sessions" ]; then
     mkdir -p "$evidence/transcripts/controller"
     cp -R "$profile_agent/sessions/." "$evidence/transcripts/controller/"
   fi
+  [ -n "$copied" ]
 }
 cleanup() {
   local status=$? p teardown_failed=""
@@ -2546,7 +2581,10 @@ cleanup() {
   [ -z "$negative_config_pod" ] || pod_exec "$negative_config_pod" planner sh -c "rm -f '$negative_config_workspace/.omp/config.yml'" >/dev/null 2>&1
   stop_pid "$daemon_pid"
   [ -z "$block_tree" ] || set_status "$block_tree" "done"
-  collect_transcripts
+  if ! collect_transcripts; then
+    teardown_failed+="${teardown_failed:+, }transcripts"
+    echo "CHECK transcripts: FAIL: the pods' sessions could not all be copied from the session database $session_db_container into $evidence/transcripts before the teardown removes it (the lines above name each key left out, or why none could be listed)"
+  fi
   stop_tree "$watch_pid"
   stop_tree "$events_pid"
   stop_pid "$leaks_pid"
@@ -2573,11 +2611,11 @@ cleanup() {
   rm -rf "$work"
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
-  # check (a namespace left dirty, a write outside the run's own project) names itself, and only a
-  # clean teardown lets a blocked checkpoint end BLOCKED. A failure while done cleans the smoke main
-  # (smoke_main_cleaning) is the fixture's teardown, not the workflow under test, and the verdict
-  # says so, unless a teardown check failed or a production guard recorded a violation: then the
-  # ordinary failure stands.
+  # check (a pod's session not copied, a namespace left dirty, a write outside the run's own
+  # project) names itself, and only a clean teardown lets a blocked checkpoint end BLOCKED. A
+  # failure while done cleans the smoke main (smoke_main_cleaning) is the fixture's teardown, not the
+  # workflow under test, and the verdict says so, unless a teardown check failed or a production
+  # guard recorded a violation: then the ordinary failure stands.
   if [ -z "$ok" ] && [ -z "$was_blocked" ] && [[ ! $status =~ ^(129|130|143)$ ]]; then
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" || true
     if [ -n "$smoke_main_cleaning" ] && [ -z "$teardown_failed" ] && [ ! -s "$evidence/pane-endpoint-violation.txt" ]; then
@@ -3116,13 +3154,13 @@ docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/pos
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
 # The run's session database, a second throwaway Postgres: every pod's Oh My Pi keeps its session
-# in it (session_store postgres, the one store the daemon loads), so a role's conversation outlives
-# the issue pod whose disk dies with it. It is its own container and its own credential, never the
-# daemon's own database above: that one holds the daemon's state, and its URL reaches every pod
-# through the providers Secret, which no pod may be given a way into. It binds the devbox's private
-# address, not loopback, since the pods dial it as they dial the worker stream; its password
-# reaches docker through an owner-only env file, never an argument, and its URL is written only to
-# an owner-only file the providers Secret reads, and is never printed.
+# in it (session_store postgres: the daemon requires a store that keeps sessions in a database), so
+# a role's conversation outlives the issue pod whose disk dies with it. It is its own container and
+# its own credential, never the daemon's own database above: that one holds the daemon's state, and
+# its URL reaches every pod through the providers Secret, which no pod may be given a way into. It
+# binds the devbox's private address, not loopback, since the pods dial it as they dial the worker
+# stream; its password reaches docker through an owner-only env file, never an argument, and its URL
+# is written only to an owner-only file the providers Secret reads, and is never printed.
 session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 (
   umask 077

@@ -593,7 +593,7 @@ func fillTable(t *builder) {
 
 	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, drop its session and retire it", issueClose,
 		[]ClaimState{StateRetired}, stoppable...)
-	t.row(onIssueClose, "already retired: the session it kept goes with the issue's volume", issueCloseRetired, nil, StateRetired)
+	t.row(onIssueClose, "already retired: the session it kept goes with the issue", issueCloseRetired, nil, StateRetired)
 
 	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
 	// A close of a tree already retired is the outcome the operator asked for, so it answers as

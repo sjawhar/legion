@@ -15,7 +15,7 @@ import (
 // The pod's own paths. The issue's disk is the pod's own generic ephemeral volume, created with the
 // pod and deleted with it; it is mounted whole at TreeRoot in workspace-init and each role
 // launcher, and no session is on it — every session is a row in the session database the
-// deployment names (Options.SessionDSNKey). The pod's feed is the volume's feedSubPath directory,
+// deployment names (Options.SessionStore). The pod's feed is the volume's feedSubPath directory,
 // mounted at FeedDir: read-write in workspace-fetch, which mounts nothing else of the volume, and
 // read-only over the whole volume's mount in every other container. The clone owns its object-store
 // entries, and no agent writes what the token-holding container reads. On a volume carried over from
@@ -64,8 +64,7 @@ const (
 )
 
 // feedSubPath is the issue volume's directory that holds the pod's feed (FeedDir). The kubelet
-// makes it on first use, so a volume provisioned before the feed moved onto it is relaunched as it
-// is: nothing of its tree moves.
+// makes it on first use.
 const feedSubPath = "feed"
 
 // AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id

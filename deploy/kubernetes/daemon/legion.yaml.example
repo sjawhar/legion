@@ -67,11 +67,14 @@ runtime:
     image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
     storage_class: standard            # the issue volumes' class; required, the cluster has no default
     issue_volume: 50Gi                 # each issue pod's own volume (and the daemon-launched controller's); 50Gi is the default
-    session_store: postgres            # required: where every pod's Oh My Pi keeps its sessions. postgres is
-                                       # the only store — an issue pod's disk is deleted with the pod, so a
-                                       # session kept as a file on it would die with it and the next launch's
-                                       # resume would fail on the missing file
-    session_dsn_secret: SESSION_DSN    # required with it: the key of the providers Secret holding that
+    session_store: postgres            # required: where every pod's Oh My Pi keeps its sessions, a store that
+                                       # keeps them in a database — postgres, or cloudsql-iam (each pod signs in
+                                       # to Cloud SQL as itself and holds no URL; it takes session_database in
+                                       # place of session_dsn_secret, docs/kubernetes.md "Selecting the store").
+                                       # pvc and an omitted key are refused: an issue pod's disk is deleted with
+                                       # the pod, so a session kept as a file on it would die with it and the
+                                       # next launch's resume would fail on the missing file
+    session_dsn_secret: SESSION_DSN    # required with postgres: the key of the providers Secret holding that
                                        # database's postgres:// URL, which every pod mounts
     # resources:                       # each role's reservation: cpu and memory, the container's limits, each
     #   tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # requested in full unless cpu_request or

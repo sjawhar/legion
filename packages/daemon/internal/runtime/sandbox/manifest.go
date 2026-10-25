@@ -755,8 +755,8 @@ func roleEnvironment(role claim.Role) []corev1.EnvVar {
 // Pi reads the variable only where that directory exists. It is on the issue's volume, which is
 // neither the pod's memory nor the gigabyte of ephemeral storage the container is admitted with,
 // so Oh My Pi's logs, Chromium's `browser-profiles` and the plugin generation an installing launch
-// puts there (plugins.go) are charged to neither — and, unlike both, the state home now outlives
-// the pod.
+// puts there (plugins.go) are charged to neither — and, unlike both, the state home outlives a
+// role container's restart, though not the pod, whose own ephemeral volume the issue's disk is.
 func roleStateHome(role claim.Role) string {
 	return scratchRoot + "/state/" + string(role)
 }
@@ -766,8 +766,9 @@ const (
 	// uvPythonRoot holds the Pythons uv installs, one directory per issue (uvPythonDir), and
 	// uvCacheDir its cache, both on the issue's volume beside the workspaces. A project's .venv, in
 	// an issue's workspace on that volume, links to an interpreter in that issue's directory, so
-	// every later pod of the issue finds the interpreter and the environment works there as it is;
-	// the cache lets every later pod of the issue reuse what an earlier one downloaded.
+	// every role container of the issue's pod finds the interpreter and the environment works there
+	// as it is; the cache lets every role of the pod reuse what another downloaded. Neither outlives
+	// the pod (roleEnvironment).
 	uvPythonRoot = TreeRoot + "/uv/python"
 	uvCacheDir   = TreeRoot + "/uv/cache"
 	// uvLinkMode is how uv puts a package from uvCacheDir into a .venv: a copy. With the cache and

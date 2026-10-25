@@ -19,8 +19,8 @@
   no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the lost-disk machinery it drove — the
   provisioning exit code 3, the recovery marker and the probe for an issue's retained sessions,
   with the `legion sessions mark-lost` command — is gone, and `runtime.kubernetes.session_store`
-  must be `postgres`. Nothing this plugin reads or writes moved; a session of it registers with a
-  daemon at 37.
+  must name a store that keeps sessions in a database, `postgres` or `cloudsql-iam`. Nothing this
+  plugin reads or writes moved; a session of it registers with a daemon at 37.
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field

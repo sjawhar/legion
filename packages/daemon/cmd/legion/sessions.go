@@ -18,7 +18,8 @@ import (
 )
 
 // sessionsCommands is `legion sessions`, the operator's hand on Oh My Pi's session database
-// (runtime.kubernetes.session_store postgres), and the one list of its subcommands.
+// (either database kind of runtime.kubernetes.session_store, postgres or cloudsql-iam), and the one
+// list of its subcommands.
 var sessionsCommands = map[string]command{
 	"import": runSessionsImport,
 }
@@ -80,8 +81,9 @@ type importedClaim struct {
 
 // runSessionsImport is `legion sessions import`: the one-off copy of every recorded session file
 // into the session table, before a deployment that kept its sessions as files on its tree volumes
-// turns runtime.kubernetes.session_store postgres on, and before those volumes go. It reads the
-// claims `legion claims list --json` printed (--claims, `-` for stdin), each claim of --tree alone
+// turns on a runtime.kubernetes.session_store that keeps sessions in a database, and before those
+// volumes go. It reads the claims `legion claims list --json` printed (--claims, `-` for stdin),
+// each claim of --tree alone
 // when given, and copies each claim's session file into the table whose URL --dsn-file holds,
 // under the path the claim recorded, which is the key Oh My Pi resumes the claim's session by
 // (ompsessions.Import). The file is read at that path, or, with --tree-volume, from the tree volume

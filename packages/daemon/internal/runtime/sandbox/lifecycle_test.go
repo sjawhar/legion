@@ -288,11 +288,10 @@ func TestALaunchBegunDuringAnOrphansDeleteWaitsForIt(t *testing.T) {
 }
 
 // The sweep deletes the project's Sandboxes of a tree whose cleanup confirmed (or that has no
-// lifecycle), only past the grace, and in the foreground, as the tree cleanup does: the issue's
-// next Sandbox names the same PVC, which a background delete would leave Terminating for a
-// re-admission to ask for. A Sandbox of a live tree survives whatever claims are known, with or
-// without a locator: a suspended role holds its session on the issue's volume the Sandbox owns
-// (N3), and a claim launched after the daemon read its claims is missing from known. The image
+// lifecycle), only past the grace, and in the foreground, as the tree cleanup does
+// (deleteSandbox). A Sandbox of a live tree survives whatever claims are known, with or without a
+// locator: a suspended role has no locator while its issue is still in the live tree (N3), and a
+// claim launched after the daemon read its claims is missing from known. The image
 // probe's Sandbox is no claim's and is the probe's own to delete (#1266), and one whose labels name
 // no issue and tree is kept and reported: what cannot be told apart from a live tree's is never
 // deleted.

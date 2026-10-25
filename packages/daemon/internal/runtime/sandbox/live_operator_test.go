@@ -138,9 +138,9 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 // podsafety): the turn-scoping overlay on the pod's state volume is PI_CONFIG_FILES' first element,
 // ahead of the operator's; PI_CONFIG_DIR is set, which the operator left unset, and the operator's
 // own variables are kept; Oh My Pi's two session variables are the runtime's, not the baseline's
-// file default — under a session database (session_store postgres, the only store the daemon
-// loads) the runtime sets OMP_SESSION_STORAGE=sql and points OMP_SESSION_SQL_DSN_FILE at the URL
-// the providers volume projects; neither OTEL_SDK_DISABLED nor PI_AUTO_QA,
+// file default — under the session database the daemon requires (the run's session_store is
+// postgres) the runtime sets OMP_SESSION_STORAGE=sql and points OMP_SESSION_SQL_DSN_FILE at the
+// URL the providers volume projects; neither OTEL_SDK_DISABLED nor PI_AUTO_QA,
 // which no baseline sets any more, is there; the agent's XDG_STATE_HOME is the architect's own
 // (roleStateHome; the root claim is the architect), and the shim made Oh My Pi's profile directory
 // under it (podsafety.EnsureStateHome) before Oh My Pi started, since Oh My Pi reads the variable

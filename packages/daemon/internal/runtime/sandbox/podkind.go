@@ -71,8 +71,8 @@ func podKindOf(labels map[string]string) (podKind, error) {
 }
 
 // issuePod is an issue's pod: every workflow role of the issue, one launcher each, working in the
-// issue's workspace on the issue's own volume, which its Sandbox owns. Two init containers
-// provision that workspace from the issue's repository.
+// issue's workspace on the issue's disk, the pod's own generic ephemeral volume, created with the
+// pod and deleted with it. Two init containers provision that workspace from the issue's repository.
 type issuePod struct{}
 
 func (issuePod) roles() []claim.Role { return claim.Roles }

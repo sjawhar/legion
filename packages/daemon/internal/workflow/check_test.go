@@ -95,7 +95,8 @@ func TestACheckReportWhileTheRootLingersIsRecorded(t *testing.T) {
 }
 
 // A pending report ends the look with nothing to show and takes the pod: the implementer's claim
-// is suspended and the issue's Sandbox with it, volume kept, both rows written after the look's
+// is suspended, session kept, and the issue suspended (issue_suspend), whose Sandbox goes with its
+// pod and disk, both rows written after the look's
 // start row so the suspension's fences find no later start. The check stays open at look 1 with
 // its look closed.
 func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {

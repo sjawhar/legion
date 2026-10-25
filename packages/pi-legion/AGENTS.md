@@ -94,7 +94,8 @@ number is the one `DaemonAPIVersion` declares, last bumped by contract 37's pod-
 deleted with it, so the init container above is no longer told `LEGION_EXPECT_ISSUE_VOLUME` and the
 lost-disk machinery that variable drove — `workspace-init`'s exit code 3, its recovery marker, the
 probe for an issue's retained sessions and `legion sessions mark-lost` — is gone, and
-`runtime.kubernetes.session_store` must be `postgres`), after contract 36's pull request `state`
+`runtime.kubernetes.session_store` must name a store that keeps sessions in a database, `postgres`
+or `cloudsql-iam`), after contract 36's pull request `state`
 on `GET /legion/v1/state` (INFRA-229: `open`, `merged` or `closed`, always emitted, since a merged
 root's close now waits for the rest of its tree), after contract 35's `settings` on
 `GET /legion/v1/state` (LEGION-791: the daemon's resolved legion.yaml with every credential,

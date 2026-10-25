@@ -13,15 +13,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scriptFunctions } from "./script-functions";
 
-// session_text, session_copy and claim_session_text, taken from stage4b-sandbox-tree.sh by name:
-// every pod of the run keeps its Oh My Pi session in the run's scratch Postgres, keyed by the path
-// its file would have had, so the harness reads a session from the table through the database's own
-// container (session_psql: `docker exec … psql -A -t`), never with a `cat` in the pod, where no file
-// is. docker is stubbed here as psql answers in unaligned tuples-only mode: a held session is one
-// row, its value exactly as stored followed by psql's one closing newline, and a session the table
-// does not hold is no row and no output at all. Each test pins what the reader makes of that: the
-// bytes whole, the closing newline taken off, a missing session refused by name, and a key, which
-// an agent writes and so is not trusted, never taken as a path to write at.
+// session_text, session_copy, claim_session_text and collect_transcripts, taken from
+// stage4b-sandbox-tree.sh by name: every pod of the run keeps its Oh My Pi session in the run's
+// scratch Postgres, keyed by the path its file would have had, so the harness reads a session from
+// the table through the database's own container (session_psql: `docker exec … psql -A -t`), never
+// with a `cat` in the pod, where no file is. docker is stubbed here as psql answers in unaligned
+// tuples-only mode: a held session is one row, its value exactly as stored followed by psql's one
+// closing newline, and a session the table does not hold is no row and no output at all. Each test
+// pins what the reader makes of that: the bytes whole, the closing newline taken off, a missing
+// session refused by name, a key, which an agent writes and so is not trusted, never taken as a
+// path to write at, and a key refused costing no other session yet failing the run's teardown.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage4b-session-text-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -93,6 +94,7 @@ ${dockerStub}
 ${fn("session_psql")}
 ${fn("session_text")}
 ${fn("session_copy")}
+${fn("collect_transcripts")}
 ${body}`,
     ],
     {
@@ -309,50 +311,110 @@ describe("session_copy", () => {
     });
   }
 
-  // [what the key is, the parts after the prefix in listing order, the refused one, the earlier one
-  // whose name it would take]. Each list leads with a key that would copy, so a refusal is shown to
-  // come before any write.
-  const refusals: [string, string[], string, string?][] = [
-    ["`..`, DIR's parent", ["ok.jsonl", ".."], ".."],
-    ["`.`, DIR itself", ["ok.jsonl", "."], "."],
-    ["the prefix alone, an empty name", ["ok.jsonl", ""], ""],
+  // [what the key is, the parts after the prefix in listing order, the refused ones, each with the
+  // other key it names (for a shared name), and the names DIR holds after]. Each list leads with a
+  // key the refusal must not cost: a refusal skips its own key, never the rest of the call.
+  const refusals: [string, string[], [string, string?][], string[]][] = [
+    ["`..`, DIR's parent", ["ok.jsonl", ".."], [[".."]], ["ok.jsonl"]],
+    ["`.`, DIR itself", ["ok.jsonl", "."], [["."]], ["ok.jsonl"]],
+    ["the prefix alone, an empty name", ["ok.jsonl", ""], [[""]], ["ok.jsonl"]],
+    // Of two keys of one name neither is written: first-come would let an agent's row that sorts
+    // first put its bytes at the name of the session it collides with.
     [
-      "`../x.jsonl`, which takes `.._x.jsonl`'s name",
-      [".._x.jsonl", "../x.jsonl"],
-      "../x.jsonl",
-      ".._x.jsonl",
+      "`../x.jsonl`, which shares `.._x.jsonl`'s name",
+      ["ok.jsonl", ".._x.jsonl", "../x.jsonl"],
+      [
+        ["../x.jsonl", ".._x.jsonl"],
+        [".._x.jsonl", "../x.jsonl"],
+      ],
+      ["ok.jsonl"],
     ],
     [
-      "absolute after the prefix, which takes `_abs.jsonl`'s name",
-      ["_abs.jsonl", "/abs.jsonl"],
-      "/abs.jsonl",
-      "_abs.jsonl",
+      "absolute after the prefix, which shares `_abs.jsonl`'s name",
+      ["ok.jsonl", "_abs.jsonl", "/abs.jsonl"],
+      [
+        ["/abs.jsonl", "_abs.jsonl"],
+        ["_abs.jsonl", "/abs.jsonl"],
+      ],
+      ["ok.jsonl"],
     ],
     [
-      "a newline, which takes `a_b.jsonl`'s name",
-      ["a_b.jsonl", "a\nb.jsonl"],
-      "a\nb.jsonl",
-      "a_b.jsonl",
+      "a newline, which shares `a_b.jsonl`'s name",
+      ["ok.jsonl", "a_b.jsonl", "a\nb.jsonl"],
+      [
+        ["a\nb.jsonl", "a_b.jsonl"],
+        ["a_b.jsonl", "a\nb.jsonl"],
+      ],
+      ["ok.jsonl"],
     ],
   ];
-  for (const [what, rels, refused, earlier] of refusals) {
-    test(`a key of ${what} is refused by name, and nothing is written`, () => {
+  for (const [what, rels, refused, written] of refusals) {
+    test(`a key of ${what} is refused by name and skipped, and every other key is still written`, () => {
       const c = copyInto(`${stem}/`, () =>
         Object.fromEntries(rels.map((rel, i) => [`${stem}/${rel}`, `SESSION-BYTES-${i}\n`]))
       );
       untouched(c);
       expect(c.r.code).toBe(1);
-      expect(c.r.stderr).toContain(`the session key ${stem}/${refused} `);
-      if (earlier !== undefined) expect(c.r.stderr).toContain(`as the key ${stem}/${earlier} is`);
+      for (const [rel, other] of refused) {
+        expect(c.r.stderr).toContain(`the session key ${stem}/${rel} `);
+        if (other !== undefined) {
+          expect(c.r.stderr).toContain(
+            `the session key ${stem}/${rel} would be written as ${derived(rel)} in ${c.dest}, as would the key ${stem}/${other}; neither is copied`
+          );
+        }
+      }
       expect(c.r.stderr).not.toContain("SESSION-BYTES");
-      expect(readdirSync(c.dest)).toEqual([]);
+      expect(readdirSync(c.dest).sort()).toEqual(written);
+      for (const name of written) {
+        expect(readFileSync(join(c.dest, name), "utf8")).toBe(
+          `SESSION-BYTES-${rels.indexOf(name)}\n`
+        );
+      }
     });
   }
 
-  test("a name that resolves outside DIR, through a symlink already there, is refused by name", () => {
+  test("a prefix holding two keys of one name writes every other key, names both, and fails", () => {
+    // The colliding pair comes first and apart in the listing, so a refusal that stopped the call,
+    // or one judged only once both were read, would cost the keys after it.
+    const rels = ["sub/x.jsonl", "a.jsonl", "sub_x.jsonl", "z/Explore-1.jsonl"];
+    const c = copyInto(`${stem}/`, () =>
+      Object.fromEntries(rels.map((rel, i) => [`${stem}/${rel}`, `SESSION-BYTES-${i}\n`]))
+    );
+    untouched(c);
+    expect(c.r.code).toBe(1);
+    expect(readdirSync(c.dest).sort()).toEqual(["a.jsonl", "z_Explore-1.jsonl"]);
+    expect(readFileSync(join(c.dest, "a.jsonl"), "utf8")).toBe("SESSION-BYTES-1\n");
+    expect(readFileSync(join(c.dest, "z_Explore-1.jsonl"), "utf8")).toBe("SESSION-BYTES-3\n");
+    expect(c.r.stderr).toBe(
+      `the session key ${stem}/sub/x.jsonl would be written as sub_x.jsonl in ${c.dest}, as would the key ${stem}/sub_x.jsonl; neither is copied\n` +
+        `the session key ${stem}/sub_x.jsonl would be written as sub_x.jsonl in ${c.dest}, as would the key ${stem}/sub/x.jsonl; neither is copied\n`
+    );
+  });
+
+  test("three keys of one name are each refused by name, naming another of them", () => {
+    const rels = ["p q.jsonl", "p/q.jsonl", "ok.jsonl", "p_q.jsonl"];
+    const c = copyInto(`${stem}/`, () =>
+      Object.fromEntries(rels.map((rel, i) => [`${stem}/${rel}`, `SESSION-BYTES-${i}\n`]))
+    );
+    untouched(c);
+    expect(c.r.code).toBe(1);
+    expect(readdirSync(c.dest)).toEqual(["ok.jsonl"]);
+    for (const rel of ["p q.jsonl", "p/q.jsonl", "p_q.jsonl"]) {
+      expect(c.r.stderr).toContain(
+        `the session key ${stem}/${rel} would be written as p_q.jsonl in ${c.dest}, as would the key ${stem}/`
+      );
+    }
+    expect(c.r.stderr.split("\n").filter((l) => l !== "")).toHaveLength(3);
+    expect(c.r.stderr).not.toContain("SESSION-BYTES");
+  });
+
+  test("a name that resolves outside DIR, through a symlink already there, is refused by name, and the rest written", () => {
     const c = copyInto(
       `${stem}/`,
-      () => ({ [`${stem}/evil.jsonl`]: "SESSION-BYTES\n" }),
+      () => ({
+        [`${stem}/evil.jsonl`]: "SESSION-BYTES\n",
+        [`${stem}/ok.jsonl`]: transcript,
+      }),
       (dest, root) => symlinkSync(join(root, "l1", "escaped.jsonl"), join(dest, "evil.jsonl"))
     );
     untouched(c);
@@ -362,6 +424,121 @@ describe("session_copy", () => {
       `the session key ${stem}/evil.jsonl would be written at ${c.root}/l1/escaped.jsonl, outside`
     );
     expect(c.r.stderr).not.toContain("SESSION-BYTES");
+    expect(readFileSync(join(c.dest, "ok.jsonl"), "utf8")).toBe(transcript);
+  });
+});
+
+// collect_transcripts, the teardown's copy of every pod's session out of the session database
+// before the teardown removes it: a session it leaves out is gone for good, so it must fail, and
+// cleanup must carry that failure to the run's verdict as the teardown check `transcripts`.
+describe("collect_transcripts", () => {
+  test("over a table with a colliding pair, copies every other session and the controller's, and fails", () => {
+    const pod = `${sessions}/-legion-workspaces-sjawhar-legion-smoke-legsmoke-1`;
+    const r = run(
+      `pod_sessions_dir=${sessions} evidence="$OUT" profile_agent="$OUT.profile"
+mkdir -p "$profile_agent/sessions/-home"
+printf 'controller\\n' >"$profile_agent/sessions/-home/c.jsonl"
+collect_transcripts || echo "collect_transcripts failed $?"`,
+      {
+        [`${pod}/a.jsonl`]: "SESSION-BYTES-a\n",
+        [`${pod}/x/y.jsonl`]: "SESSION-BYTES-xy\n",
+        [`${pod}_x/y.jsonl`]: "SESSION-BYTES-x_y\n",
+        [`${pod}/b.jsonl`]: "SESSION-BYTES-b\n",
+      }
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("collect_transcripts failed 1\n");
+    const out = join(r.out, "transcripts");
+    expect(readdirSync(out).sort()).toEqual([
+      "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_a.jsonl",
+      "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_b.jsonl",
+      "controller",
+    ]);
+    expect(
+      readFileSync(join(out, "-legion-workspaces-sjawhar-legion-smoke-legsmoke-1_b.jsonl"), "utf8")
+    ).toBe("SESSION-BYTES-b\n");
+    expect(readFileSync(join(out, "controller", "-home", "c.jsonl"), "utf8")).toBe("controller\n");
+    expect(r.stderr).toContain(`the session key ${pod}/x/y.jsonl would be written as `);
+    expect(r.stderr).toContain(`the session key ${pod}_x/y.jsonl would be written as `);
+    expect(r.stderr).not.toContain("SESSION-BYTES");
+  });
+
+  test("over a table it copies whole, succeeds", () => {
+    const pod = `${sessions}/-legion-workspaces-sjawhar-legion-smoke-legsmoke-1`;
+    const r = run(
+      `pod_sessions_dir=${sessions} evidence="$OUT" profile_agent="$OUT.profile"
+collect_transcripts && echo copied`,
+      { [`${pod}/a.jsonl`]: transcript }
+    );
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("copied\n");
+    expect(r.stderr).toBe("");
+  });
+
+  // teardownRun runs the script's own cleanup, as the EXIT trap of a run whose checkpoints all
+  // passed (ok set), with the real collect_transcripts over SESSION_COPY, the stand-in for the
+  // database copy, and the rest of the teardown stubbed; the run took no lock, so the cluster's
+  // teardown is not reached.
+  function teardownRun(sessionCopy: string) {
+    const at = mkdtempSync(join(dir, "teardown."));
+    const evidence = join(at, "evidence");
+    const profile = join(at, "profile");
+    mkdirSync(join(profile, "sessions"), { recursive: true });
+    writeFileSync(join(profile, "sessions", "c.jsonl"), "controller\n");
+    const ran = Bun.spawnSync(
+      [
+        "bash",
+        "-c",
+        `set -Eeuo pipefail
+work=${JSON.stringify(join(at, "work"))} evidence=${JSON.stringify(evidence)} profile_agent=${JSON.stringify(profile)}
+pod_sessions_dir=${sessions} session_db_container=${container}
+check=controller ok=1 was_blocked= locked= smoke_main_cleaning=
+pair_session= negative_config_pod= block_tree= pg_container=none
+shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid=
+mkdir -p "$work" "$evidence"
+exec 7>&1
+stop_tree() { :; }; stop_pid() { :; }; record_pair() { :; }; run_processes() { :; }; docker() { :; }
+note() { echo "   $*"; }
+${sessionCopy}
+${fn("collect_transcripts")}
+${fn("cleanup")}
+trap cleanup EXIT
+exit 0`,
+      ],
+      { env: { PATH: process.env.PATH ?? "" } }
+    );
+    const stdout = ran.stdout.toString();
+    // cleanup's ERR trap reports a teardown command that fails, a helper left unstubbed included.
+    expect(stdout).not.toContain("cleanup warning:");
+    return { code: ran.exitCode, stdout, evidence };
+  }
+
+  test("a copy that leaves a session out fails the run's teardown check transcripts", () => {
+    const r = teardownRun(`session_copy() {
+  [ "$1 $2" = "${sessions}/ $evidence/transcripts" ] || return 9
+  echo "the session key ${sessions}/x/y.jsonl would be written as x_y.jsonl in $2, as would the key ${sessions}/x_y.jsonl; neither is copied" >&2
+  return 1
+}`);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain(
+      `CHECK transcripts: FAIL: the pods' sessions could not all be copied from the session database ${container} into ${r.evidence}/transcripts`
+    );
+    expect(r.stdout).toContain(
+      "stage 4b e2e: FAIL (check transcripts, in the teardown after check controller)"
+    );
+    // The refusal is in the transcript above the verdict, and the controller's sessions still went.
+    expect(r.stdout.indexOf(`the session key ${sessions}/x/y.jsonl`)).toBeLessThan(
+      r.stdout.indexOf("CHECK transcripts: FAIL")
+    );
+    expect(readFileSync(join(r.evidence, "transcripts", "controller", "c.jsonl"), "utf8")).toBe(
+      "controller\n"
+    );
+  });
+
+  test("a copy that leaves nothing out leaves a passed run's teardown clean", () => {
+    const r = teardownRun(`session_copy() { [ "$1 $2" = "${sessions}/ $evidence/transcripts" ]; }`);
+    expect(r.code).toBe(0);
+    expect(r.stdout).not.toContain("FAIL");
   });
 });
 

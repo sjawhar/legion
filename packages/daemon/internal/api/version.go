@@ -316,11 +316,12 @@ package api
 // from it, the daemon's probe for a retained session of the issue that decided whether to expect
 // anything, and `legion sessions mark-lost`, the operator command that marked a claim whose
 // workspace was lost. The controller's pod loses its init container with them, since the sessions
-// directory it made is gone. `runtime.kubernetes.session_store` must be `postgres` — an omitted
-// key is the same refusal as an explicit `pvc` — since a session kept as a file on the pod's disk
-// would die with the pod and the next launch's resume would fail on the missing file, retiring the
-// claim after three failures. A daemon before 37 sets `LEGION_EXPECT_ISSUE_VOLUME=true` on a pod
-// whose `workspace-init` from this commit knows neither that name nor exit 3, so a lost disk is
+// directory it made is gone. `runtime.kubernetes.session_store` must name a store that keeps
+// sessions in a database, `postgres` or `cloudsql-iam` — an omitted key is the same refusal as an
+// explicit `pvc` — since a session kept as a file on the pod's disk would die with the pod and the
+// next launch's resume would fail on the missing file, retiring the claim after three failures. A
+// daemon before 37 sets `LEGION_EXPECT_ISSUE_VOLUME=true` on a pod whose `workspace-init` from
+// this commit knows neither that name nor exit 3, so a lost disk is
 // provisioned afresh and reported as provisioned, and that daemon resumes a role onto a session
 // file the new disk does not hold; an image built before 37 runs the whole lost-disk machinery
 // against a daemon that sets none of it. The image probe, which holds the image's pi-legion to

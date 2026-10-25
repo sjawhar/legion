@@ -16,7 +16,7 @@ your cluster, from one published worker image.
 | --- | --- |
 | A Kubernetes cluster | Agent Sandbox installed, a gVisor runtime class, a node pool for Legion, a namespace and a storage class ([below](#the-cluster)). |
 | A host for the daemon | Reachable from the pods on two ports: the API (`port`, 13370 by default) and the worker stream (`worker_stream_port`, the API port plus one). |
-| Postgres | Two databases: one for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment), and one for the agents' conversations, which every pod reaches directly (`runtime.kubernetes.session_store: postgres` with `session_dsn_secret`, both required: an issue pod's disk is deleted with the pod, so a conversation kept on it would die with it). The second may be another database of the same server; its login needs `USAGE, CREATE ON SCHEMA public`, since Oh My Pi creates its own two tables there. |
+| Postgres | Two databases: one for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment), and one for the agents' conversations, which every pod reaches directly (`runtime.kubernetes.session_store`, required, with its key: `postgres` with `session_dsn_secret`, or `cloudsql-iam` with `session_database`; an issue pod's disk is deleted with the pod, so a conversation kept on it would die with it). The second may be another database of the same server; its login needs `USAGE, CREATE ON SCHEMA public`, since Oh My Pi creates its own two tables there. |
 | [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents, and the project's repositories mapped to it in Dispatch's Settings → Repositories → Projects, one of them the project's default ([below](#the-projects-repositories)). |
 | The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
 | Three GitHub Apps | An **implement** App (the implementer's and merger's identity), a **review** App (every other role's) and an **Envoy** App (the webhook that feeds Envoy, and Dispatch's GitHub reads), each installed on the owner of every repository Legion works, with its private key ([below](#the-github-apps)). |
@@ -255,15 +255,19 @@ What each part is for:
   secret.
 - **`provider_keys`** (optional) maps a variable Oh My Pi reads to a key of the providers Secret
   ([below](#secrets-and-files)); each pod gets those keys alone, in Oh My Pi's environment.
-- **`runtime.kubernetes.session_store`** and **`session_dsn_secret`** are required, and
-  `session_store` must be `postgres`: it is the only store this runtime has. Every pod's Oh My Pi
-  keeps its conversation in the database, and `session_dsn_secret` names the key of the providers
-  Secret ([below](#secrets-and-files)) holding that database's `postgres://…` URL, which every
-  pod, the controller's and the image probe's included, mounts read-only. An omitted key and
-  `pvc`, the file store of earlier releases, are refused with the same line and its reason: an
-  issue pod's disk is deleted with the pod, so a conversation kept as a file on it dies with the
-  pod and the next launch's resume fails on the missing file, retiring the claim after three
-  failures. Name both, and have the database reachable from the pods, before the daemon boots.
+- **`runtime.kubernetes.session_store`** is required, and must name a store that keeps every
+  pod's Oh My Pi conversation in a database, with that store's key. There are two:
+  `postgres`, whose `session_dsn_secret` names the key of the providers Secret
+  ([below](#secrets-and-files)) holding that database's `postgres://…` URL, which every pod, the
+  controller's and the image probe's included, mounts read-only; and `cloudsql-iam`, whose
+  `session_database` (`instance`, `name` and `user`, all three required) names a Cloud SQL
+  database each pod signs in to as itself, with no URL held anywhere. No deployment runs
+  `cloudsql-iam` yet; the repository's `docs/kubernetes.md` ("Selecting the store") says what it
+  needs. Each kind refuses the other's key. An omitted `session_store` and `pvc`, the file store
+  of earlier releases, are refused with the same line and its reason: an issue pod's disk is
+  deleted with the pod, so a conversation kept as a file on it dies with the pod and the next
+  launch's resume fails on the missing file, retiring the claim after three failures. Name the
+  store and its key, and have the database reachable from the pods, before the daemon boots.
 - **`nats_nkey_seed_file`** and **`nats_daemon_nkey_seed_file`** (optional) are the NATS nkey user
   seeds for the agents and for the daemon's own connection, each in a file only its owner can read.
 - **`runtime.kubernetes.agent_secrets`** (optional) enrolls every pod with the
@@ -311,11 +315,12 @@ The loader refuses any key it does not know, naming it, and refuses `omp_invocat
 - **The Dispatch and Envoy tokens** go in the files `dispatch_token_file` and `envoy_token_file`
   name. The daemon hands each pod its own copy; no pod reads your files.
 - **The providers Secret**, `legion-<project>-providers` in the namespace (`<project>` lowercased
-  with everything but letters and digits removed, `legion-widgets-providers` here), holds the key
-  `session_dsn_secret` names, with the session database's `postgres://…` URL; the keys
-  `provider_keys` names; and `NATS_NKEY_SEED` (the agents' seed) when you use one. You create it;
-  the daemon never does, and a key the kubelet cannot mount refuses the boot. Every pod mounts
-  the session URL, so every agent can read it: give that login no rights beyond its own database.
+  with everything but letters and digits removed, `legion-widgets-providers` here), holds, under
+  `session_store: postgres`, the key `session_dsn_secret` names, with the session database's
+  `postgres://…` URL; the keys `provider_keys` names; and `NATS_NKEY_SEED` (the agents' seed) when
+  you use one. You create it; the daemon never does, and a key the kubelet cannot mount refuses
+  the boot. Under `postgres` every pod mounts the session URL, so every agent can read it: give
+  that login no rights beyond its own database.
 
 ## The model route
 
@@ -504,9 +509,10 @@ Closing the terminal leaves the project without one, and the daemon logs
    "Require conversation resolution before merging").
 
    **After the first upgrade to the release where an issue's disk dies with its pod,** the
-   `runtime.kubernetes` block must name `session_store: postgres` and `session_dsn_secret`, and
-   the providers Secret must hold that key, before the daemon boots: the loader refuses the file
-   otherwise ([legion.yaml](#legionyaml)). An issue whose Sandbox still owns the volume of the
+   `runtime.kubernetes` block must name a `session_store` that keeps sessions in a database, with
+   that store's key — for a deployment today `session_store: postgres` and `session_dsn_secret`,
+   with the providers Secret holding that key — before the daemon boots: the loader refuses the
+   file otherwise ([legion.yaml](#legionyaml)). An issue whose Sandbox still owns the volume of the
    earlier shape keeps it until its next launch, which deletes that Sandbox and the volume with
    it and starts the issue on a pod-owned disk, so stop each issue with its work pushed and start
    it again rather than letting a relaunch choose the moment. The repository's

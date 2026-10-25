@@ -651,8 +651,8 @@ func TestTheNameAReplacementKeptForItsGapGoesOnceTheReplacementCarriesIt(t *test
 
 // The death path's Resume over a Failed issue pod, which the controller keeps under Running:
 // suspend, wait the pod out, rewrite the Secrets, run (B1). The role's launcher in the new pod is
-// told the new generation's boot token and resumes the recorded session, and the init container is
-// told where that session is on the issue's volume.
+// told the new generation's boot token and resumes the recorded session, which the session database
+// kept: nothing of it was on the failed pod's disk.
 func TestResumeAfterAFailedPod(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)

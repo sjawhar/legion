@@ -706,7 +706,7 @@ func (r *Runtime) checkLocator(loc runtime.Locator) error {
 }
 
 // ProvisionsWorkspaces is true: every pod's init containers provision its claim's workspace on the
-// issue's own volume, which goes with the issue's Sandbox.
+// issue's disk, the pod's own ephemeral volume, which goes with the pod.
 func (r *Runtime) ProvisionsWorkspaces() bool { return true }
 
 // Suspend ends only the recorded role process. It never changes the issue Sandbox operating mode:
@@ -1026,11 +1026,13 @@ func (r *Runtime) controllerOwned(ctx context.Context, name string) (bool, error
 // gone is gone, and one the fence refuses, replaced or written since, is kept and logged with
 // attrs, since its owner's next decision is the orphan sweep's: neither is an error. Deletion
 // propagates in the foreground, as the tree cleanup's does (deleteSandbox): the Sandbox owns its
-// PVC and its role Secrets by owner reference, and the issue's next Sandbox names the same PVC
-// (IssueClaimName), so a background delete, which drops the Sandbox at once and collects the PVC
-// after, would let a re-admission inside that window create a Sandbox asking for a Terminating
-// PVC. In the foreground the Sandbox stays, Terminating, until both are gone, so a launch that
-// waits out a Sandbox being deleted (ensureSandbox) waits for its volume too.
+// Secrets by owner reference, and a controller's or a repository cache's Sandbox also its PVC, which
+// the next Sandbox of that name names again (IssueClaimName, cacheClaimName), so a background
+// delete, which drops the Sandbox at once and collects the PVC after, would let a launch inside
+// that window create a Sandbox asking for a Terminating PVC. In the foreground the Sandbox stays,
+// Terminating, until they are gone, so a launch that waits out a Sandbox being deleted
+// (ensureSandbox) waits for its volume too. An issue's Sandbox owns no PVC: the issue's disk is its
+// pod's own, and goes when the delete takes the pod.
 func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
 	policy := metav1.DeletePropagationForeground
 	err := r.sandboxClient().Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy, Preconditions: &fence})

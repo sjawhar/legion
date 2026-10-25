@@ -13,8 +13,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   lost-disk machinery that variable drove is gone with it: `workspace-init`'s exit code 3 for a
   volume holding neither the clone nor a retained session, the recovery marker a relaunch after
   that loss wrote, the probe for an issue's retained sessions, and `legion sessions mark-lost`.
-  `runtime.kubernetes.session_store` must be `postgres`, since a session kept as a file on that
-  disk would die with the pod. Install this release with a `legion` built from the same commit.
+  `runtime.kubernetes.session_store` must name a store that keeps sessions in a database,
+  `postgres` or `cloudsql-iam` (`pvc` and an omitted key are refused), since a session kept as a
+  file on that disk would die with the pod. Install this release with a `legion` built from the
+  same commit.
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits

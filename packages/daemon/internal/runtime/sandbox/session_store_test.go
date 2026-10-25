@@ -230,3 +230,58 @@ func TestAPodUnderAnotherSessionStoreHoldsAMove(t *testing.T) {
 		})
 	}
 }
+
+// A role's shim and the image probe are told the providers directory (--provider-env-dir) exactly
+// where their pod mounts the providers Secret there, which it does when something needs it
+// (mountsProviders): a provider key, a providers secret, or the postgres store's URL key. Each
+// refuses a directory it is told and cannot read (shim.ReadProviderEnv), and the probe's refusal
+// fails the daemon's boot. Under cloudsql-iam no URL key is held, so a deployment with no provider
+// key and no providers secret mounts no providers volume, and neither is told the directory.
+func TestTheProvidersDirectoryIsToldWhereThePodMountsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		store   ompsessions.Store
+		keys    map[string]string
+		mounted bool
+	}{
+		{"cloudsql-iam with no provider key", cloudSQLStore, nil, false},
+		{"cloudsql-iam with a provider key", cloudSQLStore, map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, true},
+		{"postgres with no provider key", postgresStore, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions()
+			opts.SessionStore, opts.ProviderKeys = tc.store, tc.keys
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l := launchOf(t, r, workerSpec(t))
+			argv := launcherCommand(l, r).Argv
+			probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 5, RoleReferences: testRoleReferences}, time.Time{}).Spec.PodTemplate.Spec
+			for _, site := range []struct {
+				name    string
+				pod     corev1.PodSpec
+				command []string
+			}{
+				{"a role's shim", r.podTemplate(l).Spec, argv[:slices.Index(argv, "--")]},
+				{"the image probe", probe, containerNamed(t, probe, probeContainer).Command},
+			} {
+				t.Run(site.name, func(t *testing.T) {
+					if got := containsSequence(site.command, []string{"--provider-env-dir", ProvidersDir}); got != tc.mounted {
+						t.Errorf("told --provider-env-dir %s: %t (%q), want %t", ProvidersDir, got, site.command, tc.mounted)
+					}
+					volume := slices.ContainsFunc(site.pod.Volumes, func(v corev1.Volume) bool { return v.Name == providersVolume })
+					var mounting []string
+					for _, c := range slices.Concat(site.pod.InitContainers, site.pod.Containers) {
+						if slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == providersVolume || m.MountPath == ProvidersDir }) {
+							mounting = append(mounting, c.Name)
+						}
+					}
+					if volume != tc.mounted || (len(mounting) > 0) != tc.mounted {
+						t.Errorf("the pod holds the providers volume: %t, mounted by %q; want %t", volume, mounting, tc.mounted)
+					}
+				})
+			}
+		})
+	}
+}

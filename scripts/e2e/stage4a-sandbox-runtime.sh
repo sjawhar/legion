@@ -335,8 +335,9 @@ fi
 
 begin session-db
 # The run's session database: a throwaway Postgres on the devbox, which pods reach as they
-# reach the worker stream (directly in AWS mode, through the bridge in GKE mode). The daemon loads
-# no other session store (runtime.kubernetes.session_store postgres), so every runtime the harness
+# reach the worker stream (directly in AWS mode, through the bridge in GKE mode). The daemon
+# requires a store that keeps sessions in a database, and the harness names this one
+# (runtime.kubernetes.session_store postgres), so every runtime the harness
 # builds keeps its sessions here and every resume of the run is held to this table — which is what
 # a role carries across a pod now that an issue's disk dies with its pod. Its password is
 # the run's own and reaches docker through an owner-only env file, never an argument; the URL is
@@ -404,7 +405,8 @@ op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml"
   fail "the operator could not create ConfigMap $route_configmap"
 # The run's providers Secret, named as the runtime names it (ProvidersSecretName): one key no model
 # route reads, the scratch session database's URL, which every runtime of the run keeps its
-# sessions in (session_dsn_secret stage4a_sessions; the daemon loads no other store), and, under
+# sessions in (session_dsn_secret stage4a_sessions, the key of the run's session_store postgres; the
+# daemon requires a store that keeps sessions in a database), and, under
 # LEGION_E2E_MODEL_ROUTE=key-file, a placeholder ANTHROPIC_API_KEY.
 op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
   --from-file=stage4a_sessions="$work/session-dsn" \

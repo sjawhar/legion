@@ -69,10 +69,13 @@ func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructur
 
 // deleteSandbox deletes object with foreground propagation, fenced to its UID and resourceVersion,
 // forgets its launchers' credentials once the API has accepted the delete, and waits until the API
-// no longer has it. Every delete is foreground: the Sandbox owns its PVC and its role Secrets by
-// owner reference, and foreground propagation has garbage collection remove them before the
-// Sandbox is gone, so the Sandbox's absence is the API's confirmation that its volume is gone — the
-// restricted daemon identity has no PVC verb to confirm it with. A conflict is returned as it is.
+// no longer has it. Every delete is foreground: the Sandbox owns its role Secrets by owner
+// reference — and an issue Sandbox of the disk shape before the pod-owned disk also the PVC its
+// claim template made — and foreground propagation has garbage collection remove them before the
+// Sandbox is gone, so the Sandbox's absence is the API's confirmation that what it owned is gone —
+// the restricted daemon identity has no PVC verb to confirm it with. An issue's disk of this
+// runtime's shape is not among them: it is its pod's own, and goes when the delete takes the pod.
+// A conflict is returned as it is.
 func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstructured) error {
 	name, uid, version := object.GetName(), object.GetUID(), object.GetResourceVersion()
 	policy := metav1.DeletePropagationForeground

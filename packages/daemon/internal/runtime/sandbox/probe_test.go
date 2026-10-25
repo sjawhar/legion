@@ -1490,7 +1490,9 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 
 // The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
 // reads the providers Secret's keys as the worker's shim does, with or without a provider key —
-// every pod mounts that Secret, which holds the session database's URL at least.
+// under the postgres store goldenOptions configures, the probe's pod mounts that Secret for the
+// session database's URL key at least (mountsProviders). A pod that mounts none is told no
+// directory (TestTheProvidersDirectoryIsToldWhereThePodMountsIt).
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
