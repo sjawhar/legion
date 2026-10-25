@@ -47682,8 +47682,77 @@ function claudeProjectDirectory(environment, fallback) {
 }
 
 // src/session-identity.ts
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
+import { readFile } from "fs/promises";
+import { basename as basename3, join as join5 } from "path";
+
+// src/session-state.ts
+import { readFileSync as readFileSync5 } from "fs";
+import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join4 } from "path";
+async function writeAtomicStateFile(file2, contents) {
+  await mkdir(dirname2(file2), { recursive: true, mode: 448 });
+  const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  await writeFile(temporary, contents, { mode: 384 });
+  await rename(temporary, file2);
+}
+async function touchStateFile(file2) {
+  const now = new Date;
+  await utimes(file2, now, now);
+}
+async function pruneStateDirectory(directory, isStale) {
+  const entries = await readdir(directory).catch((error48) => {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return [];
+    throw error48;
+  });
+  for (const entry of entries) {
+    const file2 = join4(directory, entry);
+    if (!await isStale(file2))
+      continue;
+    await rm(file2, { recursive: true, force: true });
+  }
+}
+var STATE_FILE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+async function writtenLongAgo(file2) {
+  const modified = await stat(file2).then((stats) => stats.mtimeMs, () => {
+    return;
+  });
+  return modified !== undefined && Date.now() - modified > STATE_FILE_MAX_AGE_MS;
+}
+var TITLES_DIRECTORY = "titles";
+function sessionTitleFile(stateDirectory, sessionId) {
+  return join4(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+}
+async function writeChosenTitle(file2, title) {
+  await writeAtomicStateFile(file2, `${title}
+`);
+}
+async function removeChosenTitle(file2) {
+  await rm(file2, { force: true });
+}
+function readChosenTitleSync(file2) {
+  try {
+    return readFileSync5(file2, "utf8");
+  } catch {
+    return;
+  }
+}
+async function recordChosenTitle(sessionId, title) {
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
+  if (pluginData === undefined)
+    return;
+  const file2 = sessionTitleFile(pluginData, sessionId);
+  const chosen = configuredValue(title);
+  if (chosen === undefined)
+    await removeChosenTitle(file2);
+  else
+    await writeChosenTitle(file2, chosen);
+}
+async function pruneStaleSessionTitles(stateDirectory) {
+  await pruneStateDirectory(join4(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+}
+
+// src/session-identity.ts
 var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
 
 class SessionIdentity {
@@ -47701,32 +47770,40 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join4(stateDirectory, "sessions", String(claudePid));
+  return join5(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join4(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join5(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
+var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join4(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+  return join5(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+}
+
+class UnparseableRoleRecordError extends Error {
+  name = "UnparseableRoleRecordError";
+  constructor(roleFile, cause) {
+    super(`the role record ${roleFile} cannot be parsed (${messageFor(cause)})`, { cause });
+  }
 }
 async function readPersistedRole(roleFile) {
+  let bytes;
   try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")));
+    bytes = await readFile(roleFile, "utf8");
   } catch (error48) {
     if (hasErrnoCode(error48, "ENOENT"))
       return;
     throw error48;
   }
+  try {
+    return PersistedRole.parse(JSON.parse(bytes));
+  } catch (error48) {
+    throw new UnparseableRoleRecordError(roleFile, error48);
+  }
 }
 async function writePersistedRole(roleFile, state) {
   await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}
 `);
-}
-async function writeAtomicStateFile(file2, contents) {
-  await mkdir(dirname2(file2), { recursive: true, mode: 448 });
-  const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  await writeFile(temporary, contents, { mode: 384 });
-  await rename(temporary, file2);
 }
 async function writeSessionHandoff(file2, sessionId) {
   await writeAtomicStateFile(file2, `${sessionId.trim()}
@@ -47751,17 +47828,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  const sessions = join4(stateDirectory, "sessions");
-  const entries = await readdir(sessions).catch((error48) => {
-    if (hasErrnoCode(error48, "ENOENT"))
-      return [];
-    throw error48;
+  await pruneStateDirectory(join5(stateDirectory, "sessions"), (file2) => {
+    const pid = basename3(file2);
+    return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || processExists(Number(entry)))
-      continue;
-    await rm(join4(sessions, entry), { recursive: true, force: true });
-  }
+}
+async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
+  const own = roleStateFile(stateDirectory, currentSessionId);
+  await pruneStateDirectory(join5(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
 }
 
 // src/envoy-off.ts
@@ -47810,8 +47884,8 @@ async function serveEnvoyOff(serverInfo, refusal) {
 }
 
 // src/legion-claim.ts
-import { readdir as readdir2, stat } from "fs/promises";
-import { join as join5 } from "path";
+import { readdir as readdir2, stat as stat2 } from "fs/promises";
+import { join as join6 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -47900,13 +47974,13 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join5(configDir, "projects");
+  const projects = join6(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file2 = join5(projects, directory, name);
-      if (await stat(file2).then((info) => info.isFile(), () => false))
+      const file2 = join6(projects, directory, name);
+      if (await stat2(file2).then((info) => info.isFile(), () => false))
         return file2;
     }
     await delay(pollMs, undefined, { signal });
@@ -48186,8 +48260,8 @@ async function executeLegionTool(runtime, input) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync5 } from "fs";
-import { basename as basename3 } from "path";
+import { readFileSync as readFileSync6 } from "fs";
+import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
   "#{window_name}",
@@ -48209,8 +48283,8 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat2 = readFileSync5(`/proc/${pid}/stat`, "utf8");
-      const parent2 = Number(stat2.slice(stat2.lastIndexOf(")") + 2).split(" ")[1]);
+      const stat3 = readFileSync6(`/proc/${pid}/stat`, "utf8");
+      const parent2 = Number(stat3.slice(stat3.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent2) ? parent2 : undefined;
     }
     const parent = Number(execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], {
@@ -48260,7 +48334,14 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, query = queryTmux, ownPane = (panePid) => isAncestor(panePid)) {
+function sessionTitle(environment, directory, sources = {}) {
+  const {
+    query = queryTmux,
+    ownPane = (panePid) => isAncestor(panePid),
+    chosen = () => {
+      return;
+    }
+  } = sources;
   const explicit = oneLine(configuredValue(environment.ENVOY_SESSION_TITLE) ?? "");
   if (visible(explicit))
     return () => explicit;
@@ -48268,9 +48349,12 @@ function sessionTitle(environment, directory, query = queryTmux, ownPane = (pane
   const socket = parts.slice(0, -2).join(",");
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
-  const directoryName = oneLine(basename3(directory) || directory);
+  const directoryName = oneLine(basename4(directory) || directory);
   const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
-  return (sessionId) => `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  return (sessionId) => {
+    const own = oneLine(chosen(sessionId) ?? "");
+    return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
+  };
 }
 
 // src/envoy-channel-server.ts
@@ -48532,12 +48616,27 @@ async function startChannelSession(options) {
 `);
     });
   };
+  let roleRefreshFailureReported = false;
+  const refreshRoleRecord = async () => {
+    const roleFile = roleStateFile(options.stateDirectory, identity.id);
+    try {
+      await touchStateFile(roleFile);
+      roleRefreshFailureReported = false;
+    } catch (error48) {
+      if (!roleRefreshFailureReported) {
+        roleRefreshFailureReported = true;
+        process.stderr.write(`envoy-channel: could not refresh the role record ${roleFile} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
+  };
   const reassertRole = async (afterOutage) => {
     if (heldRole === undefined)
       return;
     const role = heldRole;
     const holder = await options.client.getRole(role).then((info) => info.holder, undefinedOnNotFound);
     if (holder === identity.id) {
+      await refreshRoleRecord();
       if (afterOutage)
         fireRegained(role, "reregistered");
       return;
@@ -48555,11 +48654,22 @@ async function startChannelSession(options) {
     fireRegained(role, "reclaimed");
   };
   let roleTransferFrom;
+  let roleTransferFailureReported = false;
   const transferRole = async () => {
-    if (roleTransferFrom === undefined)
+    const from = roleTransferFrom;
+    if (from === undefined)
       return;
-    await restoreRole(roleTransferFrom);
-    roleTransferFrom = undefined;
+    try {
+      await restoreRole(from);
+      roleTransferFrom = undefined;
+      roleTransferFailureReported = false;
+    } catch (error48) {
+      if (!roleTransferFailureReported) {
+        roleTransferFailureReported = true;
+        process.stderr.write(`envoy-channel: could not take back the role held by ${from} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
   };
   const adoptHandoff = async () => {
     if (handoffFile === undefined)
@@ -48664,9 +48774,28 @@ async function startChannelSession(options) {
   await options.connection.flush();
   await serialized(async () => {
     await register();
-    await restoreRole();
+    await restoreRole().catch((error48) => {
+      if (error48 instanceof UnparseableRoleRecordError) {
+        process.stderr.write(`envoy-channel: ${messageFor(error48)}; the session starts without a role
+`);
+        return;
+      }
+      roleTransferFrom = identity.id;
+      roleTransferFailureReported = true;
+      process.stderr.write(`envoy-channel: could not restore the role (${messageFor(error48)}); the next heartbeat retries
+`);
+    });
   });
-  await pruneStaleSessionHandoffs(options.stateDirectory);
+  for (const prune of [
+    () => pruneStaleSessionHandoffs(options.stateDirectory),
+    () => pruneStaleSessionTitles(options.stateDirectory),
+    () => pruneStaleSessionRoles(options.stateDirectory, identity.id)
+  ]) {
+    await prune().catch((error48) => {
+      process.stderr.write(`envoy-channel: could not prune stale session state (${messageFor(error48)})
+`);
+    });
+  }
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
@@ -48831,11 +48960,14 @@ async function runEnvoyChannelServer() {
     process.stderr.write(`envoy-channel: ${notice}
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
   const title = sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
-  }, directory);
+  }, directory, {
+    chosen: (sessionId) => pluginData === undefined ? undefined : readChosenTitleSync(sessionTitleFile(pluginData, sessionId))
+  });
   const stampTitle = (sessionId, value) => {
     writeSessionTitle(sessionDirectory(process.env, sessionId), value);
   };

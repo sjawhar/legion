@@ -13,8 +13,11 @@ which you have; those need no runner.
 
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
-  dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without it on
-  `PATH` — so a role whose change owes that suite can run it.
+  dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`,
+  `psql`, `flock` and `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is
+  given. The image carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`,
+  and `psql` was the one a role had no way to supply — so a role whose change owes that suite can
+  run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a
   megabyte, because a second image roll costs more than a megabyte.
 - `sqlite3` — a repository's own SQLite fixture or database has no other way to open from a shell,
@@ -88,8 +91,10 @@ variable the runtime sets for you there or under a path on that volume your harn
 itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under `/legion/workspaces`) and
 the runtime's own directories (`/legion/repos`, `/legion/feed`, `/legion/sessions`); and after
 the command exits nothing else resolves differently. The workspace is excluded because its jj
-working copy tracks every new file, so a root written there is added to the change every role
-shares; the one write into it that is sanctioned is a repository's own dependency install into
+working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB in a role
+container), so a root written there is added to the change every role shares, and a larger new
+file is left untracked, every jj command in the workspace then warning `Refused to snapshot some
+files`. The one write into it that is sanctioned is a repository's own dependency install into
 its ignored directories, below. The variables the runtime sets on the volume, where a tool's own
 cache already goes, are
 `XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
