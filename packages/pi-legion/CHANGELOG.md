@@ -122,7 +122,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `Clear defect from <role>`, and the controller replies `Filed dispatch://<KEY>` under it. The
   issue it files carries the line `Filed for Legion from <role> on <issue>: <evidence>`, and the
   controller's triage admits a labelled root that carries it and that one of its own sessions
-  filed. At every start the controller files each evidence comment no reply follows yet.
+  filed. At every start the controller files each evidence comment no reply follows yet. It files
+  the issue with `--repo` naming the repository where the fix belongs, since without it Dispatch
+  records the project's default repository and the daemon would start the work there. The
+  controller's rule never to label work nobody asked for names a clear defect as its one
+  exception, by the deployment owner's ruling: a clear defect's fix is "how" inside work a person
+  already wants, as `STRATEGY.md` puts the split.
   `legion-worker/references/findings.md` holds the two paths. `legion-controller`,
   `legion-architect`, `legion-worker`, `legion-retro`, the production check's `fail` in
   `merge-gate.md`, `dispatch`, `dispatch-first`, and the daemon's role prompts and production-check

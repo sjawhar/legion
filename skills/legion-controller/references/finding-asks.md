@@ -21,18 +21,21 @@ the same comment, with `controller` as the role.
 2. Search first, as `skill://dispatch-first` says. When an open issue already tracks it, comment
    the evidence there, reply `Filed dispatch://<that KEY>` under the evidence comment, and file
    nothing.
-3. File it in the project the repository maps to:
+3. File it in the project the repository maps to, on that repository:
 
    ```text
-   dispatch issue --project <KEY> --title '<the defect, as a title>' --label legion --spec-file -
+   dispatch issue --project <KEY> --repo <owner/name> --title '<the defect, as a title>' --label legion --spec-file -
    ```
 
-   The spec states the defect, where the fix belongs and the fix, cites the evidence by its
-   `dispatch://` reference, and ends with the line `Filed for Legion from <role> on <issue>:
-   <evidence>`. `<role>` is the sending role's token, or `controller` for one you found.
-   `<issue>` is the `dispatch://<KEY>` it came from. `<evidence>` is the evidence comment's
-   reference. The issue opens in `triage` with the label, so its triage wake brings it back to
-   you (the skill's "New issue triage").
+   `--repo` is the repository where the fix belongs, as the message names it. Without it Dispatch
+   records the project's default repository, and the daemon admits the issue there: in a project
+   with two repositories, a defect in the other one starts work in the wrong workspace. The spec
+   states the defect, where the fix belongs and the fix, cites the evidence by its `dispatch://`
+   reference, and ends with the line `Filed for Legion from <role> on <issue>: <evidence>`.
+   `<role>` is the sending role's token, or `controller` for one you found. `<issue>` is the
+   `dispatch://<KEY>` it came from. `<evidence>` is the evidence comment's reference. The issue
+   opens in `triage` with the label, so its triage wake brings it back to you (the skill's "New
+   issue triage").
 4. Reply under the evidence comment, its first line exactly `Filed dispatch://<NEW KEY>`:
 
    ```text

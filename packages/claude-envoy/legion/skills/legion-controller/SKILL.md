@@ -6,17 +6,15 @@ description: Use when handling Legion controller wakes for weekly-plan ranking, 
 # Legion Controller
 
 The controller is the one persistent, wake-driven session for a Legion project. It admits only the
-work a person hands to Legion and the clear defects Legion's roles report, keeps the weekly plan's
-order and owners current in Dispatch, files each clear defect for Legion and asks a person about
-every finding that needs a decision, and makes triage, escalation, and human-interaction
-judgments. It starts no other work on its own, never does phase-worker work, and never routes raw
-events into an architect.
+work a person hands to Legion and the clear defects Legion's roles report. It keeps the weekly
+plan's order and owners current in Dispatch, files each clear defect for Legion, asks a person about
+every finding that needs a decision, and makes triage, escalation and human-interaction judgments.
+It starts no other work, does no phase-worker work, and routes no raw event into an architect.
 
 ## Start and claim the controller role
 
 The Legion extension registers this session with the daemon as the controller and claims
-`legion-<project>-controller` during session startup. Do not handle a wake unless that startup
-succeeded.
+`legion-<project>-controller` during session startup. Handle a wake only once that startup succeeded.
 
 The session's `gh` acts as the review App's bot account (`gh api graphql -f query='{viewer{login}}'`
 names it) from `LEGION_GH_OWNERS_DIR`, one read-only directory per GitHub owner of the project,
@@ -224,8 +222,12 @@ own. Work reaches Legion only when a person hands it over or a role reports a cl
 ([Issues handed to Legion](#issues-handed-to-legion-go-daemon)), and a labelled root in `todo`
 takes the next free slot through the daemon's waiting line (`admission.waiting`) without you, so a
 park means "should not run now", and a parked root keeps its `legion` label. Never label an issue
-nobody asked you to hand over, and never set a parked issue back to `todo` to fill a slot. A
-person's parked issue moves only when that person asks. These are every move to `todo` you make:
+nobody asked you to hand over. Never set a parked issue back to `todo` to fill a slot. The one
+exception is a clear defect, by the deployment owner's ruling: a clear defect goes to the controller
+and is filed for Legion. It fits `STRATEGY.md`'s "humans decide what, agents decide how". Its fix is
+"how", inside work a person already wants. Its `Filed for Legion` line names the source issue and
+the evidence. A defect whose fix needs a choice of "what" is an ask. A person's parked issue moves
+only when that person asks. These are every move to `todo` you make:
 
 - a root a person handed over, or a clear defect you filed for Legion, at triage ([New issue triage](#new-issue-triage));
 - an issue a person asks you to start ([Issues handed to Legion](#issues-handed-to-legion-go-daemon));
@@ -239,9 +241,8 @@ registered, and none while one of the same kind is still unsent:
 
 - `slot-free on <KEY>`: the daemon released `<KEY>`'s slot, because its tree finished or left the
   workflow, and no waiting root took it.
-- `todo on <KEY>`: `<KEY>`, an issue nobody handed to Legion, changed while in `todo` and a slot
-  was free; the daemon holds it back half a minute and folds the events of that window into it.
-  It is not Legion's: take nothing.
+- `todo on <KEY>`: an issue nobody handed to Legion changed in `todo` while a slot was free (the
+  daemon folds half a minute of its events into one wake). Take nothing: it is not Legion's.
 - `tick on <PROJECT>`: the daemon's periodic wake, a minute after it starts and then every
   `controller_wake_interval_seconds` (an hour by default), whatever the slots. A day with no event
   and [a tree waiting on a root claim](#trees-waiting-on-a-root-claim-go-daemon) get a turn from
@@ -298,13 +299,12 @@ nobody has signed in to Dispatch with). Name either, with its first line, in you
 Once a day, post one Dispatch message that says what Legion finished, what it closed without a
 change and why, and what is running.
 
-**Where.** On the issue the deployment instructions name for Legion's reports. With none named,
-on the project's `Legion daily report` issue:
-`dispatch search --query '"Legion daily report"' --project <PROJECT>` finds it. When it
-does not exist, create it once (the one issue you file unasked) and park it in `icebox`, so nobody
-takes it as work; it never carries the `legion` label. It holds every finding ask, so assign it to
-the person who answers for the project: the one the deployment instructions name, else the owner
-`dispatch whoami` names:
+**Where.** On the issue the deployment instructions name for Legion's reports. With none named, on
+the project's `Legion daily report` issue: `dispatch search --query '"Legion daily report"' --project
+<PROJECT>` finds it. When it does not exist, create it once, unasked, and park it in `icebox`, so
+nobody takes it as work. It never carries the `legion` label. It holds every finding ask, so assign
+it to the person who answers for the project: the one the deployment instructions name, else the
+owner `dispatch whoami` names:
 
 ```text
 dispatch issue --project <PROJECT> --title 'Legion daily report' --assignee '<email>' --spec-file - <<'EOF'
