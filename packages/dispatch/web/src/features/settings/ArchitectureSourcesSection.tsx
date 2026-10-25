@@ -30,10 +30,17 @@ import {
 } from "./classes";
 import { ProjectSelect } from "./ProjectSelect";
 
-/** One architecture source per project: the repository and branch its architecture
- * documents are imported from. Saving runs the server's GitHub App access check, so a
- * listed row has proven access — it shows "Access verified" until a sync reports
- * otherwise — and a failed check surfaces the server's reason inline. */
+/** A source's address: a project and one of its repositories. */
+interface SourceKey {
+  readonly project: string;
+  readonly repo: string;
+}
+
+/** A project's architecture sources, one row per repository: the branch its architecture
+ * documents are imported from, the commit imported and how many components it supplies. Saving
+ * runs the server's GitHub App access check, so a listed row has proven access — it shows
+ * "Access verified" until a sync reports otherwise — and a failed check surfaces the server's
+ * reason inline. Saving a repository the project already has changes that source's branch. */
 export function ArchitectureSourcesSection(): ReactNode {
   const queryClient = useQueryClient();
   const [project, setProject] = useState("");
@@ -44,9 +51,10 @@ export function ArchitectureSourcesSection(): ReactNode {
   const projects = useQuery(projectsQuery());
   const saveSource = useMutation({
     mutationFn: (input: { project: string; repo: string; branch: string }) =>
-      api.putArchitectureSource(input.project, { branch: input.branch, repo: input.repo }),
+      api.putArchitectureSource(input.project, input.repo, { branch: input.branch }),
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
+      // The settings list's key prefixes every project's own list, so both refresh.
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey });
       setProject("");
       setRepository("");
@@ -54,7 +62,7 @@ export function ArchitectureSourcesSection(): ReactNode {
     },
   });
   const deleteSource = useMutation({
-    mutationFn: (key: string) => api.deleteArchitectureSource(key),
+    mutationFn: (source: SourceKey) => api.deleteArchitectureSource(source.project, source.repo),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey }),
   });
@@ -62,7 +70,7 @@ export function ArchitectureSourcesSection(): ReactNode {
   // with the reason in last_error, and even a 409 (access revoked, branch gone)
   // recorded its reason on the row before failing, so both invalidate.
   const refreshSource = useMutation({
-    mutationFn: (key: string) => api.syncArchitectureSource(key),
+    mutationFn: (source: SourceKey) => api.syncArchitectureSource(source.project, source.repo),
     onSettled: () =>
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey }),
   });
@@ -80,8 +88,10 @@ export function ArchitectureSourcesSection(): ReactNode {
         Architecture sources
       </h2>
       <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-        Each project can import its architecture documents from one repository branch. Saving
-        verifies the Dispatch GitHub App can read it.
+        A project can import its architecture documents from several repositories, each on one
+        branch. Its component model is every source's components together, so a component id must
+        not repeat across a project's sources. Saving verifies the Dispatch GitHub App can read the
+        repository; saving a repository the project already has changes its branch.
       </p>
 
       {sources.isPending || projects.isPending ? (
@@ -128,7 +138,7 @@ export function ArchitectureSourcesSection(): ReactNode {
                   </tr>
                 ) : (
                   sources.data.map((source) => (
-                    <tr className={settingsTableRow} key={source.project}>
+                    <tr className={settingsTableRow} key={`${source.project} ${source.repo}`}>
                       <td className={`px-4 py-3 font-mono ${textPrimaryOnSurface}`}>
                         {source.project}
                       </td>
@@ -146,6 +156,7 @@ export function ArchitectureSourcesSection(): ReactNode {
                               <div className={textMutedOnSurface}>
                                 Previous model stays up at{" "}
                                 <span className="font-mono">{source.last_commit.slice(0, 12)}</span>
+                                {` · ${componentCount(source.components)}`}
                               </div>
                             ) : null}
                           </>
@@ -153,6 +164,7 @@ export function ArchitectureSourcesSection(): ReactNode {
                           <>
                             Synced{" "}
                             <span className="font-mono">{source.last_commit.slice(0, 12)}</span>
+                            {` · ${componentCount(source.components)}`}
                             {source.last_sync_at !== null ? (
                               <>
                                 {" "}
@@ -169,25 +181,31 @@ export function ArchitectureSourcesSection(): ReactNode {
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
-                          aria-label={`Refresh architecture source for ${source.project}`}
+                          aria-label={`Refresh architecture source ${source.repo} for ${source.project}`}
                           className={`mr-4 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${linkText} ${linkHoverText}`}
                           disabled={
                             refreshSource.isPending ||
                             deleteSource.isPending ||
                             saveSource.isPending
                           }
-                          onClick={() => refreshSource.mutate(source.project)}
+                          onClick={() =>
+                            refreshSource.mutate({ project: source.project, repo: source.repo })
+                          }
                           type="button"
                         >
-                          {refreshSource.isPending && refreshSource.variables === source.project
+                          {refreshSource.isPending &&
+                          refreshSource.variables.project === source.project &&
+                          refreshSource.variables.repo === source.repo
                             ? "Refreshing…"
                             : "Refresh"}
                         </button>
                         <button
-                          aria-label={`Delete architecture source for ${source.project}`}
+                          aria-label={`Delete architecture source ${source.repo} for ${source.project}`}
                           className={`font-medium disabled:cursor-not-allowed disabled:opacity-50 ${dangerText} ${dangerHoverText}`}
                           disabled={deleteSource.isPending || saveSource.isPending}
-                          onClick={() => deleteSource.mutate(source.project)}
+                          onClick={() =>
+                            deleteSource.mutate({ project: source.project, repo: source.repo })
+                          }
                           type="button"
                         >
                           Delete
@@ -283,4 +301,9 @@ export function ArchitectureSourcesSection(): ReactNode {
       ) : null}
     </section>
   );
+}
+
+/** `1 component`, `N components`: how much of the project's model one source supplies. */
+function componentCount(count: number): string {
+  return count === 1 ? "1 component" : `${count} components`;
 }

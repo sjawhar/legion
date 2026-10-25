@@ -107,7 +107,10 @@ test("project routes render the project page and a project document route", asyn
   ]);
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
   // No architecture source: the bare project path opens on Issues.
-  const getArchitectureSource = spyOn(api, "getArchitectureSource").mockResolvedValue(null);
+  const listProjectArchitectureSources = spyOn(
+    api,
+    "listProjectArchitectureSources"
+  ).mockResolvedValue([]);
   const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue({
     created_at: "2026-09-10T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
@@ -158,7 +161,7 @@ test("project routes render the project page and a project document route", asyn
     document.unmount();
   } finally {
     fetchSpy.mockRestore();
-    getArchitectureSource.mockRestore();
+    listProjectArchitectureSources.mockRestore();
     getInbox.mockRestore();
     getProjectArtifact.mockRestore();
     getMyState.mockRestore();
