@@ -486,6 +486,95 @@ func TestRenderWritesALinkedImageInsideItsLink(t *testing.T) {
 	}
 }
 
+// A `!` ending text right before a `[` the writer puts after it - a linked image's, or a link's the
+// next text opens first, a www link's the writer refuses bare after the `!` included - is escaped,
+// where it would open an image; a `!` before anything else is written as it is. Go and the browser
+// editor's engine both read each rendering back as the tree, its link a link and not an image.
+func TestRenderEscapesABangBeforeALinksBracket(t *testing.T) {
+	tests := []struct {
+		name, markdown, want string
+		images               int
+	}{
+		{"text before a link", "wow\\![a](u)\n", "wow\\![a](u)\n", 0},
+		// The link is written outermost, so the bold closes before its `[`.
+		{"bold text before a link inside the bold", "**wow\\![a](u)**\n", "**wow!**[**a**](u)\n", 0},
+		{"text before a bold link", "wow\\!**[a](u)**\n", "wow\\![**a**](u)\n", 0},
+		{"text and a space before a link", "wow! [a](u)\n", "wow! [a](u)\n", 0},
+		{"text before a linked image", "wow\\![![x](i.png)](u)\n", "wow\\![![x](i.png)](u)\n", 1},
+		{"text ending a paragraph", "wow!\n", "wow!\n", 0},
+		// The bare URL after the www link stays bare: the first spelling reads back.
+		{"text before a www link", "wow\\![www.a.test](http://www.a.test) see https://x.com/a\n", "wow\\![www.a.test](http://www.a.test) see https://x.com/a\n", 0},
+		{"text before a www link in code", "wow\\![`www.a.test`](http://www.a.test) see https://x.com/a\n", "wow\\![`www.a.test`](http://www.a.test) see https://x.com/a\n", 0},
+	}
+	docs := make([]*Node, len(tests))
+	rendered := make([]string, len(tests))
+	for index, test := range tests {
+		doc, err := Parse(test.markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.markdown, err)
+		}
+		images := 0
+		Walk(doc, func(node *Node) bool {
+			if node.Type == "image" {
+				images++
+			}
+			return true
+		})
+		if images != test.images {
+			t.Fatalf("Parse(%q) reads %d images, want %d", test.markdown, images, test.images)
+		}
+		docs[index] = doc
+		if rendered[index], err = Render(doc); err != nil {
+			t.Fatalf("Render(Parse(%q)): %v", test.markdown, err)
+		}
+	}
+	readings := engineReadings(t, rendered)
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if rendered[index] != test.want {
+				t.Errorf("Render(Parse(%q)) = %q, want %q", test.markdown, rendered[index], test.want)
+			}
+			back, err := Parse(rendered[index])
+			if err != nil || !back.Equal(docs[index]) {
+				got, _ := back.JSON()
+				want, _ := docs[index].JSON()
+				t.Errorf("Go reads %q back as %s (%v)\nwant: %s", rendered[index], got, err, want)
+			}
+			if engine := readings[index]; engine == nil || !engine.Equal(docs[index]) {
+				got, _ := engine.JSON()
+				t.Errorf("the engine reads %q back as %s", rendered[index], got)
+			}
+		})
+	}
+}
+
+// The first spelling of a run escapes a `!` before the `[` it writes next, inside marks it keeps
+// open as well, and before a www link it writes as an explicit link because a `!` stands before it,
+// and leaves one alone where a closer or a delimiter opener stands between.
+func TestTheFirstSpellingEscapesABangBeforeALinksBracket(t *testing.T) {
+	for _, test := range []struct {
+		markdown string
+		spelling runSpelling
+		want     string
+	}{
+		{"**wow\\![a](u)**\n", runSpelling{keepOpen: true}, "**wow\\![a](u)**"},
+		{"**wow\\![a](u)**\n", runSpelling{}, "**wow!**[**a**](u)"},
+		{"wow\\![www.a.test](http://www.a.test)\n", runSpelling{}, "wow\\![www.a.test](http://www.a.test)"},
+		{"wow\\![`www.a.test`](http://www.a.test)\n", runSpelling{}, "wow\\![`www.a.test`](http://www.a.test)"},
+		{"wow!*[www.a.test](http://www.a.test)*\n", runSpelling{}, "wow!*www.a.test*"},
+	} {
+		doc, err := Parse(test.markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", test.markdown, err)
+		}
+		r := &renderer{}
+		r.writeInlineRun(doc.Children[0].Children, "", inlineContext{startsLine: true}, test.spelling)
+		if got := r.b.String(); got != test.want {
+			t.Errorf("writeInlineRun(Parse(%q), %+v) = %q, want %q", test.markdown, test.spelling, got, test.want)
+		}
+	}
+}
+
 func TestRenderPrefixesNestedCodeBlockLines(t *testing.T) {
 	doc, err := Parse("> - item\n>\n>       code\n")
 	if err != nil {

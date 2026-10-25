@@ -44,9 +44,10 @@ type escapeContext struct {
 	// link's `]`, a hard break's backslash, the next node's first character. A block-final
 	// backslash reads back as itself and is left as written.
 	followed bool
-	// beforeLinkedImage reports whether a linked image's `[` is written right after the text,
-	// where a `!` ending it would open an image of the link's syntax.
-	beforeLinkedImage bool
+	// beforeLinkOpener reports whether a link's `[` is written right after the text - a linked
+	// image's or one a link mark opens (opensLinkNext) - where a `!` ending the text would open an
+	// image of the link's syntax.
+	beforeLinkOpener bool
 	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
 	// the run they are in does not read back with them as written (inlineWithEscapes).
 	delimiters delimiterEscapes
@@ -139,7 +140,7 @@ func needsInlineEscape(value string, offset int, char rune, context escapeContex
 	case '.', ')':
 		return orderedListMarkerPunctuation(value, offset, textLineStart)
 	case '!':
-		return offset+1 == len(value) && context.beforeLinkedImage
+		return offset+1 == len(value) && context.beforeLinkOpener
 	default:
 		return false
 	}

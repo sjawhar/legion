@@ -217,6 +217,57 @@ func isLinkedImage(node *Node) bool {
 	return node.Type == "image" && link != ""
 }
 
+// opensLinkNext reports whether the writer puts a link's `[` right after nodes[index]'s text,
+// written under next in spelling: a linked image's, which closes every mark first, so only after
+// text under none, or the link the next text, written under following, opens first, with every mark
+// of next still open and so no closer written before it. Any other mark opened first writes its own
+// delimiter before the `[`.
+//
+// A www link following writes bare (isBareWWWLink) is refused bare after the text's `!` or a code
+// span's backtick (refusesWWWAfter), and the writer writes its marks again with the link. Only a
+// text ending in `!` asks.
+func opensLinkNext(nodes []*Node, index int, next, following []Mark, escapePipes bool, spelling runSpelling) bool {
+	if index+1 >= len(nodes) {
+		return false
+	}
+	after := nodes[index+1]
+	if after.Type != "text" {
+		return len(next) == 0 && isLinkedImage(after)
+	}
+	if sharedMarks(next, following) != len(next) {
+		return false
+	}
+	if !spelling.angleURLs && isBareWWWLink(after, visibleMarks(after.Marks), escapePipes) && refusesWWWAfter(following[len(next):], nodes, index+1) {
+		following = writtenMarks(after, escapePipes, false)
+		if spelling.keepOpen {
+			var further []Mark
+			if index+2 < len(nodes) {
+				further = writtenMarks(nodes[index+2], escapePipes, true)
+			}
+			following = keepingOpen(next, following, further)
+		}
+		if sharedMarks(next, following) != len(next) {
+			return false
+		}
+	}
+	return len(following) > len(next) && following[len(next)].Type == "link"
+}
+
+// refusesWWWAfter reports whether the writer refuses nodes[at]'s www link bare (wwwMayFollow)
+// after a text ending in `!`, with opened the marks written open between them: right after the `!`,
+// or after a code span's unpadded backtick fence. A strong, emphasis or strikethrough opener ends
+// in a `*` or `~` a www URL may follow.
+func refusesWWWAfter(opened []Mark, nodes []*Node, at int) bool {
+	if len(opened) == 0 {
+		return true
+	}
+	if opened[len(opened)-1].Type != "inlineCode" {
+		return false
+	}
+	_, padded := inlineCodeFence(nodes, at)
+	return !padded
+}
+
 // writesBareURL reports whether nodes write a link as its bare URL (isBareURLLink, isBareWWWLink),
 // which linkify reads again from the text alone.
 func writesBareURL(nodes []*Node, escapePipes bool) bool {
@@ -426,22 +477,20 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label = r.labelBrackets
 			}
 			r.writeInlineText(n, &position, prefix, escapeContext{
-				footnoteLabels: r.footnoteLabels,
-				tableCell:      escapePipes,
-				urlSchemes:     !hasLink,
-				label:          label,
-				followed:       index+1 < len(nodes) || len(next) > 0,
-				delimiters:     spelling.escapes,
-				afterBareURL:   spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
-				heading:        context.heading,
-				marked:         len(next) > 0,
-				opener:         adjacentDelimiter(next[common:]),
-				closer:         adjacentDelimiter(next[sharedMarks(next, following):]),
-				flankFirst:     flankFirst,
-				flankLast:      flankLast,
-
-				// Only where no mark's closer is written between the text and the image.
-				beforeLinkedImage: len(next) == 0 && index+1 < len(nodes) && isLinkedImage(nodes[index+1]),
+				footnoteLabels:   r.footnoteLabels,
+				tableCell:        escapePipes,
+				urlSchemes:       !hasLink,
+				label:            label,
+				followed:         index+1 < len(nodes) || len(next) > 0,
+				delimiters:       spelling.escapes,
+				afterBareURL:     spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
+				heading:          context.heading,
+				marked:           len(next) > 0,
+				opener:           adjacentDelimiter(next[common:]),
+				closer:           adjacentDelimiter(next[sharedMarks(next, following):]),
+				flankFirst:       flankFirst,
+				flankLast:        flankLast,
+				beforeLinkOpener: strings.HasSuffix(n.Text, "!") && opensLinkNext(nodes, index, next, following, escapePipes, spelling),
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
