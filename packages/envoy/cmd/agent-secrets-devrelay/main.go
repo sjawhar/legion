@@ -1,15 +1,19 @@
 // Command agent-secrets-devrelay is the local dev stack's stand-in for Dispatch's
 // credential-request relay, so the credential-request broker
 // (packages/envoy/cmd/broker) can be decided by hand without a Dispatch deployment: it calls the
-// broker's UI routes with the UI bearer token and the approving human's login, the same request
-// Dispatch's server sends when a signed-in human clicks Approve or Deny.
+// broker's approval routes with a listed caller's own ServiceAccount token and the approving
+// human's login, the same request Dispatch's server sends when a signed-in human clicks Approve
+// or Deny.
 //
-//	agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --ui-token <token>
-//	agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --ui-token <token>
-//	agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --ui-token <token> [--deny]
+//	agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --account-token-file <file>
+//	agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --account-token-file <file>
+//	agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --account-token-file <file> [--deny]
 //
-// Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_UI_TOKEN, AGENT_SECRETS_APPROVER. The
-// login is whatever the broker should record as the decider: Dispatch sends its session's own
+// Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_ACCOUNT_TOKEN_FILE,
+// AGENT_SECRETS_APPROVER. The file holds the token of a ServiceAccount the broker lists in
+// BROKER_API_ACCOUNTS, as Dispatch's DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE does; on the local
+// stack, dev-oidc-issuer writes it and rewrites it before it lapses, and each run reads it afresh.
+// The login is whatever the broker should record as the decider: Dispatch sends its session's own
 // login, and the broker refuses any login that is not the record's approver.
 package main
 
@@ -24,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -57,11 +62,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func usage() string {
 	return `usage:
-  agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --ui-token <token>
-  agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --ui-token <token>
-  agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --ui-token <token> [--deny]
+  agent-secrets-devrelay approve --record <id> --login <login> --broker <url> --account-token-file <file>
+  agent-secrets-devrelay deny    --record <id> --login <login> --broker <url> --account-token-file <file>
+  agent-secrets-devrelay machine-approve --code XXXX-XXXX --login <login> --broker <url> --account-token-file <file> [--deny]
 
-Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_UI_TOKEN, AGENT_SECRETS_APPROVER.
+Environment defaults: AGENT_SECRETS_URL, AGENT_SECRETS_ACCOUNT_TOKEN_FILE, AGENT_SECRETS_APPROVER.
 `
 }
 
@@ -74,15 +79,16 @@ func exitUsage(err error) int {
 
 // commonFlags is every subcommand's shared connection and approver configuration.
 type commonFlags struct {
-	broker  string
-	uiToken string
-	login   string
+	broker    string
+	tokenFile string
+	login     string
 }
 
 func registerCommonFlags(fs *flag.FlagSet) *commonFlags {
 	c := &commonFlags{}
 	fs.StringVar(&c.broker, "broker", os.Getenv("AGENT_SECRETS_URL"), "broker base URL (default $AGENT_SECRETS_URL)")
-	fs.StringVar(&c.uiToken, "ui-token", os.Getenv("AGENT_SECRETS_UI_TOKEN"), "UI bearer token (default $AGENT_SECRETS_UI_TOKEN)")
+	fs.StringVar(&c.tokenFile, "account-token-file", os.Getenv("AGENT_SECRETS_ACCOUNT_TOKEN_FILE"),
+		"file holding the token of a ServiceAccount the broker lists in BROKER_API_ACCOUNTS (default $AGENT_SECRETS_ACCOUNT_TOKEN_FILE)")
 	fs.StringVar(&c.login, "login", os.Getenv("AGENT_SECRETS_APPROVER"), "the deciding human's login (default $AGENT_SECRETS_APPROVER)")
 	return c
 }
@@ -91,8 +97,8 @@ func (c *commonFlags) validate() error {
 	if c.broker == "" {
 		return errors.New("--broker (or AGENT_SECRETS_URL) is required")
 	}
-	if c.uiToken == "" {
-		return errors.New("--ui-token (or AGENT_SECRETS_UI_TOKEN) is required")
+	if c.tokenFile == "" {
+		return errors.New("--account-token-file (or AGENT_SECRETS_ACCOUNT_TOKEN_FILE) is required")
 	}
 	if c.login == "" {
 		return errors.New("--login (or AGENT_SECRETS_APPROVER) is required")
@@ -100,18 +106,29 @@ func (c *commonFlags) validate() error {
 	return nil
 }
 
+// client reads the caller's token from its file and returns a client presenting it. A file that
+// cannot be read, or holds nothing, is an error naming the path, never an empty bearer for the
+// broker to refuse.
+func (c *commonFlags) client() (*apiClient, error) {
+	data, err := os.ReadFile(c.tokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("read the account token: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return nil, fmt.Errorf("the account token file %s is empty", c.tokenFile)
+	}
+	return &apiClient{base: c.broker, http: &http.Client{Timeout: 30 * time.Second}, token: token}, nil
+}
+
 // ---------------------------------------------------------------------------
-// UI-bearer HTTP client
+// Listed-caller HTTP client
 // ---------------------------------------------------------------------------
 
-type uiClient struct {
+type apiClient struct {
 	base  string
 	token string
 	http  *http.Client
-}
-
-func newUIClient(base, token string) *uiClient {
-	return &uiClient{base: base, http: &http.Client{Timeout: 30 * time.Second}, token: token}
 }
 
 // apiError is the broker's {"code":...,"error":...} error envelope, plus the HTTP status it came
@@ -126,9 +143,9 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s: %s (HTTP %d)", e.Code, e.Reason, e.Status)
 }
 
-// do sends a UI-bearer-authenticated request and, on a 2xx response, returns its raw body; any
-// other status decodes the broker's error envelope into an *apiError.
-func (c *uiClient) do(ctx context.Context, method, path string, body any) ([]byte, error) {
+// do sends a request carrying the caller's ServiceAccount token and, on a 2xx response, returns
+// its raw body; any other status decodes the broker's error envelope into an *apiError.
+func (c *apiClient) do(ctx context.Context, method, path string, body any) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -196,7 +213,12 @@ func cmdDecide(approve bool, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
 		return 1
 	}
-	decideRaw, err := newUIClient(c.broker, c.uiToken).do(context.Background(), http.MethodPost,
+	client, err := c.client()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
+		return 1
+	}
+	decideRaw, err := client.do(context.Background(), http.MethodPost,
 		"/v1/credential-requests/"+url.PathEscape(*recordID)+"/"+name, map[string]any{"approver": c.login})
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets-devrelay %s: %v\n", name, err)
@@ -230,7 +252,11 @@ func cmdMachineApprove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets-devrelay machine-approve: %v\n", err)
 		return 1
 	}
-	client := newUIClient(c.broker, c.uiToken)
+	client, err := c.client()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets-devrelay machine-approve: %v\n", err)
+		return 1
+	}
 	ctx := context.Background()
 	lookupRaw, err := client.do(ctx, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": *code})
 	if err != nil {
