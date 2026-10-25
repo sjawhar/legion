@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-393",
+  "completed": "2026-10-25T20:58:00Z",
+  "headTested": "2135849104505c182a700291ae8546ce8d0843fb",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface independently on my own database (infra393_test, migrated by the head's binary): the real envoy-dispatch built at 21358491 on Postgres 17.11 + pgvector 0.8.0 in the issue pod, DISPATCH_EMBEDDER=azure keyless (the pod's projected token exchanged at Entra) against the live embed-v-4-0 deployment, with my own content. Settings rows, every boot refusal, the default boot unchanged, the identity filter, coverage without a command, input_type, a 32,000-character body embedded whole, the outage and recovery, and the gcp:Dispatch goldens' environment booting the binary all held, as the proof array below records."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "The server itself embeds everything it holds after boot, including items written before the embedding triggers existed, with no command run by a person (spec line 4; plan Decision 8: the coverage pass at start and every 10 minutes beside the scan loop)",
+      "evidence": "Run (packages/envoy/internal/dispatch/embedqueue/queue.go:76-80) marks one context with store.WithTransactionTracking and hands it to both runCoverage (its own goroutine) and the scan loop. The pool's hold mark lives in that context (store/pool.go:79-91), so while one loop has a cursor open the other loop's next statement is refused as a nested acquire; store.ForConcurrentRead's doc (pool.go:93-99) names exactly this ('Reads sharing one mark would refuse each other'). Live: booting the head's binary on Azure with 50 pending 32,000-character comments logged 'dispatch: second pooled connection requested while one is held' and 'dispatch embedqueue: coverage pass failed; the next one runs on schedule error=\"coverage pass: issue: this caller already holds a connection of the pool: a second one would deadlock it\"' (stack: Cover coverage.go:217 <- runCoverage <- Run queue.go:78), so the pass that adds pre-trigger items, repairs stale rows and drops foreign vectors stopped and waits 10 minutes; a large production backlog keeps the scan loop's cursors open often, so passes keep failing. The reverse also holds: the pass's Coverage cursor refuses the scan loop's statements, and one loop's release clears the mark the other still needs, so the guard stops protecting either. Red test (commit f2d360158d8bee04cff0a8e158a24c6be6bf6a5e): TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor in packages/envoy/internal/dispatch/embedqueue/coverage_test.go holds the scan loop's claim cursor open through a protocol-pausing proxy while the pass runs. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55393/postgres?sslmode=disable go test ./internal/dispatch/embedqueue/ -run TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor -count=1 -v -> FAIL: 'coverage pass failed ... this caller already holds a connection of the pool' then 'after Run: items 3 current 2 lacking 1 failed 0, want all 3 current'. With each loop given its own mark (a throwaway change, reverted: runCoverage on store.ForConcurrentRead(ctx)) the same test passed 3 of 3 runs. No existing test runs Cover beside the scan loop on Run's shared context; the coverage tests call Cover with a context of their own."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A setting chooses the place: Bedrock unchanged for a deployment that sets nothing new, or Azure AI Foundry with endpoint and credential as settings",
+      "surface": "real envoy-dispatch built at the head, on its own migrated Postgres 17.11 + pgvector database in the issue pod",
+      "command": "envoy-dispatch settings; 22 boot shapes through the run-server.sh environment; boot with no new settings; boot with AWS_REGION and no credentials; boot DISPATCH_EMBEDDER=azure keyless; curl -H 'Authorization: Bearer e2e-token' /api/v1/search/coverage",
+      "observed": "settings lists DISPATCH_EMBEDDER and every DISPATCH_AZURE_* row (KEY with KEY_FILE); no new settings and no region: WARN meaning search unavailable, coverage identity/place/model null; AWS_REGION: coverage identity us.cohere.embed-v4:0 place bedrock; Azure: log 'meaning search embeds through Azure AI Foundry place=azure credential=keyless', coverage place azure model embed-v-4-0",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "exit 1 naming the setting for: an unknown or capitalised DISPATCH_EMBEDDER, azure without endpoint, http/relative/hostless/query endpoints, missing/0/-5/1e6/'1,000' quota, no credential, both credentials, a partial keyless trio, a blank or missing key file, any DISPATCH_AZURE_* under bedrock or unset; coverage route without a token or with a wrong one -> 401"
+    },
+    {
+      "criterion": "On Azure it is Cohere Embed v4 at 1536 dimensions with search_document/search_query input types; each place has its own batch size and budget",
+      "surface": "the running Azure server's stored vectors compared with direct calls to the same deployment (the pod's Entra exchange)",
+      "command": "psql vector_dims/model of embeddings; python3 direct.py; direct batch of 96 and 97 texts",
+      "observed": "every vector 1536 wide under azure:<host>/embed-v-4-0; stored issue title vs a direct document embedding 0.999860, vs a direct query embedding 0.712164; Azure accepts 96 texts and refuses 97 ('total number of texts must be at most 96'), matching azureMaxBatchTexts",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "the same title embedded as document twice -> cosine 1.000000"
+    },
+    {
+      "criterion": "Each vector records the model and place that made it; search never compares a query with a vector of another model, and the queue embeds such items again",
+      "surface": "running Azure server; one item's row given the exact query vector of 'lunar eclipse photography tips' recorded under us.cohere.embed-v4:0",
+      "command": "GET /api/v1/search?q=lunar eclipse photography tips&project=TST; boot log of the coverage pass after a seeded foreign vector and a foreign dead row",
+      "observed": "foreign identity: no hit; coverage pass logged foreignVectorsDropped=1 foreignDeadReadmitted=1 and those rows ended current under the Azure identity; a row dead under the Azure identity stayed dead (failed 1)",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "the same vector relabelled with the Azure identity -> the item is the hit"
+    },
+    {
+      "criterion": "The server embeds everything after boot, pre-trigger items included, with no person-run command; backfill-embeddings goes; Dispatch reports lacking and failed counts",
+      "surface": "running Azure server; 1 issue + 31 comments inserted with session_replication_role = replica, 1 comment body changed with triggers off; two server processes on one database started together",
+      "command": "curl …/api/v1/search/coverage | jq -e '.place==\"azure\" and .total.items > 0 and .total.current == .total.items and .total.lacking == 0 and .total.failed == 0 and .total.oldest_lacking_seconds == null'",
+      "observed": "added=2, later added=30 repaired=1 by one process and 0 by the other, no error; the stale comment re-embedded with its new text; final read items 95 current 95 lacking 0 failed 0 oldest null, jq true",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "envoy-dispatch backfill-embeddings -> exit 2 'unknown subcommand \"backfill-embeddings\"'"
+    },
+    {
+      "criterion": "A 32,000-character comment or message body is embedded whole",
+      "surface": "running Azure server; a 32,000-character body whose last 1,000 characters are on another topic, posted as a comment and a message, and a 32,000-character CJK comment",
+      "command": "python3 direct.py (stored vectors vs direct embeddings of the first 31,000 characters alone and of the whole body)",
+      "observed": "comment and message: 0.906776 to the first 31,000 alone, 0.999940 to the whole body (5,472 tokens); CJK: 1.000000 to the whole body (26,255 tokens), 0.996963 to its first half",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "a 32,001-character comment -> 400 CAP_EXCEEDED; the first 31,000 characters embedded twice -> 1.000000"
+    },
+    {
+      "criterion": "When the model service fails, search answers by words and says so, and the write still succeeds and is embedded later",
+      "surface": "server restarted with DISPATCH_AZURE_EMBED_ENDPOINT on a wrong path (Azure answers 404), then with the right one",
+      "command": "GET /api/v1/search; dispatch search --query faucet --project TST (DISPATCH_URL at the local server); POST a comment; coverage route; restart",
+      "observed": "degraded embedder_unavailable; the CLI printed 'Searched by keyword only: meaning search was unavailable for this request.'; comment 201, lacking 1 failed 0, canary logged systemic, never dead; after the restart the comment became current and 'eruption cancelled air travel' (no shared word) found it with no keyword-only line",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "the same query on the healthy server answered degraded null"
+    },
+    {
+      "criterion": "gcp:Dispatch takes the endpoint and the credential or federation audience and gives them to the Dispatch container",
+      "surface": "the DISPATCH_EMBEDDER/DISPATCH_AZURE_* environment of the two committed pod goldens (rendered by the component's Construct) booted into the real binary",
+      "command": "jq the env of dispatch-pod-with-azure-{federation,key}.golden; serve.sh with exactly those variables (token and key paths pointed at local files)",
+      "observed": "both boot: 'place=azure identity=azure:example-resource…/example-embed-deployment credential=keyless' and '…/embed-v-4-0 credential=key'; the federation volume is a projected serviceAccountToken for api://AzureADTokenExchange at the path DISPATCH_AZURE_FEDERATED_TOKEN_FILE names; the key golden's DISPATCH_AZURE_EMBED_KEY_FILE is under the CSI mount; CI's envoy-infra unit tests carry the Construct tests",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "the key form against the real resource with a random key -> no key bytes in the log (grep count 0)"
+    },
+    {
+      "criterion": "The migrations and the roll: an old build and the new schema run side by side",
+      "surface": "main's envoy-dispatch (fork point f2c17ded) migrated a fresh database to 0116 and kept serving while the head's binary migrated it to 0118",
+      "command": "POST a comment through the old binary after 0117/0118; GET /api/v1/search on the old binary; select pending_since on its row",
+      "observed": "old binary: comment 201, search answers; its row has pending_since; embeddings_backfill_progress gone; 0117 set pending_since from created_at for pending rows",
+      "headSha": "2135849104505c182a700291ae8546ce8d0843fb",
+      "negativeControl": "the old binary's backfill-embeddings fails on the new schema (person-run, removed with this release)"
+    }
+  ],
+  "risks": [
+    "A misnamed deployment (or any identity change) drops every vector at the first pass, before a single embedding proves the new place works: live, DISPATCH_AZURE_EMBED_DEPLOYMENT=embed-v-4-0-typo logged foreignVectorsDropped=41 and Azure answered 404 DeploymentNotFound; reverting re-embedded all 42 items. This is plan Decision 8 as approved; the architect decides whether it stays.",
+    "azureRequestTimeout (60 s) is shorter than Azure's time for a dense batch: one direct request of 40 CJK bodies (1,049,910 tokens) took 65.0 s and succeeded. Through the server, 50 pending CJK comments timed out once, were bisected and all became current in about 2 minutes, none dead; the timed-out request still spent its tokens.",
+    "embed.EstimateTokens (4 characters a token) under-counts dense text: a 32,000-character CJK body is 26,255 tokens and a 32,000-character hex body 28,207, against an estimate of 8,000, so background pacing can exceed the quota and meet Azure's 429, which the queue treats as a throttle."
+  ]
+}
