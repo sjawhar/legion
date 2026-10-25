@@ -2803,15 +2803,19 @@ The whole sequence, from a role container holding nothing but its checkout and t
 It writes both manifests outside the checkout, into a directory `mktemp` makes under `$TMPDIR`
 (or `/tmp`), never the issue's workspace: the workspace is a jj working copy of this public
 repository, so a manifest left there is snapshotted into the role's working-copy commit and the
-password in it can reach the branch. It runs as a `bash` of its own, from a file, rather than
-typed into a role's shell, because its clean-up is a trap and a trap belongs to the shell that
-exits — a role's bash tool is not one. The three lines in angle brackets are the only ones a role
-fills in: the issue key, and the two lines it reads from the deployment's declaration.
+password in it can reach the branch. It runs as a `bash` of its own, from a file, and detached
+from the command that starts it, because its clean-up is a trap and a role's bash tool ends a
+command that runs past its timeout by killing that command and every process under it, too fast
+for any trap to run (below). Detached, the sequence is outside what the tool kills; the last line
+holds the call until the sequence has ended and then prints what it printed. The three lines in
+angle brackets are the only ones a role fills in: the issue key, and the two lines it reads from
+the deployment's declaration.
 
 ```sh
 sequence=$(mktemp "${TMPDIR:-/tmp}/sequence.XXXXXX")              # not the checkout: see above
 cat > "$sequence" <<'SEQUENCE'
 set -euo pipefail
+echo "sequence: process $$; a deliberate stop is: kill -TERM -- -$$"
 workload="<issue key lowercased>-postgres-$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
 echo "workload: $workload"                     # the name the recovery line below needs
 dir=$(mktemp -d "${TMPDIR:-/tmp}/workload.XXXXXX")
@@ -2836,6 +2840,7 @@ cleanup() {
   kubectl get job,service "$workload" --ignore-not-found   # prints nothing once both are gone
   kubectl get pods -l job-name="$workload"                 # "No resources found"
   rm -rf "$dir"
+  echo "sequence: exit $status"
   exit "$status"
 }
 trap cleanup EXIT
@@ -2924,7 +2929,9 @@ kubectl logs -l job-name="$workload" --tail=5                    # and what it s
 # The work itself goes here, inside this script: "$address" port 5432, user postgres, password
 # "$password". However it ends, the trap above removes the workload, short of a SIGKILL.
 SEQUENCE
-bash "$sequence"
+echo "sequence: $sequence, its output in $sequence.log"
+flock "$sequence" setsid -f bash "$sequence" > "$sequence.log" 2>&1 < /dev/null   # out of the tool's reach
+flock "$sequence" cat "$sequence.log"          # waits for the sequence to end, then prints its output
 ```
 
 On every exit of that `bash` — the work's end, a failed step, or `SIGINT`, `SIGTERM` or `SIGHUP`
@@ -2941,17 +2948,34 @@ still initialising, measured 2026-10-25); waits for the Service, whose owner ref
 without `blockOwnerDeletion`, holds nothing back, so the foreground delete does not wait for it;
 lists the Job, the Service and the pods by this run's name, which prints nothing and `No resources
 found`; and exits with the status it began with, or 1 when a clean-up step failed after a run that
-had succeeded.
+had succeeded, printing it last as `sequence: exit <status>`, since the call that waits for a
+detached sequence prints its output and not its status.
 
-A stop signal sent to the script's process group — an interrupt typed at a terminal is one — runs
-the trap at once; one sent to its `bash` alone runs it only when the step in progress returns,
-which each step's own timeout bounds. Measured on 2026-10-25: `SIGHUP` and `SIGINT` sent to the
-group during the Ready wait, and `SIGINT` and `SIGTERM` sent to it during the check, each ran the
-trap within a second; `SIGTERM` sent to the `bash` alone during the Ready wait ran it 76 s later,
-when the wait returned, and `SIGINT` sent to it alone during a check that was being refused ran it
-58 s later, when the check gave up. A `SIGKILL`, or the role's pod going away, runs no trap: the
-Job's two deadlines bound what is left, and a role that stopped that way removes it with the name
-the sequence printed first:
+**A timeout of the role's own bash tool is what the detaching is for.** The tool ends a call that
+runs past its timeout by signalling the command and every process under it and killing them almost
+at once: on 2026-10-25 a probe logging every 20 ms after a `SIGTERM` logged for 70 ms in one run
+and not at all in two others, and the sequence as this page published it before it detached, run
+in a call's foreground with a 40 s timeout, was gone with its Job, its Service and its running pod
+left behind, in two runs. That is the `SIGKILL` case below, and nothing in the call's output says
+so. A process in a session of its own is still killed while it descends from the call
+(`setsid --wait` was, measured the same day); `setsid -f` hands it to the system's init, which is
+what takes it out of the tool's reach. Run as published here, with the same 40 s timeout, the call
+ended at its timeout and the sequence ran on, answered, ran its trap and left nothing. A call that
+timed out has printed the sequence's file and its log before anything else, so a later call
+re-attaches with `flock <the sequence's file> cat <its log>`, which waits for the sequence to end
+and prints everything it printed; `cat` of the log alone shows how far it has got.
+
+A stop signal sent to the sequence's process group — `kill -TERM -- -<process>`, which its first
+line prints, is the deliberate stop — runs the trap at once; one sent to its `bash` alone runs it
+only when the step in progress returns, which each step's own timeout bounds. Measured on
+2026-10-25: that `kill -TERM` during the work ran the trap and the sequence exited 143 with nothing
+left; `SIGHUP` and `SIGINT` sent to the group during the Ready wait, and `SIGINT` and `SIGTERM`
+sent to it during the check, each ran the trap within a second; `SIGTERM` sent to the `bash` alone
+during the Ready wait ran it 76 s later, when the wait returned, and `SIGINT` sent to it alone
+during a check that was being refused ran it 58 s later, when the check gave up. A `SIGKILL`, or
+the role's pod going away, runs no trap: the Job's two deadlines bound what is left, and a role
+that stopped that way — or that ran the sequence in its tool's foreground and saw the call time
+out — removes it with the name the sequence printed first:
 
 ```sh
 kubectl delete job <the printed workload name> --cascade=foreground
@@ -3018,27 +3042,41 @@ to `yes`. So each bullet below carries the date of the run behind it, and a read
 gate commands itself rather than trusting the answers recorded here:
 
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence
-  exactly as published above*: the block taken from this page with only its three bracketed lines
-  filled in, each run under its own suffix, and a fixture changing one line of it where named. The
-  three gate commands answering `yes`, and `get endpoints`, `get endpointslices` and `patch jobs`
-  answering `no`; `POD_NAMESPACE` unset, and none of `psql`, `redis-cli`, `sqlite3`, `nc` and `dig`
-  on the `PATH`. As published: Ready 79 s after the submission on a cold machine, `answered` 2 s
-  later, then the trap's foreground delete in 6 s, the Service wait at once, the listing empty and
-  exit 0. With the Service's `targetPort` changed: `never answered: ConnectionRefusedError` and its
-  reading after the minute, the pod `Running` and `port 5432 -> targetPort 5433` printed, exit 1.
-  With `postgres:16` given an invalid setting, and with a container that exits the moment it
-  starts: Ready, refused every try, the pod `Error`, its log and its container's state each
-  carrying the server's last line, exit 1. With the reachability label's line removed:
-  `TimeoutError` after the minute. With the address renamed: `gaierror`. With the Service
-  selecting by `job-name`: refused by admission at the apply, naming its rule, and the Job deleted
-  while its pod was `Pending`. The six signals the trap's paragraph sets out, with what it records
-  of each, and a `SIGKILL` to the `bash` during the Ready wait, which left the Job for the two
-  recovery lines to remove in 2 s. Every run ended with nothing of it left, and the namespace's
-  quota for Jobs was back at 0 after them. Once, with fourteen sequences submitted within four
-  seconds, a Service step failed `Error from server (Conflict)` on the namespace's quota object,
-  which another submission had just changed; the trap removed that run's Job, and a re-run went
-  through. And the credential-less gate again, with the in-cluster environment removed: exit 1,
-  `The connection to the server localhost:8080 was refused …`.
+  exactly as published above, through the role's own bash tool*: the block taken from this page
+  with only its three bracketed lines filled in and pasted into a tool call, each run under its own
+  suffix, and a fixture changing one line of it where named. As published: `answered`, the trap's
+  listing empty, `sequence: exit 0`, the call returning 92 s after it started. With the Service's
+  `targetPort` changed: `never answered: ConnectionRefusedError` and its reading after the minute,
+  the pod `Running` and `port 5432 -> targetPort 5433` printed, `sequence: exit 1`. With
+  `postgres:16` given an invalid setting: refused every try, the pod `Error`, its log and its
+  container's state both carrying the server's `FATAL` line. With the reachability label's line
+  removed: `TimeoutError` after the minute. With the address renamed: `gaierror`. With a call
+  timeout of 40 s and of 20 s (the second with a 90 s stand-in for the work): the call ended at
+  its timeout, the sequence ran on to `sequence: exit 0` with nothing left, and a later call's
+  `flock … cat …` waited for the end and printed the whole run. `kill -TERM -- -<process>` during
+  the work: the trap ran, `sequence: exit 143`, nothing left. `kill -KILL -- -<process>` during the
+  work: the Job, its Service and its pod left, and the two recovery lines removed them in 2 s.
+  And, run the same way, the sequence as this page published it until then, in the call's
+  foreground with a 40 s timeout: the call ended at its timeout and the Job, its Service and its
+  running pod were left, until the recovery lines removed them. None of this issue's Jobs was left
+  after the runs.
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence run
+  in the foreground of a process of its own, before it detached*: the steps from the Job to the
+  trap were then as they are above. The three gate commands answering `yes`, and `get endpoints`,
+  `get endpointslices` and `patch jobs` answering `no`; `POD_NAMESPACE` unset, and none of `psql`,
+  `redis-cli`, `sqlite3`, `nc` and `dig` on the `PATH`. Ready 79 s after the submission on a cold
+  machine, `answered` 2 s later, the trap's foreground delete in 6 s and the Service wait at once.
+  The `targetPort`, invalid-setting, label and address fixtures as above, and a container that
+  exits the moment it starts, reported Ready and then refused every try. With the Service selecting
+  by `job-name`: refused by admission at the apply, naming its rule, and the Job deleted while its
+  pod was `Pending`. The other signals the paragraph on stopping sets out, with what it records of
+  each, and a `SIGKILL` to the `bash` during the Ready wait, which left the Job for the two recovery
+  lines to remove in 2 s. The namespace's quota for Jobs counted 4 processors per workload and was
+  back at 0 after them. Once, with fourteen sequences submitted within four seconds, a Service step
+  failed `Error from server (Conflict)` on the namespace's quota object, which another submission
+  had just changed; the trap removed that run's Job, and a re-run went through. And the
+  credential-less gate again, with the in-cluster environment removed: exit 1, `The connection to
+  the server localhost:8080 was refused …`.
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-234*: the three gate
   commands, **all three answering `yes`**, and the grant matrix behind them
   (`create`/`delete`/`get`/`list`/`watch jobs`, `get`/`list pods`, `get pods/log`, `delete pods`
