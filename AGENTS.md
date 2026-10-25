@@ -192,7 +192,9 @@ the issue; a later change of an admitted issue's repository is not applied, whic
 too. A root that stays `done` through its linger hands every child still in the
 workflow to Legion as a root of its own: the daemon sets it `todo` with the label in one Dispatch
 write, and the write's event carries the child's phase, design gate, phase records and pull request
-into a new generation, then starts that phase's role. A child whose old root had no gate (cleared
+into a new generation, then starts that phase's role. A child that never started but still
+waits on an unfinished Dispatch issue is handed over too, carrying no run; every other
+never-started child is left as it is. A child whose old root had no gate (cleared
 by a reopen in its linger) carries none: its architect registers its own spec while the child is
 before `awaiting_merge` (after that its READY is already through), and decomposes nothing anew,
 since its workers already run their phases. A role of a carried child still in a turn under its old
@@ -207,9 +209,30 @@ tree. A waiting root moved to a status only a running tree has (`in_progress`, `
 parked root does, since no slot would ever reach it: the daemon records it `done`, starts nothing
 for it, and tells the controller (`unslotted`), and `todo` with the label queues it again. Each
 admission pass (a live event, the boot read, a tick) releases such a root, one an earlier release
-left behind included. The mark is a label rather than the issue's `route` because Dispatch
-publishes every event of a routed issue to the route's topic, where a label only marks the issue;
-it carries no workflow state.
+left behind included. Legion admits no root and starts no child while Dispatch shows it blocked by
+an issue that is not `done`: a blocker in `backlog` or `icebox` has stopped rather than finished,
+and one the daemon has never seen counts as unfinished too. A blocked root keeps its place in the
+waiting line and takes no slot, so it hides no free capacity — `legion state` reports the slot
+free while every root in the queue is blocked — admission passes over it before any tree of its
+own is opened and admits the next unblocked root in rank order, then admits it at its own rank
+position once its last blocker closes; it stays the live tree of its children, which are no
+orphans. A child is the same: `release_children` accepts the whole request whatever the links say
+and answers which children it released, which it started and which it held, each held one with
+the issues it waits on. A held child is recorded at the `admitted` phase, the opening of the
+tree's design gate does not start it, and the daemon starts its first phase itself when the last
+blocker closes, whichever door the child came through (a release, a person's move to `todo`, an
+architect's `rerun_child`), and tells the tree's architect with the existing `child-status`
+notice, whose reason names the child, its root and the issues it waited on, now done. Work
+already under way is never stopped or re-checked: an issue that carries a run into a tree of its
+own is admitted whatever its links say, and a blocker added to a running tree's issue changes
+nothing for it. Two backstops catch a close no event brought: the daemon's boot reads the whole
+project listing, and its periodic turn (`controller_wake_interval_seconds`, an hour by default)
+re-reads from Dispatch the issues anything is waiting on and looks again. `legion state` prints
+the waits as `blocked on Dispatch links:`, the state's JSON carries them under
+`admission.blocked`, and the periodic wake to the project's controller carries the same list (the
+tick notice's `blocked`), for the day's report. The mark is a label rather than the issue's
+`route` because Dispatch publishes every event of a routed issue to the route's topic, where a
+label only marks the issue; it carries no workflow state.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's

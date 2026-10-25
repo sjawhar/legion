@@ -58,10 +58,7 @@ criteria are proven on and the repository skill that drives it; if the repositor
 exercise a criterion end to end, building that path is a child issue of this tree.
 
 - **Existing children:** adopt them. Do not replace or re-decompose human-created work.
-  Put every adopted child into the initial wave and release it with
-  `legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })`. Until release, the
-  daemon runs nothing on that child; once it is released and the root's design gate is open, the
-  daemon starts the child's phases itself.
+  Put every adopted child into the initial wave and release it as section 2 says.
 - **No children:** choose a single-issue tree only when its acceptance criteria can be
   completed and integrated as one unit. Otherwise create complete child issues with:
 
@@ -236,16 +233,18 @@ legion({ op: "release_children", issues: ["LEGION-41", "LEGION-42"] })
 ```
 
 The daemon moves each released child to `todo` and, while the root's design gate is open, starts
-its phases itself from its fixed workflow table, each phase worker as its own process with the
-child's context already in its environment; it starts no sub-architect, and you start no worker.
+its phases itself from its fixed workflow table; it starts no sub-architect, and you start no
+worker.
 Park while children are in flight. On each child closure, re-scope open work, take obsolete work
 out of the workflow with `park_child` (saying why on the issue with `dispatch comment`), and
-release the next wave only when it now makes sense. There is no inter-child
-dependency mechanism to encode.
+release the next wave only when it now makes sense. A dependency between children is a
+`dispatch issue-update --blocked-by` link: Legion holds each child that waits and starts it
+itself at its last blocker's close.
 
 Release admits nothing. A child never takes an admission slot or becomes a root tree of its own
 while your tree is live: it runs inside your tree from its release. A child you have not released
-stays out of the workflow.
+stays out of the workflow; one Legion holds for a blocker is released all the same, and waits in
+your tree.
 
 ## 3. Children complete
 
@@ -264,7 +263,8 @@ the child back to its implementer; a failure whose fix belongs in other work bec
 corrective child wave you create and release, and the tree returns to children-in-flight. Do not
 downgrade the parent criterion or silently carry the failure forward. If the root stays `done`
 through its linger with a child still in the workflow, the daemon hands that child to Legion as a
-root of its own (`todo` with the `legion` label). It carries that child's phase, gate, phase records
+root of its own (`todo` with the `legion` label), one never started that still waits on an
+unfinished issue included. It carries that child's phase, gate, phase records
 and pull request into a new generation and starts the role of that phase; that root's architect
 gets a catch-up that says `handed_over` and `carried` and resumes from the phase, never
 registering its spec or asking for approval again. A child whose old root had no gate carries
@@ -438,7 +438,7 @@ active phase worker.
 | Wake | Procedure |
 | --- | --- |
 | `carried-gate-opened` | Only a root whose catch-up said `carried` gets it. Its `version` and `reason`: a human approved the old root's spec document at `version`, which opened the gate this root carried; the daemon has released any READY it refused and started any child waiting on it. It is not `design-approved`: do not proceed to section 2 or release a wave because of it, and start nothing. |
-| `child-status` | A child of your tree left the workflow or re-entered it; the notice's reason names the child and its new status. `todo` (a human's move, your `release_children`, or your `rerun_child`) means the child runs again under your tree from planning, and the daemon starts it; you start nothing. `backlog`, `icebox` or `triage` (a human's move, or your `park_child`) means the daemon has suspended the child's workers, and it advances no further until it is set back to `todo`. What the rest of the tree does is your decision. |
+| `child-status` | A child of your tree left the workflow or re-entered it; the reason names the child and its new status. `todo` (a human's move, your `release_children`, or your `rerun_child`) means it runs again under your tree from planning, and the daemon starts it; you start nothing. A child held for a blocker starts the same way at its last blocker's close, the reason naming it, its root and the issues it waited on, now done; you start nothing for it either. `backlog`, `icebox` or `triage` (a human's move, or your `park_child`) means the daemon has suspended its workers, and it advances no further until it is set back to `todo`. What the rest of the tree does is your decision. |
 | `child-closed` | Read the child completion and remaining open children. Re-scope open work, park obsolete work with `park_child`, and release an appropriate next wave with `release_children`. When a worker waits on this child for a missing surface (see `phase-finished`), tell it to continue with `envoy_publish` to its role topic. The last child's close is not the end-game (section 3). |
 | `child-release-stalled` | Its `reason` names a child your `release_children` released while Dispatch already showed it `todo`, and that child's parent, whose release has not reached the daemon after three tries. Read the parent's record with the `legion` tool's `read_record` (`issue` the parent); run `release_children` for the child again once the parent is recorded in your tree, and tell the controller if it never is. |
 | `child-not-recorded` | Its `reason` names a child your tree did not record and why: its repository resolves to none (neither it nor an ancestor names one, and the project has no default), or to one not mapped to the project, or to one the daemon leaves out for a missing GitHub App. The daemon said why on the child too. Set the child's repository to one of the project's (`dispatch issue-update --repo owner/name`), then release it again with `release_children`; tell the controller when the repository it needs is not served. |
