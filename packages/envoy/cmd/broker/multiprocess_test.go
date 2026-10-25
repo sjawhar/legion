@@ -14,6 +14,12 @@
 // and finishing a request held in flight past the ten-second shutdown budget the broker used to
 // have — is a property of one process and of a signal only a real one can be sent.
 //
+// TestAFixedSessionNameAcrossARollout starts its processes one at a time rather than as a pair,
+// each with a configuration of its own, because what it drives is a rollout: two generations of
+// the broker, whose configurations fix one session name for different entries, serving one
+// database at once. Which process's configuration decides who holds that name is a property of
+// processes that start and reserve in an order, which no single process can show.
+//
 // Its own build tag, and its own CI job, for the reason cmd/dispatch/multiprocess_test.go has
 // its: a row here builds a binary, starts two processes, and waits for Postgres to settle a race
 // between them, tens of seconds each, which go test's default per-package deadline in the unit
@@ -996,5 +1002,212 @@ func TestTwoBrokers(t *testing.T) {
 		}
 		t.Logf("the draining process %s reread %s %s after its SIGTERM, told by %s",
 			draining.Addr, multiprocessSecret, time.Since(signalled).Round(time.Millisecond), stopping.Clients[0].Addr)
+	})
+}
+
+// The rollout's cast: three accounts listed in both generations' configurations for one project
+// and one person, which differ in nothing but which of them the configuration fixes rolloutSession
+// for. The old configuration fixes it for oldEntryAccount's entry and the new one re-points it to
+// newEntryAccount's; podAccount's entry fixes no name in either, so it is the stranger that asks
+// for the name and the caller of an exchange that has nothing to do with it.
+const (
+	oldEntryAccount = "system:serviceaccount:example-ns:example-daemon"
+	newEntryAccount = "system:serviceaccount:example-ns:example-scheduler"
+	rolloutSession  = "example-daemon-session"
+	// oldEntryPrincipal and newEntryPrincipal are who those entries' pods write as, which is
+	// what oauth_session_bindings records as a name's holder (exchange's accountPrincipal).
+	oldEntryPrincipal = "account:" + oldEntryAccount
+	newEntryPrincipal = "account:" + newEntryAccount
+	// takeoverWarning is what a broker logs once an exchange has taken a fixed name from the
+	// principal holding it, the one line that says a name moved; leftWarning is what it logs when
+	// the first exchange it serves finds a name its configuration fixes held by another principal,
+	// and leaves it with that holder (oauth's exchangeGrant and reserveSessions).
+	takeoverWarning = "broker: the token exchange took a session name the configuration fixes from its holder"
+	leftWarning     = "broker: the token exchange left a session name the configuration fixes with its holder until the entry claims it"
+)
+
+// rolloutAccounts is BROKER_EXCHANGE_ACCOUNTS for one generation of the rollout: the three
+// accounts, with rolloutSession fixed for fixer's entry and for no other.
+func rolloutAccounts(fixer string) string {
+	entries := make([]string, 0, 3)
+	for _, account := range []string{oldEntryAccount, newEntryAccount, podAccount} {
+		entry := account + "=" + project + "=" + person
+		if account == fixer {
+			entry += "=" + rolloutSession
+		}
+		entries = append(entries, entry)
+	}
+	return strings.Join(entries, " ")
+}
+
+// rolloutBroker is one process of the rollout: what its messages call it, the process whose log a
+// row reads, and a client of that process's own address.
+type rolloutBroker struct {
+	name    string
+	process *brokerProcess
+	client  *liveBroker
+}
+
+// sessionHolder reads who holds session in the database every process of the rollout shares, and
+// whether that hold is the configuration's, which never runs out: the one record of whose a name
+// is, read past every process's own opinion of it.
+func sessionHolder(t *testing.T, conn *pgx.Conn, session string) (string, bool) {
+	t.Helper()
+	var principal string
+	var fixed bool
+	if err := conn.QueryRow(context.Background(), `select principal, expires_at = 'infinity' from oauth_session_bindings
+		where session = $1`, session).Scan(&principal, &fixed); err != nil {
+		t.Fatalf("read the claim on %s: %v", session, err)
+	}
+	return principal, fixed
+}
+
+// linesCarrying is every line of a process's log that carries want.
+func linesCarrying(log, want string) []string {
+	var lines []string
+	for line := range strings.Lines(log) {
+		if strings.Contains(line, want) {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+	}
+	return lines
+}
+
+// TestAFixedSessionNameAcrossARollout drives a rollout that re-points a fixed session name, on
+// real broker processes and one database: the configuration of the process serving a claim
+// decides who the name is for, so no process reserving its own configuration's names at its first
+// exchange takes a name from another principal. Its rows run in order and each starts from the
+// database the one before it left: a stranger asks for the name before its entry ever has, two
+// processes of the old generation then serve that entry by turns, and the rollout comes last.
+// Every process is started with no drain, since nothing is in flight when one is stopped.
+func TestAFixedSessionNameAcrossARollout(t *testing.T) {
+	binary := buildBroker(t)
+	databaseURL := storetest.URL(t)
+	conn := connectToBroker(t, databaseURL)
+	cluster, github := oidctest.New(t), oidctest.New(t)
+	clusterKey := cluster.PublishKey(t, "cluster-key")
+	github.PublishKey(t, "github-key")
+	key := proofKey(t)
+
+	// start starts a process of the generation whose configuration fixes rolloutSession for
+	// fixer, on the one database, living as long as t: exchangeEnv with that generation's
+	// accounts in place of its own, a later value of a variable being the one a process gets, as
+	// startBroker's own Env takes precedence over productionEnv.
+	start := func(t *testing.T, name, fixer string) rolloutBroker {
+		t.Helper()
+		process := startBroker(t, brokerOptions{Binary: binary, Env: append(exchangeEnv(t, databaseURL, cluster, github, longAccessSeconds),
+			"BROKER_EXCHANGE_ACCOUNTS="+rolloutAccounts(fixer), "BROKER_DRAIN_SECONDS=0")})
+		return rolloutBroker{name: fmt.Sprintf("%s (%s)", name, process.Addr), process: process, client: newLiveBroker(process.Addr, key)}
+	}
+	// exchange is a pod of account exchanging its projected token at broker for a token under
+	// session, each pod a fresh one, as each replica of a Deployment's is.
+	pods := 0
+	exchange := func(t *testing.T, broker rolloutBroker, account, session string) (int, map[string]any) {
+		t.Helper()
+		pods++
+		podToken := mintPodToken(t, cluster, clusterKey, account, exchangeAudience, fmt.Sprintf("rollout-pod-%d", pods))
+		return broker.client.exchange(t, exchangeForm(podToken, session))
+	}
+	refusedTheName := func(status int, body map[string]any) bool {
+		description, _ := body["error_description"].(string)
+		return status == http.StatusBadRequest && body["error"] == "invalid_grant" && body["access_token"] == nil &&
+			strings.Contains(description, "The session name '"+rolloutSession+"' belongs to another identity")
+	}
+
+	old := start(t, "the old-configuration process", oldEntryAccount)
+
+	// Reserving takes no name from another principal any more, so it is worth showing that it
+	// still does the one thing it is there for: the first exchange this database ever sees is a
+	// stranger's, asking for the name the process's configuration fixes for an entry none of
+	// whose pods has exchanged, and the reservation that exchange makes first is all that can
+	// refuse it.
+	t.Run("1_AStrangerIsRefusedAFixedNameItsEntryHasNeverClaimed", func(t *testing.T) {
+		status, body := exchange(t, old, podAccount, rolloutSession)
+		if !refusedTheName(status, body) {
+			t.Fatalf("%s answered the first exchange it served, a pod of %s asking for %s, which its configuration fixes for %s, whose pods have never exchanged, %d %v; want 400 invalid_grant naming the name another identity's",
+				old.name, podAccount, rolloutSession, oldEntryAccount, status, body)
+		}
+		if holder, fixed := sessionHolder(t, conn, rolloutSession); holder != oldEntryPrincipal || !fixed {
+			t.Fatalf("after the stranger was refused, %s is held by %q (the configuration's hold: %t); want %s, held for as long as the configuration fixes it",
+				rolloutSession, holder, fixed, oldEntryPrincipal)
+		}
+	})
+
+	// The no-thrash property, which taking the name at the claim must not cost: two processes of
+	// one generation, both fixing the name for one entry, serve that entry's exchanges by turns,
+	// the second process's first exchange among them. The name never moves, and neither process
+	// logs that it took it.
+	t.Run("2_TwoProcessesOfOneGenerationNeverTakeTheNameFromEachOther", func(t *testing.T) {
+		twin := start(t, "a second old-configuration process", oldEntryAccount)
+		for turn, broker := range []rolloutBroker{old, twin, old, twin} {
+			status, body := exchange(t, broker, oldEntryAccount, rolloutSession)
+			if status != http.StatusOK || body["access_token"] == nil {
+				t.Fatalf("turn %d: %s answered a pod of %s asking for %s, which its configuration fixes for that account, %d %v; want 200 with an access token",
+					turn+1, broker.name, oldEntryAccount, rolloutSession, status, body)
+			}
+			if holder, fixed := sessionHolder(t, conn, rolloutSession); holder != oldEntryPrincipal || !fixed {
+				t.Fatalf("turn %d: after %s served it, %s is held by %q (the configuration's hold: %t); want %s throughout",
+					turn+1, broker.name, rolloutSession, holder, fixed, oldEntryPrincipal)
+			}
+		}
+		for _, broker := range []rolloutBroker{old, twin} {
+			if took := linesCarrying(broker.process.Log(), takeoverWarning); len(took) != 0 {
+				t.Errorf("%s logged that it took a fixed name from its holder, where both processes fix it for the one entry they served:\n%s",
+					broker.name, strings.Join(took, "\n"))
+			}
+		}
+	})
+
+	// The rollout. A process of the new configuration starts and serves the entry that
+	// configuration re-points the name to, which takes it from the old entry and says so. Then a
+	// process of the old configuration starts and serves an exchange of its own, as one restarted
+	// mid-rollout would; its first exchange reserves its configuration's names, which once took
+	// this one back and left the new entry refused its own name until a process restarted. After
+	// it, the new entry still has the name and the old one, no longer fixed for it, does not.
+	t.Run("3_AnOldProcessStartedMidRolloutLeavesTheNameWithTheNewEntry", func(t *testing.T) {
+		next := start(t, "the new-configuration process", newEntryAccount)
+		status, body := exchange(t, next, newEntryAccount, rolloutSession)
+		if status != http.StatusOK || body["access_token"] == nil {
+			t.Fatalf("%s answered a pod of %s asking for %s, which its configuration re-points to that account, %d %v; want 200 with an access token",
+				next.name, newEntryAccount, rolloutSession, status, body)
+		}
+		if holder, fixed := sessionHolder(t, conn, rolloutSession); holder != newEntryPrincipal || !fixed {
+			t.Fatalf("after %s served the re-pointed entry, %s is held by %q (the configuration's hold: %t); want %s",
+				next.name, rolloutSession, holder, fixed, newEntryPrincipal)
+		}
+		// The take is logged, naming both principals. This is also what makes the absence of the
+		// line anywhere else in this test mean something: it is the line a take logs.
+		next.process.Await(t, takeoverWarning)
+		if took := linesCarrying(next.process.Log(), takeoverWarning); len(took) != 1 ||
+			!strings.Contains(took[0], "from="+oldEntryPrincipal) || !strings.Contains(took[0], "to="+newEntryPrincipal) {
+			t.Fatalf("%s logged %d takeovers %q; want exactly one, from %s to %s", next.name, len(took), took, oldEntryPrincipal, newEntryPrincipal)
+		}
+
+		restarted := start(t, "an old-configuration process restarted mid-rollout", oldEntryAccount)
+		if status, body := exchange(t, restarted, podAccount, "example-worker-session"); status != http.StatusOK || body["access_token"] == nil {
+			t.Fatalf("%s answered the first exchange it served, a pod of %s under a name of its own, %d %v; want 200 — that first exchange is when it reserves, and one it refused would say nothing about what reserving did",
+				restarted.name, podAccount, status, body)
+		}
+		if holder, fixed := sessionHolder(t, conn, rolloutSession); holder != newEntryPrincipal || !fixed {
+			t.Errorf("after %s served its first exchange, %s is held by %q (the configuration's hold: %t); want it still %s's: reserving at an old-configuration process takes no name another principal holds",
+				restarted.name, rolloutSession, holder, fixed, newEntryPrincipal)
+		}
+		if status, body := exchange(t, next, newEntryAccount, rolloutSession); status != http.StatusOK || body["access_token"] == nil {
+			t.Errorf("after %s started and served, %s answered a pod of %s asking for %s, which its configuration fixes for that account, %d %v; want 200 — the entry a configuration fixes a name for is never refused its own name by a process started with another",
+				restarted.name, next.name, newEntryAccount, rolloutSession, status, body)
+		}
+		if status, body := exchange(t, next, oldEntryAccount, rolloutSession); !refusedTheName(status, body) {
+			t.Errorf("after %s started and served, %s answered a pod of %s, for which its configuration fixes no name, asking for %s, %d %v; want 400 invalid_grant naming the name another identity's",
+				restarted.name, next.name, oldEntryAccount, rolloutSession, status, body)
+		}
+		log := restarted.process.Log()
+		if took := linesCarrying(log, takeoverWarning); len(took) != 0 {
+			t.Errorf("%s logged that it took a fixed name from its holder:\n%s", restarted.name, strings.Join(took, "\n"))
+		}
+		if left := linesCarrying(log, leftWarning); len(left) != 1 ||
+			!strings.Contains(left[0], "holder="+newEntryPrincipal) || !strings.Contains(left[0], "entry="+oldEntryPrincipal) {
+			t.Errorf("%s logged %d names left with their holder %q; want exactly one, %s left with %s until %s claims it",
+				restarted.name, len(left), left, rolloutSession, newEntryPrincipal, oldEntryPrincipal)
+		}
 	})
 }

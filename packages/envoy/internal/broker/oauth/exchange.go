@@ -282,7 +282,8 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 		p.writeError(ctx, w, request, err)
 		return
 	}
-	if err := p.claimSession(txCtx, session); err != nil {
+	taken, err := p.claimSession(txCtx, session)
+	if err != nil {
 		p.writeError(ctx, w, request, err)
 		return
 	}
@@ -291,6 +292,12 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	committed = true
+	if taken != "" {
+		// Logged once the claim has committed, because it is the one way a principal loses a name
+		// it used within the retention: the configuration now fixes it for an entry.
+		slog.Warn("broker: the token exchange took a session name the configuration fixes from its holder",
+			"session", session.Extra[ClaimSession], "from", taken, "to", session.Principal)
+	}
 	p.oauth.WriteAccessResponse(ctx, w, request, resp)
 }
 
@@ -300,8 +307,10 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 // that refuses any held name. Each replica of the broker reserves for the configuration it was
 // started with. A failure answers that exchange server_error, and the next one tries again.
 //
-// A name taken from another principal is logged, because it is the one way a principal loses a
-// name it used within the retention: the configuration now fixes it for an entry.
+// It takes no name another principal holds: replicas whose configurations disagree, as during a
+// rollout that re-points a fixed name, would otherwise take it back and forth in the order they
+// first exchanged. claimSession gives the name to its entry when that entry first asks for it,
+// and a name left with its holder until then is logged, naming both.
 func (p *Provider) reserveSessions(ctx context.Context) error {
 	if p.reserved.Load() {
 		return nil
@@ -311,13 +320,13 @@ func (p *Provider) reserveSessions(ctx context.Context) error {
 	if p.reserved.Load() {
 		return nil
 	}
-	taken, err := p.store.ReserveSessions(ctx, p.reservations)
+	left, err := p.store.ReserveSessions(ctx, p.reservations)
 	if err != nil {
 		return err
 	}
-	for session, from := range taken {
-		slog.Warn("broker: the token exchange took a session name the configuration fixes from its holder",
-			"session", session, "from", from, "to", p.reservations[session])
+	for session, holder := range left {
+		slog.Warn("broker: the token exchange left a session name the configuration fixes with its holder until the entry claims it",
+			"session", session, "holder", holder, "entry", p.reservations[session])
 	}
 	p.reserved.Store(true)
 	return nil
@@ -395,23 +404,31 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 // in the transaction that stores that token: the claim can never end before the token it was made
 // for, and a token whose claim is refused is never stored.
 //
+// It is where the configuration decides who a fixed name belongs to: when this provider's
+// configuration fixes the name for the principal asking (the entry's own caller), the claim holds
+// it for that principal with no expiry and takes it from any other holder, answering whom it took
+// it from, so an entry is never refused its own name, whatever a replica started with another
+// configuration reserved. Every other claim is the ordinary one, which a held name refuses: that
+// one statement, oauthstore.Store.BindSession, is the only refusal of a claim.
+//
 // A name another principal holds is invalid_grant, because the subject token is sound and it is
 // the broker's state that refuses.
-func (p *Provider) claimSession(ctx context.Context, session *oauthstore.ExchangeSession) error {
+func (p *Provider) claimSession(ctx context.Context, session *oauthstore.ExchangeSession) (string, error) {
 	name, _ := session.Extra[ClaimSession].(string)
 	expires := session.GetExpiresAt(oauth2.AccessToken)
 	if name == "" || session.Principal == "" || expires.IsZero() {
-		return oauth2.ErrServerError.WithDebugf("the exchange issued a token without deciding its session name (%t), principal (%t) and expiry (%t)",
+		return "", oauth2.ErrServerError.WithDebugf("the exchange issued a token without deciding its session name (%t), principal (%t) and expiry (%t)",
 			name != "", session.Principal != "", !expires.IsZero())
 	}
-	if err := p.store.BindSession(ctx, name, session.Principal, expires); err != nil {
+	taken, err := p.store.BindSession(ctx, name, session.Principal, p.reservations[name] == session.Principal, expires)
+	if err != nil {
 		if errors.Is(err, oauthstore.ErrSessionHeld) {
-			return oauth2.ErrInvalidGrant.WithHintf("The session name '%s' belongs to another identity: one the broker's configuration fixes it for, or one that has written under it within the last %d days. Ask under a name of your own.",
+			return "", oauth2.ErrInvalidGrant.WithHintf("The session name '%s' belongs to another identity: one the broker's configuration fixes it for, or one that has written under it within the last %d days. Ask under a name of your own.",
 				name, int(oauthstore.SessionRetention/(24*time.Hour))).WithWrap(err).WithDebugError(err)
 		}
-		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+		return "", oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
 	}
-	return nil
+	return taken, nil
 }
 
 // liveCredential holds the launcher credential a machine access token names

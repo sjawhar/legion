@@ -68,6 +68,8 @@ type exchangeFixture struct {
 	clusterKey *oidctest.Key
 	github     *oidctest.Issuer
 	githubKey  *oidctest.Key
+	// config is the token exchange's configuration as built, before the test's adjust.
+	config oauth.ExchangeConfig
 }
 
 // newExchangeFixture starts both issuers and builds the provider against them, with adjust
@@ -84,24 +86,36 @@ func newExchangeFixture(t *testing.T, adjust func(*oauth.Config)) *exchangeFixtu
 	if err != nil {
 		t.Fatalf("GitHub keys: %v", err)
 	}
+	config := oauth.ExchangeConfig{
+		Policy: newPolicy(t,
+			[]exchange.AccountEntry{
+				{Account: account, Project: project, Person: person},
+				{Account: daemonAccount, Project: project, Person: person, Session: daemonSession},
+				{Account: otherAccount, Project: otherProject, Person: otherPerson},
+			},
+			[]exchange.WorkflowEntry{
+				{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
+				{Repository: repository, Workflow: deployWorkflow, Ref: ref, Project: project, Person: person, Session: deploySession},
+			}),
+		Kubernetes: oauth.IssuerConfig{Issuer: cluster.URL(), Audience: podAudience, Keys: clusterKeys},
+		GitHub:     oauth.IssuerConfig{Issuer: github.URL(), Audience: workflowAudience, Keys: githubKeys},
+	}
 	inner := newFixtureWith(t, func(c *oauth.Config) {
-		c.Exchange = oauth.ExchangeConfig{
-			Policy: newPolicy(t,
-				[]exchange.AccountEntry{
-					{Account: account, Project: project, Person: person},
-					{Account: daemonAccount, Project: project, Person: person, Session: daemonSession},
-					{Account: otherAccount, Project: otherProject, Person: otherPerson},
-				},
-				[]exchange.WorkflowEntry{
-					{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
-					{Repository: repository, Workflow: deployWorkflow, Ref: ref, Project: project, Person: person, Session: deploySession},
-				}),
-			Kubernetes: oauth.IssuerConfig{Issuer: cluster.URL(), Audience: podAudience, Keys: clusterKeys},
-			GitHub:     oauth.IssuerConfig{Issuer: github.URL(), Audience: workflowAudience, Keys: githubKeys},
-		}
+		c.Exchange = config
 		adjust(c)
 	})
-	return &exchangeFixture{fixture: inner, cluster: cluster, clusterKey: clusterKey, github: github, githubKey: githubKey}
+	return &exchangeFixture{fixture: inner, cluster: cluster, clusterKey: clusterKey, github: github, githubKey: githubKey, config: config}
+}
+
+// replica is a second broker process on f's database, trusting f's issuers, started with a
+// configuration that lists policy's identities instead of f's: a replica of a rollout that
+// changed the listed identities, beside one that has not yet been replaced.
+func (f *exchangeFixture) replica(t *testing.T, policy *exchange.Set) *exchangeFixture {
+	t.Helper()
+	config := f.config
+	config.Policy = policy
+	inner := newFixtureOn(t, f.dsn, func(c *oauth.Config) { c.Exchange = config })
+	return &exchangeFixture{fixture: inner, cluster: f.cluster, clusterKey: f.clusterKey, github: f.github, githubKey: f.githubKey, config: config}
 }
 
 // podToken is a projected service-account token of the account above bound to the pod uid, with
@@ -665,6 +679,58 @@ func TestANameAnEntryFixesIsRefusedToEveryOtherCaller(t *testing.T) {
 	token := f.exchanged(t, exchangeForm(f.podTokenOf(t, daemonAccount, "pod-uid-daemon"), oauthwire.SubjectTokenTypeKubernetes, ""), key)
 	f.introspectsAs(t, token, daemonSession, person, project)
 	status, body = f.exchange(t, exchangeForm(machine, oauthwire.SubjectTokenTypeAccessToken, daemonSession), key)
+	refusedTheName(t, status, body, daemonSession)
+}
+
+// TestARePointedNameIsItsNewEntrysWhicheverReplicaReservesLast: the tester's reproduction, two
+// broker processes on one database. A rollout re-points the daemon's fixed name from its account
+// to another account. A replica on the new configuration answers that account's first exchange
+// under the name, then a replica still on the old configuration, which had not exchanged yet,
+// reserves its names at an unrelated exchange. The account the new configuration fixes the name
+// for is still answered under it, and the daemon's account, which it no longer fixes the name for,
+// is refused it there. Until the rollout ends the old replica's configuration decides its own
+// claims as well: the daemon's account asking it is given the name, and the new entry's next
+// exchange on the new replica takes it back.
+func TestARePointedNameIsItsNewEntrysWhicheverReplicaReservesLast(t *testing.T) {
+	old := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	daemonForm := func(f *exchangeFixture, session string) url.Values {
+		return exchangeForm(f.podTokenOf(t, daemonAccount, "pod-uid-daemon"), oauthwire.SubjectTokenTypeKubernetes, session)
+	}
+	otherToken := func(f *exchangeFixture) string {
+		return f.exchanged(t, exchangeForm(f.podTokenOf(t, otherAccount, "pod-uid-other"), oauthwire.SubjectTokenTypeKubernetes, ""), key)
+	}
+	old.introspectsAs(t, old.exchanged(t, daemonForm(old, ""), key), daemonSession, person, project)
+
+	next := old.replica(t, newPolicy(t,
+		[]exchange.AccountEntry{
+			{Account: account, Project: project, Person: person},
+			{Account: daemonAccount, Project: project, Person: person},
+			{Account: otherAccount, Project: otherProject, Person: otherPerson, Session: daemonSession},
+		},
+		[]exchange.WorkflowEntry{
+			{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
+			{Repository: repository, Workflow: deployWorkflow, Ref: ref, Project: project, Person: person, Session: deploySession},
+		}))
+	next.introspectsAs(t, otherToken(next), daemonSession, otherPerson, otherProject)
+
+	late := old.replica(t, old.config.Policy)
+	late.exchanged(t, exchangeForm(late.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
+	var holder string
+	if err := old.pool.QueryRow(context.Background(), `select principal from oauth_session_bindings where session = $1`, daemonSession).Scan(&holder); err != nil {
+		t.Fatalf("read the claim on %s: %v", daemonSession, err)
+	}
+	if want := "account:" + otherAccount; holder != want {
+		t.Fatalf("after the old configuration reserved last, %s is held by %q, want %q: reserving takes no name", daemonSession, holder, want)
+	}
+
+	next.introspectsAs(t, otherToken(next), daemonSession, otherPerson, otherProject)
+	status, body := next.exchange(t, daemonForm(next, daemonSession), key)
+	refusedTheName(t, status, body, daemonSession)
+
+	late.introspectsAs(t, late.exchanged(t, daemonForm(late, ""), key), daemonSession, person, project)
+	next.introspectsAs(t, otherToken(next), daemonSession, otherPerson, otherProject)
+	status, body = next.exchange(t, daemonForm(next, daemonSession), key)
 	refusedTheName(t, status, body, daemonSession)
 }
 

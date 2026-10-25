@@ -84,12 +84,15 @@ func TestASessionNameIsHeldByThePrincipalThatClaimedIt(t *testing.T) {
 					t.Fatalf("run the claim out: %v", err)
 				}
 			}
-			err := s.BindSession(ctx, c.session, c.principal, c.expires)
+			taken, err := s.BindSession(ctx, c.session, c.principal, false, c.expires)
 			if !errors.Is(err, c.want) {
 				t.Fatalf("BindSession(%q, %q) = %v, want %v", c.session, c.principal, err, c.want)
 			}
 			if c.want != nil && !strings.Contains(err.Error(), c.session) {
 				t.Errorf("BindSession refused with %q, which does not name the session %q", err, c.session)
+			}
+			if taken != "" {
+				t.Errorf("BindSession answered it took %q from %q, want nothing taken by a claim no configuration fixes", c.session, taken)
 			}
 		})
 	}
@@ -103,40 +106,48 @@ func TestASessionNameIsHeldByThePrincipalThatClaimedIt(t *testing.T) {
 }
 
 // TestTheNamesTheConfigurationFixesAreHeldForTheirEntries: ReserveSessions holds every name it is
-// handed for its principal, taking it from whoever held it and saying whom; from then on any
-// other principal is refused it, its own principal claims it as often as it likes, and no claim
-// or sweep lets it run out. A name a later configuration no longer fixes goes back to the ordinary
-// rule: its principal keeps it for SessionRetention from then, and nobody else takes it meanwhile.
+// handed for its principal unless another principal holds it, and says who does; the entry's own
+// claim, which its configuration fixes the name for, takes it from that holder and says whom.
+// From then on any other principal is refused it, its own principal claims it as often as it
+// likes, and no claim or sweep lets it run out. A name a later configuration no longer fixes goes
+// back to the ordinary rule: its principal keeps it for SessionRetention from then, and nobody
+// else takes it meanwhile. A configuration re-pointing a name takes it at its new entry's claim,
+// and an older configuration reserving again afterwards takes nothing back.
 func TestTheNamesTheConfigurationFixesAreHeldForTheirEntries(t *testing.T) {
 	ctx := context.Background()
 	s, pool := newStore(t)
 	hour := time.Now().Add(time.Hour)
-	if err := s.BindSession(ctx, "legion-daemon:ACME", personPrincipal, hour); err != nil {
+	if _, err := s.BindSession(ctx, "legion-daemon:ACME", personPrincipal, false, hour); err != nil {
 		t.Fatalf("a dev box claims the name before the configuration fixes it: %v", err)
 	}
-	taken, err := s.ReserveSessions(ctx, map[string]string{"legion-daemon:ACME": daemonPrincipal, "ci-release": workflowPrincipal})
+	first := map[string]string{"legion-daemon:ACME": daemonPrincipal, "ci-release": workflowPrincipal}
+	left, err := s.ReserveSessions(ctx, first)
 	if err != nil {
 		t.Fatalf("ReserveSessions: %v", err)
 	}
-	if want := map[string]string{"legion-daemon:ACME": personPrincipal}; !reflect.DeepEqual(taken, want) {
-		t.Fatalf("ReserveSessions took %v, want %v: the configuration's name is taken from the dev box, and an unheld one from nobody", taken, want)
+	if want := map[string]string{"legion-daemon:ACME": personPrincipal}; !reflect.DeepEqual(left, want) {
+		t.Fatalf("ReserveSessions left %v with their holders, want %v: the dev box keeps the name until the entry claims it, and an unheld one is reserved", left, want)
 	}
 	for _, c := range []struct {
 		name      string
 		session   string
 		principal string
+		fixed     bool
 		want      error
+		taken     string
 	}{
+		{name: "another account is refused the name the dev box holds", session: "legion-daemon:ACME", principal: otherPrincipal, want: oauthstore.ErrSessionHeld},
+		{name: "the entry's account takes it from the dev box", session: "legion-daemon:ACME", principal: daemonPrincipal, fixed: true, taken: personPrincipal},
 		{name: "the dev box that held it is refused", session: "legion-daemon:ACME", principal: personPrincipal, want: oauthstore.ErrSessionHeld},
 		{name: "another account is refused", session: "legion-daemon:ACME", principal: otherPrincipal, want: oauthstore.ErrSessionHeld},
-		{name: "the entry's account claims it", session: "legion-daemon:ACME", principal: daemonPrincipal},
-		{name: "and claims it again", session: "legion-daemon:ACME", principal: daemonPrincipal},
-		{name: "a dev box is refused the workflow's name", session: "ci-release", principal: personPrincipal, want: oauthstore.ErrSessionHeld},
-		{name: "the workflow claims its name", session: "ci-release", principal: workflowPrincipal},
+		{name: "and the entry's account claims it again", session: "legion-daemon:ACME", principal: daemonPrincipal, fixed: true},
+		{name: "a dev box is refused the workflow's name before the workflow has claimed it", session: "ci-release", principal: personPrincipal, want: oauthstore.ErrSessionHeld},
+		{name: "the workflow claims its name", session: "ci-release", principal: workflowPrincipal, fixed: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if err := s.BindSession(ctx, c.session, c.principal, hour); !errors.Is(err, c.want) {
-				t.Fatalf("BindSession(%q, %q) = %v, want %v", c.session, c.principal, err, c.want)
+			taken, err := s.BindSession(ctx, c.session, c.principal, c.fixed, hour)
+			if !errors.Is(err, c.want) || taken != c.taken {
+				t.Fatalf("BindSession(%q, %q, fixed %t) = %q, %v, want %q, %v", c.session, c.principal, c.fixed, taken, err, c.taken, c.want)
 			}
 		})
 	}
@@ -150,20 +161,21 @@ func TestTheNamesTheConfigurationFixesAreHeldForTheirEntries(t *testing.T) {
 		}
 		return principal, forever
 	}
-	for session, want := range map[string]string{"legion-daemon:ACME": daemonPrincipal, "ci-release": workflowPrincipal} {
+	for session, want := range first {
 		if principal, forever := held(session); principal != want || !forever {
 			t.Errorf("after its principal's claims and a sweep, %s is held by %q for ever: %t; want %q with no expiry", session, principal, forever, want)
 		}
 	}
 
 	// The next configuration fixes the daemon's name for another account and no longer fixes the
-	// workflow's.
-	taken, err = s.ReserveSessions(ctx, map[string]string{"legion-daemon:ACME": otherPrincipal})
+	// workflow's. Reserving takes nothing; the other account's own claim does.
+	next := map[string]string{"legion-daemon:ACME": otherPrincipal}
+	left, err = s.ReserveSessions(ctx, next)
 	if err != nil {
 		t.Fatalf("ReserveSessions(the next configuration): %v", err)
 	}
-	if want := map[string]string{"legion-daemon:ACME": daemonPrincipal}; !reflect.DeepEqual(taken, want) {
-		t.Fatalf("ReserveSessions(the next configuration) took %v, want %v", taken, want)
+	if want := map[string]string{"legion-daemon:ACME": daemonPrincipal}; !reflect.DeepEqual(left, want) {
+		t.Fatalf("ReserveSessions(the next configuration) left %v with their holders, want %v", left, want)
 	}
 	if principal, forever := held("ci-release"); principal != workflowPrincipal || forever {
 		t.Errorf("the name the configuration stopped fixing is held by %q for ever: %t; want %q under the ordinary retention", principal, forever, workflowPrincipal)
@@ -175,8 +187,30 @@ func TestTheNamesTheConfigurationFixesAreHeldForTheirEntries(t *testing.T) {
 	if want := time.Now().Add(oauthstore.SessionRetention); runsOut.Before(want.Add(-time.Minute)) || runsOut.After(want.Add(time.Minute)) {
 		t.Errorf("the released claim runs out at %s, want SessionRetention from now, about %s", runsOut, want)
 	}
-	if err := s.BindSession(ctx, "ci-release", personPrincipal, hour); !errors.Is(err, oauthstore.ErrSessionHeld) {
+	if _, err := s.BindSession(ctx, "ci-release", personPrincipal, false, hour); !errors.Is(err, oauthstore.ErrSessionHeld) {
 		t.Errorf("BindSession(the released name, a dev box) = %v, want ErrSessionHeld: the workflow used it within the retention", err)
+	}
+	if taken, err := s.BindSession(ctx, "legion-daemon:ACME", otherPrincipal, true, hour); err != nil || taken != daemonPrincipal {
+		t.Fatalf("BindSession(the re-pointed name, its new entry) = %q, %v, want it taken from %q", taken, err, daemonPrincipal)
+	}
+
+	// A replica still on the first configuration reserves after the next one has: it takes the
+	// re-pointed name back from nobody, and a name both hold for one principal is its again.
+	left, err = s.ReserveSessions(ctx, first)
+	if err != nil {
+		t.Fatalf("ReserveSessions(the first configuration, again): %v", err)
+	}
+	if want := map[string]string{"legion-daemon:ACME": otherPrincipal}; !reflect.DeepEqual(left, want) {
+		t.Fatalf("ReserveSessions(the first configuration, again) left %v with their holders, want %v", left, want)
+	}
+	if principal, forever := held("legion-daemon:ACME"); principal != otherPrincipal || !forever {
+		t.Errorf("after an older configuration reserved again, the re-pointed name is held by %q for ever: %t; want %q with no expiry", principal, forever, otherPrincipal)
+	}
+	if principal, forever := held("ci-release"); principal != workflowPrincipal || !forever {
+		t.Errorf("the workflow's name, which the older configuration fixes for it, is held by %q for ever: %t; want %q with no expiry", principal, forever, workflowPrincipal)
+	}
+	if _, err := s.BindSession(ctx, "legion-daemon:ACME", daemonPrincipal, false, hour); !errors.Is(err, oauthstore.ErrSessionHeld) {
+		t.Errorf("BindSession(the re-pointed name, its old entry under the next configuration) = %v, want ErrSessionHeld", err)
 	}
 }
 

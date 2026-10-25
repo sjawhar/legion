@@ -47,8 +47,8 @@ var ErrSessionHeld = errors.New("oauthstore: another identity holds this session
 const SessionRetention = 90 * 24 * time.Hour
 
 // heldByConfiguration is the expires_at of a session name an entry fixes, which ReserveSessions
-// writes and nothing lets lapse: the name is its entry's for as long as the configuration says
-// so, and Sweep's expires_at <= now() never selects it.
+// and a fixed entry's own BindSession write and nothing lets lapse: the name is its entry's for as
+// long as the configuration says so, and Sweep's expires_at <= now() never selects it.
 const heldByConfiguration = "'infinity'::timestamptz"
 
 // claimActor is the RFC 8693 Section 4.1 'act' claim, which names the party acting for the
@@ -146,39 +146,62 @@ func (s *ExchangeSession) Clone() oauth2.Session {
 
 // BindSession claims the session name for principal until SessionRetention past expires, the
 // moment the token the claim is made for expires, and reports ErrSessionHeld when another
-// principal holds it.
+// principal holds it. fixed says the configuration of the process making the claim fixes the
+// name for principal; the claim then holds the name with no expiry and takes it from whoever
+// holds it, and BindSession answers the principal it took the name from, one whose claim had not
+// run out; it answers "" for a name that was unheld, run out or already principal's.
 //
 // The name is the principal's from its first claim: the same principal re-claiming it extends
 // the claim and never shortens it, any other principal is refused for as long as the claim
 // stands, and an unheld name, or one whose claim has run out, is claimed outright. A name an
-// entry fixes is held by ReserveSessions and never runs out. Without this, any caller that may
-// exchange could name any session string, and a token naming another principal's session would be
-// believed by everything downstream that believes the token.
+// entry fixes is held by ReserveSessions before its entry's first claim, so a stranger is refused
+// it by this same rule, and never runs out. Without this, any caller that may exchange could name
+// any session string, and a token naming another principal's session would be believed by
+// everything downstream that believes the token.
 //
-// It is one statement, so two exchanges racing for one name cannot both win: the loser's insert
-// conflicts with the winner's row and its update is refused by the row's own principal and expiry.
-func (s *Store) BindSession(ctx context.Context, session, principal string, expires time.Time) error {
-	var bound bool
-	err := s.db(ctx).QueryRow(ctx, `insert into oauth_session_bindings (session, principal, expires_at) values ($1, $2, $3)
-		on conflict (session) do update set principal = excluded.principal,
-			expires_at = greatest(oauth_session_bindings.expires_at, excluded.expires_at)
-		where oauth_session_bindings.principal = excluded.principal or oauth_session_bindings.expires_at <= now()
-		returning true`, session, principal, expires.Add(SessionRetention)).Scan(&bound)
+// The configuration decides here, at the claim, rather than at ReserveSessions: two replicas
+// started with configurations that disagree, as during a rollout that re-points a fixed name,
+// each give the name to the principal their own configuration fixes it for when that principal
+// asks, so the entry the configuration fixes a name for is never refused its own name, and a
+// re-point takes effect at the new entry's first exchange.
+//
+// It is one statement, and the only one that refuses a claim, so two exchanges racing for one
+// name cannot both win: the loser's insert conflicts with the winner's row and its update is
+// refused by the row's own principal and expiry. The holder it answers is read from the
+// statement's snapshot, so a claim that committed while this one waited on its row is not named.
+func (s *Store) BindSession(ctx context.Context, session, principal string, fixed bool, expires time.Time) (string, error) {
+	var taken string
+	err := s.db(ctx).QueryRow(ctx, `with prior as (
+			select principal from oauth_session_bindings where session = $1 and expires_at > now()
+		), bound as (
+			insert into oauth_session_bindings (session, principal, expires_at)
+			values ($1, $2, case when $4 then `+heldByConfiguration+` else $3 end)
+			on conflict (session) do update set principal = excluded.principal,
+				expires_at = greatest(oauth_session_bindings.expires_at, excluded.expires_at)
+			where $4 or oauth_session_bindings.principal = excluded.principal or oauth_session_bindings.expires_at <= now()
+			returning true
+		)
+		select coalesce((select principal from prior where principal <> $2), '') from bound`,
+		session, principal, expires.Add(SessionRetention), fixed).Scan(&taken)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("%w: %s", ErrSessionHeld, session)
+		return "", fmt.Errorf("%w: %s", ErrSessionHeld, session)
 	}
 	if err != nil {
-		return fmt.Errorf("bind session name: %w", err)
+		return "", fmt.Errorf("bind session name: %w", err)
 	}
-	return nil
+	return taken, nil
 }
 
 // ReserveSessions holds every session name reserved maps to a principal (the names the entries of
-// the configuration fix, exchange.Set.Reservations) for that principal, with no expiry, and
-// answers each name it took from another principal mapped to that principal. A name the
-// configuration fixes is the configuration's to give, so it is taken from whoever held it; a
-// name an earlier configuration fixed and this one does not is handed back to the ordinary rule,
-// its principal holding it for SessionRetention from now.
+// the configuration fix, exchange.Set.Reservations) for that principal, with no expiry, unless
+// another principal holds it, and answers each name it left with another principal mapped to that
+// holder. A name an earlier configuration fixed and this one does not is handed back to the
+// ordinary rule, its principal holding it for SessionRetention from now.
+//
+// It takes nothing: it is what refuses a stranger a fixed name before the entry's own caller has
+// ever exchanged, and a name another principal holds already refuses strangers. Taking is
+// BindSession's, at the fixed entry's own claim, so a replica started with an older configuration
+// that reserves after a newer one cannot take back a name the newer one has re-pointed.
 //
 // It is one statement, so the names are reserved together or not at all, and a BindSession racing
 // it waits on the row it is writing.
@@ -187,35 +210,35 @@ func (s *Store) ReserveSessions(ctx context.Context, reserved map[string]string)
 	for session, principal := range reserved {
 		sessions, principals = append(sessions, session), append(principals, principal)
 	}
-	rows, err := s.db(ctx).Query(ctx, `with prior as (
-			select session, principal from oauth_session_bindings where session = any($1)
-		), released as (
+	rows, err := s.db(ctx).Query(ctx, `with released as (
 			update oauth_session_bindings set expires_at = $3
 			where expires_at = `+heldByConfiguration+` and session <> all($1)
 		), held as (
 			insert into oauth_session_bindings (session, principal, expires_at)
 			select session, principal, `+heldByConfiguration+` from unnest($1::text[], $2::text[]) as r (session, principal)
 			on conflict (session) do update set principal = excluded.principal, expires_at = excluded.expires_at
-			returning session, principal
+			where oauth_session_bindings.principal = excluded.principal or oauth_session_bindings.expires_at <= now()
+			returning session
 		)
-		select held.session, prior.principal from held join prior using (session) where prior.principal <> held.principal`,
+		select session, principal from oauth_session_bindings
+		where session = any($1) and session not in (select session from held)`,
 		sessions, principals, time.Now().Add(SessionRetention))
 	if err != nil {
 		return nil, fmt.Errorf("reserve the session names the configuration fixes: %w", err)
 	}
 	defer rows.Close()
-	taken := map[string]string{}
+	left := map[string]string{}
 	for rows.Next() {
-		var session, from string
-		if err := rows.Scan(&session, &from); err != nil {
+		var session, holder string
+		if err := rows.Scan(&session, &holder); err != nil {
 			return nil, fmt.Errorf("reserve the session names the configuration fixes: %w", err)
 		}
-		taken[session] = from
+		left[session] = holder
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("reserve the session names the configuration fixes: %w", err)
 	}
-	return taken, nil
+	return left, nil
 }
 
 // SetTokenExchangeCustomJWT remembers a subject token's jti until exp plus jtiRetentionMargin and
