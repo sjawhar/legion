@@ -3,9 +3,10 @@
 Part of `skill://legion-architect`. Read the section for the notice that woke you. Each of
 `merge-refused`, `merge-stalled`, `merge-removed` and `merge-waiting` is the daemon reporting on
 the merge it submitted for an accepted READY, and each reaches the architect that owns the issue.
-The wake-routing table in `skill://legion-architect/SKILL.md` gives each notice its move in one
-sentence; the section here is what that sentence stands on — what the notice's `reason` names,
-what the daemon has and has not stopped doing, and what you read before you ask a person.
+The wake-routing table, in `skill://legion-architect/references/wake-routing.md`, gives each
+notice its move in one sentence; the section here is what that sentence stands on — what the
+notice's `reason` names, what the daemon has and has not stopped doing, and what you read before
+you ask a person.
 
 In every one of the four the issue stays in `awaiting_merge`, where no worker holds a phase and a
 backward move is refused, so what a repository rule needs is a person's to give.
