@@ -259,6 +259,12 @@ func runSelfHealthMonitor(
 			terminalFailures++
 			if rebuild != nil {
 				if rebuildErr := rebuild(); rebuildErr != nil {
+					// The rebuild runs under ctx, so a shutdown that cancels ctx mid-rebuild cuts it
+					// with context.Canceled. That error is the shutdown, not a failed rebuild, and an
+					// ordered shutdown writes no ERROR, so the monitor stops here without logging it.
+					if ctx.Err() != nil {
+						return
+					}
 					logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
 				} else {
 					logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
