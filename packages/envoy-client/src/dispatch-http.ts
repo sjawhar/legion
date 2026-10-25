@@ -542,9 +542,43 @@ export class DispatchClient {
   }
 
   /** `GET /api/v1/projects/{key}/architecture-sources`: the project's architecture sources, one
-   *  per repository, in the order the project added them; `[]` when it has none. */
+   *  per repository, in the order the project added them; `[]` when it has none.
+   *
+   *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
+   *  asks its `GET /api/v1/projects/{key}/architecture-source` instead: `200 null` (or a pre-#1522
+   *  `404 SOURCE_NOT_FOUND`) is `[]`, and a row is that one source. Any other answer throws, so a
+   *  project the server does not know (`404 NOT_FOUND`, "not found") is still an error. */
   async listArchitectureSources(project: string): Promise<ArchitectureSource[]> {
-    return this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    } catch (error) {
+      const noRoute =
+        error instanceof DispatchServiceError &&
+        error.status === 404 &&
+        error.code === "NOT_FOUND" &&
+        error.message.startsWith("no route for ");
+      if (!noRoute) throw error;
+    }
+    try {
+      const source: ArchitectureSource | null = await this.#json("GET", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-source",
+      ]);
+      return source === null ? [] : [source];
+    } catch (error) {
+      if (
+        error instanceof DispatchServiceError &&
+        error.status === 404 &&
+        error.code === "SOURCE_NOT_FOUND"
+      ) {
+        return [];
+      }
+      throw error;
+    }
   }
 
   /** `POST /api/v1/projects/{key}/architecture-sources/sync`: import every source of the

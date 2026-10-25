@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -54,6 +55,33 @@ func (s *server) listProjectArchitectureSources(w http.ResponseWriter, r *http.R
 		}
 	}
 	WriteJSON(w, http.StatusOK, sources)
+}
+
+// getArchitectureSource answers the singular read that dispatch clients older than this release
+// make on every issue create: the project's first source in id order, or null when it has none
+// (they read only whether it is null), and 404 for a project that does not exist. The CLI and the
+// server ship separately, so a removed route turned every create into false "Could not check"
+// advice (#1522 fixed the same skew); it stays until no such client is left.
+func (s *server) getArchitectureSource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	key := r.PathValue("key")
+	slog.Warn("dispatch: GET /api/v1/projects/{key}/architecture-source called by a dispatch client older than this release; upgrade it, the route will be removed", "project", key)
+	sources, err := querySources(r.Context(), s.deps.Store.Pool, `where project_key = $1 order by id limit 1`, key)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if len(sources) == 0 {
+		if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", key).Scan(new(string)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		WriteJSON(w, http.StatusOK, nil)
+		return
+	}
+	WriteJSON(w, http.StatusOK, sources[0])
 }
 
 // querySources reads the source rows the tail (a where and order by clause) selects.

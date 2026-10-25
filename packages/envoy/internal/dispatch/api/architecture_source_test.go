@@ -412,6 +412,34 @@ func TestArchitectureSourcesListAddAndChangeBranch(t *testing.T) {
 	}
 }
 
+// A dispatch client older than this release reads the singular route on every issue create and
+// takes null as "no model": it is kept with that contract, answering the project's first source,
+// so a client and server that ship separately do not turn every create into "Could not check".
+func TestArchitectureSourceSingularReadForOlderClients(t *testing.T) {
+	handler, _ := newArchitectureSourceServer(t, twoSourceFake())
+	createTestProject(t, handler, "CORE")
+	read := func(project string) *httptest.ResponseRecorder {
+		return agentRequest(t, handler, http.MethodGet, "/api/v1/projects/"+project+"/architecture-source", nil, "agent-token")
+	}
+
+	if none := read("CORE"); none.Code != http.StatusOK || strings.TrimSpace(none.Body.String()) != "null" {
+		t.Fatalf("singular read without a source: status=%d body=%s, want 200 null", none.Code, none.Body.String())
+	}
+	if absent := read("NOPE"); absent.Code != http.StatusNotFound || decodeBody[map[string]string](t, absent)["code"] != "NOT_FOUND" {
+		t.Fatalf("singular read of a project that does not exist: status=%d body=%s, want 404 NOT_FOUND", absent.Code, absent.Body.String())
+	}
+
+	putSource(t, handler, "CORE", "legion/arch", "main")
+	putSource(t, handler, "CORE", "acme/infra", "release")
+	first := read("CORE")
+	if first.Code != http.StatusOK {
+		t.Fatalf("singular read with two sources: status=%d body=%s", first.Code, first.Body.String())
+	}
+	if got, want := decodeStrict[architectureSourceResponse](t, first).String(), "CORE legion/arch@main enabled=true commit=- error=- components=0"; got != want {
+		t.Fatalf("singular read with two sources = %s, want the first added, %s", got, want)
+	}
+}
+
 // Removing one source retires only the components it projected: another source's components and
 // edges stay, and an issue attached to one of each keeps the removed one as unknown.
 func TestArchitectureSourceDeleteRemovesOnlyItsComponents(t *testing.T) {

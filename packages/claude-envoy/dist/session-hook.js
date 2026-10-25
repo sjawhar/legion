@@ -15429,7 +15429,28 @@ class DispatchClient {
     return this.#json("GET", ["api", "v1", "projects"]);
   }
   async listArchitectureSources(project) {
-    return this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    } catch (error48) {
+      const noRoute = error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "NOT_FOUND" && error48.message.startsWith("no route for ");
+      if (!noRoute)
+        throw error48;
+    }
+    try {
+      const source = await this.#json("GET", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-source"
+      ]);
+      return source === null ? [] : [source];
+    } catch (error48) {
+      if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
+        return [];
+      }
+      throw error48;
+    }
   }
   async syncArchitectureSources(project) {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-sources", "sync"]);

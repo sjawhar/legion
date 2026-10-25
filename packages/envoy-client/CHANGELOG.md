@@ -16,9 +16,13 @@
   source's failed line. `DispatchClient` gains `listArchitectureSources(project)`,
   `syncArchitectureSources(project)` and `syncArchitectureSource(project, repo)`, on the routes
   under `/api/v1/projects/{key}/architecture-sources`, and loses `getArchitectureSource`; the
-  issue create's architecture guidance reads the list and takes `[]` as no model. This client
-  needs a Dispatch of the same release: an older server answers the new routes `404`, which the
-  guidance reports as "Could not check whether project … has an architecture model" (INFRA-391).
+  issue create's architecture guidance reads the list and takes `[]` as no model. A Dispatch older
+  than this release has no route for the list, so the client then reads that server's
+  `GET /api/v1/projects/{key}/architecture-source` (`null`, or a pre-#1522 `404
+  SOURCE_NOT_FOUND`, is no model; a row is one source) and the guidance stays right while the
+  plugin and the server roll out separately; a project the server does not know is still reported
+  as "Could not check whether project … has an architecture model". `architecture-sync` needs a
+  Dispatch of the same release (INFRA-391).
 - A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
   expires a session record 300 s after its last write, and three refresh attempts plus one whole
   listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between
