@@ -1646,6 +1646,11 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<boolean> => {
     const topic = ROLE_TOPIC_PREFIX + role;
     const { client } = requireEnvoy();
+    // The two questions every guard below asks, each named once: add an await, then re-read them
+    // before writing shared state. A move abandoned at its deadline, or one whose session moved,
+    // decides nothing; the move that replaced it owns the role from there.
+    const owns = (): boolean => live() && sessionOpen(id);
+    const stillHolds = (): boolean => claimedRoleTopic === topic;
     const holder = await client.getRole(role).then(
       (info) => info.holder,
       (error: unknown) => {
@@ -1658,7 +1663,7 @@ export default function envoyExtension(pi: PiApi): void {
     // role now, and a regain fired for the old session would re-run its daemon ready call; one
     // owed for the role is kept for the session that carries it. A move abandoned at its deadline
     // reads the same way: the move that replaced it owns the role, and this one decides nothing.
-    if (!live() || claimedRoleTopic !== topic || !sessionOpen(id)) return false;
+    if (!owns() || !stillHolds()) return false;
     let reason: RoleRegainReason;
     if (holder === id) {
       if (!afterOutage) return true;
@@ -1668,7 +1673,7 @@ export default function envoyExtension(pi: PiApi): void {
       // The host moved, a session event ended the role, or this move was abandoned, while the
       // claim was in flight: a hold it left is this process's own, which the pass the move queued
       // keeps or hands back (`settleRole`, from the hold or from the hand-back the event left).
-      if (!live() || claimedRoleTopic !== topic || !sessionOpen(id)) return false;
+      if (!owns() || !stillHolds()) return false;
       if (!result.claimed) {
         endRole();
         refusedRoles.set(id, role);
@@ -1840,11 +1845,14 @@ export default function envoyExtension(pi: PiApi): void {
   // whether the claim waits on it. The first read is recorded on the hold; one that differs from
   // it means another process registers that session (this process's own registration of it takes
   // the hold back first, in `registerSession`), which is the newer holder from then on, and the hold
-  // is dropped. A read that fails, or finds another holder, leaves the next pass to decide.
+  // is dropped. A read that fails, or finds another holder, leaves the next pass to decide, and so
+  // does one the caller's deadline outran: every caller runs inside a queued task, so the fence is
+  // a parameter with no default.
   const observeAbandonedHold = async (
     topic: string,
     role: string,
-    holder: string | undefined
+    holder: string | undefined,
+    live: Fence
   ): Promise<boolean> => {
     const abandoned = abandonedHolds.get(topic);
     if (abandoned === undefined || abandoned.id !== holder) return false;
@@ -1854,7 +1862,12 @@ export default function envoyExtension(pi: PiApi): void {
         (info) => (info.holder === holder ? info.last_seen : undefined),
         () => undefined
       );
-    if (seen === undefined) return true;
+    // Add an await, then re-read the fence before writing shared state. A read this move's
+    // deadline outran is a read that failed: it records nothing on the hold, and the move that
+    // replaced it observes it afresh. Both answer true, the answer that records no refusal —
+    // a refusal written in error outlives every later pass (`refusedRoles`), while a refusal left
+    // unwritten costs one more claim.
+    if (!live() || seen === undefined) return true;
     if (abandoned.lastSeen !== undefined && seen !== abandoned.lastSeen) {
       abandonedHolds.delete(topic);
       return false;
@@ -1944,12 +1957,24 @@ export default function envoyExtension(pi: PiApi): void {
       // Only a soft claim is refused. A holder that is this process's own abandoned hold is waited
       // out, since the listener reaps it; any other is the newer holder, and the role stays its
       // for this session.
-      const waitingOnReap = await observeAbandonedHold(topic, role, result.holder);
-      if (!waitingOnReap) refusedRoles.set(id, role);
+      const waitingOnReap = await observeAbandonedHold(topic, role, result.holder, live);
+      // Add an await, then re-read both before writing shared state: this move was abandoned at
+      // its deadline, or its session moved, while the hold was read, and the claim that replaced
+      // it may already have cleared the refusal it is about to record. Nothing is written then,
+      // and the line says so: one that reads "not reclaimed" when no refusal was recorded sends
+      // the next reader after a `refusedRoles` entry that does not exist.
+      const notRecorded = !live()
+        ? "the move was abandoned at its deadline before the refusal was recorded"
+        : sessionOpen(id)
+          ? undefined
+          : `the session moved to ${hostSessionID()} before the refusal was recorded`;
+      if (notRecorded === undefined && !waitingOnReap) refusedRoles.set(id, role);
       logger.warn(
-        waitingOnReap
-          ? "envoy: role still held by a session this process left; claiming again once the listener reaps it"
-          : "envoy: role held by another live session; not reclaimed",
+        notRecorded !== undefined
+          ? `envoy: role held by another live session; ${notRecorded}`
+          : waitingOnReap
+            ? "envoy: role still held by a session this process left; claiming again once the listener reaps it"
+            : "envoy: role held by another live session; not reclaimed",
         { role, sessionID: id, holder: result.holder }
       );
       return false;
@@ -2130,6 +2155,10 @@ export default function envoyExtension(pi: PiApi): void {
     live: Fence
   ): Promise<boolean> => {
     const host = context.sessionManager.getSessionId();
+    // The question every guard below asks, named once: add an await, then re-read `owns` before
+    // writing shared state. A pass abandoned at its deadline, or one the host moved out from
+    // under, records nothing of what it opened; the pass the move queues converges from there.
+    const owns = (): boolean => live() && sessionOpen(host);
     noteMove(host);
     if (sessionID !== host) restoreLocalSessionState(context);
     if (establishedSession !== host) {
@@ -2166,23 +2195,23 @@ export default function envoyExtension(pi: PiApi): void {
         await ensureConnection(live);
         // Each await is a place the host can move and a place this pass can be abandoned at its
         // deadline: a fenced pass opened nothing, so it records nothing as open either.
-        if (!live()) return false;
+        if (!owns()) return false;
         await subscribe(agentSubject(host), live);
-        if (!live()) return false;
+        if (!owns()) return false;
         // A viewer's replay request and its watch pings reach the session here. Opening it costs
         // one core subscription and publishes nothing: a session nobody opens stays silent.
         await watchAgentStream(host, live);
-        if (!live()) return false;
+        if (!owns()) return false;
         if ((context.sessionManager.getBranch?.() ?? []).length > 0) {
           await recoverRegisteredInterests(live);
-          if (!live()) return false;
+          if (!owns()) return false;
         }
         inboundOpenFor = host;
       } catch (error) {
         inboundFailure = error;
       }
     }
-    if (!live() || hostSessionID() !== host) return false;
+    if (!owns()) return false;
     // Every session subscribes to its own agent subject, so every session is registered;
     // envoy_send treats an unregistered id as dead. The listener rejects a claim from a session it
     // does not currently know, so this comes before the role.
@@ -2190,7 +2219,7 @@ export default function envoyExtension(pi: PiApi): void {
       () => undefined,
       (error: unknown) => ({ error })
     );
-    if (!live()) return false;
+    if (!owns()) return false;
     if (registration === undefined) {
       establishedSession = host;
       ensureHeartbeat(context);
@@ -2200,7 +2229,7 @@ export default function envoyExtension(pi: PiApi): void {
     const decided = await roleMoves.run((moveLive) =>
       settleRole(context, host, cause, registration === undefined, moveLive)
     );
-    if (!live()) return false;
+    if (!owns()) return false;
     if (registration !== undefined) {
       throw new RegistrationError(messageFor(registration.error), { cause: registration.error });
     }
@@ -2282,14 +2311,18 @@ export default function envoyExtension(pi: PiApi): void {
     registered: boolean,
     live: Fence
   ): Promise<boolean> => {
-    if (!sessionOpen(host)) return false;
+    // The question every guard below asks, named once: add an await, then re-read `owns` before
+    // writing shared state. A move abandoned at its deadline, or one whose host moved, decides
+    // nothing, and the move the next pass queues converges from the state this one left.
+    const owns = (): boolean => live() && sessionOpen(host);
+    if (!owns()) return false;
     const branch = context.sessionManager.getBranch?.() ?? [];
     // The rows are read until a pass has decided for this session, except for a brand-new first
     // session, which has none.
     const readRows = roleSettledFor !== host && (branch.length > 0 || roleSettledFor !== "");
     const desired = await desiredRole(host, branch, readRows);
     // A move abandoned at its deadline decided nothing, exactly as one the host overtook.
-    if (!live() || !sessionOpen(host)) return false;
+    if (!owns()) return false;
     const unheard = lastHeard !== host;
     const held = heldRole();
     if (held !== undefined && held !== desired) {
@@ -2297,12 +2330,12 @@ export default function envoyExtension(pi: PiApi): void {
       // A role end after a move no session event announced is one no plugin heard: say so, and
       // who claims it again.
       if (ended !== undefined && unheard) warnRoleEnded(context, host, ended);
-      if (!live() || !sessionOpen(host)) return false;
+      if (!owns()) return false;
     }
     if ((await settleEndedHolds(host, desired, live)) && unheard && desired !== undefined) {
       warnNoticesClosed(context, desired);
     }
-    if (!live() || !sessionOpen(host)) return false;
+    if (!owns()) return false;
     if (!registered) return false;
     if (desired === undefined) {
       roleSettledFor = host;
@@ -2336,7 +2369,7 @@ export default function envoyExtension(pi: PiApi): void {
           () => undefined
         );
       if (holder !== undefined && holder !== host && lineage.includes(holder)) supersedes = holder;
-      if (!live() || !sessionOpen(host)) return false;
+      if (!owns()) return false;
     }
     try {
       const claimed = await setEnvoyRole(desired, host, live, {
@@ -2354,6 +2387,9 @@ export default function envoyExtension(pi: PiApi): void {
         error: messageFor(error),
       });
     }
+    // The claim, or the unsubscribe of the role it moved off, can outrun this move's deadline:
+    // a move that no longer decides for `host` records nothing of its pass either.
+    if (!owns()) return false;
     roleSettledFor = host;
     return true;
   };
