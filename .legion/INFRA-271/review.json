@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-271",
+  "completed": "2026-10-25T08:00:00Z",
+  "round": 1,
+  "headReviewed": "12217616312f4c129e7da298cd006d16a5a6839f",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/sessionproxy/sessionproxy.go:112",
+      "description": "The proof dial has no deadline. The launcher passes Run's container-lifetime ctx (launcher.go:156, :311, :496); the connector dials the private IP with a zero net.Dialer (cloudsqlconn v1.25.4 dialer.go:233,613 via x/net proxy.Direct) and bounds the TLS handshake only by ctx (dialer.go:636). A black-holed or stalled instance holds the launcher's synchronous command loop past the daemon's start deadline (relaunch.go:178,198); the daemon's Stop (relaunch.go:211-219) cannot be read, and the launcher's named refusal arrives with no waiter, so the error D5 promises to surface is lost. resumeLookupTimeout's own invariant (launcher.go:515-518) no longer holds once the proof runs ahead of it. Fix: bound the proof dial with a deadline that, with resumeLookupTimeout, stays inside the daemon's wait; keep the serving context as it is."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/sessionproxy/sessionproxy.go:146",
+      "description": "Close waits for every established copy and closes none (serve's io.Copy pair ignores ctx; cloudsqlconn Dialer.Close closes caches, not connections, dialer.go:900-919). manager.wait calls it before active.done closes (launcher.go:358-372), and endGeneration waits on done even after SIGKILL (process.go:109-113). In PID 1 the kill of -1 ends every holder, so the deployed path is bounded; off PID 1 (cleanExitedGeneration returns at once, process.go:77-78; the signal reaches only -pid) a socket holder outside the process group wedges stop, the next generation and Run forever. Close is called only after the generation's processes have ended or been killed, so it should close the remaining client/upstream pairs before it waits; TestCloseEndsTheProxy (sessionproxy_test.go:384-406) pins the blocking behaviour and moves with it."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:711",
+      "description": "The lifetime bound is right for an explicit stop in PID 1 (endGeneration's timer covers cleanup, and its SIGKILL targets -1: one grace, the tester's measurement) but not for a child that exits on its own: cleanExitedGeneration then gives leftovers up to --stop-grace more (process.go:83-99) with the proxy serving. State both cases; AGENTS.md:67's 'stops with the child' has the same gap. The implement handoff's 'grace plus cleanup' bound is not what the code does on a stop."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/ompsessions/store.go:44",
+      "description": "ValidInstance is not the connector's rule though its comment says it is the one rule both sides hold: it refuses a domain-scoped project (example.com:project:region:instance), which cloudsqlconn's instance.ParseConnName accepts (conn_name.go:30), and accepts whitespace inside a segment (the tester's note), which passes --check-config and fails every generation start."
+    }
+  ],
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. At 12217616312f all queued (Tests run 40174053921, PR Title run 40174497363) when this round was submitted; not waited on, since the round requests changes.",
+  "thermonuclear": "deep-review and code-quality at 12217616312f: both CHANGES, both naming the Close wedge off PID 1; deep-review independently naming the unbounded proof dial. Both confirm the replacement sessionproxy pair covers both directions (sessionproxy_test.go:420-459, :464-489) and that a stop in PID 1 is one grace.",
+  "threads": "No review threads existed before this round."
+}
