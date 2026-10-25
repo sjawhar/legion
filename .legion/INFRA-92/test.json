@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T12:40:00Z",
+  "completed": "2026-10-25T12:50:00Z",
   "round": 5,
-  "verdict": "fail",
+  "verdict": "pass",
   "heads": {
     "code": "301288e631cb",
     "pushedHead": "e7fdeea43528f8c0227d6562788845fa244eda89",
@@ -12,19 +12,10 @@
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Its three entries were re-run here, not read, and each with the previous head's bundle beside it in the same run: the listener answering HTML under a 200, the file faces, and the smoke. I drove two cases beyond them that the architect asked for — a listener answer of valid JSON that misses the schema, and the interests reconciliation observed on the registry rather than inferred — and both hold. The behaviour of this round is right. The round fails on the push that carried it, below, which is not a behaviour of the code."
+    "how": "Its three entries were re-run here, not read, and each with the previous head's bundle beside it in the same run: the listener answering HTML under a 200, the file faces, and the smoke. I drove two cases beyond them that the architect asked for — a listener answer of valid JSON that misses the schema, and the interests reconciliation observed on the registry rather than inferred — and both hold. Its CI line is accurate too: the code commit was pushed untrailered and started its own runs, and the handoff commit followed as a handoff-only push with skip-checks: true, which is what that trailer is for."
   },
-  "failures": [
-    {
-      "criterion": "Every code push of this pull request starts the repository's checks, and the head that merges has CI (skill://legion-worker, 'Every role pushes its own commits': a handoff-only push carries skip-checks: true, every other push carries no such line, and a head with no CI is refused at READY).",
-      "evidence": "The branch head e7fdeea43528f8c0227d6562788845fa244eda89 ends with 'skip-checks: true' after two empty lines — read with git log -1 --format=%B e7fdeea43528 | cat -A — and the push it headed carried a code commit, 301288e631cb, holding packages/claude-envoy/src/envoy-channel-server.ts, src/session-identity.ts, tests/envoy-channel-handoff.test.ts and the rebuilt dist. GitHub therefore started nothing: `gh pr checks 2154` lists one check, pr-title; `gh run list --commit e7fdeea43528f8c0227d6562788845fa244eda89` holds only PR Title runs, which come from pull_request events rather than from the push; and `gh run list --commit 301288e631cb` is empty. main's required set is lint, typecheck, test and pr-title, so three required checks have never run on this round's code. No red test can pin this: it is a property of the push, not of the source. The remedy is a head whose message carries no trailer — a rewrite of e7fdeea43528's message and a force-push, or any later push whose head carries none. This handoff's own push is handoff-only and so carries the trailer, which is right for it and does not cure the code head."
-    }
-  ],
-  "failed": 1,
-  "failureInContext": {
-    "theRemedyIsSound": "The three faces the reviewer and the architect named were all driven here and all hold, each with the previous head's bundle beside it in the same run. What fails is how this round was delivered, not the boundary move: the implementer should not read the verdict as the change being wrong.",
-    "secondOfItsClass": "This is the second defect of one shape in this issue, and the retro learning should carry the two together rather than as two incidents. In round four a code commit kept the review App as its author because handoff_complete guards the handoff commit of a push and nothing guards the code commit beside it. Here a trailer meant for a handoff-only push rode a push that also carried code, so GitHub started nothing for the code. Both are a rule that is right for one of the two commits in a push and silently wrong for the other, and in both the wrong half is the code commit — the half that matters most and is checked least."
-  },
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
       "criterion": "The reviewer's defect, listener face: an answer that is not JSON must not cost the session its role, and must be queued so a heartbeat takes the role back.",
@@ -66,14 +57,19 @@
     "why": "I raised that defect, so I verify its absence myself rather than cite it."
   },
   "ciRead": {
-    "head": "e7fdeea43528f8c0227d6562788845fa244eda89",
-    "readAt": "2026-10-25T12:36:00Z",
-    "runs": ["PR Title run 40192696986 — success"],
-    "note": "That is the whole of it, and it is the failure recorded above: the push that carried the code commit was trailered skip-checks: true, so lint, typecheck, test and the Legion Envoy and Contracts lanes never started on this content. I did not re-run any of them myself — they are CI's work — and so this round has no static evidence to cite at all."
+    "head": "301288e631cbbbd02f3fb22673bf42d00c658d55 (the code commit; the pushed head e7fdeea43528 is the handoff commit, which a handoff-only push correctly leaves without runs)",
+    "readAt": "2026-10-25T12:48:00Z",
+    "runs": [
+      "Tests run 40192592108 — success (lint, typecheck, test: main's required set, less pr-title)",
+      "Docs run 40192592244 — success",
+      "PR Title run 40192592168 — success",
+      "Legion Envoy and Contracts run 40192592148 — jobs changes, claude-envoy and envoy-smoke success; job dispatch (the browser suite) in progress when read, cited as running and not waited for"
+    ],
+    "note": "Read with the full sha, after the abbreviated one gave an empty answer that I first misread as no CI — see correctionInThisRound. Read by commit, which is the shape to expect: the code commit carries the checks, and the pushed head e7fdeea43528, a handoff-only push, carries pr-title alone. The static work — lint, types and the unit and integration suites — is CI's and was not re-run here. The one lane still running is the dispatch browser job; the Agents spec it would catch a change in was run here at this content, 34 of 34 in both profiles, and the daemon reads that job's settlement itself and returns the issue if a required check goes red."
   },
   "notProven": [
     "That Claude Code itself sends session_title, and that the daemon's seeded '/rename Legion <role> · <KEY>' makes a pane read as its role and issue: Claude Code cannot run in a Legion issue pod, so every hook payload in every run here is JSON the harness writes in the documented shape.",
-    "The webkit, webkit-iphone, firefox and firefox-download-navigation projects: Playwright's host validation refuses to start those engines in this pod for want of system libraries no agent can install without root. CI carries them — and at this head CI has not run at all.",
+    "The webkit, webkit-iphone, firefox and firefox-download-navigation projects: Playwright's host validation refuses to start those engines in this pod for want of system libraries no agent can install without root. CI carries them, and its Legion Envoy and Contracts run was still in progress when I read it.",
     "A session whose Envoy or inbound messages are off stamps its title once at startup, so a later rename does not reach its Dispatch attribution. Unchanged behaviour for every title, not this change's."
   ],
   "knownNotThisChange": [
@@ -81,9 +77,35 @@
     "packages/dispatch/e2e/phone.e2e.ts:393, dispatch://INFRA-95's row: its fix merged to main at 09:26Z after this branch's base, and I proved it green six times of six on a throwaway clone of main. This branch's copy stays red until the base comes in at the merge."
   ],
   "previousRounds": [
-    { "round": 1, "verdict": "pass", "head": "485db1c056d8" },
-    { "round": 2, "verdict": "fail", "head": "398af3d484a2", "summary": "the directory squeezed to 0 x 16 px beside the 64-character name; pinned by the red row at agents.e2e.ts:1807" },
-    { "round": 3, "verdict": "pass", "head": "80d324defedc", "summary": "the floor fixed it; whole projects run here with every failure classified by isolated re-runs" },
-    { "round": 4, "verdict": "pass", "head": "0a8530169857", "summary": "the role retry, both sweep rules apart, the resume record, the rem breakpoint driven with a launch flag, and the identity rewrite verified by the tester" }
-  ]
+    {
+      "round": 1,
+      "verdict": "pass",
+      "head": "485db1c056d8"
+    },
+    {
+      "round": 2,
+      "verdict": "fail",
+      "head": "398af3d484a2",
+      "summary": "the directory squeezed to 0 x 16 px beside the 64-character name; pinned by the red row at agents.e2e.ts:1807"
+    },
+    {
+      "round": 3,
+      "verdict": "pass",
+      "head": "80d324defedc",
+      "summary": "the floor fixed it; whole projects run here with every failure classified by isolated re-runs"
+    },
+    {
+      "round": 4,
+      "verdict": "pass",
+      "head": "0a8530169857",
+      "summary": "the role retry, both sweep rules apart, the resume record, the rem breakpoint driven with a launch flag, and the identity rewrite verified by the tester"
+    }
+  ],
+  "correctionInThisRound": {
+    "what": "I first recorded a failure that did not exist: that this round's code had no CI because the branch head carries skip-checks: true.",
+    "why_it_was_wrong": "I ran `gh run list --commit 301288e631cb` with the abbreviated sha. That field matches the full forty-character sha only, so gh answered with nothing and I read 'no runs' where the right reading was 'no answer to that query'. With the full sha, 301288e631cbbbd02f3fb22673bf42d00c658d55, every run is there, and `gh run view` on each gives headSha=301288e631cb. My second reading, `gh pr checks 2154` showing one check, was consistent with the error because it reads the pull request's head, which is the handoff commit a handoff-only push correctly leaves without runs.",
+    "what_was_actually_right": "The implementer pushed the code commit with no trailer, which started CI at its own sha, and pushed the handoff commit afterwards as a handoff-only push with the trailer. That is the rule as written, and the daemon carries the code head's verdict to the handoff head.",
+    "kept_here_on_purpose": "So the next reader can tell a real CI gap from this one: the test is the full sha, and `gh run list` with an abbreviated one proves nothing either way."
+  },
+  "classNote": "The round-four authorship defect stands on its own: a code commit kept the review App as author because handoff_complete guards the handoff commit of a push and nothing guards the code commit beside it. I had paired it with the trailer reading above as a second instance of one class; with the trailer reading withdrawn, the class has one member, and the retro learning should say so rather than count my misreading as evidence."
 }
