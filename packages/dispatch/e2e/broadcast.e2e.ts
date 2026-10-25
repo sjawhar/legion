@@ -408,7 +408,9 @@ test("a session that leaves between a refused send and its restore is still in t
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
     expect(posted).toHaveLength(2);
-    expect(posted[1]).toEqual(posted[0]);
+    // Word for word, under a key of its own: Dispatch would answer the refused key its refusal.
+    expect(posted[1]).toEqual({ input: posted[0]?.input, key: expect.any(String) });
+    expect(posted[1]?.key).not.toBe(posted[0]?.key);
 
     const view = page.getByRole("region", { name: "Broadcast" });
     await expect(

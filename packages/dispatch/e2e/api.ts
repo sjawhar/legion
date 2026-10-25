@@ -63,6 +63,9 @@ const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
+  /** The `Idempotency-Key` header the write carries, naming one intent: a repeat under it is
+   *  answered what the first was answered. None when absent, which Dispatch handles unkeyed. */
+  idempotencyKey?: string;
   login?: string;
   /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
   token?: string;
@@ -145,6 +148,9 @@ async function request<T>(
     headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
     Object.assign(headers, await userHeaders(options.login));
+  }
+  if (options.idempotencyKey !== undefined) {
+    headers["Idempotency-Key"] = options.idempotencyKey;
   }
 
   const response = await fetch(new URL(path, baseUrl), {
@@ -644,33 +650,27 @@ export function createMessage(
   );
 }
 
-/** Sends one message to a session as a human. Every send carries an `idempotency_key`; this mints
- *  one unless the caller names its own. */
+/** Sends one message to a session as a human; `options.idempotencyKey` keys it. */
 export function createAgentMessage(
   sessionID: string,
-  input: Omit<CreateAgentMessageInput, "idempotency_key"> & { readonly idempotency_key?: string },
+  input: CreateAgentMessageInput,
   options: ApiOptions = {}
 ): Promise<Message> {
   return request<Message>(
     `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
     "POST",
-    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
+    input,
     options
   );
 }
 
-/** Sends one broadcast as a human. Every send carries an `idempotency_key`; this mints one unless
- *  the caller names its own, as a row that replays a request the page made does. */
+/** Sends one broadcast as a human; `options.idempotencyKey` keys it, as a row that repeats a
+ *  request the page made does. */
 export function createBroadcast(
-  input: Omit<CreateBroadcastInput, "idempotency_key"> & { readonly idempotency_key?: string },
+  input: CreateBroadcastInput,
   options: ApiOptions = {}
 ): Promise<BroadcastCreated> {
-  return request<BroadcastCreated>(
-    "/api/v1/broadcasts",
-    "POST",
-    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
-    options
-  );
+  return request<BroadcastCreated>("/api/v1/broadcasts", "POST", input, options);
 }
 
 export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {

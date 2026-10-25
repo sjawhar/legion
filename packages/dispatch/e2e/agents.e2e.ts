@@ -1457,14 +1457,14 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     await expect(failed.getByRole("status")).toHaveText(/^Could not send to 2 agents: /);
     await expect(failed.getByRole("button", { name: "Restore draft" })).toBeVisible();
 
-    // Retry sends the very message again: the same body, mode and recipients.
+    // Retry sends the very message again: the same body, mode and recipients, under a new key,
+    // since Dispatch keeps the answer it gave the refused one and would only refuse it again.
     await failed.getByRole("button", { name: "Retry" }).click();
     await expect(
       row("Refused first.").getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
     await expect(sends.getByText(/^Could not send/)).toHaveCount(0);
     expect(posted).toHaveLength(3);
-    expect(posted[2]).toEqual(posted[0]);
     expect(posted[0]).toEqual({
       input: {
         body: "Refused first.",
@@ -1473,6 +1473,8 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
       },
       key: expect.any(String),
     });
+    expect(posted[2]).toEqual({ input: posted[0]?.input, key: expect.any(String) });
+    expect(posted[2]?.key).not.toBe(posted[0]?.key);
   } finally {
     await alice.close();
   }

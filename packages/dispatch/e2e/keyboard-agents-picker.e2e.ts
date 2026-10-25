@@ -2,6 +2,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createAgentMessage, createMessage, patchIssue } from "./api";
+import { keyedWrite } from "./keyed-writes";
 import { resetDatabase } from "./seed";
 import { holdPosts, MESSAGE_REFUSED, refusePosts } from "./sends";
 import { asUser } from "./users";
@@ -426,14 +427,16 @@ test.describe("agents page", () => {
           new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       await row.getByRole("button", { name: "Retry" }).click();
-      // The same message, so the same key: Dispatch answers a repeat with the message it made.
-      const key = (await sent).postDataJSON().idempotency_key;
-      expect(key).toEqual(expect.any(String));
-      expect((await retried).postDataJSON()).toEqual({
-        body: "Status please",
-        delivery: "aside",
-        idempotency_key: key,
+      // The same message under a new key: Dispatch keeps the answer it gave a key, so the refused
+      // key would only be answered the refusal again.
+      const first = keyedWrite(await sent);
+      const again = keyedWrite(await retried);
+      expect(first).toEqual({
+        input: { body: "Status please", delivery: "aside" },
+        key: expect.any(String),
       });
+      expect(again).toEqual({ input: first.input, key: expect.any(String) });
+      expect(again.key).not.toBe(first.key);
     } finally {
       await context.close();
     }
@@ -788,12 +791,12 @@ test.describe("agents page", () => {
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
-      const sends: { body: unknown; ok: boolean; path: string }[] = [];
+      const sends: { input: unknown; key: string | undefined; ok: boolean; path: string }[] = [];
       page.on("response", (response) => {
         const request = response.request();
         const path = new URL(request.url()).pathname;
         if (request.method() !== "POST" || !/\/(comments|messages)$/.test(path)) return;
-        sends.push({ body: request.postDataJSON(), ok: response.ok(), path });
+        sends.push({ ...keyedWrite(request), ok: response.ok(), path });
       });
       const send = async (text: string) => {
         const before = sends.length;
@@ -823,24 +826,30 @@ test.describe("agents page", () => {
       await send("third");
       await expect(field).toHaveValue("");
 
+      // Every send is keyed, each under a key of its own.
       const mentions = [{ target: `session:${plannerSession.session_id}` }];
+      const key = expect.any(String);
       expect(sends).toEqual([
         {
-          body: { body: "@Planner first", delivery: "aside", mentions },
+          input: { body: "@Planner first", delivery: "aside", mentions },
+          key,
           ok: true,
           path: `/api/v1/issues/${issueKey}/comments`,
         },
         {
-          body: { body: "@Planner second", delivery: "aside", mentions },
+          input: { body: "@Planner second", delivery: "aside", mentions },
+          key,
           ok: true,
           path: `/api/v1/issues/${issueKey}/comments`,
         },
         {
-          body: { body: "third", delivery: "aside", idempotency_key: expect.any(String) },
+          input: { body: "third", delivery: "aside" },
+          key,
           ok: true,
           path: `/api/v1/agents/${plannerSession.session_id}/messages`,
         },
       ]);
+      expect(new Set(sends.map((send) => send.key)).size).toBe(3);
     } finally {
       await context.close();
     }

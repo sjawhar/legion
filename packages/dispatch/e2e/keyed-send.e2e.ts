@@ -1,4 +1,4 @@
-import { expect, type Page, type Request, test } from "@playwright/test";
+import { expect, type Page, type Response, test } from "@playwright/test";
 
 import {
   agentRow,
@@ -9,27 +9,28 @@ import {
   reviewerSession,
   seedAgents,
 } from "./agents";
+import { watchWrites } from "./keyed-writes";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// A message to one session goes under an idempotency key, and the page tries it again under that
-// key until Dispatch answers it (`sendKeyedAgentMessage`); a broadcast is keyed and kept the same
-// way (`broadcast-queue.ts`). These rows run both against the real server: an attempt whose answer
-// the page never gets, and one a server that is down answers 503, each end in one message per
-// recipient and the composer cleared.
+// A message to one session goes under an `Idempotency-Key`, and the page tries it again under
+// that key until Dispatch answers it (`sendKeyedAgentMessage`); a broadcast is keyed and kept the
+// same way (`broadcast-queue.ts`). These rows run both against the real server: an attempt whose
+// answer the page never gets, and one a server that is down answers 503, each end in one message
+// per recipient and the composer cleared. Dispatch answers a repeat under a key it has answered
+// with the answer it stored, marked `Idempotency-Replayed: ?1`.
 
 const messages = `/api/v1/agents/${plannerSession.session_id}/messages`;
 const broadcasts = "/api/v1/broadcasts";
 
-/** Every POST the page makes to the Planner's message route, in order. */
-function watchPosts(page: Page): Request[] {
-  const posts: Request[] = [];
-  page.on("request", (request) => {
-    if (request.method() === "POST" && new URL(request.url()).pathname === messages) {
-      posts.push(request);
-    }
-  });
-  return posts;
+/** The first answer to a `POST` to `path` that Dispatch replays from a key it already answered. */
+function replayed(page: Page, path: string): Promise<Response> {
+  return page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      new URL(response.url()).pathname === path &&
+      response.headers()["idempotency-replayed"] === "?1"
+  );
 }
 
 /** Opens the Planner's composer from the keyboard, types `body` and sends it. */
@@ -63,7 +64,7 @@ test("a send whose answer is lost is tried again under its key, and delivered on
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posts = watchPosts(page);
+    const posts = watchWrites(page, "POST", messages);
     // The first POST reaches Dispatch, which makes the message and sends it; its answer is lost on
     // the way back, as a dropped connection loses it.
     let firstAnswer: number | undefined;
@@ -74,23 +75,19 @@ test("a send whose answer is lost is tried again under its key, and delivered on
       firstAnswer = (await route.fetch()).status();
       return route.abort("failed");
     });
-    const landed = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === messages &&
-        response.status() === 200
-    );
+    const landed = replayed(page, messages);
     await openAgents(page);
     await send(page, "Exactly once, please");
 
     const answer = await landed;
     expect(firstAnswer).toBe(201);
+    // The repeat is answered what the first attempt was.
+    expect(answer.status()).toBe(201);
     expect(posts).toHaveLength(2);
-    const [first, second] = posts.map((post) => post.postDataJSON());
+    const [first, second] = posts;
     expect(first).toEqual({
-      body: "Exactly once, please",
-      delivery: "aside",
-      idempotency_key: expect.any(String),
+      input: { body: "Exactly once, please", delivery: "aside" },
+      key: expect.any(String),
     });
     // The same message under the same key: Dispatch answers it with the message it made.
     expect(second).toEqual(first);
@@ -114,7 +111,7 @@ test("a send a server that is down answers 503 is tried again, not refused, and 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posts = watchPosts(page);
+    const posts = watchWrites(page, "POST", messages);
     let refused = false;
     await page.route(`**${messages}`, async (route) => {
       if (route.request().method() !== "POST" || refused) return route.fallback();
@@ -134,11 +131,12 @@ test("a send a server that is down answers 503 is tried again, not refused, and 
     await openAgents(page);
     await send(page, "Once, after the outage");
 
-    await landed;
+    // The 503 never reached Dispatch, so the second attempt is the first it answers.
+    expect((await landed).headers()["idempotency-replayed"]).toBeUndefined();
     expect(refused).toBe(true);
     expect(posts).toHaveLength(2);
-    const [first, second] = posts.map((post) => post.postDataJSON());
-    expect(first.idempotency_key).toEqual(expect.any(String));
+    const [first, second] = posts;
+    expect(first?.key).toEqual(expect.any(String));
     expect(second).toEqual(first);
     const row = agentRow(page, plannerSession.session_id);
     await expect(row.getByRole("textbox", { name: "Comment" })).toHaveValue("");
@@ -163,7 +161,7 @@ test("a send held through a reload is resumed under its key, and delivered once"
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posts = watchPosts(page);
+    const posts = watchWrites(page, "POST", messages);
     const prompts: string[] = [];
     page.on("dialog", (dialog) => {
       prompts.push(dialog.type());
@@ -184,12 +182,7 @@ test("a send held through a reload is resumed under its key, and delivered once"
       // The page cancelled the request with the reload; there is nothing left to answer.
       await route.abort("failed").catch(() => undefined);
     });
-    const resumed = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === messages &&
-        response.status() === 200
-    );
+    const resumed = replayed(page, messages);
     await openAgents(page);
     await send(page, "Kept through the reload");
     await reached.promise;
@@ -200,11 +193,10 @@ test("a send held through a reload is resumed under its key, and delivered once"
     await resumed;
     expect(prompts).toEqual(["beforeunload"]);
     expect(posts).toHaveLength(2);
-    const [first, second] = posts.map((post) => post.postDataJSON());
+    const [first, second] = posts;
     expect(first).toEqual({
-      body: "Kept through the reload",
-      delivery: "aside",
-      idempotency_key: expect.any(String),
+      input: { body: "Kept through the reload", delivery: "aside" },
+      key: expect.any(String),
     });
     expect(second).toEqual(first);
     expect(await getSentMessages()).toMatchObject([
@@ -229,7 +221,7 @@ test("a send held through a reload is resumed under its key, and delivered once"
 
 // A broadcast is keyed too, and the same loss of an answer is the same outcome: Dispatch made the
 // broadcast and sent every recipient their copy, and the repeat under that key is answered with it
-// (200) rather than making a second one.
+// rather than making a second one.
 test("a broadcast whose answer is lost is tried again under its key, and each agent hears it once", async ({
   browser,
 }) => {
@@ -246,12 +238,7 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
       firstAnswer = (await route.fetch()).status();
       return route.abort("failed");
     });
-    const landed = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === broadcasts &&
-        response.status() === 200
-    );
+    const landed = replayed(page, broadcasts);
     await openAgents(page);
     await broadcast(page, "Exactly once, everyone");
 
@@ -261,17 +248,18 @@ test("a broadcast whose answer is lost is tried again under its key, and each ag
     // answer made.
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/u);
     expect(page.url().split("/").at(-1)).toBe((await answer.json()).id);
-    // The lost answer's repeat, and any repeat after it while Dispatch's answer still shows a
-    // recipient pending, are the one request under the one key.
     expect(posted.length).toBeGreaterThanOrEqual(2);
-    const [first, ...repeats] = posted;
+    const [first] = posted;
     expect(first).toEqual({
-      body: "Exactly once, everyone",
-      delivery: "btw",
-      idempotency_key: expect.any(String),
-      session_ids: [plannerSession.session_id, reviewerSession.session_id],
+      input: {
+        body: "Exactly once, everyone",
+        delivery: "btw",
+        session_ids: [plannerSession.session_id, reviewerSession.session_id],
+      },
+      key: expect.any(String),
     });
-    for (const repeat of repeats) expect(repeat).toEqual(first);
+    // Every attempt is that one press: the same request under the same key.
+    for (const attempt of posted) expect(attempt).toEqual(first);
     await expect
       .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
       .toEqual([plannerSession.session_id, reviewerSession.session_id].sort());
@@ -312,12 +300,7 @@ test("a broadcast held through a reload is resumed under its key, and each agent
       // The page cancelled the request with the reload; there is nothing left to answer.
       await route.abort("failed").catch(() => undefined);
     });
-    const resumed = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname === broadcasts &&
-        response.status() === 200
-    );
+    const resumed = replayed(page, broadcasts);
     await openAgents(page);
     await broadcast(page, "Kept through the reload");
     await reached.promise;
@@ -328,14 +311,16 @@ test("a broadcast held through a reload is resumed under its key, and each agent
     await resumed;
     expect(prompts).toEqual(["beforeunload"]);
     expect(posted.length).toBeGreaterThanOrEqual(2);
-    const [first, ...repeats] = posted;
+    const [first] = posted;
     expect(first).toEqual({
-      body: "Kept through the reload",
-      delivery: "btw",
-      idempotency_key: expect.any(String),
-      session_ids: [plannerSession.session_id, reviewerSession.session_id],
+      input: {
+        body: "Kept through the reload",
+        delivery: "btw",
+        session_ids: [plannerSession.session_id, reviewerSession.session_id],
+      },
+      key: expect.any(String),
     });
-    for (const repeat of repeats) expect(repeat).toEqual(first);
+    for (const attempt of posted) expect(attempt).toEqual(first);
     await expect(
       page.getByRole("region", { name: "Sends" }).getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();

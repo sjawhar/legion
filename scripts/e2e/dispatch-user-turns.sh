@@ -431,8 +431,8 @@ pass
 
 broadcast_body="LEGION-394 $run broadcast: status, please."
 begin a-broadcast-gets-a-card
-human -X POST "http://127.0.0.1:$dispatch_port/api/v1/broadcasts" \
-  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" --arg k "$run" '{body: $b, delivery: "steer", session_ids: [$s], idempotency_key: ("broadcast-" + $k)}')" >/dev/null
+human -X POST "http://127.0.0.1:$dispatch_port/api/v1/broadcasts" -H "Idempotency-Key: broadcast-$run" \
+  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" '{body: $b, delivery: "steer", session_ids: [$s]}')" >/dev/null
 until_true 120 "the broadcast's card" has_card "$broadcast_body"
 [ "$(user_mentions "$broadcast_body")" = 0 ] || fail "the broadcast became a user message"
 note "a card, no user message"
@@ -699,8 +699,8 @@ pass
 
 offline_body="LEGION-394 $run Send while the session is down: my label for it is CHARLIE$run. What is my label?"
 begin a-send-while-the-session-is-down-fails
-offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
-  -d "$(jq -nc --arg b "$offline_body" --arg k "$run" '{body: $b, delivery: "steer", idempotency_key: ("offline-" + $k)}')")
+offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" -H "Idempotency-Key: offline-$run" \
+  -d "$(jq -nc --arg b "$offline_body" '{body: $b, delivery: "steer"}')")
 offline_sent=$SECONDS
 offline_id=$(jq -r .id <<<"$offline")
 note "message $offline_id: $(jq -c '.deliveries[0] | {attempt, delivery, session_id, state, error}' <<<"$offline")"
@@ -748,8 +748,8 @@ begin a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card
 # attempt: Dispatch refuses to accept a failed attempt, so it stays a card.
 listener -X DELETE "http://127.0.0.1:$envoy_port/v1/sessions/$session_id" >/dev/null
 until_true 30 "the listener to drop the session" unlisted
-unlisted_send=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
-  -d "$(jq -nc --arg b "$unlisted_body" --arg k "$run" '{body: $b, delivery: "steer", idempotency_key: ("unlisted-" + $k)}')")
+unlisted_send=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" -H "Idempotency-Key: unlisted-$run" \
+  -d "$(jq -nc --arg b "$unlisted_body" '{body: $b, delivery: "steer"}')")
 unlisted_sent=$SECONDS
 unlisted_id=$(jq -r .id <<<"$unlisted_send")
 note "message $unlisted_id: $(jq -c '.deliveries[0] | {attempt, delivery, session_id, state, error}' <<<"$unlisted_send")"
