@@ -69,9 +69,10 @@ default, and the dev sign-in flag refuses a non-loopback host. psql runs without
 `PGHOSTADDR` (`e2e/psql.ts`), which would otherwise send it somewhere the server
 never checked. The harness ports `DISPATCH_E2E_PORT` (default `8777`),
 `FAKE_ENVOY_PORT` (default `9021`), `FAKE_GITHUB_PORT` (default `9022`),
-`PLAIN_HTTP_PORT` (default `9023`) and `FAKE_BROKER_PORT` (default `9024`) are
-its other inputs, resolved for the whole suite by `e2e/harness-ports.ts`. A
-local run starts its own servers on those five ports and refuses before any of
+`PLAIN_HTTP_PORT` (default `9023`), `FAKE_BROKER_PORT` (default `9024`),
+`DEV_OIDC_ISSUER_PORT` (default `9025`) and `REAL_BROKER_PORT` (default `9026`)
+are its other inputs, resolved for the whole suite by `e2e/harness-ports.ts`. A
+local run starts its own servers on those seven ports and refuses before any of
 them starts if one is taken, so it never
 truncates the database behind a server it did not start;
 `DISPATCH_E2E_REUSE_SERVERS=1` is the opt-in for running against a harness you
@@ -84,8 +85,13 @@ live sessions with `setLiveSessions` from `e2e/agents.ts`. It starts
 credential-request feature is on, and tests seed its pending requests with
 `setPendingCredentialRequests` from `e2e/fake-broker-helpers.ts`; an empty
 `DISPATCH_E2E_AGENT_SECRETS_URL` runs the suite with no broker instead, as a
-deployment that configures none (`AGENTS.md` has the switch). It also starts
-`e2e/plain-http-proxy.ts` on `PLAIN_HTTP_PORT` for the plain-HTTP project.
+deployment that configures none (`AGENTS.md` has the switch). Beside the fake
+broker, `e2e/run-broker.sh` starts the real broker on `REAL_BROKER_PORT` and the
+dev OIDC issuer it trusts on `DEV_OIDC_ISSUER_PORT`, in a database of its own
+(`<DATABASE_URL's database>_broker`, recreated at each start), which only the
+browser and `e2e/broker-approval.e2e.ts`'s seeding step reach: the server keeps
+reading the fake. It also starts `e2e/plain-http-proxy.ts` on `PLAIN_HTTP_PORT`
+for the plain-HTTP project.
 
 Run the local harness with its isolated database available:
 
@@ -125,8 +131,9 @@ That script refuses a `dispatch-pg` on any image but its pinned pgvector one, si
 migrations need the `vector` extension, and prints the commands that move the container's data
 volume onto that image, quoted so they paste as they read. The harness ports
 (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`,
-`FAKE_BROKER_PORT`) move the instance, and the command refuses before anything starts when one is
-taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a psql in flight too.
+`FAKE_BROKER_PORT`, `DEV_OIDC_ISSUER_PORT`, `REAL_BROKER_PORT`) move the instance, and the command
+refuses before anything starts when one is taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`),
+and a Ctrl-C ends a psql in flight too.
 
 A spec runs against the instance with the printed command, which sets
 `DISPATCH_E2E_REUSE_SERVERS=1` and the same `DATABASE_URL`; each spec empties the database and the

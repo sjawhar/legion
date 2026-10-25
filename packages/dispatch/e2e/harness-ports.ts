@@ -1,8 +1,10 @@
-/** The five harness ports, resolved and validated once for every reader in `e2e/`.
+/** The seven harness ports, resolved and validated once for every reader in `e2e/`.
  *
- * `e2e/run-server.sh:21-24` resolves the first four variables with `${VAR:-default}`, so an empty
- * value means the default here too, the same rule for all five. `PLAIN_HTTP_PORT` is the
- * plain-HTTP project's browser-facing proxy, which only the TypeScript harness reads.
+ * `e2e/run-server.sh:21-24` resolves `DISPATCH_E2E_PORT` and the three fake listeners' variables,
+ * and `e2e/run-broker.sh` `DISPATCH_E2E_PORT`, `DEV_OIDC_ISSUER_PORT` and `REAL_BROKER_PORT`, each
+ * with `${VAR:-default}`, so an empty value means the default here too, the same rule for all
+ * seven. `PLAIN_HTTP_PORT` is the plain-HTTP project's browser-facing proxy, which only the
+ * TypeScript harness reads.
  * A value that is not a port in canonical decimal is refused naming its variable, because every
  * later consumer turns it into something that names nothing: `net.connect` raises
  * `ERR_SOCKET_BAD_PORT` on `NaN`, `Bun.serve` binds a random port for `0`, and a URL built from a
@@ -34,14 +36,16 @@ function harnessPort(variable: string, fallback: string): HarnessPort {
   return { port, variable };
 }
 
-/** The five ports by listener, the one place a port is paired with its variable: the Playwright
+/** The seven ports by listener, the one place a port is paired with its variable: the Playwright
  *  config's listener table spreads these, and the collision check below names them. */
 export const harnessPorts = {
+  devIssuer: harnessPort("DEV_OIDC_ISSUER_PORT", "9025"),
   dispatch: harnessPort("DISPATCH_E2E_PORT", "8777"),
   fakeBroker: harnessPort("FAKE_BROKER_PORT", "9024"),
   fakeEnvoy: harnessPort("FAKE_ENVOY_PORT", "9021"),
   fakeGithub: harnessPort("FAKE_GITHUB_PORT", "9022"),
   plainHttp: harnessPort("PLAIN_HTTP_PORT", "9023"),
+  realBroker: harnessPort("REAL_BROKER_PORT", "9026"),
 };
 
 // Two variables naming one port would each pass a per-port check, and every consumer would then

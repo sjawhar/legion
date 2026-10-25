@@ -24,7 +24,6 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/sjawhar/envoy/internal/broker/brokertest"
-	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -118,9 +117,9 @@ func (f approvalFixture) start(t *testing.T, databaseURL, publicURL string, env 
 	return startBroker(t, brokerOptions{Binary: f.binary, Env: append(f.baseEnv(databaseURL, publicURL), env...)})
 }
 
-// pods is a podBroker on base, the one way every broker here is asked for a secret.
-func (f approvalFixture) pods(t *testing.T, base string) podBroker {
-	return podBroker{t: t, base: base, issuer: f.issuer, key: f.podKey, audience: approvalPodAudience}
+// pods is a brokertest.Pods on base, the one way every broker here is asked for a secret.
+func (f approvalFixture) pods(t *testing.T, base string) brokertest.Pods {
+	return brokertest.Pods{T: t, Base: base, Token: brokertest.IssuerTokens(t, f.issuer, f.podKey, approvalPodAudience)}
 }
 
 // dispatchToken is Dispatch's server's own projected ServiceAccount token, as it calls the broker.
@@ -130,28 +129,12 @@ func (f approvalFixture) dispatchToken(t *testing.T) string {
 	return f.issuer.Mint(t, f.podKey, claims)
 }
 
-// state reads request id's state as pod p, through GET /v1/requests/{id} with the pod's proof.
-func (b podBroker) state(p pod, id string) requestReply {
-	b.t.Helper()
-	path := "/v1/requests/" + id
-	signed, err := proof.Sign(p.key, p.enrollmentID, http.MethodGet, b.base+path, time.Now())
-	if err != nil {
-		b.t.Fatal(err)
-	}
-	status, answer := accountCall(b.t, b.base, http.MethodGet, path, map[string]string{"Proof": signed}, nil)
-	if status != http.StatusOK {
-		b.t.Fatalf("%s's GET %s = %d %s, want 200", p.runtimeID, path, status, answer)
-	}
-	var reply requestReply
-	b.decode(answer, &reply)
-	return reply
-}
-
-// requirePending fails t unless request id, which pod p made, is still pending on its record.
-func (b podBroker) requirePending(p pod, id, after string) {
-	b.t.Helper()
-	if reply := b.state(p, id); reply.State != "pending" || reply.GrantID != nil {
-		b.t.Fatalf("after %s the request is %+v, want still pending with no grant", after, reply)
+// requirePending fails pods' test unless request id, which pod p made, is still pending on its
+// record.
+func requirePending(pods brokertest.Pods, p brokertest.Pod, id, after string) {
+	pods.T.Helper()
+	if reply := pods.State(p, id); reply.State != "pending" || reply.GrantID != nil {
+		pods.T.Fatalf("after %s the request is %+v, want still pending with no grant", after, reply)
 	}
 }
 
@@ -282,8 +265,8 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		t.Fatalf("the broker's boot log does not say sign-in is on:\n%s", broker.Boot)
 	}
 
-	var launch launcher
-	var podA, podB pod
+	var launch brokertest.Launcher
+	var podA, podB brokertest.Pod
 	var requestA, requestB, recordA, recordB string
 	newBrowser := func(t *testing.T) *brokertest.Browser {
 		return brokertest.NewBrowser(t, base, http.DefaultTransport, f.issuer)
@@ -291,9 +274,9 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 
 	t.Run("a pod's request for ada's secret waits on its record's page", func(t *testing.T) {
 		pods := f.pods(t, base)
-		launch = pods.logIn(approvalLauncherService, approvalLauncherAccount)
-		podA = pods.enroll(launch, "pod-a", approvalPodAccount)
-		reply := pods.ask(podA, approvalSecretName)
+		launch = pods.LogIn(approvalLauncherService, approvalLauncherAccount)
+		podA = pods.Enroll(launch, "pod-a", approvalPodAccount)
+		reply := pods.Ask(podA, approvalSecretName)
 		if reply.State != "pending" || reply.RecordID == nil || string(reply.Approver) != `"`+ada+`"` {
 			t.Fatalf("pod-a's request = %+v (approver %s), want pending on a record ada approves", reply, reply.Approver)
 		}
@@ -381,11 +364,11 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 				t.Fatalf("the page after ada's Approve does not say it was granted:\n%s", outcome)
 			}
 			pods := f.pods(t, base)
-			reply := pods.state(podA, requestA)
+			reply := pods.State(podA, requestA)
 			if reply.State != "granted" || reply.GrantID == nil || reply.ApproveURL != "" {
 				t.Fatalf("pod-a's request after ada's Approve = %+v, want granted with a grant and no approve_url", reply)
 			}
-			if values := pods.values(podA, *reply.GrantID); values[approvalSecretName] != approvalSecretValue {
+			if values := pods.Values(podA, *reply.GrantID); values[approvalSecretName] != approvalSecretValue {
 				t.Fatalf("pod-a's grant values = %v, want %s=%s", values, approvalSecretName, approvalSecretValue)
 			}
 		})
@@ -393,8 +376,8 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 
 	t.Run("a second pending record for the refusals", func(t *testing.T) {
 		pods := f.pods(t, base)
-		podB = pods.enroll(launch, "pod-b", approvalPodAccount)
-		reply := pods.ask(podB, approvalSecretName)
+		podB = pods.Enroll(launch, "pod-b", approvalPodAccount)
+		reply := pods.Ask(podB, approvalSecretName)
 		if reply.State != "pending" || reply.RecordID == nil || reply.ApproveURL != base+"/approve/"+*reply.RecordID {
 			t.Fatalf("pod-b's request = %+v, want pending with its record's approve_url", reply)
 		}
@@ -429,7 +412,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		if outcome := brokertest.PageText(t, b.Get(t, res.Header.Get("Location")).Body); !strings.Contains(outcome, approvalSecretName+": not yours to decide; only "+ada+" may") {
 			t.Fatalf("the page after carol's forged POST does not say it was not hers to decide:\n%s", outcome)
 		}
-		f.pods(t, base).requirePending(podB, requestB, "carol's forged POST")
+		requirePending(f.pods(t, base), podB, requestB, "carol's forged POST")
 	})
 
 	t.Run("A5: Dispatch's ServiceAccount token on the account routes is sent to the page", func(t *testing.T) {
@@ -441,7 +424,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 				t.Fatalf("Dispatch's %s of ada's secret = %d %s, want 403 DECIDE_ON_BROKER_PAGE naming the page", route, status, answer)
 			}
 		}
-		f.pods(t, base).requirePending(podB, requestB, "Dispatch's approve and deny")
+		requirePending(f.pods(t, base), podB, requestB, "Dispatch's approve and deny")
 	})
 
 	t.Run("A5: an ID token for ada minted for Dispatch's OAuth client decides nothing", func(t *testing.T) {
@@ -460,7 +443,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		if status != http.StatusUnauthorized || decodeError(t, answer).Code != "ACCOUNT_TOKEN_INVALID" {
 			t.Fatalf("the account approve route with ada's Dispatch ID token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, answer)
 		}
-		f.pods(t, base).requirePending(podB, requestB, "ada's Dispatch ID token")
+		requirePending(f.pods(t, base), podB, requestB, "ada's Dispatch ID token")
 	})
 
 	t.Run("A5: a callback with a code from a sign-in the broker did not start makes no session", func(t *testing.T) {
@@ -497,7 +480,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 				res.Status, res.Cookie(sessionCookieName), res.Body)
 		}
 		requireSignInRedirect(t, f.issuer, b.Get(t, "/approve/"+recordB), "the page after the grafted callback")
-		f.pods(t, base).requirePending(podB, requestB, "the foreign callbacks")
+		requirePending(f.pods(t, base), podB, requestB, "the foreign callbacks")
 	})
 
 	t.Run("A2: a session past its expiry decides nothing and signs in again", func(t *testing.T) {
@@ -520,7 +503,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 			t.Fatalf("Approve with the expired session's cookie = %d, want 403 not signed in:\n%s", res.Status, res.Body)
 		}
 		requireSignInRedirect(t, f.issuer, replay.Get(t, "/approve/"+recordB, old), "the page with the expired session's cookie")
-		f.pods(t, base).requirePending(podB, requestB, "the expired session's POST")
+		requirePending(f.pods(t, base), podB, requestB, "the expired session's POST")
 	})
 
 	t.Run("A2: a logged-out session's replayed cookie decides nothing", func(t *testing.T) {
@@ -539,7 +522,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		if res.Status != http.StatusForbidden || !strings.Contains(brokertest.PageText(t, res.Body), "Not signed in") {
 			t.Fatalf("Approve with the logged-out session's cookie = %d, want 403 not signed in:\n%s", res.Status, res.Body)
 		}
-		f.pods(t, base).requirePending(podB, requestB, "the logged-out session's POST")
+		requirePending(f.pods(t, base), podB, requestB, "the logged-out session's POST")
 	})
 
 	t.Run("A10: sign-in is all or none, and none boots with approvals off", func(t *testing.T) {
@@ -582,7 +565,7 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		if status != http.StatusForbidden || decodeError(t, answer).Code != "DECIDE_ON_BROKER_PAGE" {
 			t.Fatalf("Dispatch's approve with sign-in off = %d %s, want 403 DECIDE_ON_BROKER_PAGE", status, answer)
 		}
-		f.pods(t, base).requirePending(podB, requestB, "the sign-in-off broker")
+		requirePending(f.pods(t, base), podB, requestB, "the sign-in-off broker")
 	})
 
 	t.Run("A11: a sign-in begun on one process finishes on another and decides on a third", func(t *testing.T) {
@@ -595,8 +578,8 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 
 		replicas.route(t, first)
 		pods := f.pods(t, replicas.URL)
-		p := pods.enroll(pods.logIn(approvalLauncherService, approvalLauncherAccount), "pod-c", approvalPodAccount)
-		reply := pods.ask(p, approvalSecretName)
+		p := pods.Enroll(pods.LogIn(approvalLauncherService, approvalLauncherAccount), "pod-c", approvalPodAccount)
+		reply := pods.Ask(p, approvalSecretName)
 		if reply.State != "pending" || reply.RecordID == nil || reply.ApproveURL != replicas.URL+"/approve/"+*reply.RecordID {
 			t.Fatalf("pod-c's request = %+v, want pending with its record's page on the shared URL", reply)
 		}
@@ -631,11 +614,11 @@ func TestTheBinaryApprovesASecretOnItsOwnPage(t *testing.T) {
 		if !strings.Contains(third.Log(), "approval page decision login="+ada+" record="+recordC) {
 			t.Fatalf("process #3 did not log ada's decision of %s:\n%s", recordC, third.Log())
 		}
-		granted := pods.state(p, reply.RequestID)
+		granted := pods.State(p, reply.RequestID)
 		if granted.State != "granted" || granted.GrantID == nil {
 			t.Fatalf("pod-c's request after ada's Approve on process #3 = %+v, want granted", granted)
 		}
-		if values := pods.values(p, *granted.GrantID); values[approvalSecretName] != approvalSecretValue {
+		if values := pods.Values(p, *granted.GrantID); values[approvalSecretName] != approvalSecretValue {
 			t.Fatalf("pod-c's grant values = %v, want %s=%s", values, approvalSecretName, approvalSecretValue)
 		}
 	})

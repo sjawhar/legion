@@ -5,7 +5,7 @@
 import { fileURLToPath } from "node:url";
 
 import { baseUrl, getInbox, listAgents, listBroadcasts, userHeaders } from "./api";
-import { type HarnessListener, harnessListeners } from "./harness-listeners";
+import { goBuildBootMs, type HarnessListener, harnessListeners } from "./harness-listeners";
 import { harnessPorts } from "./harness-ports";
 import { databaseUrlRefusal, Interrupted, Supervisor, shellQuote } from "./local-instance-support";
 import { isPortUsed, takenPorts } from "./port-probe";
@@ -18,9 +18,7 @@ const envoyPackage = fileURLToPath(new URL("../../envoy", import.meta.url));
 /** The server packages/envoy/scripts/dev-postgres.sh serves, at its `postgres` database. */
 const adminUrl = "postgres://postgres:dispatch@127.0.0.1:55432/postgres?sslmode=disable";
 const localDatabase = "dispatch_local";
-/** run-server.sh builds the server before it listens, and a cold `go build` on a busy machine is
- *  the long pole, so the server gets the ten minutes the docs media harness gives it. */
-const serverBootMs = 600_000;
+/** Every listener but the ones that build Go (`goBuildBootMs`) is a Bun process up in moments. */
 const listenerBootMs = 30_000;
 
 /** Every process this command starts. Ctrl-C or a SIGTERM interrupts it from the first step on,
@@ -44,7 +42,7 @@ async function waitUntilReady(listener: HarnessListener): Promise<void> {
   const { child, name } = supervisor.start(listener.name, listener.argv, dispatchPackage);
   const server = listener.port === harnessPorts.dispatch.port;
   const target = server ? `${baseUrl}/healthz` : `127.0.0.1:${listener.port}`;
-  const timeoutMs = server ? serverBootMs : listenerBootMs;
+  const timeoutMs = listener.buildsGo ? goBuildBootMs : listenerBootMs;
   const ready = async () => {
     if (!server) return isPortUsed(listener.port);
     try {
@@ -116,7 +114,7 @@ async function main(): Promise<void> {
     throw new Error("unset PLAYWRIGHT_BASE_URL: this command starts its own servers");
   }
   const given = process.env.DATABASE_URL?.trim();
-  for (const tool of ["go", "psql", "flock", "openssl", ...(given ? [] : ["docker"])]) {
+  for (const tool of ["go", "psql", "flock", "openssl", "curl", ...(given ? [] : ["docker"])]) {
     if (!Bun.which(tool)) throw new Error(`${tool} is required on PATH`);
   }
   const refusal = given ? databaseUrlRefusal(given) : undefined;

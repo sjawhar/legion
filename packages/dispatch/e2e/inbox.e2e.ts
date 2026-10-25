@@ -18,7 +18,7 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { needsYouCards } from "./editor";
-import { setCredentialRecords, setPendingCredentialRequests } from "./fake-broker-helpers";
+import { setPendingCredentialRequests } from "./fake-broker-helpers";
 import {
   assigneeFilter,
   assigneeOptions,
@@ -825,7 +825,8 @@ test("a snoozed row leaves Later, the banner and the Needs-you badge alone until
 // A credential request is listed above the asks and waits on its approver as much as an ask
 // whose turn is theirs, so it is as much a reason not to say "Nothing needs you" and as much a
 // part of the Needs-you badge and the Blocked-on-you banner. A request waiting on someone else
-// is in neither.
+// is in neither. A secret request is decided on the secrets broker's own page, so its row is a
+// plain link to the page the broker named for it, `approve_url`, as the broker gave it.
 test("a pending credential request alone is listed, counted, and keeps the empty state away", async ({
   browser,
 }, testInfo) => {
@@ -838,8 +839,10 @@ test("a pending credential request alone is listed, counted, and keeps the empty
     await expect(empty).toBeVisible();
     await expect(badge).toHaveCount(0);
 
+    const approveUrl = "https://secrets.internal.example/approve/record-alice";
     await setPendingCredentialRequests([
       {
+        approve_url: approveUrl,
         approver: "alice",
         identifiers: ["DEMO_API_KEY"],
         kind: "agent_secret",
@@ -847,6 +850,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
         requested_at: new Date().toISOString(),
       },
       {
+        approve_url: "https://secrets.internal.example/approve/record-bob",
         approver: "bob",
         identifiers: ["BOB_API_KEY"],
         kind: "agent_secret",
@@ -860,7 +864,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
     await expect(requests.getByRole("link")).toHaveCount(1);
     await expect(requests.getByRole("link")).toContainText("Secret request");
     await expect(requests.getByRole("link")).toContainText("DEMO_API_KEY");
-    await expect(requests.getByRole("link")).toHaveAttribute("href", "/credentials/record-alice");
+    await expect(requests.getByRole("link")).toHaveAttribute("href", approveUrl);
     await expect(empty).toHaveCount(0);
     await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
     await expect(page.getByText(/^Blocked on you: 1 item, oldest/)).toBeVisible();
@@ -877,9 +881,9 @@ test("a pending credential request alone is listed, counted, and keeps the empty
 });
 
 // LEGION-587: a credential request's session (either id - the enrollment's and the request's
-// stated one, here the same live session) names a live session in the Inbox row and on the
-// record page alike, each linked to its live conversation.
-test("a pending credential request naming a running session links to it, in the Inbox and on its record page", async ({
+// stated one, here the same live session) names a live session in the Inbox row, linked to its
+// live conversation.
+test("a pending credential request naming a running session links to it in the Inbox", async ({
   browser,
 }) => {
   const alice = await asUser(browser, "alice");
@@ -893,38 +897,15 @@ test("a pending credential request naming a running session links to it, in the 
         title: "Reviewing LEGION-587",
       },
     ]);
-    const requestedAt = new Date().toISOString();
     await setPendingCredentialRequests([
       {
+        approve_url: "https://secrets.internal.example/approve/record-session-587",
         approver: "alice",
         identifiers: ["SESSION_API_KEY"],
         kind: "agent_secret",
         record_id: "record-session-587",
-        requested_at: requestedAt,
+        requested_at: new Date().toISOString(),
         session: { enrollment: "sess-session-587", request: "sess-session-587" },
-      },
-    ]);
-    await setCredentialRecords([
-      {
-        approver: "alice",
-        decided: null,
-        enrollment: {
-          kind: "session",
-          operator: "alice",
-          runtime_id: "host-alice:123:0",
-          slot: null,
-        },
-        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-        identifiers: ["SESSION_API_KEY"],
-        kind: "agent_secret",
-        lifetime_seconds: 3600,
-        record_id: "record-session-587",
-        requested_at: requestedAt,
-        reason: "need it for the fix",
-        rules_version: "rules-v1",
-        service: null,
-        session: { enrollment: "sess-session-587", request: "sess-session-587" },
-        state: "pending",
       },
     ]);
 
@@ -933,12 +914,6 @@ test("a pending credential request naming a running session links to it, in the 
     const inboxSessionLink = requests.getByRole("link", { name: "Reviewing LEGION-587" });
     await expect(inboxSessionLink).toBeVisible();
     await expect(inboxSessionLink).toHaveAttribute("href", "/agents/sess-session-587/live");
-
-    await requests.getByRole("link", { name: /SESSION_API_KEY/ }).click();
-    await expect(page).toHaveURL(/\/credentials\/record-session-587$/);
-    const recordSessionLink = page.getByRole("link", { name: "Reviewing LEGION-587" });
-    await expect(recordSessionLink).toBeVisible();
-    await expect(recordSessionLink).toHaveAttribute("href", "/agents/sess-session-587/live");
   } finally {
     await alice.close();
   }
@@ -946,7 +921,7 @@ test("a pending credential request naming a running session links to it, in the 
 
 // The common host-session case - only the request's own override is set, no enrollment session_id
 // at all - shows the request's session with no preamble.
-test("a pending credential request naming only the request's session id shows it with no preamble, in the Inbox and on its record page", async ({
+test("a pending credential request naming only the request's session id shows it with no preamble in the Inbox", async ({
   browser,
 }) => {
   const alice = await asUser(browser, "alice");
@@ -960,38 +935,15 @@ test("a pending credential request naming only the request's session id shows it
         title: "Reviewing LEGION-587 request-only",
       },
     ]);
-    const requestedAt = new Date().toISOString();
     await setPendingCredentialRequests([
       {
+        approve_url: "https://secrets.internal.example/approve/record-request-only-587",
         approver: "alice",
         identifiers: ["SESSION_REQUEST_ONLY_KEY"],
         kind: "agent_secret",
         record_id: "record-request-only-587",
-        requested_at: requestedAt,
+        requested_at: new Date().toISOString(),
         session: { enrollment: null, request: "sess-request-only-587" },
-      },
-    ]);
-    await setCredentialRecords([
-      {
-        approver: "alice",
-        decided: null,
-        enrollment: {
-          kind: "session",
-          operator: "alice",
-          runtime_id: "host-alice:456:0",
-          slot: null,
-        },
-        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
-        identifiers: ["SESSION_REQUEST_ONLY_KEY"],
-        kind: "agent_secret",
-        lifetime_seconds: 3600,
-        record_id: "record-request-only-587",
-        requested_at: requestedAt,
-        reason: "need it for the fix",
-        rules_version: "rules-v1",
-        service: null,
-        session: { enrollment: null, request: "sess-request-only-587" },
-        state: "pending",
       },
     ]);
 
@@ -1002,12 +954,37 @@ test("a pending credential request naming only the request's session id shows it
       name: "Reviewing LEGION-587 request-only",
     });
     await expect(inboxSessionLink).toHaveAttribute("href", "/agents/sess-request-only-587/live");
+  } finally {
+    await alice.close();
+  }
+});
 
-    await requests.getByRole("link", { name: /SESSION_REQUEST_ONLY_KEY/ }).click();
-    await expect(page).toHaveURL(/\/credentials\/record-request-only-587$/);
-    await expect(page.getByText(/says it came from/)).toHaveCount(0);
-    const recordSessionLink = page.getByRole("link", { name: "Reviewing LEGION-587 request-only" });
-    await expect(recordSessionLink).toHaveAttribute("href", "/agents/sess-request-only-587/live");
+// A broker older than its approval page names no `approve_url`, so Dispatch has nowhere to send
+// the approver: the row is listed and counted as any other, links nowhere, and says where the
+// request is decided.
+test("a pending secret request with no approve_url is listed unlinked, saying it is decided on the secrets broker", async ({
+  browser,
+}) => {
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await setPendingCredentialRequests([
+      {
+        approver: "alice",
+        identifiers: ["OLD_BROKER_KEY"],
+        kind: "agent_secret",
+        record_id: "record-old-broker",
+        requested_at: new Date().toISOString(),
+      },
+    ]);
+
+    await page.goto("/");
+    const requests = page.getByRole("region", { name: "Credential requests" });
+    const row = requests.getByRole("listitem").filter({ hasText: "OLD_BROKER_KEY" });
+    await expect(row).toContainText("Secret request");
+    await expect(row).toContainText("Decided on the secrets broker.");
+    await expect(requests.getByRole("link")).toHaveCount(0);
+    await expect(page.getByText(/^Needs you 1$/).first()).toBeVisible();
   } finally {
     await alice.close();
   }
@@ -1036,6 +1013,7 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
 
     await setPendingCredentialRequests([
       {
+        approve_url: "https://secrets.internal.example/approve/record-alice",
         approver: "alice",
         identifiers: ["DEMO_API_KEY"],
         kind: "agent_secret",

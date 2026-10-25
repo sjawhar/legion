@@ -391,6 +391,12 @@ jobs:
               - 'packages/envoy/internal/pglisten/**'
               - 'packages/envoy/internal/routing/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'
+              # The real secrets broker, its dev issuer and the request seeder the approval browser
+              # tests build and start (e2e/run-broker.sh), with the envoy packages they compile
+              # beyond the server's (`go list -deps` of the three in packages/envoy).
+              - 'packages/envoy/cmd/broker/**'
+              - 'packages/envoy/cmd/dev-oidc-issuer/**'
+              - 'packages/envoy/internal/broker/**'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
               # dev-postgres.test.sh (envoy-go) reads too.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'

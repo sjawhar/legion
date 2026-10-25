@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
-import { harnessListeners } from "./harness-listeners";
+import { goBuildBootMs, harnessListeners } from "./harness-listeners";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 import { takenPorts } from "./port-probe";
 
@@ -22,7 +22,7 @@ const startedListeners = startsOwnServers
   : harnessListeners.filter((listener) => listener.deployed);
 
 // `DISPATCH_E2E_REUSE_SERVERS=1` runs the suite against a harness the caller started and left
-// listening on the five harness ports. Unset or empty starts this run's own servers and refuses a
+// listening on the harness ports. Unset or empty starts this run's own servers and refuses a
 // port already taken, because reusing a server this run did not start points `e2e/seed.ts`'s
 // truncation at whatever database that server holds — another lane's. Any other value is refused
 // rather than quietly read as "no".
@@ -109,10 +109,13 @@ export default defineConfig({
   // Runs once the web servers are up and before any row: it refuses a target that does not read
   // this run's fake Envoy (e2e/preflight.ts).
   globalSetup: fileURLToPath(new URL("./preflight.ts", import.meta.url)),
-  webServer: startedListeners.map(({ argv, port }) => ({
+  // A listener that builds Go waits on that build, Playwright's 60 s default being too short for a
+  // cold one (e2e/harness-listeners.ts).
+  webServer: startedListeners.map(({ argv, buildsGo, port }) => ({
     command: argv.join(" "),
     port,
     reuseExistingServer: reuseServers,
+    ...(buildsGo ? { timeout: goBuildBootMs } : {}),
   })),
   projects: [
     { name: "chromium", testIgnore: plainHttpSpecs, use: { ...devices["Desktop Chrome"] } },
