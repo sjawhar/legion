@@ -2,60 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T16:20:00Z",
-  "round": 4,
-  "testedHead": "91f50e61b385 (code head: 802c9b23 'feat(image)!: the worker image ships Claude Code's pin, and a pod fetches the binary', merged forward with main 371d6c87; 356d7df7 is its handoff-only child)",
+  "completed": "2026-10-25T16:56:00Z",
+  "round": 5,
+  "testedHead": "801c88948293 (code head: review round 3's fixes on top of 91f50e61; d8539b82 is its handoff-only child). Code changed since round 4: packages/daemon/internal/runtime/backend.go, sandbox/plugins.go, sandbox/plugins_test.go, scripts/e2e/stage1-skeleton.sh",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran both real-binary commands at 91f50e61: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts` -> 9 pass, 0 fail, 66 expect() calls in 156.74s; `cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts` -> 2 pass, 0 fail in 10.23s. The whole-worker baseline through the real legion claude-bridge built from this head also held: 5 inbox reminders matched exactly, one publish at count 3 with last words; after a SIGTERM and --resume the publish named the words said before the kill."
+    "how": "Re-ran at 801c8894: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts` -> 9 pass, 0 fail in 135.48s; `cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts` -> 2 pass, 0 fail in 5.92s; and the fourth proof, the pod's install of the pinned release, driven independently by running the rendered install block (proof 1 below)."
   },
-  "legionEnvoyAndContractsAt2fc4b487": "The architect's question: run 40195025973 at 2fc4b487 failed envoy-go and broker-multiprocess with a build failure of packages/envoy/cmd/broker's tests (`service_account_scope_test.go:48` and `service_accounts_test.go:46`: `startBroker` called with the old eight-string signature, `want (*testing.T, brokerOptions)`). That is main's own semantic conflict between #2185 (BROKER_SERVICES accounts tests) and #2162 (startBroker's options form): main's own run of that workflow at 3ca092a6 failed the same way (run 40191054671, push), and main fixed it in #2194 (f9d5eabb, run 40198868994 success). This branch changes no file under packages/envoy (0 paths in `jj diff --from main@origin --to 91f50e61`). At 91f50e61, which carries #2194, `cd packages/envoy && go test -count=1 -run '^$' ./cmd/broker` compiles: `ok … [no tests to run]`. Not this change's.",
+  "reviewRound3": [
+    "Important (cold-cache race in claudeCodeBlock): fixed by construction, as the architect asked to judge it. In the block rendered at 801c8894 the only filesystem call on the shared cache before the flock is `mkdir -p -- \"$cache\" 2>/dev/null`, which succeeds when another role has just made the directory; the regular-file recovery `{ rm -f -- \"$cache\" && mkdir -p -- \"$cache\"; }` runs only when that mkdir fails. The old line's failure after the race shown deterministically: with the directory already made, `rm -f -- \"$cache\"` printed `rm: cannot remove 'c': Is a directory` and the subshell exited 1 before npm; the new line in the same state reached npm, exit 0. The race itself was not reproduced, and per the architect no attempt was made to hunt it.",
+    "Minor: packages/daemon/internal/runtime/backend.go:41-44 and scripts/e2e/stage1-skeleton.sh:250-253 now say the image carries Claude Code's pin and its plugin and a pod installs the binary at launch; the PR body's Change bullet says the same, and its E2E (implementer) line names 801c8894 with the pod install among its proofs."
+  ],
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Acceptance 1 (a pod launches a Claude Code worker), as the image now carries the pin and not the binary: the generation's start script installs the pinned release, verifies it, and execs the agent only then",
-      "surface": "The start wrapper the sandbox runtime renders for a Claude implementer's generations 1 and 2 (startArgv/claudeCodeBlock at 91f50e61, written out by a throwaway in-package Go test), run with /bin/sh in this issue pod of the production cluster, which has the worker image's /usr/local/bin/npm, node and /usr/bin/flock and real egress to the npm registry. Only two paths were rewritten to writable copies: the role's state home and /opt/legion/claude-code (this pod's image predates the pin)",
-      "command": "XDG_CACHE_HOME=$TMPDIR/r4/xdg sh -c \"$(cat script-g1.sh)\" legion-start 0 <g1 claude path> --version; then the g2 script the same way",
-      "observed": "g1: `added 2 packages in 24s`, the version check passed, and the exec'd agent printed `2.1.310 (Claude Code)`, exit 0, 26 s, 279M under legion-claude-code/g1 and 126M of npm cache. g2 from the warm cache: `added 2 packages in 12s`, `2.1.310 (Claude Code)`, exit 0, 13 s, and g1 was removed (only g2 left). Two roles (implementer, tester) launching at once on one cache serialized on the flock and both succeeded (11 s and 20 s).",
-      "headSha": "91f50e61b385",
-      "negativeControl": "Each failure printed a `legion claude-code:` line, exited 1 and never reached the agent's exec: a range pin (^2.1.310) that npm ci accepts was refused by the version check (`--version printed \"2.1.310 (Claude Code)\"; … pins ^2.1.310`); an unreachable registry with an empty cache gave `legion claude-code: installing the Claude Code … pins into …/g2 failed`; a lockfile whose platform-package sha512 was replaced made npm skip that optional package as corrupted, and the check refused the missing binary (`running …/claude --version: spawnSync … ENOENT`). The unaltered control execs the agent (`AGENT-EXECED`, exit 0)."
+      "criterion": "Acceptance 1 (a pod launches a Claude Code worker), review round 3's race: Claude roles of one pod installing on a cold shared npm cache at once, and a cache path an interrupted flock left as a regular file",
+      "surface": "claudeCodeBlock as the sandbox runtime renders it at 801c8894 for the implementer and the tester (written out by a throwaway in-package Go test), run with /bin/sh in this issue pod of the production cluster, which has the worker image's npm, node and /usr/bin/flock and real egress to npm; only the role state homes and /opt/legion/claude-code were rewritten to writable copies",
+      "command": "for i in 1 2: fresh XDG_CACHE_HOME, `sh run-implementer.sh & sh run-tester.sh & wait`; then `: > xdgf/legion-claude-code; XDG_CACHE_HOME=xdgf sh run-implementer.sh`",
+      "observed": "Both cold concurrent runs: implementer and tester each `added 2 packages`, exit 0 (12 s/9 s, 11 s/7 s), serialized on the cache lock. With a regular file at the cache path the block replaced it with a directory and installed (`added 2 packages in 10s`, exit 0)",
+      "headSha": "801c88948293",
+      "negativeControl": "The old line's second half in the post-race state (directory already present): `rm: cannot remove 'c': Is a directory`, subshell exit 1, npm never reached; the new line in the same state reached npm, exit 0"
     },
     {
-      "criterion": "Acceptance 1 (the image probe's claude-code row): the image's pin names one exact version with a sha512 integrity for the platform package a pod installs",
-      "surface": "capabilities.ReadClaudeCodePin over the repository's real packages/daemon/docker/claude-code pin and mutants of it (throwaway in-package Go test)",
-      "command": "cd packages/daemon && go test -count=1 -v -run TestZZTesterPin ./internal/capabilities/",
-      "observed": "The real pin answers version 2.1.310 with no error",
-      "headSha": "91f50e61b385",
-      "negativeControl": "Refused, each by name: a `^2.1.310` range (`not an exact version`), a lockfile root out of step (`records … at \"2.1.309\" where … pins 2.1.310`), a lockfile without the linux-x64 package (`locks no @anthropic-ai/claude-code-linux-x64`), and a sha1 integrity (`carries no sha512 integrity`)"
-    },
-    {
-      "criterion": "Acceptance 3 and 5 on Oh My Pi, unchanged by this round",
+      "criterion": "Acceptance 3 and 5 on Oh My Pi, unchanged since round 4",
       "surface": "The pinned Oh My Pi binary omp/18.8.9 with both real plugin entries and stand-ins",
       "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts",
-      "observed": "9 pass, 0 fail, 66 expect() calls in 156.74s",
-      "headSha": "91f50e61b385",
+      "observed": "9 pass, 0 fail in 135.48s",
+      "headSha": "801c88948293",
       "negativeControl": "The file's case that refuses the first architect publish with 404 unclaimed asserts it is not recorded as accepted and is retried under the same key"
     },
     {
-      "criterion": "Acceptance 3, 5 and 11 on Claude Code after main's claude-envoy changes merged in (#2154 registers the session name)",
-      "surface": "A whole Claude Code worker: real legion claude-bridge built from 91f50e61, real Claude Code 2.1.310, the committed dist/envoy-channel.js and both plugin dirs, stand-in model/daemon/listener/NATS",
-      "command": "cd packages/claude-envoy && TMPDIR=$TMPDIR bun tests/zz-tester-s1.ts; TMPDIR=$TMPDIR bun tests/zz-tester-s3.ts resume (throwaway runners from $TMPDIR/infra220-tester-harness/, removed)",
-      "observed": "s1: agent_start=6 agent_end=6, 5 model requests equal to the reminder exactly, one publish at count 3; resume: the resume reminder's publish carried lastMessage \"Thinking (reply 2).\", said before the kill",
-      "headSha": "91f50e61b385",
-      "negativeControl": "Round 3's I1/I2 controls on this harness (an early acknowledgement marks the run reported; a task between failed inbox writes runs as an assignment) are not re-run; the code of both is unchanged since 2fc4b487 apart from merged-in main files outside packages/pi-shared/src/phase-*"
+      "criterion": "Acceptance 11: Claude Code arms the shipped hook entries and acts on a blocked Stop",
+      "surface": "The real Claude Code 2.1.310 binary with the generated plugin tree and the built dist/envoy-channel.js, stand-ins for the Anthropic API, daemon, listener and NATS",
+      "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts",
+      "observed": "2 pass, 0 fail in 5.92s",
+      "headSha": "801c88948293",
+      "negativeControl": "The file asserts PostToolUse fires for the model's own Bash call and for none of the hook's own legion_phase_hook calls"
     }
   ],
-  "scriptsRead": "scripts/e2e/claude-backend-sandbox.sh now asserts the bridge's agent is the generation's installed binary under /legion/scratch/state/implementer/legion-claude-code/g<generation>, that the image holds no /usr/local/bin/claude, that the installed --version's first word equals the pin's version, and after the pod replacement that the new generation runs its own install and the deleted generation's install is gone. Each matches the rendered paths above. `bash -n` passes. Not run (no cluster here).",
-  "ci": "Runs of 91f50e61 at 16:16Z: PR Title 40210101512 success; Tests 40210101226, Worker Image 40210101245 (builds the image without Claude Code and runs its publish gate and probe) and Docs 40210101161 in progress; Legion Envoy and Contracts 40210101256 queued.",
+  "ci": "Runs of 801c8894 at 16:53Z: Docs 40212834988 success, PR Title 40212834826 success (and the body-edit re-runs), Tests 40212834721 in progress, Worker Image 40212834794 and Legion Envoy and Contracts 40212834732 queued.",
   "notTested": [
-    "scripts/e2e/claude-backend-tmux.sh and scripts/e2e/claude-backend-sandbox.sh were not run (no docker, tmux or cluster access from an issue pod). Acceptance line 1's cluster run is still to happen before acceptance.",
-    "The worker image itself was not built here; the Worker Image run at 91f50e61 does that."
+    "scripts/e2e/claude-backend-tmux.sh and scripts/e2e/claude-backend-sandbox.sh were not run (no docker, tmux or cluster access from an issue pod); the architect has asked two devbox sessions to run them, and acceptance line 1's cluster run is still to happen before acceptance."
   ],
   "risks": [
-    "A corrupted platform tarball does not fail `npm ci` (npm skips an optional dependency whose integrity fails and exits 0), so the launch fails at the version check with `running …/claude --version: … ENOENT`. The launch still fails loudly and nothing unverified runs, but the line names a missing binary; the integrity cause is only in npm's own warning above it. docs/kubernetes.md's `npm ci holds each tarball to the lockfile's integrity` is true; it does not say npm refuses.",
-    "Every Claude launch fetches and unpacks ~279 MB per role per generation (12-26 s here) and fails if the registry is unreachable; the earlier generation's copy is removed, the npm cache (~126 MB) is shared on the issue's volume. A registry outage now fails Claude launches with no fallback, by design.",
-    "Round 3's open risks stand: an uncharged resume loop under a database store while a Claude sibling still records a transcript; Claude roles under cloudsql-iam depending on the session proxy; M1 recorded as a spec departure (a publish failure other than 404 unclaimed/holder_lapsed is retried, not dropped).",
-    "The start wrapper's setup-failure line still says `not starting Oh My Pi` for a Claude launch (pre-existing text)."
+    "A residual of the same shape, much narrower: when the cache path is a regular file (an interrupted flock left one) and two roles start at once, one role's `rm -f` can meet the directory the other just made, and that launch fails loudly with the install's failure line. Read from the construction, not reproduced.",
+    "Round 4's open risks stand: a corrupted platform tarball fails at the version check (ENOENT) because npm skips a corrupt optional package; every Claude launch downloads about 280 MB and fails without the npm registry; M1 recorded as a spec departure (a non-404-unclaimed publish failure is retried, not dropped)."
   ]
 }
