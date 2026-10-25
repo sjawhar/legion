@@ -22,8 +22,8 @@ Usage: e2e-local.sh [--help]
 Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
 fixtures plus one direct message, prove how a send to an unknown session and a
 send whose bus is gone are refused, and write raw and rendered acceptance
-evidence to packages/envoy/out/e2e/. NATS runs in Docker, or as a local
-nats-server process on a host that has no container runtime.
+evidence to packages/envoy/out/e2e/. NATS is a server of this checkout's own
+build (internal/testnats/cmd/natsd), so no container runtime is needed.
 EOF
 }
 
