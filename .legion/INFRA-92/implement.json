@@ -2,71 +2,66 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T07:05:00Z",
-  "round": "the tester's fail at c4229eabc433 (the directory squeezed to no width beside the 64-character name), plus the two items the architect queued: the role-restore guard and the hook timing restated",
+  "completed": "2026-10-25T10:50:00Z",
+  "round": "the reviewer's second changes-requested round at ab2e7080c1ba: three findings, two of them in the role-file work",
   "proof": [
     {
-      "criterion": "Both sentences the spec promises at a laptop's width hold at once: the whole 64-character name, wrapping rather than cut, and a directory that is painted, readable and hoverable (the tester's failure, and the red row it left at agents.e2e.ts:1807).",
-      "surface": "Dispatch's own browser suite in a real Chromium and in the iphone profile, in this pod, against the shared PostgreSQL 17.11 with pgvector on the issue volume.",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e PATH=<pg17>/bin:$PATH LD_LIBRARY_PATH=<pg17 libs> bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agents.e2e.ts",
-      "observed": "34 passed, 0 failed. The tester's row, 'an agent row's directory is still shown beside the longest name in use, so its path stays one hover away' (agents.e2e.ts:1807), passes unmodified in both profiles, and the row above it at :1717 passes with the two assertions added to its laptop branch — the directory visible, and assertWhole over it, which is the architect's condition that the shortened text be read whole rather than merely measured.",
-      "headSha": "6d42d4911eaf67c527648979375ea87f3471ee14",
-      "negativeControl": "The same row at the tester's head: 0 x 16 px and not visible beside name64, against 397 x 16 px in the identical row titled 'Short'. The fix is one floor class; without it the heading's content takes the whole row at md."
+      "criterion": "Finding 1: a soft setRole refused at startup no longer costs the session its role for the life of the process, and a refusal that repeats is still retried.",
+      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree, with a proxy in front of the listener that answers 503 to the first two POSTs of /v1/roles/set and forwards everything else.",
+      "command": "a throwaway probe, /tmp/role-round2-probe.sh (not in the tree), case one",
+      "observed": "After startup: the session alive and already holding — no, precisely: alive=yes with one stderr line, 'could not restore the role from <…> (POST …/v1/roles/set failed with 503: injected listener outage); the next heartbeat retries'. The proxy recorded refusals=2, so the first heartbeat's retry was refused as well, and the listener named the session holder of the role after the third claim. Two refusals, not one, is the point: `transferRole` clears the queued retry only once `restoreRole` resolves, so a single failure would pass even if the retry were one-shot.",
+      "headSha": "450bd2fabe423b2eb8b2ad0b4d1bdd0b5c0dd3a5",
+      "negativeControl": "The same code path with the refusals exhausted is the control the probe's own second case runs: with REFUSALS=0 the claim lands at startup and no retry line is written. Before this round, the catch wrote the same line and nothing ever re-ran the claim — the unit row 'a role claim that fails at startup still starts the session, and the next heartbeat takes the role back' fails against that code."
     },
     {
-      "criterion": "The floor holds at the widths the architect named, and at the ones around them, with nothing clipped and the page inside its viewport.",
-      "surface": "The same rig, a throwaway spec run in the chromium project at four viewport widths and then deleted (it is not in the tree).",
-      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/tmp-wide-check.e2e.ts, the spec setting the viewport to 1280, 1440, 1024 and 768 in turn and printing each box",
-      "observed": "1 passed. The directory is 192 x 16 px at every one of the four widths, its text 'build-host · features' whole with assertWhole, its title the full path, while the heading is 370 x 40 at 1280, 530 x 40 at 1440, 435 x 44 at 1024 and 179 x 80 at 768 — the name taking the further lines, which is the trade the architect accepted. assertPageFits held at all four.",
-      "headSha": "6d42d4911eaf67c527648979375ea87f3471ee14",
-      "negativeControl": "1440 is the control the defect itself supplies: the tester measured the long-name row recovering to 158 px there while 1280 was 0, so a fix that only worked at the wider width would show as an unequal pair here. Both read 192."
+      "criterion": "Finding 2: the role sweep no longer deletes a live holder's only recovery record, and still deletes an abandoned one.",
+      "surface": "The same live rig: a channel server holding a role against the real listener, with two role records in the same directory, both aged past the sweep's thirty days — one belonging to the running session, one to a session that is not running.",
+      "command": "the same probe, case two, then a second channel server whose startup runs the sweep",
+      "observed": "Both records aged to 31.0 days while the first session was running and holding. After two heartbeats: the live holder's record read 0.0 days and the abandoned one still 31.0. After the next session's startup sweep: the live holder's record kept, the abandoned one deleted.",
+      "headSha": "450bd2fabe423b2eb8b2ad0b4d1bdd0b5c0dd3a5",
+      "negativeControl": "The abandoned record in the same run and the same directory, identical in age and shape, deleted by the same sweep — so what kept the other one is the heartbeat's touch and not a sweep that stopped working."
     },
     {
-      "criterion": "An unreadable role file costs the session its role and nothing else: the channel server stays up and registered (the architect's queued item; the tester reproduced the crash on this head and on main@origin alike).",
-      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree, with roles/<session id>.json at mode 000.",
-      "command": "a throwaway probe, /tmp/role-guard-probe.sh (not in the tree): start the listener, write the role file, chmod 000, run the bundle for 8 s, then ask the listener's GET /v1/sessions and the process itself",
-      "observed": "alive=yes, registered=role-guard-0001, and exactly one stderr line: 'envoy-channel: could not restore the role from <…>/roles/role-guard-0001.json (EACCES: permission denied, open …); the session starts without one'. No delete, no rename, no retry.",
-      "headSha": "6d42d4911eaf67c527648979375ea87f3471ee14",
-      "negativeControl": "The same case against main@origin's dist/envoy-channel.js in the same run: alive=no, while the listener still listed role-guard-0001 — 'Claude Envoy channel server failed: EACCES: permission denied, open …/roles/role-guard-0001.json'. That is the dead row on the Agents page the guard removes."
+      "criterion": "Finding 3: the row's media query and its `md:` classes answer alike at a root font size other than 16 px.",
+      "surface": "Dispatch's own browser suite in a real Chromium launched with `--blink-settings=defaultFontSize=20`, in this pod, at an 800 px viewport — between 768 px as an absolute number and 48rem as 960 px at that default.",
+      "command": "a throwaway spec run in the chromium project and then deleted (not in the tree): it reads both media queries and the row's rendered directory",
+      "observed": "root 20px: (min-width: 768px)=true, (min-width: 48rem)=false, and the row's directory reads the whole path, `build-host · /workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features` — the below-`md` layout, which is where the `md:` classes also are at that width. 1 passed.",
+      "headSha": "450bd2fabe423b2eb8b2ad0b4d1bdd0b5c0dd3a5",
+      "negativeControl": "The constant as it was is measured in the same run: `(min-width: 768px)` answers true there, which is the divergence — the shortened directory inside the layout meant to keep the whole path — that the new value removes."
     },
     {
-      "criterion": "The chosen name still registers, a rename still replaces it, an unnamed session still keeps the fallback, and the dispatch command still carries the same name.",
-      "surface": "The committed bundles against a real nats-server and a real Envoy listener, every title read back through GET /v1/sessions.",
-      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh",
-      "observed": "PASS: 'eeny meeny', then 'miny moe' after the UserPromptSubmit payload, then 'probe-project smoke-ti' with no name, and the dispatch stamp holding 'miny moe'.",
-      "headSha": "6d42d4911eaf67c527648979375ea87f3471ee14",
-      "negativeControl": "The script's own last case: main@origin's bundle registered the fallback and not the chosen name."
-    },
-    {
-      "criterion": "The UserPromptSubmit hook's cost on every prompt, restated as the architect asked — an interleaved sample, as a range with its size, saying what remains over bare Bun rather than implying nothing does.",
-      "surface": "The committed bundles run as Claude Code runs them, in this container.",
-      "command": "twelve interleaved rounds of three: the new dist/session-title-hook.js, a bare `bun` script that reads stdin, and the old shared dist/session-hook.js, each with the same UserPromptSubmit payload on stdin",
-      "observed": "n=12 each, medians: the new hook 122 ms (100-165), a bare bun script 82 ms (72-136), the old shared bundle 208 ms (190-548). So the hook costs about 40 ms over bare Bun on this sample, against about 126 ms before it — the reviewer's ~115 ms is gone, and what remains is 40 ms and not nothing. Earlier samples of three, taken under different load, read 0-3 ms (mine) and ~25 ms (the tester's); the quantity moves with the machine, which is why this one is interleaved and given as a range.",
-      "headSha": "6d42d4911eaf67c527648979375ea87f3471ee14",
-      "negativeControl": "The old shared bundle measured in the same interleaved loop: 208 ms median, so the difference is the entrypoint's module graph and not the load of the moment."
+      "criterion": "Nothing on the Agents page moved, and the plugin still registers the name a person gave the session.",
+      "surface": "Dispatch's browser suite (chromium and iphone) over the Agents spec, and the committed bundles against a real nats-server and Envoy listener.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agents.e2e.ts, then bash packages/claude-envoy/scripts/smoke-session-title.sh",
+      "observed": "34 passed, 0 failed, the tester's row at :1807 and the laptop row at :1717 among them; and the smoke PASS — 'eeny meeny', then 'miny moe', then 'probe-project smoke-ti', with the dispatch stamp holding 'miny moe'.",
+      "headSha": "450bd2fabe423b2eb8b2ad0b4d1bdd0b5c0dd3a5",
+      "negativeControl": "The smoke's own last case: main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name."
     }
   ],
-  "testerFailure": {
-    "verdict": "fixed",
-    "how": "The row's flex container is md:flex-nowrap; the heading is min-w-0 with content width and the directory was md:flex-1 md:basis-0 with min-w-0, so at md the heading's content squeezed the directory to zero. The directory now carries md:min-w-48, a floor the name cannot take, and its md:truncate is gone so the shortened text is read whole rather than ellipsised — the architect's condition that assertWhole hold over it. The tester's red row passes unmodified."
-  },
+  "reviewFindings": [
+    "1 (blocking) — fixed. The startup catch sets `roleTransferFrom = identity.id`, so the heartbeat's existing `transferRole` → `restoreRole` path re-runs the claim, and because `transferRole` clears the queue only after `restoreRole` resolves, a repeated failure stays queued. A role file that cannot be parsed is deliberately not queued: no later read of the same bytes succeeds, and a transfer that threw every tick would end each one before its interests reconciliation. The stderr line says which case it was.",
+    "2 (blocking) — fixed. `reassertRole`'s holder-confirmed branch touches the record through the new `touchStateFile`. A timestamp touch, not a rewrite, on the architect's instruction: the content has not changed, and an atomic rewrite would drop a temporary file into `roles/` every two minutes — which is also why the three existing `readdir(roles)` assertions the first attempt had to move after `shutdown()` are back where they were, untouched.",
+    "3 (minor) — fixed. `MD_VIEWPORT_QUERY` is `(min-width: 48rem)` and its comment says why the unit matters. Only that token changed: `COMPACT_VIEWPORT_QUERY` and `PHONE_VIEWPORT_QUERY` carry the same px-against-rem mismatch and are left alone, as the reviewer asked, as the pull request's one Fast-follow line.",
+    "Threads — the five the reviewer named as accepted are resolved by node id. The reviewer also opened three threads for this round's findings, which it did not name: each has one disposition reply and is resolved. PRRT_kwDORFy7ds6v9duc, which the reviewer asked to leave open, is answered and resolved too, on the architect's instruction that it stays open only until finding 3 is in the head — which this head carries."
+  ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/agents/AgentsPage.tsx — md:min-w-48 on the directory span, md:truncate dropped, the comment saying why the floor exists and what it is sized for",
-    "packages/dispatch/e2e/agents.e2e.ts — the row at :1717 only: its laptop branch now asserts the directory is visible and passes assertWhole, which is what let a zero-width element through before. The tester's row at :1807 is untouched",
-    "packages/dispatch/AGENTS.md — the floor, and that neither width ellipsises the directory",
-    "packages/claude-envoy/src/envoy-channel-server.ts — restoreRole awaited with a catch of every failure, one stderr line naming the file and the reason",
-    "packages/claude-envoy/dist/envoy-channel.js — rebuilt"
+    "packages/claude-envoy/src/envoy-channel-server.ts — the startup catch queues the retry; `refreshRoleRecord` touches the record on a confirmed hold, best-effort with one stderr line per failure run",
+    "packages/claude-envoy/src/session-state.ts — `touchStateFile`",
+    "packages/claude-envoy/src/session-identity.ts — the role sweep's doc comment, which reasoned about a record nothing touches",
+    "packages/claude-envoy/tests/envoy-channel-handoff.test.ts — two rows: a claim refused twice at startup and recovered by a heartbeat, and a heartbeat refreshing the record the age sweep reads",
+    "packages/claude-envoy/dist/ — rebuilt",
+    "packages/dispatch/web/src/features/shell/useDialog.ts — `(min-width: 48rem)`"
   ],
   "trickyParts": [
-    "md:truncate had to go, not just the floor: Tailwind's truncate sets text-overflow: ellipsis unconditionally, and e2e/unclipped.ts's assertWhole flags a computed ellipsis whether or not the text is actually being cut. With the floor in place the shortened text fits anyway, and a host or segment wider than the floor now wraps inside it rather than being cut, with the whole path still the title.",
-    "The floor is 192 px (md:min-w-48), a token already used elsewhere in this package. It is sized for a host and a last segment at text-xs; the directory holds exactly 192 px at 768, 1024, 1280 and 1440, because the heading takes everything else at each of them."
+    "The touch has to be a touch. A rewrite through `writePersistedRole` is atomic — a temporary file in `roles/` renamed over the record — so every two minutes a listing of that directory could catch the temporary file, which is what made three existing assertions flake until they were moved after shutdown. `touchStateFile` writes nothing and leaves nothing beside the record, and those three assertions are back in their original places.",
+    "An unparseable role file is not queued for retry. It is the one failure a later read of the same bytes cannot fix, and a `transferRole` that threw on every tick would end each heartbeat before `syncRegisteredInterests`."
   ],
-  "deviations": [
-    "The architect offered two mechanisms — a floor on the same line, or letting the directory fall to its own line above the phone breakpoint — and left the choice to me. I took the floor: it keeps the shortened '<host> · <last segment>' text with the full path in its title, which is what agents.e2e.ts:1717 expects, so that row stays true and nothing about the laptop row's shape drifts."
+  "deviations": [],
+  "openQuestions": [
+    "One interaction of the two fixes, found by the first version of the probe and reported to the architect rather than fixed, because this round was scoped to the three findings: a role record already older than thirty days whose startup claim is refused is deleted by the startup sweep, which runs after the restore, before the queued retry can use it. The record is then gone and the retry finds nothing. It needs both an aged record and a transient listener failure in the same startup, the session can still claim the role itself through `rememberRole`, and either fix (sweeping before the restore, or skipping the role sweep while a retry is queued) is a change the architect asked not to make this round. Proven incidentally: the probe's first version, which aged the record and refused the claim in one run, ended with the record deleted and the role unheld."
   ],
-  "openQuestions": [],
   "discoveredComplexity": [
-    "packages/claude-envoy's 'queryTmux is bounded even by a tmux that ignores SIGTERM' failed once more in this round's bun test, at 5021 ms. That is the known gVisor spawn-timeout flake, settled by the stream lead as a learning for retro rather than an issue; CI is green on it and no Legion code is involved.",
-    "packages/dispatch/e2e/phone.e2e.ts:393, 'an inline link keeps its line and grows its hit box without covering its neighbours', failed once in this round's local iphone run (128 passed, that one failed). It is the row dispatch://INFRA-95 exists to fix, it passes and fails on unchanged code, it is nowhere near the Agents row, and it failed in CI's before-leg run too at a head without any of this change."
+    "A worker container's /home is not durable within a session: `nats-server`, installed into GOPATH's bin earlier in this issue and used by three smoke runs, was gone by this round, and the smoke failed with `nats-server: command not found` through a listener that then died of `nats: no servers available`. It is reinstalled at /legion/scratch/bin, on the issue volume, which the rest of the rig already uses. A smoke or probe that needs a tool should look there first.",
+    "The browser rig needs `@legion/contracts` built (`cd packages/contracts && bun run build`, 0.13 s) before Playwright loads the specs, and a run killed by a command deadline leaves its five harness listeners holding their ports; both cost a run each in earlier rounds and are in the retro learning already queued."
   ]
 }
