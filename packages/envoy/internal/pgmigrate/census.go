@@ -57,7 +57,7 @@ type TableCensus struct {
 	// Through is the table a foreign key reaches this one from (TouchedTable.Through); empty for a
 	// table the migration names. Such a table is read for its holders and its size, and its rows
 	// are not counted: the migration locks it only to check or act on the rows its foreign key
-	// connects.
+	// connects, or, for a dropped table's key, only for the catalog change.
 	Through string
 	Exists  bool
 	// Bytes is its pg_total_relation_size; Rows is its exact row count, read only when Bytes is
@@ -409,7 +409,7 @@ func someTables(names []string) string {
 // transaction usable and is a refusal naming the holders, not an error. A table the migration
 // names above the limit is refused on its size, and its rows are not counted; a table a foreign
 // key reaches has no limit, since the migration checks or acts on only the rows that key connects,
-// and its rows are never counted.
+// or, for a dropped table's key, changes only the catalog, and its rows are never counted.
 func censusTable(ctx context.Context, tx pgx.Tx, touched TouchedTable, options CensusOptions, bound lockBound, entry *MigrationCensus) error {
 	name := touched.Name
 	table := TableCensus{Name: name, Through: touched.Through}

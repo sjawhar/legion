@@ -33,6 +33,15 @@ symptoms:
 
 # A PR-Body Template That Names a CI Check the Repository Never Produces
 
+**Superseded 2026-10-23 (dispatch://INFRA-83):** the `CI:` line this learning is about no longer
+exists. The PR-body template (`skills/legion-worker/references/pr-body.md`) carries no `CI:` line at
+all, so neither the shape prescribed below nor any replacement wording is written into a body: no
+role records a check result for a later step to trust, and the tester and the reviewer each read CI
+on GitHub at the head they are judging and record none of it (the reviewer's own four GitHub reads
+are in `skills/legion-worker/references/merge-gate.md`). What follows records the 2026-09-13 round as
+it happened; its rule — a template line naming a check the repository does not produce is fixed in
+the template, not explained away in a body — still holds for every other template line.
+
 LEGION-38 changed one line of `skills/legion-worker/SKILL.md` and one clause of
 `packages/pi-envoy/roles/implementer.md` (PR #1008, commit `cf2b0b9cec03`). The PR-body template's
 `CI:` line had said `` `pr-checks-result` run <run-id> — success at <head-sha> ``. The repository's

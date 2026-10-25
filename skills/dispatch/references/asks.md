@@ -4,8 +4,8 @@ Read this once an ask is open. Whether to ask, and how to write it, is "Before y
 
 ## Who answers an ask
 
-- An ask goes to the issue's assignee's Inbox. On an unassigned issue it is in nobody's default Inbox or `Needs you` count.
-- `dispatch whoami` prints whom you act for: your token owner's email, or no owner (a service token shows as `<namespace>/<name>`, as your writes do). An issue you create goes to your owner, else inherits its parent's assignee, else stays unassigned.
+- An ask goes to the issue's assignee's Inbox: the `Assignee:` that `dispatch read` prints decides whose, not the project's default. On an unassigned issue it is in nobody's default Inbox or `Needs you` count. A project's default assignee fills in only when an issue is created with nobody named and nothing earlier in the chain below names someone; an issue created with an explicit nobody, set to nobody later, or created before the default was set stays unassigned.
+- `dispatch whoami` prints whom you act for: your token owner's email, or no owner (a service token shows as `<namespace>/<name>`, as your writes do). An issue you create goes to your owner, else inherits its parent's assignee, else goes to the project's default assignee when a person set one on the Settings page, else stays unassigned.
 - On an unassigned issue where the answer matters, assign it to your owner, or name in the question who should answer. Assign with `PATCH /api/v1/issues/{key}` and `{"assignee": "<email>"}`. An email nobody signed in with gets `ASSIGNEE_NOT_ALLOWED`.
 - Never reassign an issue a human holds to get a faster answer. That is the human's call.
 

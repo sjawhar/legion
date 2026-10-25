@@ -87,6 +87,7 @@ A decision a human must make is an `:::ask{#slug}` block at the end of the secti
 ## Claim the issue before you work it
 
 - Before you implement, `dispatch claim --issue <KEY>` and `dispatch issue-update --issue <KEY> --status in_progress`. Release with `--release` when you finish, hand over or switch. Closing releases it.
+- Claiming does not deliver the issue's comments to you. In the same turn, route the issue to your session, `dispatch issue-update --issue <KEY> --route session:<your session id>`, or subscribe to it with `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. When you release, clear the route with `--route ''`. Never route an issue with the `legion` label, or under one: Legion's roles work it, not your session.
 - Reading, commenting, asking or gating a PR claims nothing.
 - `409 ISSUE_CLAIMED`: someone else holds it. Never work it in parallel. Refusals and takeovers: [issues.md](skill://dispatch/references/issues.md).
 
@@ -97,6 +98,8 @@ Outside Legion, the session doing the work moves its issue and the children it o
 ## Asking
 
 A design decision a document records is a decision block in it, at every phase, approved or not. A block in an approved document makes the approval stale until its answer. A Legion phase worker sends the decision to its architect (`skill://legion-worker`). A to-do or permission only a human can give, or a decision with no document, is a `dispatch ask`. The gates apply to both.
+
+In a Legion session, a role or any of its subagents that finds a problem outside its own issue never files an issue for it (the issue creation in [Your owner](#your-owner) included). It opens a `dispatch ask` as `skill://legion-worker/references/findings.md` says, on the issue that reference names. That overrides "Ask on your own issue" in gate 1, and gate 4's rule to ask nothing beside what the human asked for.
 
 ### Before you ask
 

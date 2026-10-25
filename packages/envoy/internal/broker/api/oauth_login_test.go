@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
 // deviceMachine is one machine logging in: its key, the OAuth client it logs in with, and the
@@ -514,6 +516,75 @@ func TestADeviceLoginSpendsItsPersonsBucket(t *testing.T) {
 		if !errors.As(err, &re) || re.Response.StatusCode != http.StatusTooManyRequests || !strings.HasPrefix(re.ErrorDescription, "RATE_LIMITED: ") || re.Response.Header.Get("Retry-After") == "" {
 			t.Fatalf("sixth device authorization = %v, want 429 RATE_LIMITED with Retry-After", err)
 		}
+	}
+}
+
+// TestDeviceLoginsNeedOnlyTheirTransactionsConnection pins that a device login holds one pooled
+// connection, its provider transaction's, and never waits for a second while it holds it: on a
+// two-connection pool, two logins each holding a transaction and a third waiting for a connection
+// all answer, and /healthz answers while they run. A lock on oauth_device_codes, which each
+// login's transaction writes first, holds both transactions open until both have begun.
+func TestDeviceLoginsNeedOnlyTheirTransactionsConnection(t *testing.T) {
+	rig := brokertest.NewRig(t, brokertest.WithPoolMaxConns(2))
+	ctx := context.Background()
+	// The lock holder and the watcher each get a connection of their own, outside the pool the
+	// logins draw on.
+	connect := func() *pgx.Conn {
+		t.Helper()
+		conn, err := pgx.ConnectConfig(ctx, rig.Store.Pool.Config().ConnConfig)
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		t.Cleanup(func() { conn.Close(context.Background()) })
+		return conn
+	}
+	watch := connect()
+	holder, err := connect().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `lock table oauth_device_codes in share mode`); err != nil {
+		t.Fatal(err)
+	}
+
+	// bound is how long each call may take: far below the broker's 45 s request deadline, and
+	// what ends a call the pool never serves.
+	const bound = 10 * time.Second
+	client := func(m *deviceMachine) context.Context {
+		return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: bound, Transport: helper.NewDPoPTransport(m.key, http.DefaultTransport)})
+	}
+	logins := make(chan error, 3)
+	for i := range 3 {
+		m := newDeviceMachine(t, rig)
+		request := m.request(t, fmt.Sprintf("person%d@example.com", i), "")
+		jkt := m.thumbprint(t)
+		go func() {
+			_, err := m.config.DeviceAuth(client(m), oauth2.SetAuthURLParam("request", request), oauth2.SetAuthURLParam("dpop_jkt", jkt))
+			logins <- err
+		}()
+	}
+	storetest.AwaitLockWaiters(t, watch, holder, 2)
+	if err := holder.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	health := make(chan error, 1)
+	go func() {
+		resp, err := (&http.Client{Timeout: bound}).Get(rig.URL + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				err = fmt.Errorf("status %d", resp.StatusCode)
+			}
+		}
+		health <- err
+	}()
+	for range 3 {
+		if err := <-logins; err != nil {
+			t.Errorf("device authorization on a two-connection pool: %v", err)
+		}
+	}
+	if err := <-health; err != nil {
+		t.Errorf("/healthz while the logins ran: %v", err)
 	}
 }
 

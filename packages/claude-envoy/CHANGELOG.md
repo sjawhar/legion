@@ -7,8 +7,25 @@
 - A person's browser edit of a spec a session wrote reaches that session's channel as one card, 30
   seconds after the person stops editing: the card names the document, the two versions and each
   editor, and the diff follows it in a fenced `diff` block.
+- The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:
+  `dispatch issue-update --issue <KEY> --before <OTHER>` puts it above that issue,
+  `--after <OTHER>` below, and both together land it between them, printed as `rank -> before KEY`
+  or `rank -> after KEY`. The bundled tool descriptions carry the two arguments, and the plugin's
+  own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
+  `legion/` were regenerated (INFRA-188).
+
+### Changed
+
+- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
+  `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
+  and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
 
 ### Fixed
+
+- The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
+  reference: its Wake routing table moves unchanged to
+  `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
   the calling process's environment: tmux printed the tabs as `_` to a process with neither `TMUX`
@@ -99,6 +116,17 @@
 
 ### Added
 
+- A Claude Code session registers under the name a person gave it (`claude -n`, `--name`,
+  `/rename`), alone, so Dispatch's Agents page shows that name where it showed
+  `<tmux pane or folder> <short id>`; `ENVOY_SESSION_TITLE` still wins, and a session nobody named
+  keeps that `<tmux pane or folder> <short id>` title. Claude Code hands the chosen name to a hook
+  alone, as `session_title`, so a new `UserPromptSubmit` hook, and the `SessionStart` one, records
+  it under `${CLAUDE_PLUGIN_DATA}/titles/` and the channel server reads it on every registration:
+  a rename shows after the session's next prompt and the heartbeat that follows, and taking the
+  name away brings the fallback title back. That hook is a bundle of its own, since Claude Code
+  holds the prompt until it returns: it costs about what starting `bun` at all costs. Title files
+  are pruned at thirty days, and so are the role files beside them, which a session that held its
+  role to the end used to leave behind for ever.
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight
   characters. Inside tmux the name is `session:window` for a window whose `automatic-rename` is

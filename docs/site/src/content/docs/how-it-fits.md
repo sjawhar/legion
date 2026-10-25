@@ -58,9 +58,9 @@ Envoy, so nothing that reacts to Dispatch has to poll it.
 
 Legion's coordinator works only the issues handed to it, which are the ones carrying the Dispatch
 label `legion`. That lets Legion share a project with people and other agents. A person sets the
-label from the issue header, or an agent sets it with `dispatch issue-update`. Legion's own **controller**
-agent also hands over work: whenever an admission slot is free, it labels and admits the
-highest-priority `todo` leaf issue that nobody else is working.
+label from the issue header, or asks Legion's own **controller** agent to set it for them; the
+controller never hands over work on its own. An agent that finds a problem outside its own issue
+asks a person in a Dispatch ask whether it needs an issue, rather than filing one.
 
 Each admitted issue gets an **architect**, which owns the issue's tree. It writes the spec, splits
 large work into child issues, and runs each change through phase workers in turn: a **planner**, an
@@ -76,10 +76,10 @@ Two decisions stay with people:
   approves it, unless that version is the person's own answer to a decision block and the answer is
   the whole change since the version they approved: then Dispatch records their approval at the new
   version and the gate reopens. The gate is on by default; a deployment can turn it off.
-- **The merge.** The merger sends `READY`. The daemon accepts it only when no check or workflow
-  the base branch requires has failed or is missing, posts it on the Dispatch issue, and submits
-  the pull request for merge. The repository's own rules decide when it lands, so a review a
-  person must give, or a by-hand merge, stays theirs.
+- **The merge.** The merger sends `READY`. The daemon accepts it on the approved head, posts it on
+  the Dispatch issue, and submits the pull request for merge. The repository's own rules decide
+  whether and when it lands, so a check it requires, a review a person must give, or a by-hand
+  merge, stays theirs.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.
@@ -117,8 +117,7 @@ only where an event goes; what to do about it is the coordinator's and the agent
 ## An issue, start to finish
 
 1. Someone files an issue in a Dispatch project. It starts in Triage.
-2. When it is ready, it moves to Todo with the `legion` label, set by a person or by the controller
-   filling a free slot.
+2. When it is ready, a person moves it to Todo with the `legion` label, or asks the controller to.
 3. The coordinator admits it and starts its architect, which writes the spec.
 4. The architect requests approval. The request reaches the approver's Inbox, they approve that
    version, and Dispatch publishes the approval on Envoy. The coordinator opens the design gate.
@@ -126,7 +125,7 @@ only where an event goes; what to do about it is the coordinator's and the agent
    changes sends it back to the implementer, and through the tester again.
 6. Once the reviewer approves, the architect reads the evidence and accepts the change (or sends
    it back), and the retrospective runs. The merger then sends `READY`, which the daemon accepts
-   once no required check has failed or is missing, and posts on the issue.
+   on the approved head plus retro's notes, and posts on the issue.
 7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
    The merge closes the issue: it is Done.
 8. After the close, once the deploy carries the merge, the implementer drives the change in

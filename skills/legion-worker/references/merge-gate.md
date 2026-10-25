@@ -18,14 +18,15 @@ it, and any other change to the head voids it.
 
 ## The reviewer
 
-- The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
+- The reviewer reads CI on GitHub and verifies the `Threads` and `E2E` facts there directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
-  and records the verdict. The `CI` fact is the checks that stand for the code under review:
+  and records the verdict. The CI it reads is the checks that stand for the code under review:
   those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/` (a push that changes only
-  `.legion/` carries `skip-checks: true`, so GitHub runs no workflow for it). With `<o>/<r>`,
-  `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  every commit above that push's head changes only `.legion/` (GitHub starts no workflow run for a
+  head whose commit message carries `skip-checks: true`, which every handoff-only push before
+  retro does; retro's push carries no such line, so its head does get GitHub's workflow runs of
+  its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
   `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
   base branch's rulesets' required checks and its branch protection's, when it has any. Both
   branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
@@ -35,22 +36,23 @@ it, and any other change to the head voids it.
   ```bash
   base=$(gh pr view <n> -R <o>/<r> --json baseRefName -q .baseRefName) && \
     base_path=$(jq -rn --arg b "$base" '$b | split("/") | map(@uri) | join("/")') && \
-    echo rulesets: && gh api "repos/<o>/<r>/rules/branches/$base_path" --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' && \
+    echo rulesets: && gh api --paginate "repos/<o>/<r>/rules/branches/$base_path" --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' && \
     echo protection: && gh api "repos/<o>/<r>/branches/$base_path" --jq '.protection.required_status_checks.checks[].context'
   ```
 
   A read GitHub refuses stops the command there, and is reported to the architect, never guessed. The CI head, the head of the
   branch's newest `pull_request` run
   (`gh api 'repos/<o>/<r>/actions/runs?branch=<headRefName>&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'`,
-  newest first); the PR body's `CI:` line names runs at that same commit
-  (`gh run view <run-id> --json headSha,status,conclusion`), or the line is stale and the review
-  says so. That commit's check-runs
+  newest first). That commit's check-runs
   (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
   as passing for a required check). And the compare proving only `.legion/` changed since
-  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '[.files[].filename] | all(startswith(".legion/"))'`
-  prints `true`; `false` means code was pushed since CI ran, so wait for the new push's runs and
-  read the CI head again). A required check `queued` or `in_progress`: wait. One `completed` as
+  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[].filename] | all(startswith(".legion/"))), files: (.files | length)}'`
+  prints `handoffsOnly` `true`; `false` means code was pushed since CI ran, so wait for the new
+  push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
+  comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides
+  nothing: tell the architect and do not approve. A required check
+  `queued` or `in_progress`: wait. One `completed` as
   `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
   check only a commit status reports, a workflow another repository defines), tell the architect
   and do not approve. `gh pr checks <n>` is not the read: it reads only the current head, which
@@ -147,15 +149,13 @@ reviewing until you finish.
   no pre-flight of its own, and its completion reports the commit the workspace stands on. READY's
   checks run in the daemon, which reads the pull request's head on GitHub and refuses, before
   recording anything, on each ground the merger's role prompt names in its `Go daemon workflow`
-  part, by its code and with its remedy. That part is the one complete list of READY's refusals.
-  A required check or workflow still running refuses nothing; a failed or missing one does. A
+  part, by its code and with its remedy. That part is the one complete list of READY's refusals. A
   refusal records nothing; the merger reports it to the architect unless it says to complete
   again, and never pushes a commit to make CI run. On success the daemon posts the packet as a
   `dispatch message` on the issue, publishes it to the project's merge queue role when one is set,
   and says on the issue when that role has no live holder; the answer's `note` says when READY was
-  published on a pull request a person already merged, whose head can no longer change, or on a
-  base that requires no check, which the packet itself also says, or carries the by-hand note of a
-  pull request a person merges.
+  published on a pull request a person already merged, whose head can no longer change, or carries
+  the by-hand note of a pull request a person merges.
 - **The daemon submits the merge the moment READY is accepted, unless the answer says a person
   merges it.** It queues a `ready_merge` outbox row for the head READY named, and the row, as the
   implement App, reads GitHub and then the record: while the issue still awaits that READY head, a
@@ -186,7 +186,12 @@ reviewing until you finish.
   GitHub's message. While the record still awaits READY's head, GitHub showing the pull request
   closed or at another head is a webhook not yet applied, so the row waits for the two to agree.
   Only once GitHub's last change to the pull request is more than 10 minutes old, however long the
-  row waited before, does the row end and tell the architect once (`merge-stalled`). A reopen at
+  row waited before, does the row end and tell the architect once (`merge-stalled`). A merge the
+  daemon submitted that GitHub has not completed within an hour of READY's acceptance tells the
+  issue's architect once (`merge-waiting`) and goes on waiting: nothing is withdrawn, the merge
+  stands, the issue stays in `awaiting_merge`, and the architect reads the pull request for what
+  GitHub waits on — a required check that never ran or failed, a review only a person can give, a
+  queue that has not landed it — and asks a person for what no worker can do. A reopen at
   READY's head reuses the row, starts it over as though nothing had been armed, and takes it from a
   run that read the record before the reopen. Any other failure retries.
   No role runs `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull
@@ -217,9 +222,12 @@ reviewing until you finish.
 
 - **The merge closes the issue; the production check is the implementer's work after the close.**
   When the pull request merges, the daemon writes `done` and, in the implementer's session, still
-  live, hands it the check task. Its first line is `Production check of <KEY>: <title>.`, and it
-  names the repository, the pull request, the merge commit, the look's number, what woke the look
-  (`the merge`, for the first) and whether it is the last. A resumed session tells the check task
+  live, hands it the check task. On a root whose tree still runs the close, and so the check task,
+  comes later: the merge is recorded, the root waits in `awaiting_merge` until the last other
+  issue of its tree is done or parked, and the check opens with that close. Its first line is
+  `Production check of <KEY>: <title>.`, and it names the repository, the pull request, the merge
+  commit, the look's number, what woke the look (`the merge`, for the first) and whether it is the
+  last. A resumed session tells the check task
   from its last phase task by that first line. The check carries no phase and no handoff: a look
   ends with `handoff_complete` carrying a `verdict` and a `summary`, no commit, and the daemon
   refuses a report on an issue with no open check (`CHECK_NOT_OPEN`), on a look already ended
@@ -238,10 +246,11 @@ reviewing until you finish.
     previous release, a daemon still running the previous commit, a deploy nobody has run): the
     summary names what is missing, and the `Production:` line stays at
     `pending deploy of <merge sha>`.
-  - `fail`, for a defect: file it as an issue of its own in the issue's project with
-    `dispatch issue` (`--external <owner>/<repo>#<n>` links the pull request; its spec names the
-    closed issue as `dispatch://<KEY>`), never as a child of the closed issue, and name the new
-    issue in the `Production:` line and in the summary.
+  - `fail`, for a defect: open a `dispatch ask` for it on the controller's report issue, as
+    `skill://legion-worker/references/findings.md` says, publish its reference to the controller
+    topic, and file no issue. It names this issue, the pull request, the merge commit, what you
+    drove and what failed. Name the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the `Production:`
+    line and in the summary.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look: the daemon suspends
   your claim with its session and the issue's volume kept, the pod goes, and the daemon wakes the
   check (the pod comes back and your session resumes with a new check task) on Dispatch's
@@ -262,9 +271,9 @@ reviewing until you finish.
   closes the check as any look's would; a `pending` closes it as not run, and before reporting it
   you write on the pull request, in the `Production:` line and a comment, that the check did not
   run because production did not carry the merge within the bound.
-- **The record lives on the pull request alone.** Dispatch refuses a message or a comment on a
-  closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
-  issue" is the pull request for a closed issue, and a defect reaches Dispatch as the new issue.
+- **The record lives on the pull request alone.** Dispatch refuses a message, a comment or an ask
+  on a closed issue (`ISSUE_CLOSED`), so the deployment instructions' "on the pull request and the
+  issue" is the pull request for a closed issue, and a defect reaches Dispatch as the ask above.
   The architect accepted the issue before the merge and is asked nothing after it. `pass` or
   `fail` closes the check: your claim is retired and, for a child, the issue's Sandbox and volume
   are released.

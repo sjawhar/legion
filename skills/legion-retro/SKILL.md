@@ -39,8 +39,8 @@ retrospective's durable output.
    that developed the change is responsible for testing it in production, once production carries
    the merge. The record is the pull request's `Production:` line and one pull-request comment,
    naming what was driven, how, what was observed, the merge commit and what woke the look; nothing
-   is written on the closed issue, since Dispatch refuses it. A defect the check finds is filed as
-   an issue of its own in the project, never as a child of the closed one
+   is written on the closed issue, since Dispatch refuses it. A defect the check finds is a
+   `dispatch ask` on the controller's report issue, never an issue the implementer files
    (`skill://legion-worker/references/merge-gate.md`, *The production check after the close*).
 
 Retro's commits sit above the reviewer's approved head and the approval stands: commits that change
@@ -86,18 +86,21 @@ Organize by reusable topic rather than by pull request, but never edit a documen
 write this retro — not its frontmatter, not its body. Two trees' retros can land within the same
 hour, and an in-place edit (another `related_issues` entry, a sharpened sentence, a `status`
 flip) conflicts with any other tree's edit to the same lines of the same file. Search
-`docs/solutions/` for the topic first; before relying on a hit, also search for
-`supersedes: docs/solutions/<its-path>` and `Extends docs/solutions/<its-path>` naming it —
-Legion runs no pass that reconciles these links, so a newer file that extends or supersedes the
-one you found is discoverable only by following them. Then write a new file of your own, named
-`docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md` so two trees never choose the same path:
+`docs/solutions/` for the topic first; before relying on a hit, also search `docs/solutions/` for
+its path (`docs/solutions/<its-path>`): a hit in another file's front matter under its
+`supersedes:` key (on that line, or as an item of the list below it) supersedes the one you found,
+and a line `Extends docs/solutions/<its-path>` extends it. Legion runs no pass that reconciles
+these links, so a newer file is discoverable only by following them. Then write a new file of
+your own, named `docs/solutions/<category>/<slug>-<LEGION_ISSUE>.md` so two trees never choose
+the same path:
 
 - **A fresh topic:** state the rule in a few imperative lines; the incident goes in an Evidence
   section below, never in the rule.
 - **A topic an existing document already covers:** underneath its own H1 heading, the first line
   reads `Extends docs/solutions/<existing-path>.md.`; the rule states only the delta.
 - **A topic an existing document states wrongly:** frontmatter adds
-  `supersedes: docs/solutions/<existing-path>.md`; the first line under the H1 says why. Leave
+  `supersedes: docs/solutions/<existing-path>.md`, or, for several, a `supersedes:` list with one
+  `- docs/solutions/<existing-path>.md` item each; the first line under the H1 says why. Leave
   the old file's frontmatter and body untouched: Legion runs no pass that reconciles it, so the
   `supersedes:` link is the only thing that makes the correction discoverable from the old file.
 
@@ -130,9 +133,9 @@ Before you push those commits, bring up to date the body content the repository 
 pull request's changed paths. A repository can require such content, a line naming a checklist
 for each class of changed path for instance, and have a required check read it from the PR body.
 When your commits add a `docs/solutions/` path the approved body never accounted for, or take away
-the `.legion/` paths it did, that check fails at your head; the merger reports a stale body rather
-than rewriting it, and READY refuses a head whose required check failed, so the tree stops at the
-merger.
+the `.legion/` paths it did, that check fails at your head; the merger reports a stale body
+rather than rewriting it, and GitHub will not merge a head whose required check failed, so the
+merge waits.
 
 1. Read what the deployment instructions in your system prompt, and the agent guide and pull
    request template of the repository you are working in, derive from the changed paths. When
@@ -167,14 +170,30 @@ what failed.
 
 Then push both commits with one push, so one CI run covers them (`<KEY>` is your `LEGION_ISSUE`):
 `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>`.
-It carries `docs/solutions/` and the removal of `.legion/<KEY>/`, so it is not a handoff-only
-push: its head's message never ends with `skip-checks: true` and carries none of GitHub's
-`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*). When
-the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
+Its head's message never ends with `skip-checks: true` and carries none of GitHub's
+`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*).
+Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
+When the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
 moved; never force), write `<dir>/before.md` back the same way before you report the refusal to
-the architect with its output, so the body matches the head GitHub has. After the push, post one
-Dispatch message on
-the issue — `--issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
+the architect with its output, so the body matches the head GitHub has.
+
+When you have already pushed a head that wrongly carries the line — under an older copy of these
+instructions, say — read that pushed head's own commit message first and confirm it ends with
+`skip-checks: true`:
+`cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" log -r <the pushed head> --no-graph -T description`.
+The fix is to describe that same commit again without the line and push it once, which is the
+rewrite of an already-pushed commit:
+`skill://legion-worker/references/conflicts-and-rewrites.md#rewriting-pushed-commits`. Run that
+section's guard first; a non-empty guard result means another tree's work is built on the commit,
+so do not rewrite it — report the listed commits to the architect instead. Once the guard has
+cleared, the bookmark moves backwards with `--allow-backwards` and the branch is pushed once:
+that is the one non-fast-forward move the rewrite section sanctions, and not the force this
+skill's push step forbids when `jj git push` refuses a branch another role moved. The rewritten
+head is a code head, so GitHub runs the base branch's required checks on it from scratch, and the
+merge waits for them.
+
+After the push, post one Dispatch message on the issue — `--issue` is your `LEGION_ISSUE`; Legion
+issues live on Dispatch, never on a GitHub
 issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
 follows the merge's close of the issue. The message must carry this revived implementer's structured

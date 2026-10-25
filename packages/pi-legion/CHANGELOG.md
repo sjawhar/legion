@@ -7,6 +7,20 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
+  `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
+  is refused while an issue beneath it is still in the workflow and a merged root's close waits
+  for the rest of its tree, so a root stands in `awaiting_merge` for days and an operator reads
+  the merge here rather than guessing at it. Always emitted, so a plugin built before it refuses
+  the state. Install this release with a `legion` built from the same commit.
+- The `legion-controller` skill this plugin ships reorders a project's board with
+  `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
+  stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by
+  board rank alone, so board rank alone carries the weekly plan's order. The controller still sets
+  the coarse priority, as the signal people and filters read and as the order by which an agent
+  takes its own next issue, but it changes no admission; the reference used to have the controller
+  set priority and rank together so that "highest priority, then board rank" produced the plan's
+  order (INFRA-188).
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
@@ -66,16 +80,91 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The merger's READY, as the `legion` tool's `handoff_complete` with `ready: true` reaches it,
+  refuses one ground fewer: `READY_CHECKS_NOT_GREEN` is gone, and the daemon reads none of the
+  head's check runs or commit statuses. GitHub, under the base branch's own rules, decides whether
+  the merge happens, and one it has not completed within an hour of READY's acceptance tells the
+  issue's architect once (`merge-waiting`). The merger's role prompt and the Legion skills carry
+  the new catalogue, the pull request body has no `CI:` line, and every list read that decides
+  something is paginated (sjawhar/legion#2121).
+  A daemon rolled back to a release before this one refuses what this one writes on a `ready_merge`
+  row and in the notice it adds, as the entry below says of `armed` and `merge-removed`: the
+  payload's `warned` and `queued` fields, which its strict decoder refuses on every retry, and the
+  `merge-waiting` notice kind, which its reader refuses and which holds every waiting notice of the
+  project behind it. Before starting the older daemon, run against its database, with `<KEY>` the
+  Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'warned' - 'queued' where kind = 'ready_merge' and (payload ? 'warned' or payload ? 'queued') and split_part(issue, '-', 1) = '<KEY>';`
+  and
+  `delete from outbox where kind = 'notice' and payload->>'kind' = 'merge-waiting' and split_part(issue, '-', 1) = '<KEY>';`
+  The notice is deleted rather than rewritten to a kind the older daemon knows: it says only that a
+  merge is still waiting, and the nearest older kind, `merge-refused`, would tell an architect that
+  a merge ended when it has not. Dropping it loses one telling; the row goes on submitting.
+- The `legion-controller` skill and its `backlog-stewardship` reference name no person: a ruling is
+  a direct Dispatch message to this controller from a person rather than from one named individual,
+  and the duty list, the pass trigger and both definitions say so (dispatch://INFRA-227). The
+  daemon's `controller-root` role prompt and `packages/envoy/AGENTS.md` drop the same name, and the
+  root `AGENTS.md` now carries the standing rule that a skill, a role prompt and an `AGENTS.md`
+  name no person and write the role instead. The controller behaves as it did: a ruling still sets
+  off the full reconciliation pass and a weekly-plan record.
+- Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits
+  touch (INFRA-149). Before, the `legion-worker` skill, the `legion-retro` skill and the daemon's
+  worker and implementer prompts all decided the line by the paths a push changed, so a retro with
+  no learning to write — whose one commit is the removal of `.legion/<issue>/` — added the line and
+  left the commit that merges with no check runs at all, which a base branch that requires a check
+  blocks while Legion carries the earlier code head's verdict and reads the head as green. Three
+  further sentences, in the merge-gate reference and the architect and reviewer prompts, now tie
+  the absence of a workflow run to that line rather than to the paths; the daemon's own carry of a
+  code head's verdict stays keyed to paths, since it classifies by path and reads no commit
+  message. The `legion-retro` skill also gives a retro worker the cure for a head it has already
+  pushed with the line. The sentence has a fifth home here,
+  `legion-worker/references/skip-checks-trailer.md`, which the entry above moved the trailer's
+  contract into, and the skills guard counts it in all five.
+- No Legion role, and no subagent of one, files an issue for a problem it finds outside its own
+  issue. It opens a `dispatch ask` on the controller's report issue instead, naming the issue it
+  came from and where the fix belongs (and that it is not Legion's when it is not), with its
+  evidence in a comment the ask cites, a recommendation, and the options `File an issue`,
+  `Do not file` and, when the project maps the repository, `File it for Legion`. The report issue
+  never closes, so the ask stays answerable when its issue merges. The asker publishes the ask's
+  reference to the controller topic; the controller follows it, files only what the person's answer
+  asks for (with the `legion` label only when the answer asks Legion to work it), and replies under
+  the ask `Filed dispatch://<KEY>` or `Not filed: <reason>`. At each start it follows the report
+  issue's open asks and acts on any answered one with no such reply. The new
+  `skill://legion-worker/references/findings.md` holds the rule; the `dispatch-first` and
+  `dispatch` skills, every Legion skill and the phase workers' and architects' role prompts point
+  to it. An architect still files the children of its own tree; a review-round-cap split on a root
+  becomes a finding ask, and on a child a sibling under the same parent.
+- The production check's `fail` is a finding ask on the report issue rather than an issue of its
+  own: the `legion-worker` merge-gate reference, the `legion-architect` and `legion-retro` skills,
+  the implementer's role prompts and the daemon's check task say so, the implementer publishes the
+  ask to the controller, and the `Production:` line names the ask.
+- The controller starts no work on its own. "Keeping the slots full", the walk that labelled and
+  admitted the highest-priority `todo` issue whenever a slot was free, is gone: a free slot is
+  never a reason to label or admit an issue, the controller never sets a parked issue back to
+  `todo` to fill one, and the `slot-free`, `todo` and `tick` wakes the daemon still sends take
+  nothing. Work reaches Legion only when a person labels it, or asks the controller to (a message,
+  a Slack request, an answer to a finding ask). Every issue the controller files for a person
+  carries one spec line, `Filed for <person> at their request: <request>`, naming the answered
+  ask, the Slack message or the direct message. Triage admits a labelled root only when a person
+  set the label, or the controller's own session filed it with that line (for an ask, the session
+  whose `Filed dispatch://<KEY>` reply follows a `File it for Legion` answer), and asks a person
+  about any other. A Slack mention a bot posted gets an answer, never an issue or a label. When
+  the report issue is found closed, the controller reopens it into `icebox`. Re-filing a
+  child as an independent root is an ask the controller opens, acted on only on the person's yes.
+  Stopped-session recovery moves work to Legion only on a person's ruling the weekly plan records,
+  no longer when a session's handoff or a plan row of the controller's own says so.
+
 - The implementer pushes and completes without waiting for CI: its role prompt, the
   `legion-worker` skill and the PR-body reference forbid waiting for, watching or polling the pull
-  request's remote CI and any `sleep` loop, and the `CI` line names each run's state as GitHub shows
-  it at the completion. Under the Go daemon, a required check that settled red while the issue was
+  request's remote CI and any `sleep` loop, and each role reads the head's CI on GitHub for itself
+  rather than from a line another role wrote (sjawhar/legion#2121 deletes that line). Under the Go
+  daemon, a required check that settled red while the issue was
   still in `implementing` now sends the work back the moment the implementer completes, with a
   `checks-red` naming it, instead of starting a tester round on that head; before, nothing acted on
   that red until a later settlement or a reviewer read it.
 - The architect decides each `review_round_cap` notice in the turn it wakes, and posts the decision
   on the issue: narrow the next rounds to named acceptance lines, split the part that cannot settle
-  into an issue of its own blocked by this one, or let rounds that each found less than the one before run on. The daemon's cap
+  off (a sibling child under the same parent, or, on a root, a finding ask whether the rest needs
+  an issue), or let rounds that each found less than the one before run on. The daemon's cap
   still notifies only.
 
 - **Breaking configuration change:** under `runtime: kubernetes`, the daemon refuses, at load and
@@ -481,6 +570,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `legion.daemonApiVersion` is unchanged.
 
 ### Fixed
+
+- The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
+  reached an architect with its middle cut out; its Wake routing table moves unchanged to
+  `skill://legion-architect/references/wake-routing.md` (INFRA-376).
 
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and

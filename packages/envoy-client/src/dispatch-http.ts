@@ -13,6 +13,7 @@ import type {
   ArtifactVersionText,
   Ask,
   AskRead,
+  ClaimedIssue,
   Comment,
   CommentRead,
   CommentWriteResponse,
@@ -419,8 +420,11 @@ export class DispatchClient {
 
   /** `POST /api/v1/issues/{key}/claim`: this session takes the issue. 409 ISSUE_CLAIMED when a
    *  running session, or any human, holds it; 409 CLAIM_CONTENDED when the holder changed twice
-   *  while the request ran, so nothing was applied. */
-  async claimIssue(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+   *  while the request ran, so nothing was applied. The answer's `legion_managed_status` says
+   *  whether the Legion daemon owns this issue's status — true when the issue carries the
+   *  `legion` label in any case or sits under one that does, where a status anyone else writes
+   *  is undone. */
+  async claimIssue(issue: string, input: { readonly actor?: Actor } = {}): Promise<ClaimedIssue> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],
@@ -429,8 +433,12 @@ export class DispatchClient {
   }
 
   /** `DELETE /api/v1/issues/{key}/claim`: give up the claim, or clear one whose session is
-   *  gone. The status does not move. It answers the same two 409s, and has no force. */
-  async releaseIssueClaim(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+   *  gone. The status does not move. It answers the same two 409s, has no force, and carries
+   *  `legion_managed_status` as `claimIssue` does. */
+  async releaseIssueClaim(
+    issue: string,
+    input: { readonly actor?: Actor } = {}
+  ): Promise<ClaimedIssue> {
     return this.#json(
       "DELETE",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],

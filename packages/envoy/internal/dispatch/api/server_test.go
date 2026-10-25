@@ -208,6 +208,29 @@ func directServer(deps Deps) *server {
 	return &server{deps: deps}
 }
 
+// writeSessionRecord answers GET /v1/registry/{session_id} from the rows a stub listener also
+// serves as its live list, so one literal gives both answers and the two agree the way a real
+// listener's do. Dispatch resolves a session through this route rather than through the list,
+// so a stub that served only the list would answer every lookup "no live session"; an id no row
+// names is the listener's own 404, the one absence a caller may act on.
+func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessionID string) {
+	t.Helper()
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(sessionsJSON), &rows); err != nil {
+		t.Errorf("decode the stub listener's sessions: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	for _, row := range rows {
+		if row["session_id"] == sessionID {
+			_ = json.NewEncoder(w).Encode(row)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"error":"no live session ` + sessionID + `"}`))
+}
+
 // waitForDatabaseLocks waits up to 2 s for want backends to queue behind a lock that holder's
 // transaction owns (storetest.WaitForLockWaiters), and fails the test when they never do.
 func waitForDatabaseLocks(t *testing.T, holder pgx.Tx, want int) {
@@ -598,6 +621,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "project creation", event: model.Event{Type: "project.created", Actor: user}, want: false},
 		{name: "repository project mapping", event: model.Event{Type: "settings.repo_project.updated", Actor: user}, want: false},
 		{name: "architecture source", event: model.Event{Type: "settings.architecture_source.updated", Actor: user}, want: false},
+		{name: "project default assignee", event: model.Event{Type: "settings.project_default_assignee.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
 		{name: "user thread state", event: model.Event{Type: "user_thread_state.updated", Actor: user}, want: false},
 	} {

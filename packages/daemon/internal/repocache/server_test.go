@@ -136,10 +136,15 @@ func (r *testRunner) transfers() []string {
 	var seen []string
 	for _, argv := range r.argv {
 		for _, arg := range argv {
-			if arg == gitHub {
-				seen = append(seen, argv[1]+" "+argv[2])
-				break
+			if arg != gitHub {
+				continue
 			}
+			args := argv[1:]
+			for len(args) > 2 && args[0] == "-c" {
+				args = args[2:]
+			}
+			seen = append(seen, args[0]+" "+args[1])
+			break
 		}
 	}
 	return seen
@@ -775,7 +780,7 @@ func TestServeEndsWhenTheFirstCloneFails(t *testing.T) {
 	opts.Log = func(string) {}
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-	if err := Serve(ctx, opts); err == nil || !strings.Contains(err.Error(), "git clone --bare") {
+	if err := Serve(ctx, opts); err == nil || !strings.Contains(err.Error(), "git -c gc.auto=0") {
 		t.Fatalf("Serve = %v, want the clone's failure", err)
 	}
 }

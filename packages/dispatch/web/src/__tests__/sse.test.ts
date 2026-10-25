@@ -3,6 +3,7 @@ import { QueryClient } from "@tanstack/react-query";
 import {
   architectureSourcesQuery,
   inboxQuery,
+  projectDefaultAssigneesQuery,
   projectsQuery,
   userStateQuery,
 } from "../api/queries";
@@ -131,6 +132,10 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
       ["repo-projects"],
       ["issue"],
     ];
+  }
+  // A default decides who a later create lands on; no issue already listed moves.
+  if (event.type === "settings.project_default_assignee.updated") {
+    return [projectDefaultAssigneesQuery().queryKey];
   }
   if (
     event.type === "settings.architecture_source.updated" ||
@@ -351,6 +356,13 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "project.updated": [event("project.updated", {}, { issue_key: null })],
   "settings.repo_project.updated": [
     event("settings.repo_project.updated", {}, { issue_key: null }),
+  ],
+  "settings.project_default_assignee.updated": [
+    event(
+      "settings.project_default_assignee.updated",
+      { assignee: "alice", project: "CORE" },
+      { issue_key: null }
+    ),
   ],
   "settings.architecture_source.updated": [
     event("settings.architecture_source.updated", {}, { issue_key: null }),

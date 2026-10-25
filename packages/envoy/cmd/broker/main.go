@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/config"
@@ -37,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/reread"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
@@ -57,12 +61,85 @@ const agentSecretPendingTTL = 12 * time.Hour
 // tags, its key, and whether it has a current value.
 const policyRefresh = 5 * time.Minute
 
+// rereadListenWait bounds how long the bind waits for the reread listener's first successful
+// LISTEN. What it waits on is pglisten.Listener's OnConnected, which runs only once the LISTEN
+// statement itself has returned, so while this waits the pod either becomes one the fan-out can
+// reach or the bound runs out: a pod whose dial or whose LISTEN failed waits the whole of it,
+// logs one warning and serves anyway, which is the other half of what the bound is for - it is
+// what keeps a database that takes the connection and then says nothing from holding the boot.
+//
+// Five seconds is insurance, not a figure a boot spends: in twenty measured boots the LISTEN was
+// in place before the wait was reached at all. What a boot that did reach it loses is the
+// notifications sent in that window, which costs that one pod its own five-minute reload
+// (policyRefresh) and nothing else.
+const rereadListenWait = 5 * time.Second
+
+// oauthSecretTimeout bounds oauthstore.Store.Secret, the one boot call that runs after the bind:
+// an insert ... on conflict do nothing and a select on a one-row table. It needs a bound of its
+// own because it runs on serving, which no signal cancels - a pod the load balancer may already
+// be sending requests to has to drain rather than die mid-request - and a hang there is a pod
+// holding a bound listening socket with no srv.Serve behind it until the kubelet's SIGKILL at
+// the end of the grace period. Ten seconds is far above any contention two statements against a
+// one-row table ever meet, and far below the 60-second shutdownTimeout the grace period already
+// has to cover, so it can only fire on a database that has stopped answering.
+//
+// The headroom is measured, not assumed. Two sessions running these two statements at the same
+// moment against a fresh database - the contention a cold two-pod boot makes on
+// oauth_provider_secret, where both pods insert the row and one of them loses - take 2.7-6.3 ms
+// for the session that waits and 0.8-1.5 ms for the one that does not, over five runs: three
+// orders of magnitude inside this bound. The caveat belongs with the figure. That was measured
+// with psql against a one-row table of the same shape rather than through the broker's own pgx
+// call on the migrated schema, so it is the order of magnitude of the contention and not the
+// whole cost of the call. oauth_secret_timeout_test.go measures the call itself, and asserts a
+// margin rather than a duration.
+const oauthSecretTimeout = 10 * time.Second
+
 func main() {
 	// The broker takes no flags; parsing refuses any flag given rather than ignoring it.
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// again carries this process's signals, registered here before any boot work rather than
+	// inside the drain where it used to be, and held for the life of the process: so "stop it
+	// now" works throughout. signal.NotifyContext's own relay goroutine returns as soon as it has
+	// cancelled ctx, while its channel stays registered, so without this registration every
+	// signal after the first was swallowed instead of taking SIGTERM's default disposition -
+	// kill -TERM twice did nothing at all until the boot had finished. Room for two, because
+	// "stop it now" is two signals in quick succession and signal.Notify drops what a full
+	// channel cannot take.
+	again := make(chan os.Signal, 2)
+	signal.Notify(again, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(again)
+	// serveStarted is closed once the socket is bound and srv.Serve is about to take it, and
+	// drainNow is how the watchdog below hands a second signal to the drain. The watchdog is
+	// again's only reader, and it decides once, from serveStarted's state, who a second signal
+	// belongs to (secondSignalFindsServing): the drain, through drainNow, or the watchdog's own
+	// exit. Room for one, so that handing it over never blocks on a drain that is not reading
+	// yet - there is never a second hand-over to make room for.
+	serveStarted := make(chan struct{})
+	drainNow := make(chan struct{}, 1)
+	go func() {
+		if secondSignalFindsServing(again, serveStarted) {
+			// Serving: ending the drain rather than the process is right once there are
+			// in-flight requests for srv.Shutdown to finish.
+			drainNow <- struct{}{}
+			return
+		}
+		// A second signal read before serveStarted had closed. Some of the boot runs on a
+		// context no signal cancels, and all of it runs with no health endpoint answering, so
+		// an operator who has asked twice is owed an exit rather than a process that runs on to
+		// bind a socket and drain a server that never served. The lines logged above this one
+		// say how far the boot had got; the status is non-zero because this is a boot that did
+		// not finish, not a clean stop.
+		//
+		// The line says what the check established and not what the exit finds: main may close
+		// serveStarted and start srv.Serve in the two statements between the two, so "had not
+		// begun serving when the second signal was read" is true where "has served nothing"
+		// would be a claim about an instant this goroutine never observes.
+		slog.Error("broker: a second signal arrived while the broker was still starting up, so it is stopping without a drain: it had not begun serving when that signal was read")
+		os.Exit(1)
+	}()
 
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
@@ -77,6 +154,17 @@ func main() {
 	// BROKER_SECRETS_KMS_KEY_ARN, or BROKER_SECRETS_KMS_KEY_NAME under gcp-secret-manager.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
+	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
+	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
+	// repository can check that it does: the guard this repository would otherwise write — a test
+	// in the owning module reading the dependent's rendered manifest — cannot cross repositories,
+	// since the Deployment and its grace period live in the deployment's own repository. This line
+	// and the operator documentation are that guard's replacement, so total is the figure an
+	// operator transcribes: the grace period must cover it in addition to any preStop pause the
+	// deployment adds, because the pause and this drain are both paid out of the one grace period.
+	drain := time.Duration(cfg.DrainSeconds) * time.Second
+	slog.Info("broker stop budget", "drain", wholeSeconds(drain), "shutdown", wholeSeconds(shutdownTimeout),
+		"total", wholeSeconds(drain+shutdownTimeout))
 	// How the broker signs in to its database, logged before anything reaches for AWS or the
 	// database, so an operator reads it from the log rather than the task's environment: rds-iam
 	// when each connection signs in with an RDS IAM token the broker mints, and password when it
@@ -110,15 +198,9 @@ func main() {
 	// Secrets Manager's fields), Secrets Manager under the AWS SDK's credential chain, or Secret
 	// Manager under Application Default Credentials.
 	var secretStore secrets.Store
-	// mintToken mints a minted secret's value. Only the GCP store mints (config.Load refuses
-	// BROKER_MINT_TARGETS under any other), and without targets no minted secret is served.
-	var mintToken func(context.Context, string, time.Duration) (string, error)
 	var credentials string
 	switch {
 	case fakeSecrets != "":
-		if len(cfg.MintTargets) > 0 {
-			fatal(fmt.Errorf("BROKER_MINT_TARGETS needs Secret Manager itself, not BROKER_FAKE_SECRETS_FILE, since only it mints"))
-		}
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
 		// The file's kms_key_id names the agent-secrets key as the selected store configures it.
@@ -131,16 +213,12 @@ func main() {
 		fatal(err)
 		defer client.Close()
 		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
-		if len(cfg.MintTargets) > 0 {
-			mintToken, err = secrets.NewGCPTokenMinter(ctx)
-			fatal(err)
-		}
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts)), MintTargets: cfg.MintTargets}
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Compact(slices.Sorted(maps.Values(cfg.ServicesByAccount)))}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
@@ -152,8 +230,147 @@ func main() {
 		pod = enroll.K8sPodVerifier{Verifier: verifier}
 	}
 
-	current, err := policy.NewCurrent(ctx, loader, policyRefresh)
+	// The context the work that has to outlive the drain runs on: the five-minute policy reload
+	// below and the reread listener under it. ctx is signal.NotifyContext's, which the first
+	// SIGTERM cancels, and a pod goes on being sent new requests for the whole of its drain —
+	// that is what the drain is for — so for that window it is still one of the pods a reread has
+	// to reach, and a retag that narrows who may have a secret has to be in force there too.
+	// context.WithoutCancel keeps every value ctx carries and drops only its cancellation;
+	// endServing, called once srv.Shutdown has returned - having answered the last request, or
+	// having spent its 60-second allowance - is what ends these loops instead. Everything that legitimately stops at the signal — the request
+	// sweeper below — stays on ctx.
+	serving, endServing := context.WithCancel(context.WithoutCancel(ctx))
+	defer endServing()
+
+	// The policy and its five-minute reload, on serving rather than on ctx so the backstop the
+	// fan-out leans on goes on reloading while the pod drains: stopped at the signal it would
+	// leave the one pod the load balancer is still choosing with neither the fan-out nor the
+	// reload to narrow the tags it serves. One thing about boot changes with it: the first load
+	// no longer ends early on a signal that arrives while it is running, so a pod signalled
+	// mid-boot finishes that load and then returns without draining at all, there being nothing
+	// bound to drain (the return below). NewCurrent's own contract is untouched — its
+	// loop logs no failed-load line once its context has ended, which is now the end of the
+	// shutdown rather than the signal, so the line a deployment alarms on still counts only loads
+	// that failed while the broker was meant to be serving.
+	//
+	// Written down so nobody rediscovers it as a hang: one signal does not interrupt this call.
+	// A store that never answers the first load leaves it running - it runs on serving, which no
+	// signal cancels, and the ctx.Err() check below sits after it returns - so a single SIGTERM
+	// is noted and nothing more until the load ends. That is safe, and it stays as it is. A pod
+	// here has bound nothing, is in no EndpointSlice and serves no caller, so there is no request
+	// to answer and nothing to drain by ending it sooner; what does end it is a second signal,
+	// which the watchdog goroutine at the top of main reads from `again` and answers with
+	// os.Exit(1) (measured: gone within 30 ms of that signal), or the kubelet's SIGKILL at the
+	// end of the grace period.
+	current, err := policy.NewCurrent(serving, loader, policyRefresh)
 	fatal(err)
+	// A signal that arrived while that first load ran leaves nothing to drain. The load runs on
+	// serving and so does not end early, which is deliberate, but a process signalled before it
+	// has bound anything has no caller to answer and no in-flight request to finish: returning
+	// here is the whole of such a process's shutdown. Binding a socket and then running a drain
+	// and a shutdown budget for a server that never served would hold the pod open for the whole
+	// drain and serve nobody - the shutdown budget itself is a maximum rather than a wait, since
+	// srv.Shutdown with nothing in flight returns at once, so what is saved here is the drain,
+	// and what is avoided is a pod in an EndpointSlice that answers no caller.
+	if ctx.Err() != nil {
+		slog.Info("broker: signalled while starting up, before it had bound anything", "stage", "the first policy load")
+		return
+	}
+
+	// This process's own sender id, minted once at boot. Postgres delivers a notification to every
+	// session listening on the channel, this pod's own included, so without an id stamped on what
+	// it sends a pod would reread every secret it just reread on behalf of a caller. Both halves of
+	// the fan-out take it: the notifier stamps it, and the listener drops what carries it.
+	senderID := uuid.NewString()
+	// firstListen carries the reread listener's first successful LISTEN to the bind below, which
+	// waits for it: a pod the load balancer can reach is a pod a retag has to reach, so a process
+	// that bound before its own LISTEN was in place would spend those milliseconds serving
+	// traffic while a peer's reread of a secret it holds goes to a channel nobody on this pod is
+	// on yet. That wait orders net.Listen against the LISTEN and nothing else. It does nothing for
+	// a notification committed before the LISTEN, while the first policy load above was reading
+	// the namespace - the load was taken before the subscription existed - and the catch-up load
+	// after the wait is what covers that one. OnConnected is what makes the wait mean "listening"
+	// rather than nearly that: pglisten runs it after the LISTEN statement has succeeded, where a
+	// hook on the dial would fire with the LISTEN still in flight. The token is sent without
+	// blocking and the channel is never drained again, so every redial behind the boot costs the
+	// listener nothing.
+	//
+	// The receiving half of the reread fan-out, started after the first policy load (it rereads
+	// into that policy) and before net.Listen, so a pod that cannot hold a LISTEN connection still
+	// serves: Run redials forever on its own and never refuses the boot. What such a pod loses
+	// while it has no connection is the notifications sent in that window — it goes on serving the
+	// tags it last read and catches up at its own five-minute reload (policyRefresh), which is the
+	// fan-out's documented backstop. It runs on serving, not on the signal's own context: a
+	// draining pod is still being sent requests, so it is still a pod a peer's reread has to
+	// reach, and a listener stopped at the signal would leave that pod serving the tags it read
+	// before the retag for the whole of its drain. The shutdown ends it instead.
+	firstListen := make(chan struct{}, 1)
+	go (&reread.Listener{
+		Sender: senderID,
+		Dial:   st.Listener,
+		OnConnected: func() {
+			select {
+			case firstListen <- struct{}{}:
+			default:
+			}
+		},
+		Refresh: func(ctx context.Context, name string) error {
+			_, err := current.RefreshOne(ctx, name)
+			return err
+		},
+	}).Run(serving)
+	// The wait that pairs with it, and the whole of what it promises: either this pod is listening
+	// on the channel before net.Listen binds the socket callers reach it on, or rereadListenWait
+	// has run out. A pod whose dial or whose LISTEN failed waits the bound out and then serves
+	// anyway, the listener redialing behind it, so nothing here can refuse a boot; the bound is
+	// what keeps a Postgres that takes the connection and never answers from holding one.
+	select {
+	case <-firstListen:
+		// The catch-up: one more whole-namespace load into the live policy, taken now that the
+		// LISTEN is in place, so that the subscription exists before the read whose result it is
+		// meant to invalidate. Postgres delivers nothing to a session for a NOTIFY committed before
+		// that session's LISTEN, and the listener's onConnected deliberately catches nothing up, so
+		// without this load the following is lost on this pod until its five-minute reload, with
+		// nothing logged: B starts and begins its first load; A serves a reread of a narrowing
+		// retag and commits its notification, which no session of B's is listening for; B's
+		// LISTEN succeeds. With this load, B then reads the namespace again here and binds with
+		// the retag in force. A notification committed after the LISTEN is delivered instead; the
+		// RefreshOne it drives and this Refresh take the policy's one writer lock, and Refresh
+		// re-describes every name a reread changed within the store's ListLag (Current's recent
+		// anchors), so a reread that lands first is not undone by this load's listing. What this
+		// load reads is the store's listing, as every whole-namespace load does, so a store whose
+		// listing lags a write by up to its ListLag (Store.ListLag) can still show it the tags
+		// from before the retag. That exposure is the store's rather than this ordering's - the
+		// alternative shapes of this fix all share it, since a retag committed before any
+		// subscription is only ever visible through a listing - and it is tracked, with the two
+		// ways to close it and their costs, at dispatch://INFRA-375.
+		//
+		// It costs one extra namespace read per boot, and nothing after: the whole listing - on
+		// Secrets Manager its ListSecrets pages and at most one KMS alias lookup, on Secret
+		// Manager those pages and one GetSecretVersion per secret.
+		//
+		// A failed load does not refuse the boot. The first load succeeded, so the policy is
+		// live and this is a catch-up; the line says what failing it loses, and it is named
+		// apart from the "broker: <operation> failed" lines, which stand for a request answered
+		// 500 or 503. It runs on serving, as the first load does and for the same reasons, so
+		// what the first load's comment writes down about one signal holds here too: a store
+		// that never answers holds the boot until a second signal or the kubelet's SIGKILL.
+		if err := current.Refresh(serving); err != nil {
+			slog.Warn("broker: serving without the boot's catch-up policy load, so a retag another pod served while this one was starting may not be in force here until its five-minute reload", "error", err)
+		}
+		// The same check as the one after the first load, for the same reason: a process
+		// signalled before it has bound anything has nothing to drain.
+		if ctx.Err() != nil {
+			slog.Info("broker: signalled while starting up, before it had bound anything", "stage", "the catch-up policy load")
+			return
+		}
+	case <-time.After(rereadListenWait):
+		// No catch-up here. With no LISTEN in place there is no subscription to order a read
+		// after, so a second namespace read would not close the window, only move where it
+		// starts: a notification sent before the listener connects is lost on this pod whatever
+		// is read now, as this warning says, and its five-minute reload is what catches it up.
+		slog.Warn("broker: binding before the reread listener has had an answer", "waited", rereadListenWait)
+	}
 
 	// Bind now, synchronously, right after every guard that can still refuse to
 	// boot has already run (config, the port-0 public-URL guard, migrations, the first policy
@@ -184,11 +401,19 @@ func main() {
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
-	reqMachine.MintToken = mintToken
 	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
 	oauthStore := oauthstore.New(st.Pool)
 	oauthStore.Reused = enroll.RevokeReusedCredential
-	oauthSecret, err := oauthStore.Secret(ctx)
+	// On serving, not ctx, for the same reason the policy's own loads are: this runs after the
+	// bind above, so a SIGTERM arriving here finds a pod the load balancer may already be sending
+	// requests to, and such a pod has to drain rather than die with "context canceled" where its
+	// callers see a reset connection. The signal is still read, by <-ctx.Done() below, which the
+	// moment this boot finishes begins the drain it asked for. What no signal cancels still has
+	// to be bounded, though, because nothing is serving the socket this pod has already bound:
+	// oauthSecretTimeout is that bound, and its own comment says what it is sized against.
+	secretCtx, cancelSecret := context.WithTimeout(serving, oauthSecretTimeout)
+	oauthSecret, err := oauthStore.Secret(secretCtx)
+	cancelSecret()
 	fatal(err)
 	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
@@ -229,20 +454,42 @@ func main() {
 	if cfg.SecretsStore == secrets.StoreGCP {
 		rereadOverall = &api.GCPRereadOverallLimit
 	}
+	// draining is set once, by the signal handler below, and read by every handler goroutine
+	// GET /healthz runs on, which is why it is atomic rather than a plain bool.
+	var draining atomic.Bool
+	// The sending half of the reread fan-out. reread.Notifier returns the error rather than
+	// logging it, because what a failed fan-out means is this program's decision, and the decision
+	// is one WARN and nothing else: the reread this pod was asked for has already happened and the
+	// answer it gives its caller stands, and the peers that did not hear reread this secret at
+	// their own next five-minute reload (policyRefresh) anyway. Neither the caller's 200 nor the
+	// process is worth failing over a notification Postgres would not take.
+	notify := reread.Notifier(st.Pool, senderID)
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,
 		SecretsKMSKey:      cfg.SecretsKMSKey,
-		TrustedProxyHeader: cfg.TrustedProxyHeader})
+		TrustedProxyHeader: cfg.TrustedProxyHeader,
+		Draining:           draining.Load,
+		NotifyReread: func(ctx context.Context, name string) {
+			if err := notify(ctx, name); err != nil {
+				slog.Warn("broker: the other pods were not told to reread a secret", "secret", name, "error", err)
+			}
+		}})
 	srv := &http.Server{
 		Handler:           withRequestDeadline(mux, requestDeadline),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      requestDeadline + 15*time.Second,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       2 * time.Minute,
 	}
+	// From here a second signal belongs to the drain below rather than to the watchdog's exit:
+	// the socket is bound and srv.Serve is about to take it, so there are requests to finish and
+	// a drain whose job is finishing them. Closing serveStarted before srv.Serve starts is what
+	// makes the watchdog's exit line true: a decision that finds it open is one taken before
+	// srv.Serve could have answered a single request.
+	close(serveStarted)
 	go func() {
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("broker: serve", "error", err)
@@ -251,21 +498,126 @@ func main() {
 	}()
 
 	<-ctx.Done()
+	// The drain comes first and the listener stays open through it, rather than the reverse: a pod
+	// leaves its Service's EndpointSlice concurrently with the kubelet beginning termination, not
+	// before it, so for a while after SIGTERM the kubelet is still routing new connections here.
+	// Failing readiness now — GET /healthz answers 503 SHUTTING_DOWN from this point, while every
+	// other route is served exactly as before — and closing the listener only once the drain has
+	// run out is what keeps those connections from being refused by a socket that is already gone.
+	slog.Info("broker draining", "drain", wholeSeconds(drain))
+	draining.Store(true)
+	if drain > 0 {
+		// A second signal ends the drain at once: an operator, or a kubelet that has decided this
+		// pod has to be gone now, must not have to wait out a drain whose whole purpose has
+		// already been served. ctx is no help here — signal.NotifyContext cancelled it with the
+		// first signal — so the second one arrives on drainNow, handed over by the watchdog at the
+		// top of main once it has found serveStarted closed. A zero drain takes neither this
+		// select nor a timer, which would be a wait on something that never fires.
+		timer := time.NewTimer(drain)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-drainNow:
+			slog.Info("broker: a second signal ended the drain early")
+		}
+	}
 	slog.Info("broker shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("broker: shutdown", "error", err)
 	}
+	// Shutdown has returned, either having answered the last request or having spent the 60
+	// seconds above, so the work kept alive through the drain has nothing left to serve: this is
+	// where the reread listener and the five-minute policy reload stop.
+	//
+	// The order is a dependency, and it is not the one the pool makes: st.Listener hands pglisten
+	// a connection hijacked out of the pool (store.go, conn.Hijack), so st.Close never touches it
+	// and closing the store would not end a LISTEN. What ends it is pglisten's own deferred
+	// close of that connection when its loop returns, which endServing asks for by cancelling
+	// serving. endServing only asks: nothing here waits for that goroutine, and the process
+	// exits with the cancellation delivered and the close in flight, which costs nothing because
+	// Postgres ends a session whose connection goes with the process. The order still matters for
+	// the reload and the pools: endServing stops the loop that would otherwise read through a
+	// pool st.Close is about to shut, and st.Close releases the two pools behind it, each of
+	// whose health checks is a goroutine of its own.
+	endServing()
+	st.Close()
+}
+
+// secondSignalFindsServing takes the first two signals off again and then answers whether
+// serveStarted was closed: true when the second signal belongs to the drain, false when it
+// belongs to the watchdog's exit. It is the watchdog's whole decision, kept out of main so a test
+// drives it with no process to kill.
+//
+// The order is the point. It takes both signals before it looks at serveStarted, and then looks
+// once without waiting. Waiting on serveStarted and the second signal in one select instead would
+// be a select over two ready channels whenever a second signal reached a broker already serving,
+// and Go picks among ready cases uniformly at random: some of those stops would os.Exit(1) a
+// serving broker, skipping the drain and srv.Shutdown and logging that it had served nothing.
+// Read this way, serveStarted's state is the only input, and it only ever moves one way, so once
+// it is closed every second signal answers drain.
+//
+// The first signal is the one signal.NotifyContext has already turned into ctx's cancellation;
+// again is sent it too, and taking it off here is what leaves the next one to mean "now". Nothing
+// else reads again, so no other reader can take either signal first.
+//
+// What this establishes is the state at the look and not at what the caller does next: found
+// open, the exit two statements later runs while main may already have closed serveStarted and
+// started srv.Serve, so what is true of that exit is that the broker had not begun serving when
+// the second signal was read. The ERROR line says that and no more. Nothing orders the two, and
+// nothing should: this window is between a function returning and the next two statements, where
+// the defect it replaces was a choice between two ready cases measured at 39 of 100 on a signal
+// pair the kernel cannot merge - orders of magnitude apart, and the exit is what the operator
+// asked for twice. A lock or a second check here would be a fix to a window that does not need
+// one.
+//
+// Either answer stops the process. Found open, srv.Serve has not started at the look, since main
+// closes serveStarted first, so no request was ever accepted to drop; found closed, a server
+// exists or is one statement from existing, and the drain is the right owner for it - it ends at
+// once on the hand-over and runs srv.Shutdown.
+func secondSignalFindsServing(again <-chan os.Signal, serveStarted <-chan struct{}) bool {
+	<-again
+	<-again
+	select {
+	case <-serveStarted:
+		return true
+	default:
+		return false
+	}
 }
 
 // requestDeadline bounds every request's own context, so no handler outlives its caller by more
-// than a Dispatch call's worth of time; WriteTimeout sits past it so a handler that honours its
+// than a Dispatch call's worth of time; writeTimeout sits past it so a handler that honours its
 // context always gets to write its answer.
 const requestDeadline = 45 * time.Second
 
-// shutdownTimeout is how long SIGTERM waits for in-flight requests before the process exits.
-const shutdownTimeout = 10 * time.Second
+// writeTimeout is the http.Server's own WriteTimeout: the request deadline plus the fifteen
+// seconds a handler that honours its context needs to write the answer it already has. Go resets
+// the write deadline once a request's headers are read, so what it bounds is the exchange after
+// the headers and not the whole accepted connection, whose header read has its own
+// ReadHeaderTimeout above.
+const writeTimeout = requestDeadline + 15*time.Second
+
+// shutdownTimeout is how long the broker waits for its in-flight requests once the drain has run
+// out, and it is the write timeout rather than a figure of its own because that is the longest
+// exchange the server itself allows a request already past its headers: one admitted in the last
+// instant of the drain still gets its whole 45-second handler deadline, and WriteTimeout bounds
+// the exchange around it at 60 seconds. A connection still sending headers when the drain ends
+// is not what this budget is for: Shutdown closes an idle connection at once and treats one that
+// has gone five seconds without its headers as idle (net/http closeIdleConns), so the longest it
+// waits for a connection that never sends a request is those five seconds. It is only safe to be
+// this long because the deployment's terminationGracePeriodSeconds has to cover it — past that
+// the kubelet SIGKILLs the process whatever it believes it is still allowed, and the in-flight
+// requests this budget exists to finish are dropped anyway. The stop-budget line main logs at
+// boot is how a deployment reads the number it has to cover.
+const shutdownTimeout = writeTimeout
+
+// wholeSeconds renders a duration as a whole number of seconds ("65s") rather than as
+// time.Duration's own "1m5s", because the stop budget's reader is a deployment setting
+// terminationGracePeriodSeconds, which is counted in seconds and nothing else. Every duration it
+// is given is a whole number of them.
+func wholeSeconds(d time.Duration) string { return strconv.Itoa(int(d/time.Second)) + "s" }
 
 func withRequestDeadline(next http.Handler, deadline time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -298,15 +650,27 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 }
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
-// its configuration: the audience and skew every request object is checked against, and the
-// service accounts that prove a pod is a registered service's. A grant lasts the lifetime its
-// request signed, or until its session ends.
+// its configuration: the audience and skew every request object is checked against, and, for each
+// service account, the registered service a pod running as it proves. A grant lasts the lifetime
+// its request signed, or until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
-		ServiceAccounts: cfg.ServiceAccounts,
+		ServicesByAccount: cfg.ServicesByAccount,
+		Minters:           kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
+}
+
+// kindMinters is the broker's minter for each kind: the GitHub App minter for github-app secrets
+// and the Google login minter for google-login ones. Its arguments are the production minters in
+// newRequestMachine; a test passes ones aimed at its own endpoints, so wiring a kind to the wrong
+// minter fails it.
+func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) map[string]requests.Minter {
+	return map[string]requests.Minter{
+		policy.KindGitHubApp:   githubApp.Mint,
+		policy.KindGoogleLogin: googleLogin.Mint,
+	}
 }

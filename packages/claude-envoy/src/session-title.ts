@@ -165,21 +165,42 @@ export function tmuxPaneTitle(
   return /^[0-9]+$/.test(session) ? undefined : session
 }
 
+/** A name the user gave the session (`claude -n`, `--name`, `/rename`), as recorded for
+ *  `sessionId`; undefined when that session has none. */
+export type ChosenTitle = (sessionId: string) => string | undefined
+
+/** The seams a caller may inject; each defaults to what the running session uses. */
+export interface SessionTitleSources {
+  /** How a tmux server is asked for a pane's fields; by default a bounded `tmux` run. */
+  readonly query?: TmuxQuery
+  /** Whether a pane's first process is ours; by default one of this process's ancestors. */
+  readonly ownPane?: (panePid: string) => boolean
+  /** The name the user gave a session; by default none is recorded. */
+  readonly chosen?: ChosenTitle
+}
+
 /**
  * The title this session registers with the Envoy listener, which Dispatch's Agents page shows in
- * place of the session id: `ENVOY_SESSION_TITLE`; else a name and the current id's first eight
- * characters, the name being the pane's tmux name inside tmux (`TMUX` and `TMUX_PANE`, asked of
- * the server `TMUX` names, for a pane whose first process `ownPane` accepts, by default one of this
- * process's ancestors) and the project directory's name otherwise. The short id keeps two sessions that
- * share a tmux window or session apart. The name is worked out once, as the server starts: a tmux
- * rename after that shows on the next start.
+ * place of the session id: `ENVOY_SESSION_TITLE`; else the name the user gave the session, alone,
+ * since a name a person chose needs nothing to tell it apart; else a name and the current id's
+ * first eight characters, the name being the pane's tmux name inside tmux (`TMUX` and
+ * `TMUX_PANE`, asked of the server `TMUX` names, for a pane whose first process `ownPane`
+ * accepts, by default one of this process's ancestors) and the project directory's name
+ * otherwise. The short id keeps two sessions that share a tmux window or session apart. The tmux
+ * name is worked out once, as the server starts: a tmux rename after that shows on the next
+ * start. `chosen` is asked on every call instead, so a name the user chose after the server
+ * started reaches the listener on the next registration.
  */
 export function sessionTitle(
   environment: SessionTitleEnvironment,
   directory: string,
-  query: TmuxQuery = queryTmux,
-  ownPane: (panePid: string) => boolean = (panePid) => isAncestor(panePid),
+  sources: SessionTitleSources = {},
 ): SessionTitle {
+  const {
+    query = queryTmux,
+    ownPane = (panePid: string) => isAncestor(panePid),
+    chosen = () => undefined,
+  } = sources
   const explicit = oneLine(configuredValue(environment.ENVOY_SESSION_TITLE) ?? "")
   // A title with nothing that shows once cleaned (a zero-width space, a colour code alone) would
   // be a blank row.
@@ -196,5 +217,8 @@ export function sessionTitle(
       ? undefined
       : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ??
     (visible(directoryName) ? directoryName : "session")
-  return (sessionId) => `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`
+  return (sessionId) => {
+    const own = oneLine(chosen(sessionId) ?? "")
+    return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`
+  }
 }
