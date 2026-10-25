@@ -1944,9 +1944,14 @@ workflow role (`claim.Roles`: architect, planner, implementer, tester, reviewer,
    own. Its log has one line for each connection the daemon accepted, `launcher: connected to the
    daemon at <address> as launcher <id> (sandbox <name>, role <role>, pod <uid>)`, and one for each
    connection that ended, `launcher: daemon connection: <why>; reconnecting`, so a connected
-   launcher reads apart from one still dialing. The launcher's own lines, and each role child's
-   stdout and stderr lines, are prefixed `<role>: `, so the container's one log interleaves every
-   role's lines and `kubectl logs <pod> -c roles | grep '^<role>: '` reads one role's.
+   launcher reads apart from one still dialing. The launcher's own lines for a role, and each role
+   child's stdout and stderr lines, are prefixed `<role>: `, so the container's one log interleaves
+   every role's lines and `kubectl logs <pod> -c roles | grep '^<role>: '` reads one role's. Each
+   line is whole: the launcher's lines and each generation of a role write through writers of
+   their own, and a generation's last line without a newline is written out as a line of its own
+   once the generation ends. A line the launcher writes for no role (a panic) has
+   no prefix, and when the container ends the daemon quotes those lines after each role's own in
+   that role's detail.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
 `runtime.kubernetes.issue_volume` (50Gi by default) and `storage_class`, labelled

@@ -126,11 +126,14 @@ func newManagers(cfg Config) ([]*manager, error) {
 		if strings.TrimSpace(string(token)) == "" {
 			return nil, fmt.Errorf("launcher: role %s launcher token %s is empty", role, file)
 		}
-		stdout, stderr := log.writers(role)
+		// The launcher's own lines for the role are written through a writer of their own, and
+		// each generation's child through writers of its own (command), so no launcher line is
+		// glued onto a line the child has not finished, and no generation's onto another's.
+		_, own := log.writers(role)
 		managers = append(managers, &manager{
 			cfg: cfg, role: role, token: strings.TrimSpace(string(token)), namespaced: true,
 			private: filepath.Join(cfg.RolesDir, role, RolePrivateDir), launcherID: randomID(),
-			stdout: stdout, stderr: stderr, requests: map[string]request{},
+			log: log, stderr: own, requests: map[string]request{},
 		})
 	}
 	return managers, nil
@@ -305,12 +308,17 @@ type child struct {
 	pid        int
 	dir        string
 	status     *os.File
-	done       chan struct{}
+	// output is the generation's own prefixed stdout and stderr in an issue pod's container,
+	// whose unfinished last lines wait flushes once the generation's process is gone.
+	output []io.Writer
+	done   chan struct{}
 }
 
 // manager serves one role: its own daemon connection, its own launcher id, its own token and
 // private directory, its own child, and, in an issue pod's container, its own prefix in the log
-// and a namespace of its own for every generation it starts.
+// and a namespace of its own for every generation it starts. stdout and stderr are where the
+// controller's one role writes; in an issue pod's container stderr is the launcher's own lines
+// for the role, and log gives each generation writers of its own.
 type manager struct {
 	cfg        Config
 	role       string
@@ -320,6 +328,7 @@ type manager struct {
 	launcherID string
 	stdout     io.Writer
 	stderr     io.Writer
+	log        *roleLog
 	writer     *shimwire.Writer
 	mu         sync.Mutex
 	child      *child
@@ -408,7 +417,7 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		m.remember(command.ID, body, result)
 		return result
 	}
-	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, dir: dir, status: process.status, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, dir: dir, status: process.status, output: process.output, done: make(chan struct{})}
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
@@ -426,13 +435,20 @@ func (m *manager) remember(id string, body []byte, result shimwire.Frame) {
 
 // command is one generation's process: in an issue pod's container, role-init as the init of
 // this role's new user, mount, PID and IPC namespaces, with the pipe it reports the shim's own
-// wait status on; in the controller's pod, the shim itself in the container's own namespaces.
+// wait status on and prefixed writers of the generation's own; in the controller's pod, the shim
+// itself in the container's own namespaces.
 func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProcess, error) {
 	if m.namespaced {
-		return newRoleProcess(RoleInitConfig{
+		stdout, stderr := m.log.writers(m.role)
+		process, err := newRoleProcess(RoleInitConfig{
 			RolesDir: m.cfg.RolesDir, Role: m.role, Generation: start.Generation, Home: roleHome,
 			HomeMounts: roleHomeMounts, FixedRoot: roleFixedRoot, Argv: start.Argv,
-		}, env, m.stdout, m.stderr)
+		}, env, stdout, stderr)
+		if err != nil {
+			return nil, err
+		}
+		process.output = []io.Writer{stdout, stderr}
+		return process, nil
 	}
 	cmd := exec.Command(start.Argv[0], start.Argv[1:]...)
 	cmd.Env = env
@@ -443,7 +459,8 @@ func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProc
 
 // wait reports the generation's exit once its process is gone. A role's exit is the shim's own:
 // its namespace init reports the status it waited on, and only an init killed before the shim
-// ended — or one that never started it — reports its own.
+// ended — or one that never started it — reports its own. Once the process and its output copies are done, the last line the generation left
+// unfinished is written out, so it is neither lost nor joined to the next generation's first.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	var reported *syscall.WaitStatus
 	if active.status != nil {
@@ -453,6 +470,11 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	}
 	if err := cmd.Wait(); err != nil && cmd.ProcessState == nil {
 		m.logf("launcher: wait for generation %d: %v", active.generation, err)
+	}
+	for _, output := range active.output {
+		if w, ok := output.(*prefixWriter); ok {
+			w.flush()
+		}
 	}
 	if !m.namespaced {
 		m.cleanExitedGeneration()
@@ -572,14 +594,16 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 // roleLog is the one container log an issue pod's roles share: every line a role's launcher or
 // its child writes carries that role's name, since `kubectl logs` shows one log for the pod's
 // roles where one container per role showed six. Whole lines are written under one lock, so two
-// roles never interleave inside a line.
+// roles never interleave inside a line. Each writer holds its own unfinished line, so the
+// launcher's lines for a role and each generation of its child are written through writers of
+// their own, and none is ever joined to another's unfinished line.
 type roleLog struct {
 	mu             sync.Mutex
 	stdout, stderr io.Writer
 }
 
-// writers are role's own stdout and stderr: nil where the launcher was given none, which exec.Cmd
-// turns into the null device for the child.
+// writers are a new pair of role's own stdout and stderr: nil where the launcher was given none,
+// which exec.Cmd turns into the null device for the child.
 func (l *roleLog) writers(role string) (stdout, stderr io.Writer) {
 	if l.stdout != nil {
 		stdout = &prefixWriter{log: l, out: l.stdout, prefix: role + ": "}
@@ -588,6 +612,17 @@ func (l *roleLog) writers(role string) (stdout, stderr io.Writer) {
 		stderr = &prefixWriter{log: l, out: l.stderr, prefix: role + ": "}
 	}
 	return stdout, stderr
+}
+
+// linef writes one whole line of the launcher's own, no role's, so it carries no prefix: the
+// daemon quotes such lines with every role's when the container ends (sandbox's containerLines).
+func (l *roleLog) linef(format string, args ...any) {
+	if l.stderr == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, _ = fmt.Fprintf(l.stderr, format+"\n", args...)
 }
 
 // maxLogLine bounds how much of one unfinished line a role can make PID 1 hold: a longer line is
@@ -636,6 +671,18 @@ func (w *prefixWriter) emit(line []byte, cut bool) {
 		w.line = append(w.line, '\n')
 	}
 	_, _ = w.out.Write(w.line)
+}
+
+// flush writes the unfinished line the writer holds, behind its prefix and ended as a line of its
+// own: called once the generation writing to it is gone and its output copied, so what it wrote
+// last without a newline is neither lost nor joined to anything written after.
+func (w *prefixWriter) flush() {
+	w.log.mu.Lock()
+	defer w.log.mu.Unlock()
+	if len(w.partial) > 0 {
+		w.emit(w.partial, true)
+		w.partial = w.partial[:0]
+	}
 }
 
 // resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;

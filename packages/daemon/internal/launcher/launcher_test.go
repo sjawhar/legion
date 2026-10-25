@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -845,5 +846,33 @@ func TestARolesResumeIsReadWhereTheContainerHoldsItsHome(t *testing.T) {
 	}
 	if got.OK || !strings.Contains(got.Error, "resume session file "+session+": stat "+session) {
 		t.Fatalf("start = %#v, want a refusal naming %s: the session is read under the home mounts, at %s, where nothing is", got, session, held)
+	}
+}
+
+// The container's log holds every line whole and behind its own role's prefix: the launcher's own
+// line for a role never glues onto a line that role's child has not finished, and a generation
+// that exits mid-line has that line written out on its own once it is gone, so the next
+// generation's first line starts a line of its own rather than finishing it (`fatalready`).
+func TestTheContainersLogKeepsEveryLineWholeAcrossGenerations(t *testing.T) {
+	out := &lockedBuffer{}
+	log := &roleLog{stdout: out, stderr: out}
+	_, own := log.writers("tester")
+	first, _ := log.writers("tester")
+	_, _ = first.Write([]byte("downloading 42%"))
+	_, _ = fmt.Fprintf(own, "launcher: daemon connection: EOF; reconnecting\n")
+	_, _ = first.Write([]byte("\rdownloading 99%\nfatal"))
+	first.(*prefixWriter).flush()
+	second, _ := log.writers("tester")
+	_, _ = second.Write([]byte("ready\n"))
+	second.(*prefixWriter).flush()
+	log.linef("launcher: reap orphans: list role namespace processes: permission denied")
+
+	want := "tester: launcher: daemon connection: EOF; reconnecting\n" +
+		"tester: downloading 42%\rdownloading 99%\n" +
+		"tester: fatal\n" +
+		"tester: ready\n" +
+		"launcher: reap orphans: list role namespace processes: permission denied\n"
+	if got := out.String(); got != want {
+		t.Fatalf("the container's log is\n%q\nwant\n%q", got, want)
 	}
 }

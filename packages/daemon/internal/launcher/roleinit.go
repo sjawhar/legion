@@ -129,11 +129,13 @@ func containerPath(path string) string {
 const RoleInitSubcommand = "role-init"
 
 // roleProcess is one generation's role-init: the command that is the init of the role's new
-// namespaces, and the pipe it writes the shim's own wait status to.
+// namespaces, the pipe it writes the shim's own wait status to, and, in an issue pod's container,
+// the prefixed writers of the generation's own output, which its wait flushes.
 type roleProcess struct {
 	cmd    *exec.Cmd
 	status *os.File
 	write  *os.File
+	output []io.Writer
 }
 
 // newRoleProcess builds a generation's role-init over cfg, with env the generation's environment
