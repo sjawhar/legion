@@ -792,6 +792,7 @@ export function ProofDocument({
               onAnswered={blockAnswered}
               owner={owner.kind === "document" ? owner : undefined}
               readOnly={blocksReadOnly}
+              rowResolution={isClosed}
             />
           );
         })}

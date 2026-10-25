@@ -219,3 +219,67 @@ test("after Ask back on a decision block, the hosted card's turn label follows t
     view.unmount();
   }
 });
+
+test("a closed issue's current document shows a withdrawn block's record from its ask row; a saved version reads only its own attributes", async () => {
+  const withdrawn: Ask = {
+    ...blockAsk,
+    resolution: {
+      actor: { id: "alice", kind: "user" },
+      at: new Date().toISOString(),
+      kind: "withdrawn",
+      reason: "Withdrawn by the close of CORE-1.",
+    },
+    state: "resolved",
+  };
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["asks", "CORE-1"], [withdrawn]);
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  queryClient.setQueryData(["artifact", "artifact-1", "version", 1], {
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "The saved version",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const { editors, rerender, sync, view } = renderProofDocument({ queryClient });
+  const mountBlock = (index: number) => {
+    const editor = editors[index];
+    if (editor === undefined) throw new Error(`editor ${index} missing`);
+    const nodeViews = editor.viewProps.nodeViews as Record<
+      string,
+      (node: ProseMirrorNode) => { dom: HTMLElement; destroy(): void }
+    >;
+    const construct = nodeViews.ask;
+    if (construct === undefined) throw new Error("the ask node view was not installed");
+    act(() => {
+      editor.root.append(construct(askNode({ state: "resolved", urgency: "high" })).dom);
+    });
+    const section = editor.root.querySelector("section[data-dispatch-ask-block]");
+    if (section === null) throw new Error("the ask block shell was not mounted");
+    return section as HTMLElement;
+  };
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    rerender({ isClosed: true });
+    const current = within(mountBlock(0));
+    expect((await current.findByTestId("ask-resolution-badge")).textContent).toBe("Withdrawn");
+    expect(current.getByText(/Withdrawn when alice closed the issue$/)).toBeDefined();
+    expect(current.queryByText(/Withdrawn by the close of CORE-1/)).toBeNull();
+    expect(current.queryByRole("radio")).toBeNull();
+    expect(current.queryByRole("button", { name: "Answer" })).toBeNull();
+
+    // The same block and row on a saved version: the version reads its own attributes, so a
+    // withdrawal made after it never shows there.
+    rerender({ isClosed: true, version: 1 });
+    await waitFor(() => expect(editors).toHaveLength(2));
+    const saved = within(mountBlock(1));
+    expect(await saved.findByText("Resolved")).toBeDefined();
+    expect(saved.queryByTestId("ask-resolution-badge")).toBeNull();
+    expect(saved.queryByText(/Withdrawn/)).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});

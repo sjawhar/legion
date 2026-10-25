@@ -4,7 +4,7 @@ import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { eventDescription } from "../issue/event-description";
-import { actorLabel } from "../refs/actor";
+import { askResolutionReason, describeAskResolutionActor } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
@@ -24,6 +24,7 @@ function AskEventBody({
   onRendered?: () => void;
 }): ReactNode {
   const { answer, question, options, resolution, created_at } = event.payload;
+  const resolutionReason = resolution === undefined ? undefined : askResolutionReason(resolution);
   // A changed answer names the one it replaced; the first answer's event carries none.
   const previous = event.type === "ask.answered" ? event.payload.previous_answer : undefined;
   return (
@@ -60,8 +61,14 @@ function AskEventBody({
       )}
       {resolution === undefined ? null : (
         <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
-          Resolved by {actorLabel(resolution.actor)} (
-          <MarkdownBody markdown={resolution.reason} onRendered={onRendered} variant="inline" />){" "}
+          {describeAskResolutionActor(resolution)}
+          {resolutionReason === undefined ? null : (
+            <>
+              {" "}
+              -{" "}
+              <MarkdownBody markdown={resolutionReason} onRendered={onRendered} variant="inline" />
+            </>
+          )}{" "}
           <Timestamp at={resolution.at} />
         </p>
       )}

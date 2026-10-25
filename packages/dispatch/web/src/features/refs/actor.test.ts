@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test";
 
-import { actorLabel, shortSessionId } from "./actor";
+import type { AskResolution } from "../../api/types";
+import {
+  actorLabel,
+  askResolutionBadge,
+  describeAskResolution,
+  describeAskResolutionActor,
+  shortSessionId,
+} from "./actor";
 
 const titles = new Map([["abcdef1234567890", "Planner"]]);
 
@@ -78,4 +85,33 @@ test("a session a service token authenticated keeps the service account after th
   expect(actorLabel({ id: "0123456789abcdef", kind: "session", service: "legion-worker" })).toBe(
     "session:01234567… (as legion-worker)"
   );
+});
+
+test("a withdrawal names the closer once and drops the server's reason, which only repeats it", () => {
+  const at = "2026-10-25T00:00:00Z";
+  const withdrawn = (actor: AskResolution["actor"]): AskResolution => ({
+    actor,
+    at,
+    kind: "withdrawn",
+    reason: "Withdrawn by the close of CORE-1.",
+  });
+  expect(describeAskResolution(withdrawn({ id: "alice", kind: "user" }))).toBe(
+    "Withdrawn when alice closed the issue"
+  );
+  expect(describeAskResolutionActor(withdrawn({ id: "legion-daemon:CORE", kind: "session" }))).toBe(
+    "Withdrawn when legion-daemon:CORE closed the issue"
+  );
+  expect(askResolutionBadge(withdrawn({ id: "alice", kind: "user" }))).toBe("Withdrawn");
+
+  const retracted: AskResolution = {
+    actor: { id: "0123456789abcdef", kind: "session" },
+    at,
+    kind: "retracted",
+    reason: "Duplicate.",
+  };
+  expect(describeAskResolution(retracted)).toBe("Retracted by session:01234567… - Duplicate.");
+  expect(askResolutionBadge(retracted)).toBe("Retracted");
+  const resolved: AskResolution = { ...retracted, kind: "resolved", reason: "Done." };
+  expect(describeAskResolution(resolved)).toBe("Resolved by session:01234567… - Done.");
+  expect(askResolutionBadge(resolved)).toBe("Resolved");
 });

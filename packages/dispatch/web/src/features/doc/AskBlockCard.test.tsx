@@ -148,6 +148,7 @@ function renderCard({
   onAnswered = () => {},
   owner,
   readOnly = false,
+  rowResolution = false,
   thread = threadRead(indexed),
 }: {
   ask?: Ask;
@@ -157,6 +158,8 @@ function renderCard({
   onAnswered?: (id: string) => void;
   owner?: { project: string; slug: string };
   readOnly?: boolean;
+  /** Render as a closed issue's current document does. */
+  rowResolution?: boolean;
   /** What `GET /asks/{id}` answers for the block's ask. */
   thread?: AskRead;
 }) {
@@ -179,6 +182,7 @@ function renderCard({
           onAnswered={onAnswered}
           owner={owner}
           readOnly={readOnly}
+          rowResolution={rowResolution}
         />
       </QueryClientProvider>
     </MemoryRouter>
@@ -767,6 +771,74 @@ test("a read-only resolved decision shows its state and no form", () => {
   try {
     expect(card.section.querySelector("form")).toBeNull();
     expect(card.header.getByText("Resolved")).toBeDefined();
+  } finally {
+    card.unmount();
+  }
+});
+
+// A closed issue's current document: a block whose own state and ask row are both resolved shows
+// the row's record, as the close that withdrew it wrote it. A version view never does.
+
+const withdrawnAsk: Ask = {
+  ...ask,
+  resolution: {
+    actor: { id: "legion-daemon:CORE", kind: "session" },
+    at: new Date().toISOString(),
+    kind: "withdrawn",
+    reason: "Withdrawn by the close of CORE-1.",
+  },
+  state: "resolved",
+};
+
+test("a closed issue's resolved block shows its withdrawn row's record and no composer", () => {
+  const card = renderCard({
+    ask: withdrawnAsk,
+    node: askNode({ state: "resolved" }),
+    readOnly: true,
+    rowResolution: true,
+  });
+  try {
+    expect(card.section.querySelector("form")).toBeNull();
+    expect(card.footer.queryByRole("radio")).toBeNull();
+    expect(card.footer.getByTestId("ask-resolution-badge").textContent).toBe("Withdrawn");
+    expect(
+      card.footer.getByText(/Withdrawn when legion-daemon:CORE closed the issue$/)
+    ).toBeDefined();
+    expect(card.footer.queryByText(/Withdrawn by the close/)).toBeNull();
+    // The record names who asked and how it ended, so the header does not repeat either.
+    expect(card.header.queryByText("Resolved")).toBeNull();
+    expect(card.section.querySelector("[data-dispatch-ask-asked]")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a closed issue's block still reading open keeps its own attributes over a withdrawn row", () => {
+  const card = renderCard({
+    ask: withdrawnAsk,
+    node: askNode({ state: "open" }),
+    readOnly: true,
+    rowResolution: true,
+  });
+  try {
+    expect(card.footer.queryByTestId("ask-resolution-badge")).toBeNull();
+    expect(card.recordRows().map(([selected]) => selected)).toEqual(["false", "false"]);
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a version view's resolved block reads its own attributes, not its row's withdrawal", () => {
+  const card = renderCard({
+    ask: withdrawnAsk,
+    node: askNode({ state: "resolved" }),
+    readOnly: true,
+  });
+  try {
+    expect(card.header.getByText("Resolved")).toBeDefined();
+    expect(card.footer.queryByTestId("ask-resolution-badge")).toBeNull();
+    expect(card.section.textContent).not.toContain("Withdrawn");
   } finally {
     card.unmount();
   }

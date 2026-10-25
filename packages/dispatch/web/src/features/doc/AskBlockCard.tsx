@@ -13,6 +13,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
+import { AskCompletionCard } from "../inbox/AskCompletionCard";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { actorLabel } from "../refs/actor";
@@ -33,6 +34,10 @@ export interface AskBlockCardProps {
    *  under; an issue document's asks carry their `issue_key`. */
   owner: { project: string; slug: string } | undefined;
   readOnly: boolean;
+  /** Whether a resolved block whose indexed ask row is resolved too shows the row's resolution
+   *  record: the current document of a closed issue, whose close withdrew the ask. A saved
+   *  version reads its own attributes only, so a later withdrawal never appears on it. */
+  rowResolution: boolean;
 }
 
 /** The decision block's host for the one ask card every surface shares. It portals into the
@@ -41,7 +46,9 @@ export interface AskBlockCardProps {
  * recorded outcome — once the server has indexed the block into an ask row and the surface is
  * live. Until then, and on a read-only surface (closed issue, version view), the block reads its
  * own attributes: the options with the chosen ones ticked and the note, and the header names who
- * answered. A block copied from another document's ask has no ask of its own: it shows its
+ * answered. The one exception is `rowResolution`: there a block whose attribute and ask row are
+ * both resolved shows the row's resolution record (its badge and who resolved it), with no
+ * composer. A block copied from another document's ask has no ask of its own: it shows its
  * source's state, and the header links to the document where that ask is answered. The question
  * itself is the editor's content, so no part of this card repeats it. */
 export function AskBlockCard({
@@ -50,12 +57,19 @@ export function AskBlockCard({
   onAnswered,
   owner,
   readOnly,
+  rowResolution,
 }: AskBlockCardProps): ReactNode {
   const facts = askBlockFacts(host.node);
   const malformed = facts.malformedReason !== undefined;
   const open = facts.state === "open";
   const answered = facts.state === "answered";
   const hosted = !malformed && !readOnly && ask !== undefined;
+  const resolvedRow =
+    !malformed && rowResolution && facts.state === "resolved" && ask?.state === "resolved"
+      ? ask
+      : undefined;
+  // Whether the footer shows a card naming who asked and how it ended, so the header does not.
+  const carded = hosted || resolvedRow !== undefined;
   const pill = askBlockPill[facts.urgency];
   // A block ask indexed without an actor (the server settled it with no pending author) still
   // shows when it was asked; "asked by" waits for a name.
@@ -81,7 +95,7 @@ export function AskBlockCard({
               </span>
             )}
             <strong className={textPrimaryOnSurface}>Decision</strong>
-            {hosted || ask === undefined ? null : (
+            {carded || ask === undefined ? null : (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-asked="">
                 <span aria-hidden="true">·</span>
                 <span>{asker === "" ? "asked" : `asked by ${asker}`}</span>
@@ -94,7 +108,7 @@ export function AskBlockCard({
             {(hosted && ask.state === "open") || reference === undefined ? null : (
               <CopyRefButton route={reference} />
             )}
-            {!hosted && answered ? (
+            {!carded && answered ? (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-answered="">
                 <span aria-hidden="true">·</span>
                 <span>Answered by {facts.answeredBy}</span>
@@ -106,7 +120,7 @@ export function AskBlockCard({
                 )}
               </span>
             ) : null}
-            {!hosted && !malformed && !open && !answered ? (
+            {!carded && !malformed && !open && !answered ? (
               <span className={`${PILL_CLASS} ${badgeLow.bg} ${badgeLow.text}`}>
                 {facts.state === "resolved" ? "Resolved" : "Closed"}
               </span>
@@ -139,6 +153,14 @@ export function AskBlockCard({
             owner={owner}
             thread="collapsed"
             variant="compact"
+          />
+        ) : resolvedRow !== undefined ? (
+          <AskCompletionCard
+            artifactSlug={undefined}
+            ask={resolvedRow}
+            documentLink={false}
+            edits={[]}
+            frame="block"
           />
         ) : (
           <AttributeRecord facts={facts} />

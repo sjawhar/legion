@@ -100,3 +100,64 @@ test("EventBody shows the answer a change replaced, struck through", async () =>
     view.unmount();
   }
 });
+
+test("EventBody names how an ask was resolved: a withdrawal by the close, a retraction with its reason", async () => {
+  const withdrawn: Extract<Event, { type: "ask.resolved" }> = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-10-25T00:00:00Z",
+    id: 4,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: {
+      anchor: null,
+      answer: null,
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-10-24T00:00:00Z",
+      edited_at: null,
+      id: "ask-1",
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 1,
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Publish?",
+      resolution: {
+        actor: { id: "alice", kind: "user" },
+        at: "2026-10-25T00:00:00Z",
+        kind: "withdrawn",
+        reason: "Withdrawn by the close of CORE-1.",
+      },
+      state: "resolved",
+      urgency: "med",
+    },
+    seq: 4,
+    type: "ask.resolved",
+  };
+  const view = render(<EventBody event={withdrawn} />);
+
+  try {
+    expect(await screen.findByText(/^Withdrawn when alice closed the issue/)).toBeDefined();
+    expect(screen.queryByText(/Withdrawn by the close/)).toBeNull();
+    expect(screen.queryByText(/Resolved by/)).toBeNull();
+    view.rerender(
+      <EventBody
+        event={{
+          ...withdrawn,
+          payload: {
+            ...withdrawn.payload,
+            resolution: {
+              actor: { id: "session-1", kind: "session" },
+              at: "2026-10-25T00:00:00Z",
+              kind: "retracted",
+              reason: "Superseded by **the spec**.",
+            },
+          },
+        }}
+      />
+    );
+    expect(await screen.findByText(/^Retracted by session:session-… -/)).toBeDefined();
+    expect((await screen.findByText("the spec")).tagName).toBe("STRONG");
+  } finally {
+    view.unmount();
+  }
+});
