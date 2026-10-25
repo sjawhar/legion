@@ -3,11 +3,13 @@ package routes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,5 +235,56 @@ func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 				t.Fatalf("whoami: status=%d body=%s, want 503 EVENT_HEAD_UNAVAILABLE", response.Code, response.Body.String())
 			}
 		})
+	}
+}
+
+// whoami checks sign-in before it reads the event log's head, so a caller with no sign-in is
+// answered 401 NO_IDENTITY, which sends a page to sign in, even while the head cannot be read,
+// and the head is not read for it: a 503 there would have a signed-out page retry a server that
+// only needs its sign-in. The same router signed in is answered the 503.
+func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing.T) {
+	people := newMemoryPeople()
+	ctx, err := BuildAppContext(AppContextOptions{
+		SigningKey: "signing-key",
+		People:     people,
+		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
+	})
+	if err != nil {
+		t.Fatalf("build context: %v", err)
+	}
+	var reads atomic.Int32
+	ctx.eventHead = func(context.Context) (int64, error) {
+		reads.Add(1)
+		return 0, errors.New("the database stopped answering")
+	}
+	handler, _ := New(ctx)
+	whoami := func(login string) (int, string) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+		if login != "" {
+			request.Header.Set("X-Dispatch-User", login)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		var body struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("whoami as %q: status=%d body=%s: %v", login, response.Code, response.Body.String(), err)
+		}
+		return response.Code, body.Code
+	}
+
+	if status, code := whoami(""); status != http.StatusUnauthorized || code != "NO_IDENTITY" {
+		t.Fatalf("an anonymous whoami while the head cannot be read: %d %s, want 401 NO_IDENTITY", status, code)
+	}
+	if n := reads.Load(); n != 0 {
+		t.Fatalf("an anonymous whoami read the event head %d times, want none", n)
+	}
+	if status, code := whoami("alice@d.example"); status != http.StatusServiceUnavailable || code != "EVENT_HEAD_UNAVAILABLE" {
+		t.Fatalf("a signed-in whoami while the head cannot be read: %d %s, want 503 EVENT_HEAD_UNAVAILABLE", status, code)
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatalf("a signed-in whoami read the event head %d times, want once", n)
 	}
 }
