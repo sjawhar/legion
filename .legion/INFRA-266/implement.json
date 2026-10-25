@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-266",
-  "completed": "2026-10-25T09:06:20Z",
+  "completed": "2026-10-25T10:03:19Z",
   "proof": [
+    {
+      "criterion": "Review round 2, thread PRRT_kwDORFy7ds6wACjn: a person's last pick is what the server ends with and what Settings shows, even when Settings is left and reopened while a save is out.",
+      "surface": "The Settings page of the SPA built at this head, served by the real cmd/dispatch binary on PostgreSQL 17, driven in Chromium by Dispatch's browser suite; the first PUT held by page.route; navigation through the app's own Inbox and Settings links (no reload).",
+      "command": "cd packages/dispatch && DATABASE_URL=<a local Postgres> bun run e2e -- --project=chromium e2e/settings.e2e.ts e2e/inbox.e2e.ts -g 'default assignee'  (row 'default assignee picks still saving when Settings is left and reopened go out in pick order, and the last pick is the one kept', e2e/settings.e2e.ts:498)",
+      "observed": "5 passed (35.8s) at 65e8caff (the forward merge of main; fingerprint a66a22ad… unchanged from 9dd03557, where settings+inbox e2e ran 38 passed). In the row: hold bob's PUT, pick carol, leave to Inbox and back, pick alice, release -> wire sent bob, answered bob, sent carol, answered carol, sent alice, answered alice; after reload the control and the list route name CORE -> alice. Unit (settings.test.tsx, one QueryClient, unmount/remount): remounted row shows carol, then dave; puts [bob, carol, dave], ends at dave.",
+      "headSha": "65e8caff252a412873aa94df5c367f5613da0d42",
+      "negativeControl": "Head tests with ProjectsSection.tsx restored to 69bed70c74a4 (round 1's per-instance queue): the row fails at settings.e2e.ts:551, expect(core).toHaveValue(\"alice\") -> Received \"carol\" (the unmounted row's queued carol sent after alice and stored); the unit remount test fails, Expected \"carol@example.com\", Received \"\"."
+    },
     {
       "criterion": "Review round 1, thread PRRT_kwDORFy7ds6v_sz1: on the Settings page the default stored and shown is the person's last pick; a pick shows at once and a second pick while a save is out is not sent concurrently.",
       "surface": "The Settings page of the SPA built at this head, served by the real cmd/dispatch binary on PostgreSQL 17, driven in Chromium by Dispatch's browser suite, with the first PUT held by page.route.",
@@ -108,7 +116,10 @@
     "Review round 1: packages/dispatch/web/src/features/settings/ProjectsSection.tsx — DefaultAssigneeCell and useDefaultAssigneeWrite: per-row serialised writes (newest queued pick wins, pick shown at once, answer merged into the cache, stale reads cancelled, per-row error and Retry); a disabled Loading…/Unavailable picker until the defaults are read; the Settings sentence reworded",
     "Review round 1: packages/dispatch/web/src/__tests__/settings.test.tsx — the default-assignee tests assert the displayed value against a stateful stub, per-row errors, and the unread states",
     "Review round 1: packages/dispatch/e2e/settings.e2e.ts — two new browser rows (write order, unread state) and toBeEnabled before reading Unassigned",
-    "Review round 1: skills/dispatch/references/asks.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md — the default fills in only a new issue created with nobody named"
+    "Review round 1: skills/dispatch/references/asks.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md — the default fills in only a new issue created with nobody named",
+    "Review round 2: packages/dispatch/web/src/features/settings/ProjectsSection.tsx — useDefaultAssigneeWrite queues picks in TanStack's mutation cache (mutationKey + scope per project) and shows the newest pending pick via useMutationState; the per-instance guard, queued ref and shown state are gone",
+    "Review round 2: packages/dispatch/web/src/__tests__/settings.test.tsx (remount regression on one QueryClient; queue test now expects every pick in order) and packages/dispatch/e2e/settings.e2e.ts (leave-and-reopen row)",
+    "Merge of main at 14571f6f4aea (65e8caff): one conflict in packages/envoy/AGENTS.md (main's claim paragraph beside this branch's assignee paragraph), both kept"
   ],
   "trickyParts": [
     "The staleness check is deliberately not allowedLogin: that helper answers 400 ASSIGNEE_NOT_ALLOWED, and a default left stale by a restore or a direct write must fall through to nobody rather than refuse the create. After the simplify pass it is a scalar subquery in the returning of the update projects … next_number statement the create already runs, so no statement runs under the project row lock that did not run before, and defaultAssignee is a pure function again.",
@@ -116,12 +127,14 @@
     "The browser rows focus the control before selecting an option, as e2e/issue.e2e.ts:973-977 already does for the issue's own assignee picker: the people list is fetched only once a reader reaches for the control, so the option does not exist until then.",
     "Adding a Default assignee column to the Projects table made the existing settings row's getByRole('columnheader', { name: 'Default' }) ambiguous with the repository table's own Default column. That one locator is now exact; nothing else about that row changed.",
     "The picker's write state is per row on purpose: one shared mutation let a failure or pick on one project replace another's error. A row's shown pick overrides the stored value only while that row has a save out or queued; onSettled clears it once nothing is queued, after onSuccess has already written the server's answer into the defaults cache, so the control never flashes the old value. onMutate cancels a defaults read already out, which would otherwise land over the answer.",
-    "Unknown means `defaults.data === undefined`, not `!isSuccess`: a refetch that fails after a successful read keeps the last known list on screen beside the load error, which is true, rather than blanking every row."
+    "Unknown means `defaults.data === undefined`, not `!isSuccess`: a refetch that fails after a successful read keeps the last known list on screen beside the load error, which is true, rather than blanking every row.",
+    "TanStack v5.102.8: a scoped mutation dispatches status pending with its variables and runs onMutate as soon as mutate is called, and waits in the MutationCache until earlier mutations of its scope finish; hook-level onSuccess/onSettled run before the final status dispatch. So useMutationState's last pending variables is the newest pick from any mount, and the last save's answer is in the cache before it leaves the pending list (no flash)."
   ],
   "deviations": [
     "The plan's D4 said the staleness check would be one exists query run only when the four earlier chain steps had yielded nobody. The ce-simplify-code pass folded it into the returning of the statement the create already runs, so it costs one primary-key probe on people inside a statement that runs regardless, and no second round trip under the project row lock on any create. The behaviour the plan specified is unchanged: a stale default still falls through to nobody, a project with no default still costs nothing, and the chain's order is untouched.",
     "The planner's two recorded departures from the spec stand as written: the prose sweep is fourteen source sites plus the generated claude-envoy bundle rather than the spec's five, and the default is written through a per-project human-only PUT and read through a human-only list route rather than through the architecture-source family's authAny shape.",
-    "The architect asked for an explicit-null test beside the absent-body refusal. TestPutProjectDefaultAssigneeSetsChangesAndClears already sends {\"assignee\": null} and reads the stored default cleared, so no second test of the same path was added; it is the guard against refusing every falsy body."
+    "The architect asked for an explicit-null test beside the absent-body refusal. TestPutProjectDefaultAssigneeSetsChangesAndClears already sends {\"assignee\": null} and reads the stored default cleared, so no second test of the same path was added; it is the guard against refusing every falsy body.",
+    "Round 2's fix sends every pick in pick order (bob, Unassigned, carol -> three PUTs) instead of dropping intermediate queued picks as round 1 did. Dropping needs per-project state shared across mounts outside TanStack; the mutation scope gives one queue per project per QueryClient with nothing held by a component, and the server still ends at the last pick. Two browser tabs are two QueryClients; across them the server keeps the last PUT to arrive, as it did before this change."
   ],
   "openQuestions": [
     "An issue created from a GitHub reference takes its resolved project's default, with no carve-out. Where a repository has no mapping that project is DISPATCH_DEFAULT_PROJECT, so a default set there reaches that person for every unmapped repository's issues. The Settings page now says so beside the control, as the architect ruled; whoever sets a default there sees the consequence at the moment they set it.",
