@@ -25,12 +25,13 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 		delivered map[string]struct{}
 	}
 	listenerState.delivered = map[string]struct{}{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				TargetSession  string `json:"target_session"`

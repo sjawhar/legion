@@ -16,12 +16,13 @@ import (
 func TestMentionDeliveryPersistsPendingBeforeSendAndRetryCompletesIt(t *testing.T) {
 	var database *store.Store
 	pendingDuringSend := "not observed"
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				Payload string `json:"payload"`
@@ -97,6 +98,7 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	sent := []string{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
@@ -106,9 +108,9 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"role":"reviewer","holder":"` + holder + `","title":"reviewer","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				TargetSession string `json:"target_session"`
@@ -211,12 +213,13 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 // attempt, under its original number, so the listener deduplicates a send that did land.
 func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testing.T) {
 	keys := []string{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				IdempotencyKey string `json:"idempotency_key"`
@@ -304,12 +307,13 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 // number and idempotency key, not report it undeliverable without ever calling the listener.
 func TestStrandedMentionAttemptIsResolvedRatherThanFailedUnsent(t *testing.T) {
 	keys := []string{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				IdempotencyKey string `json:"idempotency_key"`

@@ -41,7 +41,7 @@ import (
 // recorded on the issue and delivered to the session that lost it.
 //
 // Every claim write is the resolve-then-lock pair envoy_resolve.go owns, because the listener
-// lookup never runs inside a transaction (fetchLiveSessions carries the reason): judgeHolder
+// lookup never runs inside a transaction (fetchHolderLiveness carries the reason): judgeHolder
 // reads the holder and takes the liveness snapshot with nothing held, then claimWrite locks
 // the row, re-reads it, and decides with claimBlockedBy under that lock; a holder that
 // changed in between sends the write around the cycle once more. claimCycle is that pair and
@@ -117,13 +117,14 @@ func (s *server) writeClaimError(w http.ResponseWriter, err error) {
 	s.writeHandlerError(w, err)
 }
 
-// liveSessions is what the listener answered about the claim's holder, read with no
-// transaction open and no pooled connection held. It holds at most that one holder's record,
-// because that is the only session the decision asks about. `fetched` is false when the
-// caller never needed it, which is every claim of an issue nobody else holds.
-type liveSessions struct {
+// holderLiveness is what the listener answered about the claim's holder, read with no
+// transaction open and no pooled connection held. `holder` is that session's own record, or
+// nil when the session store holds none, because that one session is the only thing the
+// decision asks about. `fetched` is false when the caller never needed it, which is every
+// claim of an issue nobody else holds.
+type holderLiveness struct {
 	fetched bool
-	byID    map[string]envoy.Session
+	holder  *envoy.Session
 }
 
 // errHolderUnjudged says the decision needs a liveness snapshot this caller did not take,
@@ -131,31 +132,31 @@ type liveSessions struct {
 // cycle rather than deciding from a snapshot that does not describe the holder.
 var errHolderUnjudged = errors.New("claim holder was not covered by the liveness snapshot")
 
-// fetchLiveSessions asks the listener about the holder's own session, by id, and returns a
-// snapshot that covers that holder alone: the one entry the decision reads, or none when the
-// session store holds no record of it. It must be called with nothing held: it is a
-// cross-service HTTP call of up to five seconds, and production runs four pool connections,
-// so a held connection or row lock across it stalls unrelated requests. An unreachable or
-// unconfigured listener is a 503, never "unknown, therefore free" — Dispatch does not hand
-// one session's work to another on a transport error. Only a session holder is ever asked
-// about: judgeHolder reaches this through errHolderUnjudged, which a holder of any other kind
-// never produces, so no read is made for a human's claim.
-func (s *server) fetchLiveSessions(ctx context.Context, holder model.IssueClaim) (liveSessions, error) {
+// fetchHolderLiveness asks the listener about the holder's own session, by id, and answers
+// with that one session's record, or with none when the session store holds no record of it.
+// It must be called with nothing held: it is a cross-service HTTP call of up to five seconds,
+// and production runs four pool connections, so a held connection or row lock across it
+// stalls unrelated requests. An unreachable or unconfigured listener is a 503, never
+// "unknown, therefore free" — Dispatch does not hand one session's work to another on a
+// transport error. Only a session holder is ever asked about: judgeHolder reaches this
+// through errHolderUnjudged, which a holder of any other kind never produces, so no read is
+// made for a human's claim.
+func (s *server) fetchHolderLiveness(ctx context.Context, holder model.IssueClaim) (holderLiveness, error) {
 	if s.deps.Envoy == nil {
-		return liveSessions{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE",
+		return holderLiveness{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE",
 			"ENVOY_URL is not configured, so Dispatch cannot tell whether %s is still working", claimHolder(holder.Actor, ""))
 	}
 	session, err := s.deps.Envoy.Session(ctx, holder.Actor.ID)
 	if errors.Is(err, envoy.ErrNotFound) {
-		return liveSessions{fetched: true, byID: map[string]envoy.Session{}}, nil
+		return holderLiveness{fetched: true}, nil
 	}
 	if err != nil {
 		if errors.Is(err, envoy.ErrUnavailable) {
-			return liveSessions{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE", "%s", err.Error())
+			return holderLiveness{}, errorf(http.StatusServiceUnavailable, "ENVOY_UNAVAILABLE", "%s", err.Error())
 		}
-		return liveSessions{}, err
+		return holderLiveness{}, err
 	}
-	return liveSessions{fetched: true, byID: map[string]envoy.Session{holder.Actor.ID: session}}, nil
+	return holderLiveness{fetched: true, holder: &session}, nil
 }
 
 // humanRule is how a route treats a human caller, the one difference between claiming and
@@ -173,7 +174,7 @@ type humanRule struct {
 // alone; apart, they are two loose arguments a caller can pair wrongly.
 type judgement struct {
 	holder *model.IssueClaim
-	live   liveSessions
+	live   holderLiveness
 }
 
 // claimBlockedBy is the whole taking rule, and it runs under the issue's row lock: the caller
@@ -183,8 +184,8 @@ type judgement struct {
 //
 // A liveness snapshot speaks only for the holder that was read before it was taken, so the
 // first check is that the row still shows that holder: a session-to-session change in between
-// would otherwise be judged against a snapshot that predates the new holder, read as "not
-// listed", and let a live session's claim be taken without force.
+// would otherwise be judged against a snapshot that predates the new holder, read as a
+// session the store no longer holds, and let a live session's claim be taken without force.
 //
 // A human's claim has no session to end, so it is held until that human or another releases
 // it. A session's claim is held while the session store still holds that session's record,
@@ -212,11 +213,12 @@ func claimBlockedBy(
 	if !judged.live.fetched {
 		return errHolderUnjudged
 	}
-	session, listed := judged.live.byID[current.Actor.ID]
-	if !listed {
+	if judged.live.holder == nil {
 		return nil
 	}
-	return &claimConflict{claim: *current, liveTitle: session.Title, forcible: rule.forcible}
+	return &claimConflict{
+		claim: *current, liveTitle: judged.live.holder.Title, forcible: rule.forcible,
+	}
 }
 
 // sameHolder reports whether two nullable claims name the same holder.
@@ -243,7 +245,7 @@ func (s *server) judgeHolder(
 	if !errors.Is(claimBlockedBy(holder, actor, rule, judged), errHolderUnjudged) {
 		return judged, nil
 	}
-	judged.live, err = s.fetchLiveSessions(ctx, *holder)
+	judged.live, err = s.fetchHolderLiveness(ctx, *holder)
 	if err != nil {
 		return judgement{}, err
 	}

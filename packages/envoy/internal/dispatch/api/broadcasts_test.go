@@ -68,29 +68,6 @@ func newBroadcastListener(
 	return server, state
 }
 
-// writeSessionRecord answers GET /v1/registry/{session_id} from the rows a stub listener also
-// serves as its live list, so the two agree the way a real listener's do. A send resolves each
-// selected session through this route rather than through the list, so a stub that served only
-// the list would answer every recipient "no live session"; an id no row names is the listener's
-// own 404, the one absence a send may exclude for.
-func writeSessionRecord(t *testing.T, w http.ResponseWriter, sessionsJSON, sessionID string) {
-	t.Helper()
-	var rows []map[string]any
-	if err := json.Unmarshal([]byte(sessionsJSON), &rows); err != nil {
-		t.Errorf("decode the stub listener's sessions: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	for _, row := range rows {
-		if row["session_id"] == sessionID {
-			_ = json.NewEncoder(w).Encode(row)
-			return
-		}
-	}
-	w.WriteHeader(http.StatusNotFound)
-	_, _ = w.Write([]byte(`{"error":"no live session ` + sessionID + `"}`))
-}
-
 func (l *broadcastListener) targets() []string {
 	l.Lock()
 	defer l.Unlock()
@@ -465,7 +442,7 @@ func TestBroadcastReachesSessionsTheLiveListNoLongerHolds(t *testing.T) {
 // original send" for every session the original missed, so a recipient dropped on a transient
 // failure would be unreachable under that key for good - and the key itself must stay free, so
 // the sender's retry is a fresh send rather than a replay of a broadcast that never happened.
-func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
+func TestBroadcastWhoseSessionReadDoesNotAnswerWritesNothingAndLeavesItsKeyFree(t *testing.T) {
 	var refusing atomic.Bool
 	refusing.Store(true)
 	listener, sends := newBroadcastListener(t, broadcastSessions, func(w http.ResponseWriter, r *http.Request) bool {

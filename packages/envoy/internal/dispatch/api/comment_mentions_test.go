@@ -187,6 +187,7 @@ func TestMentionedCommentPinsRoleHolderBeforeSending(t *testing.T) {
 	roleHolder := "s1"
 	roleLookups := 0
 	sent := []map[string]any{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
@@ -197,9 +198,9 @@ func TestMentionedCommentPinsRoleHolderBeforeSending(t *testing.T) {
 				"role": "reviewer", "holder": holder, "title": "reviewer", "capabilities": []string{"btw", "steer"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var input map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -235,12 +236,13 @@ func TestMentionedCommentPinsRoleHolderBeforeSending(t *testing.T) {
 }
 
 func TestMentionReplyRequiresItsAttemptTargetAndIsIdempotent(t *testing.T) {
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
@@ -473,12 +475,13 @@ func TestMentionRetrySelectsOneTargetAndReresolvesIt(t *testing.T) {
 }
 
 func TestCommentMentionReadProjectionIncludesReplyChain(t *testing.T) {
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"projection-envelope","recipient":"s1"}`))
 		default:
@@ -633,6 +636,7 @@ func TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue(t *testing.T) {
 	var issueKey string
 	lookups := []string{}
 	moveRouteTo := ""
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/v1/roles/"):
@@ -650,9 +654,9 @@ func TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue(t *testing.T) {
 				"role": role, "holder": "s1", "title": "planner", "capabilities": []string{"btw", "steer"},
 			})
 		case r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
@@ -706,9 +710,9 @@ func TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue(t *testing.T) {
 				"role": role, "holder": "s1", "title": "planner", "capabilities": []string{"btw", "steer"},
 			})
 		case r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -730,16 +734,17 @@ func TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue(t *testing.T) {
 // listener once per mention it names.
 func TestACommentItsOwnerRefusesResolvesNoMention(t *testing.T) {
 	lookups := 0
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
+		`{"session_id":"s2","title":"tester","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lookups++
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s2":
-			_, _ = w.Write([]byte(`{"session_id":"s2","title":"tester","capabilities":["steer"]}`))
+			writeSessionRecord(t, w, sessions, "s2")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
-				`{"session_id":"s2","title":"tester","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -782,12 +787,13 @@ func TestACommentItsOwnerRefusesResolvesNoMention(t *testing.T) {
 func TestReplyDuringAMentionSendStillRecordsTheDeliveryReceipt(t *testing.T) {
 	var handler http.Handler
 	replied := 0
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
-			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}`))
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				Payload string `json:"payload"`

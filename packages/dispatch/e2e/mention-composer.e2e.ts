@@ -627,3 +627,41 @@ test("a mention of a session the listener holds no record of is still refused as
     await alice.close();
   }
 });
+
+// The third answer INFRA-249 made possible: the listener's store read did not answer at all. A
+// 503 is neither a delivery nor an absence, so the row carries the listener's own reason and
+// must not say "no live session" - those words read as "that agent has ended", and Dispatch's
+// own classifier (comment_delivery.go's prefix test) keys on them to decide a target was never
+// resolved.
+test("a mention of a session the listener could not read is refused with the listener's reason, not as no live session", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Mention through a silent bus" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const field = page.getByRole("form", { name: "Comment composer" }).getByLabel("Comment");
+    await selectMention(page, field, "/btw @", "Planner");
+    // The session is there as far as anyone knows; it is the read that fails, which the
+    // listener answers 503 with the bus's reason.
+    await setSessionRecord("planner", "unreadable");
+    expect(await issueCommentPayload(page, issue.key)).toEqual({
+      body: "@Planner",
+      delivery: "btw",
+      mentions: [{ target: "session:planner" }],
+    });
+    const deliveries = page.getByRole("list", { name: "Mention deliveries" });
+    await expect(deliveries).toContainText("failed");
+    await expect(deliveries).toContainText(
+      "envoy listener: GET /v1/registry/planner returned 503: envoy: the message bus did not answer: nats: no responders available"
+    );
+    await expect(deliveries).not.toContainText("no live session");
+    expect(await getSentMessages()).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
