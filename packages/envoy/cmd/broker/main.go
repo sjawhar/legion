@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/config"
@@ -37,6 +40,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/reread"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/wake"
@@ -77,6 +81,17 @@ func main() {
 	// BROKER_SECRETS_KMS_KEY_ARN, or BROKER_SECRETS_KMS_KEY_NAME under gcp-secret-manager.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
+	// The whole stop budget, logged as soon as the configuration naming its first half is loaded,
+	// because a deployment's terminationGracePeriodSeconds has to cover it and nothing in this
+	// repository can check that it does: the guard this repository would otherwise write — a test
+	// in the owning module reading the dependent's rendered manifest — cannot cross repositories,
+	// since the Deployment and its grace period live in the deployment's own repository. This line
+	// and the operator documentation are that guard's replacement, so total is the figure an
+	// operator transcribes: the grace period must cover it in addition to any preStop pause the
+	// deployment adds, because the pause and this drain are both paid out of the one grace period.
+	drain := time.Duration(cfg.DrainSeconds) * time.Second
+	slog.Info("broker stop budget", "drain", wholeSeconds(drain), "shutdown", wholeSeconds(shutdownTimeout),
+		"total", wholeSeconds(drain+shutdownTimeout))
 	// How the broker signs in to its database, logged before anything reaches for AWS or the
 	// database, so an operator reads it from the log rather than the task's environment: rds-iam
 	// when each connection signs in with an RDS IAM token the broker mints, and password when it
@@ -155,6 +170,27 @@ func main() {
 	current, err := policy.NewCurrent(ctx, loader, policyRefresh)
 	fatal(err)
 
+	// This process's own sender id, minted once at boot. Postgres delivers a notification to every
+	// session listening on the channel, this pod's own included, so without an id stamped on what
+	// it sends a pod would reread every secret it just reread on behalf of a caller. Both halves of
+	// the fan-out take it: the notifier stamps it, and the listener drops what carries it.
+	senderID := uuid.NewString()
+	// The receiving half of the reread fan-out, started after the first policy load (it rereads
+	// into that policy) and before net.Listen, so a pod that cannot hold a LISTEN connection still
+	// serves: Run redials forever on its own and never refuses the boot. What such a pod loses
+	// while it has no connection is the notifications sent in that window — it goes on serving the
+	// tags it last read and catches up at its own five-minute reload (policyRefresh), which is the
+	// fan-out's documented backstop. It runs on the process context, not a context of its own, so
+	// the first signal ends it rather than leaving it rereading through the shutdown.
+	go (&reread.Listener{
+		Sender: senderID,
+		Dial:   st.Listener,
+		Refresh: func(ctx context.Context, name string) error {
+			_, err := current.RefreshOne(ctx, name)
+			return err
+		},
+	}).Run(ctx)
+
 	// Bind now, synchronously, right after every guard that can still refuse to
 	// boot has already run (config, the port-0 public-URL guard, migrations, the first policy
 	// load) — the only way any caller, dev-broker.sh included, can learn which process holds an
@@ -229,18 +265,34 @@ func main() {
 	if cfg.SecretsStore == secrets.StoreGCP {
 		rereadOverall = &api.GCPRereadOverallLimit
 	}
+	// draining is set once, by the signal handler below, and read by every handler goroutine
+	// GET /healthz runs on, which is why it is atomic rather than a plain bool.
+	var draining atomic.Bool
+	// The sending half of the reread fan-out. reread.Notifier returns the error rather than
+	// logging it, because what a failed fan-out means is this program's decision, and the decision
+	// is one WARN and nothing else: the reread this pod was asked for has already happened and the
+	// answer it gives its caller stands, and the peers that did not hear reread this secret at
+	// their own next five-minute reload (policyRefresh) anyway. Neither the caller's 200 nor the
+	// process is worth failing over a notification Postgres would not take.
+	notify := reread.Notifier(st.Pool, senderID)
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,
 		SecretsKMSKey:      cfg.SecretsKMSKey,
-		TrustedProxyHeader: cfg.TrustedProxyHeader})
+		TrustedProxyHeader: cfg.TrustedProxyHeader,
+		Draining:           draining.Load,
+		NotifyReread: func(ctx context.Context, name string) {
+			if err := notify(ctx, name); err != nil {
+				slog.Warn("broker: telling the other pods to reread a secret failed", "secret", name, "error", err)
+			}
+		}})
 	srv := &http.Server{
 		Handler:           withRequestDeadline(mux, requestDeadline),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      requestDeadline + 15*time.Second,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       2 * time.Minute,
 	}
 	go func() {
@@ -251,6 +303,31 @@ func main() {
 	}()
 
 	<-ctx.Done()
+	// The drain comes first and the listener stays open through it, rather than the reverse: a pod
+	// leaves its Service's EndpointSlice concurrently with the kubelet beginning termination, not
+	// before it, so for a while after SIGTERM the kubelet is still routing new connections here.
+	// Failing readiness now — GET /healthz answers 503 SHUTTING_DOWN from this point, while every
+	// other route is served exactly as before — and closing the listener only once the drain has
+	// run out is what keeps those connections from being refused by a socket that is already gone.
+	slog.Info("broker draining", "drain", wholeSeconds(drain))
+	draining.Store(true)
+	if drain > 0 {
+		// A second signal ends the drain at once: an operator, or a kubelet that has decided this
+		// pod has to be gone now, must not have to wait out a drain whose whole purpose has
+		// already been served. ctx is no help here — signal.NotifyContext cancelled it with the
+		// first signal — so the second one needs a channel of its own. A zero drain takes neither
+		// this registration nor a timer, which would be a wait on something that never fires.
+		again := make(chan os.Signal, 1)
+		signal.Notify(again, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(again)
+		timer := time.NewTimer(drain)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-again:
+			slog.Info("broker: a second signal ended the drain early")
+		}
+	}
 	slog.Info("broker shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -260,12 +337,30 @@ func main() {
 }
 
 // requestDeadline bounds every request's own context, so no handler outlives its caller by more
-// than a Dispatch call's worth of time; WriteTimeout sits past it so a handler that honours its
+// than a Dispatch call's worth of time; writeTimeout sits past it so a handler that honours its
 // context always gets to write its answer.
 const requestDeadline = 45 * time.Second
 
-// shutdownTimeout is how long SIGTERM waits for in-flight requests before the process exits.
-const shutdownTimeout = 10 * time.Second
+// writeTimeout is the http.Server's own WriteTimeout: the request deadline plus the fifteen
+// seconds a handler that honours its context needs to write the answer it already has.
+const writeTimeout = requestDeadline + 15*time.Second
+
+// shutdownTimeout is how long the broker waits for its in-flight requests once the drain has run
+// out, and it is the write timeout rather than a figure of its own because that is the longest
+// exchange the server itself allows: a request admitted in the last instant of the drain still
+// gets its whole 45-second handler deadline, and WriteTimeout bounds the exchange around it at
+// 60 seconds, so 60 seconds covers every request the server ever let in. It is only safe to be
+// this long because the deployment's terminationGracePeriodSeconds has to cover it — past that
+// the kubelet SIGKILLs the process whatever it believes it is still allowed, and the in-flight
+// requests this budget exists to finish are dropped anyway. The stop-budget line main logs at
+// boot is how a deployment reads the number it has to cover.
+const shutdownTimeout = writeTimeout
+
+// wholeSeconds renders a duration as a whole number of seconds ("65s") rather than as
+// time.Duration's own "1m5s", because the stop budget's reader is a deployment setting
+// terminationGracePeriodSeconds, which is counted in seconds and nothing else. Every duration it
+// is given is a whole number of them.
+func wholeSeconds(d time.Duration) string { return strconv.Itoa(int(d/time.Second)) + "s" }
 
 func withRequestDeadline(next http.Handler, deadline time.Duration) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
