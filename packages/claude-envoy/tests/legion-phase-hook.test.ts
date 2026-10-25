@@ -2,10 +2,10 @@ import { expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops"
 import { REMINDER } from "@legion/pi-shared/phase-stall"
-import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits"
 import {
   createPhaseHookEndpoint,
   PHASE_HOOK_REFUSAL,
@@ -15,6 +15,7 @@ import {
   phaseHookToolDefinition,
   phaseStallFile,
 } from "../src/legion-phase-hook"
+import { waitFor } from "./channel-session-harness"
 
 const SESSION = "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
 
@@ -28,6 +29,29 @@ const implementer: ClaimCapability = {
   secret: "U2VjcmV0",
 }
 
+/**
+ * The four numbers every case runs on, through the environment the endpoint is given: no test
+ * waits a production interval. The architect is held off at nine reminders so only the case that
+ * drives the notice reaches it.
+ *
+ * The clock is the real one, as `waitFor`'s is: what the cases drive is the endpoint's own
+ * `setTimeout`, whose callback then awaits a daemon read, so advancing a fake clock would settle
+ * nothing on its own. Every case waits for the condition it is about; the few fixed waits are the
+ * ones asserting that nothing happens, which have no condition to wait for, and each is a small
+ * multiple of the interval above.
+ */
+const QUICK_LIMITS: Record<string, string> = {
+  LEGION_STALL_REMINDER_MS: "20",
+  LEGION_STALL_WAITING_MS: "80",
+  LEGION_STALL_RESUME_MS: "20",
+  LEGION_STALL_ARCHITECT_AFTER: "9",
+}
+
+/** One record on disk, as the Go bridge or an earlier run of this server left it. */
+function recorded(state: string, count: number, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ state, count, reported: false, ...extra })
+}
+
 interface Harness {
   readonly endpoint: PhaseHookEndpoint
   readonly file: string
@@ -35,12 +59,27 @@ interface Harness {
   readonly record: () => Promise<unknown>
   /** The record as it stood when the daemon answered the record check. */
   readonly recordAtDaemonRead: () => unknown
+  /** The lines this endpoint wrote into the bridge's inbox, in order. */
+  readonly inbox: readonly string[]
+  /** Every message published to the Envoy listener, in order. */
+  readonly published: readonly PublishInput[]
+  /** Settles the claim's boot, as `startLegionClaim`'s `booted` does. */
+  readonly boot: () => void
   readonly lines: readonly string[]
   readonly close: () => Promise<void>
 }
 
 async function harness(
-  options: { readonly record?: string; readonly claim?: ClaimCapability } = {},
+  options: {
+    readonly record?: string
+    readonly claim?: ClaimCapability
+    /** Added to (and overriding) `QUICK_LIMITS` and `LEGION_PROJECT`. */
+    readonly env?: Record<string, string | undefined>
+    /** False for a session outside a Legion pane, which has no inbox at all. */
+    readonly inbox?: boolean
+    /** What the listener answers the `attempt`th publish; accepted by default. */
+    readonly publish?: (input: PublishInput, attempt: number) => Promise<unknown>
+  } = {},
 ): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "claude-envoy-phase-hook-"))
   const file = phaseStallFile(directory, SESSION)
@@ -62,12 +101,25 @@ async function harness(
   }) as typeof fetch
   const daemon = createLegionDaemonClient("http://daemon.test", fetchStub)
   const lines: string[] = []
+  const inbox: string[] = []
+  const published: PublishInput[] = []
+  const booted = Promise.withResolvers<void>()
   const endpoint = createPhaseHookEndpoint({
     stateFile: file,
     claim: () => options.claim,
+    booted: booted.promise,
     readState: () => daemon.state(),
-    project: "legion",
-    limits: DEFAULT_STALL_LIMITS,
+    inbox:
+      options.inbox === false
+        ? undefined
+        : async (text) => {
+            inbox.push(text)
+          },
+    publish: async (input) => {
+      published.push(input)
+      return options.publish === undefined ? {} : options.publish(input, published.length)
+    },
+    env: { LEGION_PROJECT: "legion", ...QUICK_LIMITS, ...options.env },
     log: paneReminderLog((line) => lines.push(line)),
   })
   return {
@@ -75,8 +127,15 @@ async function harness(
     file,
     record,
     recordAtDaemonRead: () => atRead,
+    inbox,
+    published,
+    boot: booted.resolve,
     lines,
-    close: () => rm(directory, { recursive: true, force: true }),
+    close: async () => {
+      // As the server's own `stop` does: no armed timer outlives the case that armed it.
+      endpoint.stop()
+      await rm(directory, { recursive: true, force: true })
+    },
   }
 }
 
@@ -88,8 +147,8 @@ test("the tool names itself Claude Code's hook endpoint and tells the model not 
 })
 
 test("a turn settling on an open phase is blocked once, with the reminder, and the count is recorded before the answer", async () => {
-  const { endpoint, record, recordAtDaemonRead, close } = await harness({
-    record: JSON.stringify({ state: "open", count: 0, reported: false }),
+  const { endpoint, record, recordAtDaemonRead, inbox, close } = await harness({
+    record: recorded("open", 0),
     claim: implementer,
   })
   try {
@@ -105,7 +164,8 @@ test("a turn settling on an open phase is blocked once, with the reminder, and t
     expect(recordAtDaemonRead()).toEqual({ state: "open", count: 0, reported: false })
     expect(await record()).toEqual({ state: "open", count: 1, reported: false })
 
-    // The second settle of the run is the timer's, which this build does not arm yet.
+    // The second settle of the run lets the turn end and carries its reminder from the timer, so
+    // the daemon sees the turn end and can deliver a queued task.
     expect(
       await endpoint.handle({
         event: "Stop",
@@ -113,6 +173,321 @@ test("a turn settling on an open phase is blocked once, with the reminder, and t
         stopHookActive: "true",
       }),
     ).toEqual({})
+    expect(inbox).toEqual([])
+    await waitFor(async () => inbox.length > 0, "the timer's reminder to reach the inbox")
+    expect(inbox).toEqual([REMINDER])
+    expect(await record()).toEqual({ state: "open", count: 2, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("a settle that says what it waits on buys the quiet wait, and is reminded once after it", async () => {
+  const { endpoint, record, inbox, close } = await harness({
+    record: recorded("open", 0),
+    claim: implementer,
+  })
+  try {
+    expect(
+      await endpoint.handle({
+        event: "Stop",
+        lastAssistantMessage: "WAITING on CI to go green on the branch.",
+      }),
+    ).toEqual({})
+    expect(await record()).toEqual({ state: "waiting", count: 0, reported: false })
+    // Nothing is sent into the wait itself.
+    await Bun.sleep(30)
+    expect(inbox).toEqual([])
+    await waitFor(async () => inbox.length > 0, "the reminder the wait earned")
+    expect(inbox).toEqual([REMINDER])
+    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+    // One reminder, not a second from the same wait.
+    await Bun.sleep(60)
+    expect(inbox).toEqual([REMINDER])
+  } finally {
+    await close()
+  }
+})
+
+test("a turn that ended on an API error is settled, answered {} and reminded from the timer", async () => {
+  const { endpoint, record, inbox, close } = await harness({
+    record: recorded("open", 0),
+    claim: implementer,
+  })
+  try {
+    // Claude Code ignores what a StopFailure hook returns, so the reminder it earned cannot be a
+    // continuation: it is written into the session instead.
+    expect(
+      await endpoint.handle({ event: "StopFailure", lastAssistantMessage: "I pushed the branch." }),
+    ).toEqual({})
+    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+    await waitFor(async () => inbox.length > 0, "the reminder the failed turn earned")
+    expect(inbox).toEqual([REMINDER])
+  } finally {
+    await close()
+  }
+})
+
+test("the prompt that carries this endpoint's own reminder does not reset its count", async () => {
+  const { endpoint, record, inbox, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+  })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    await waitFor(async () => inbox.length > 0, "the timer's reminder to reach the inbox")
+    expect(await record()).toEqual({ state: "open", count: 2, reported: false })
+    expect(await endpoint.handle({ event: "UserPromptSubmit", prompt: inbox[0] ?? "" })).toEqual({})
+    expect(await record()).toEqual({ state: "open", count: 2, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("a prompt carrying a line this server wrote for a delivery is that delivery's turn", async () => {
+  const delivery = "<channel>the architect asks for a status</channel>"
+  const open = await harness({ record: recorded("open", 2), claim: implementer })
+  try {
+    open.endpoint.deliveryWritten(delivery)
+    expect(await open.endpoint.handle({ event: "UserPromptSubmit", prompt: delivery })).toEqual({})
+    expect(await open.record()).toEqual({ state: "open", count: 0, reported: false })
+  } finally {
+    await open.close()
+  }
+
+  // A delivery is something happening, but it is not an assignment: it reopens no closed phase.
+  // The line is dropped as its prompt arrives, so the same text next time is an assignment.
+  const closed = await harness({ record: recorded("closed", 0), claim: implementer })
+  try {
+    closed.endpoint.deliveryWritten(delivery)
+    await closed.endpoint.handle({ event: "UserPromptSubmit", prompt: delivery })
+    expect(await closed.record()).toEqual({ state: "closed", count: 0, reported: false })
+    await closed.endpoint.handle({ event: "UserPromptSubmit", prompt: delivery })
+    expect(await closed.record()).toEqual({ state: "open", count: 0, reported: false })
+  } finally {
+    await closed.close()
+  }
+})
+
+test("a prompt carrying anything else is the daemon's assignment and opens the phase", async () => {
+  const { endpoint, record, close } = await harness({
+    record: recorded("closed", 0),
+    claim: implementer,
+  })
+  try {
+    expect(
+      await endpoint.handle({ event: "UserPromptSubmit", prompt: "Implement INFRA-220." }),
+    ).toEqual({})
+    expect(await record()).toEqual({ state: "open", count: 0, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("a helper agent's tool call is not the worker working, and does not reset the count", async () => {
+  const { endpoint, record, close } = await harness({
+    record: recorded("open", 2),
+    claim: implementer,
+  })
+  try {
+    for (const event of ["PostToolUse", "PostToolUseFailure"]) {
+      expect(await endpoint.handle({ event, toolName: "Bash", agentId: "agent-7" })).toEqual({})
+      expect(await record()).toEqual({ state: "open", count: 2, reported: false })
+    }
+    expect(await endpoint.handle({ event: "PostToolUse", toolName: "Bash", agentId: "" })).toEqual(
+      {},
+    )
+    expect(await record()).toEqual({ state: "open", count: 0, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("a tool call that failed is work too, and resets the count", async () => {
+  const { endpoint, record, close } = await harness({
+    record: recorded("open", 2),
+    claim: implementer,
+  })
+  try {
+    expect(
+      await endpoint.handle({ event: "PostToolUseFailure", toolName: "Bash", agentId: "" }),
+    ).toEqual({})
+    expect(await record()).toEqual({ state: "open", count: 0, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("the architect is told at the threshold, asked again when no session holds the role, and never twice", async () => {
+  const { endpoint, record, inbox, published, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+    env: { LEGION_STALL_ARCHITECT_AFTER: "2" },
+    publish: async (_input, attempt) => {
+      if (attempt > 1) return {}
+      // The listener's "no live session holds that role".
+      throw new EnvoyApiError({
+        method: "POST",
+        url: "http://listener.test/v1/messages/publish",
+        status: 404,
+        responseBody: JSON.stringify({ error: "no holder", reason: "unclaimed" }),
+      })
+    },
+  })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    await waitFor(async () => published.length === 1, "the architect to be told")
+    const refused = (await record()) as { reported: boolean; reportKey: string }
+    // The refusal leaves the notice to be sent again, under the key it was minted with.
+    expect(refused.reported).toBe(false)
+    expect(refused.reportKey).toMatch(/^[0-9a-f-]{36}$/)
+    expect(published[0]?.topic).toContain("architect")
+    expect(published[0]?.message).toContain("2 phase reminders")
+
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    await waitFor(async () => published.length === 2, "the architect to be told again")
+    expect(published[1]?.idempotencyKey).toBe(refused.reportKey)
+    expect(await record()).toEqual({
+      state: "open",
+      count: 3,
+      reported: true,
+      reportKey: refused.reportKey,
+    })
+
+    // Accepted once is told once: the run's later reminders add no second notice.
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    await waitFor(async () => inbox.length === 3, "the third reminder of the run")
+    expect(published.length).toBe(2)
+  } finally {
+    await close()
+  }
+})
+
+test("a timer whose turn has started again writes nothing", async () => {
+  const { endpoint, record, inbox, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+  })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    expect(
+      await endpoint.handle({ event: "UserPromptSubmit", prompt: "Carry on with INFRA-220." }),
+    ).toEqual({})
+    // Three times the 20 ms the armed reminder was waiting for.
+    await Bun.sleep(60)
+    expect(inbox).toEqual([])
+    expect(await record()).toEqual({ state: "open", count: 0, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("a session resumed on an open phase is reminded once its claim has booted", async () => {
+  const { record, inbox, boot, close } = await harness({
+    record: recorded("open", 0),
+    claim: implementer,
+  })
+  try {
+    // Nothing is armed before the claim has booted: the reminder needs the claim it gates on.
+    await Bun.sleep(40)
+    expect(inbox).toEqual([])
+    boot()
+    await waitFor(async () => inbox.length > 0, "the resume reminder")
+    expect(inbox).toEqual([REMINDER])
+    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("a resumed session whose task arrives first is not reminded on top of it", async () => {
+  const { endpoint, inbox, boot, close } = await harness({
+    record: recorded("open", 0),
+    claim: implementer,
+  })
+  try {
+    // The daemon re-sending an interrupted task arrives as a prompt, and drops the resume
+    // reminder through the same generation guard.
+    expect(
+      await endpoint.handle({ event: "UserPromptSubmit", prompt: "Carry on with INFRA-220." }),
+    ).toEqual({})
+    boot()
+    await Bun.sleep(60)
+    expect(inbox).toEqual([])
+  } finally {
+    await close()
+  }
+})
+
+test("a worker whose workspace was recreated is told once, as a turn of its own", async () => {
+  const { endpoint, record, inbox, boot, close } = await harness({
+    record: recorded("closed", 0),
+    claim: implementer,
+    env: { LEGION_WORKSPACE_RECREATED: "true" },
+  })
+  try {
+    boot()
+    await waitFor(async () => inbox.length > 0, "the recreated-workspace notice")
+    expect(inbox[0]).toContain("it holds what was pushed to legion/LEGION-208")
+    // Recorded in the record the phase and count live in, so a server Claude Code restarts inside
+    // the same process does not repeat it.
+    expect(await record()).toEqual({
+      state: "closed",
+      count: 0,
+      reported: false,
+      recreatedNoticeSent: true,
+    })
+    // The turn it starts is this server's own line, not the daemon's assignment: a phase that was
+    // over stays over.
+    await endpoint.handle({ event: "UserPromptSubmit", prompt: inbox[0] ?? "" })
+    expect(await record()).toEqual({
+      state: "closed",
+      count: 0,
+      reported: false,
+      recreatedNoticeSent: true,
+    })
+    await Bun.sleep(40)
+    expect(inbox.length).toBe(1)
+  } finally {
+    await close()
+  }
+})
+
+test("a record that already says the recreated-workspace notice was sent earns no second one", async () => {
+  const { inbox, boot, close } = await harness({
+    record: recorded("closed", 0, { recreatedNoticeSent: true }),
+    claim: implementer,
+    env: { LEGION_WORKSPACE_RECREATED: "true" },
+  })
+  try {
+    boot()
+    await Bun.sleep(40)
+    expect(inbox).toEqual([])
+  } finally {
+    await close()
+  }
+})
+
+test("a launcher that recreated nothing sends no notice and records no key", async () => {
+  const { record, inbox, boot, close } = await harness({
+    record: recorded("closed", 0),
+    claim: implementer,
+  })
+  try {
+    boot()
+    await Bun.sleep(40)
+    expect(inbox).toEqual([])
+    expect(await record()).toEqual({ state: "closed", count: 0, reported: false })
   } finally {
     await close()
   }
@@ -135,9 +510,7 @@ test("a record the deployed build wrote reads as an open phase with no reminders
 })
 
 test("a session holding no claim, as the bridge's seeding /rename turn does, is never reminded", async () => {
-  const { endpoint, record, close } = await harness({
-    record: JSON.stringify({ state: "open", count: 0, reported: false }),
-  })
+  const { endpoint, record, close } = await harness({ record: recorded("open", 0) })
   try {
     expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Renamed." })).toEqual({})
     expect(await record()).toEqual({ state: "open", count: 0, reported: false })
@@ -148,7 +521,7 @@ test("a session holding no claim, as the bridge's seeding /rename turn does, is 
 
 test("an architect's session runs no phase reminder", async () => {
   const { endpoint, record, close } = await harness({
-    record: JSON.stringify({ state: "open", count: 0, reported: false }),
+    record: recorded("open", 0),
     claim: { ...implementer, role: "architect" },
   })
   try {
@@ -163,7 +536,7 @@ test("an architect's session runs no phase reminder", async () => {
 
 test("a call naming no event, or one this endpoint does not know, is refused and moves nothing", async () => {
   const { endpoint, record, close } = await harness({
-    record: JSON.stringify({ state: "open", count: 2, reported: false }),
+    record: recorded("open", 2),
     claim: implementer,
   })
   try {
@@ -176,31 +549,30 @@ test("a call naming no event, or one this endpoint does not know, is refused and
   }
 })
 
-test("the four events this build does not yet handle answer {} and record nothing", async () => {
-  const { endpoint, record, close } = await harness({
-    record: JSON.stringify({ state: "open", count: 2, reported: false }),
-    claim: implementer,
-  })
-  try {
-    expect(await endpoint.handle({ event: "StopFailure", lastAssistantMessage: "" })).toEqual({})
-    expect(await endpoint.handle({ event: "PostToolUse", toolName: "Bash", agentId: "" })).toEqual(
-      {},
-    )
-    expect(
-      await endpoint.handle({ event: "PostToolUseFailure", toolName: "Bash", agentId: "" }),
-    ).toEqual({})
-    expect(await endpoint.handle({ event: "UserPromptSubmit", prompt: "go on" })).toEqual({})
-    expect(await record()).toEqual({ state: "open", count: 2, reported: false })
-  } finally {
-    await close()
-  }
-})
-
 test("a session with no record at all is no record, not a fresh open phase", async () => {
   const { endpoint, record, close } = await harness({ claim: implementer })
   try {
     expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Done." })).toEqual({})
     expect(await record()).toBeUndefined()
+  } finally {
+    await close()
+  }
+})
+
+test("a session outside a Legion pane has no inbox, and says so rather than losing the reminder", async () => {
+  const { endpoint, lines, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+    inbox: false,
+  })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    await waitFor(
+      async () => lines.some((line) => line.includes("has no way to reach this worker")),
+      "the log line naming the missing inbox",
+    )
   } finally {
     await close()
   }

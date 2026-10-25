@@ -45,7 +45,6 @@ import {
 } from "@legion/envoy-client/transport"
 import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
 import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
-import { stallLimits } from "@legion/pi-shared/stall-limits"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -1064,6 +1063,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const stateDirectory = pluginStateDirectory()
   // The Legion bridge's inbox takes the events itself; otherwise they go to Claude Code's channel.
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
+  // One connection to the bridge carries every line this server writes into the session: each
+  // Envoy delivery, and the reminders and notices the phase endpoint writes.
+  const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket)
   // Claude Code drops a notification from a channel it did not load without telling this server,
   // so such a session advertises no delivery mode and Dispatch refuses a message to it rather than
   // reporting it delivered. The bridge's inbox needs no channel.
@@ -1099,15 +1101,27 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // own hooks drive through the `legion_phase_hook` tool. It is started here, beside the claim it
   // gates on, and restores this session's record as it starts, before any hook can be answered.
   const phaseLog = paneReminderLog(logLegion)
+  // The claim's boot, for the endpoint's resume reminder and its recreated-workspace notice: both
+  // need the claim, and the claim starts further down, once the channel session exists.
+  const claimBooted = Promise.withResolvers<void>()
   const phaseHook =
     pane === undefined || daemon === undefined
       ? undefined
       : createPhaseHookEndpoint({
           stateFile: phaseStallFile(pane.configDir, identity.id),
           claim: () => claim?.capability(),
+          booted: claimBooted.promise,
           readState: () => daemon.state(),
-          project: configuredValue(process.env["LEGION_PROJECT"]),
-          limits: stallLimits(process.env, phaseLog),
+          inbox:
+            inbox === undefined
+              ? undefined
+              : (text) =>
+                  inbox.notification({
+                    method: CHANNEL_NOTIFICATION_METHOD,
+                    params: { content: text, meta: {} },
+                  }),
+          publish: client.publish,
+          env: process.env,
           log: phaseLog,
         })
   const toolDefinitions = [
@@ -1130,7 +1144,20 @@ export async function runEnvoyChannelServer(): Promise<void> {
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))
   })
-  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket)
+  // The endpoint is told every line this server writes for a delivery: the `UserPromptSubmit`
+  // that carries one back is that delivery's turn, not a fresh assignment, and this server, which
+  // writes them all, is the only place that knows.
+  const notifier: ChannelNotifier =
+    inbox === undefined
+      ? server
+      : phaseHook === undefined
+        ? inbox
+        : {
+            notification: async (notification) => {
+              phaseHook.deliveryWritten(notification.params.content)
+              await inbox.notification(notification)
+            },
+          }
   // A session whose deliveries are channel notifications Claude Code did not load shows the model
   // nothing, so it advertises no delivery mode at all.
   const capabilities =
@@ -1144,6 +1171,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
     if (stopping) return
     stopping = true
     booting.abort()
+    // A reminder waiting on a 15-minute WAITING wait holds no shutting-down server open.
+    phaseHook?.stop()
     if (session === undefined) {
       stopped.resolve()
       return
@@ -1206,6 +1235,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
         log: logLegion,
         stop: endPane,
       })
+      // What `claimSession.bootstrap` returning is to the Oh My Pi host: the point the phase
+      // endpoint may read the claim, arm its resume reminder and tell the worker its workspace
+      // was recreated.
+      void claim.booted.then(claimBooted.resolve)
     }
     if (stopping) await session.shutdown()
     await stopped.promise

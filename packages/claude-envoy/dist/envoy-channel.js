@@ -44750,35 +44750,6 @@ async function findHandoffCommit(input) {
   }
   return carrying;
 }
-
-// ../pi-shared/src/stall-limits.ts
-var DEFAULT_STALL_LIMITS = {
-  reminderMs: 300000,
-  waitingMs: 900000,
-  resumeMs: 120000,
-  architectAfter: 3
-};
-function integerSetting(env, log, name, fallback, least) {
-  const raw = env[name];
-  if (raw === undefined)
-    return fallback;
-  const value = raw.trim() === "" ? Number.NaN : Number(raw);
-  if (!Number.isInteger(value) || value < least) {
-    log.warn(`legion: ${name} is not an integer of ${least} or more; using ${fallback}`, {
-      value: raw
-    });
-    return fallback;
-  }
-  return value;
-}
-function stallLimits(env, log) {
-  return {
-    reminderMs: integerSetting(env, log, "LEGION_STALL_REMINDER_MS", DEFAULT_STALL_LIMITS.reminderMs, 0),
-    waitingMs: integerSetting(env, log, "LEGION_STALL_WAITING_MS", DEFAULT_STALL_LIMITS.waitingMs, 0),
-    resumeMs: integerSetting(env, log, "LEGION_STALL_RESUME_MS", DEFAULT_STALL_LIMITS.resumeMs, 0),
-    architectAfter: integerSetting(env, log, "LEGION_STALL_ARCHITECT_AFTER", DEFAULT_STALL_LIMITS.architectAfter, 2)
-  };
-}
 // ../../node_modules/.bun/@modelcontextprotocol+sdk@1.30.0/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
 function isZ4Schema(s) {
   const schema = s;
@@ -48333,6 +48304,46 @@ function createPhaseReminder(deps) {
   };
 }
 
+// ../pi-shared/src/stall-limits.ts
+var DEFAULT_STALL_LIMITS = {
+  reminderMs: 300000,
+  waitingMs: 900000,
+  resumeMs: 120000,
+  architectAfter: 3
+};
+function integerSetting(env, log, name, fallback, least) {
+  const raw = env[name];
+  if (raw === undefined)
+    return fallback;
+  const value = raw.trim() === "" ? Number.NaN : Number(raw);
+  if (!Number.isInteger(value) || value < least) {
+    log.warn(`legion: ${name} is not an integer of ${least} or more; using ${fallback}`, {
+      value: raw
+    });
+    return fallback;
+  }
+  return value;
+}
+function stallLimits(env, log) {
+  return {
+    reminderMs: integerSetting(env, log, "LEGION_STALL_REMINDER_MS", DEFAULT_STALL_LIMITS.reminderMs, 0),
+    waitingMs: integerSetting(env, log, "LEGION_STALL_WAITING_MS", DEFAULT_STALL_LIMITS.waitingMs, 0),
+    resumeMs: integerSetting(env, log, "LEGION_STALL_RESUME_MS", DEFAULT_STALL_LIMITS.resumeMs, 0),
+    architectAfter: integerSetting(env, log, "LEGION_STALL_ARCHITECT_AFTER", DEFAULT_STALL_LIMITS.architectAfter, 2)
+  };
+}
+
+// ../pi-shared/src/workspace-recreated.ts
+var WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
+function workspaceRecreatedNotice(environment, issue2) {
+  if (environment[WORKSPACE_RECREATED_VARIABLE] !== "true")
+    return;
+  return {
+    id: crypto.randomUUID(),
+    content: `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue2} ` + "(the repository's default branch if nothing was), and anything you had not pushed is gone. " + "Before you continue, check the workspace against what you remember doing and re-read your " + "last handoff."
+  };
+}
+
 // src/legion-phase-hook.ts
 var PHASE_HOOK_TOOL_NAME = "legion_phase_hook";
 var PHASE_HOOK_REFUSAL = "legion_phase_hook is Claude Code's hook endpoint for Legion's phase reminder: Claude Code's " + "own hooks call it with the event they fire for, and it does nothing for a call the model " + "makes. Do not call it.";
@@ -48343,6 +48354,7 @@ var HOOK_EVENTS = [
   "PostToolUseFailure",
   "UserPromptSubmit"
 ];
+var WRITTEN_LINES_KEPT = 32;
 var hookArguments = exports_external.object({
   event: exports_external.enum(HOOK_EVENTS),
   lastAssistantMessage: exports_external.string().optional(),
@@ -48370,6 +48382,7 @@ function paneReminderLog(write) {
     warn: (message, context) => line("warn", message, context)
   };
 }
+var NO_RECORD = { entry: undefined, recreatedNoticeSent: false };
 function readPhaseStallRecord(file2, log) {
   let raw;
   try {
@@ -48382,7 +48395,7 @@ function readPhaseStallRecord(file2, log) {
         error: messageFor(error48)
       });
     }
-    return;
+    return NO_RECORD;
   }
   let data;
   try {
@@ -48392,31 +48405,34 @@ function readPhaseStallRecord(file2, log) {
       file: file2,
       error: messageFor(error48)
     });
-    return;
+    return NO_RECORD;
   }
   if (typeof data !== "object" || data === null) {
     log.warn("legion: the phase-stall state is not an object; this session starts afresh", { file: file2 });
-    return;
+    return NO_RECORD;
   }
   const stall = phaseStallFrom(data);
   if (stall === undefined) {
     log.warn("legion: the phase-stall state holds no state this build knows; starting afresh", {
       file: file2
     });
-    return;
+    return NO_RECORD;
   }
   const report2 = phaseStallReportFrom(data);
   return {
-    state: stall.state,
-    count: stall.count,
-    reported: report2.reported,
-    ...report2.reportKey === undefined ? {} : { reportKey: report2.reportKey }
+    entry: {
+      state: stall.state,
+      count: stall.count,
+      reported: report2.reported,
+      ...report2.reportKey === undefined ? {} : { reportKey: report2.reportKey }
+    },
+    recreatedNoticeSent: "recreatedNoticeSent" in data && data.recreatedNoticeSent === true
   };
 }
-function writePhaseStallRecord(file2, entry, log) {
+function writePhaseStallRecord(file2, entry, recreatedNoticeSent, log) {
   const temporary = join6(dirname3(file2), `.legion-phase-stall-${randomUUID3()}`);
   try {
-    writeFileSync2(temporary, JSON.stringify(entry), { mode: 384 });
+    writeFileSync2(temporary, JSON.stringify({ ...entry, ...recreatedNoticeSent ? { recreatedNoticeSent } : {} }), { mode: 384 });
     renameSync2(temporary, file2);
   } catch (error48) {
     rmSync3(temporary, { force: true });
@@ -48427,26 +48443,88 @@ function writePhaseStallRecord(file2, entry, log) {
   }
 }
 function createPhaseHookEndpoint(deps) {
-  const reminder = createPhaseReminder({
-    sendReminder: (text) => {
-      deps.log.warn("legion: a phase reminder has no way to reach this worker yet", {
-        reminder: text
+  const limits = stallLimits(deps.env, deps.log);
+  const restored = readPhaseStallRecord(deps.stateFile, deps.log);
+  let entry = restored.entry ?? { state: "closed", count: 0, reported: false };
+  let recreatedNoticeSent = restored.recreatedNoticeSent;
+  const saveRecord = (next) => {
+    entry = next;
+    writePhaseStallRecord(deps.stateFile, next, recreatedNoticeSent, deps.log);
+  };
+  let timer;
+  const dropTimer = () => {
+    if (timer === undefined)
+      return;
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  const armTimer = (callback, delayMs) => {
+    dropTimer();
+    timer = setTimeout(() => {
+      timer = undefined;
+      callback();
+    }, delayMs);
+  };
+  let lastReminder;
+  const written = new Set;
+  const noteWritten = (content) => {
+    written.add(content);
+    for (const oldest of written) {
+      if (written.size <= WRITTEN_LINES_KEPT)
+        break;
+      written.delete(oldest);
+    }
+  };
+  const writeToSession = (text, what) => {
+    const { inbox } = deps;
+    if (inbox === undefined) {
+      deps.log.warn(`legion: ${what} has no way to reach this worker: this session has no inbox`, {
+        text
       });
-    },
-    armTimer: () => {},
-    saveEntry: (entry) => writePhaseStallRecord(deps.stateFile, entry, deps.log),
+      return;
+    }
+    inbox(text).catch((error48) => {
+      deps.log.warn(`legion: ${what} did not reach this worker`, { error: messageFor(error48) });
+    });
+  };
+  const sendReminder = (text) => {
+    lastReminder = text;
+    writeToSession(text, "a phase reminder");
+  };
+  const reminder = createPhaseReminder({
+    sendReminder,
+    armTimer,
+    saveEntry: saveRecord,
     claim: deps.claim,
     readState: deps.readState,
-    publisher: () => {
-      deps.log.debug("legion: this build tells no architect about a stalled worker");
-      return;
-    },
-    project: deps.project,
-    limits: deps.limits,
+    publisher: () => deps.publish,
+    project: configuredValue(deps.env["LEGION_PROJECT"]),
+    limits,
     log: deps.log
   });
-  reminder.restore(readPhaseStallRecord(deps.stateFile, deps.log));
+  reminder.restore(restored.entry);
+  const sendRecreatedNotice = (issue2) => {
+    if (recreatedNoticeSent)
+      return;
+    const notice = workspaceRecreatedNotice(deps.env, issue2);
+    if (notice === undefined)
+      return;
+    recreatedNoticeSent = true;
+    saveRecord(entry);
+    noteWritten(notice.content);
+    writeToSession(notice.content, "the recreated-workspace notice");
+  };
+  deps.booted.then(() => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return;
+    sendRecreatedNotice(claim.issue);
+    if (claim.role !== "architect")
+      reminder.armResumeReminder();
+  });
   return {
+    deliveryWritten: noteWritten,
+    stop: dropTimer,
     handle: async (input) => {
       const parsed = hookArguments.safeParse(input);
       if (!parsed.success)
@@ -48465,11 +48543,29 @@ function createPhaseHookEndpoint(deps) {
           const reminded = await reminder.settle(event.lastAssistantMessage ?? "");
           return reminded === undefined ? {} : { decision: "block", reason: reminded };
         }
-        case "StopFailure":
-        case "PostToolUse":
-        case "PostToolUseFailure":
-        case "UserPromptSubmit":
+        case "StopFailure": {
+          const reminded = await reminder.settle(event.lastAssistantMessage ?? "");
+          if (reminded !== undefined)
+            armTimer(() => sendReminder(reminded), limits.reminderMs);
           return {};
+        }
+        case "PostToolUse":
+        case "PostToolUseFailure": {
+          if ((event.agentId ?? "") !== "")
+            return {};
+          reminder.apply({ kind: "tool-call" });
+          return {};
+        }
+        case "UserPromptSubmit": {
+          reminder.turnStarted();
+          dropTimer();
+          const prompt = event.prompt ?? "";
+          if (prompt === lastReminder)
+            return {};
+          const delivered = written.delete(prompt);
+          reminder.apply({ kind: delivered ? "inbound-event" : "assignment" });
+          return {};
+        }
       }
     }
   };
@@ -49325,6 +49421,7 @@ async function runEnvoyChannelServer() {
   }), directory);
   const stateDirectory = pluginStateDirectory();
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
+  const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket);
   const channel = inboxSocket === undefined ? detectClaudeChannel({
     claudePid: process.ppid,
     bundlePath: process.argv[1] ?? "",
@@ -49347,12 +49444,18 @@ async function runEnvoyChannelServer() {
   let claim;
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl);
   const phaseLog = paneReminderLog(logLegion);
+  const claimBooted = Promise.withResolvers();
   const phaseHook = pane === undefined || daemon === undefined ? undefined : createPhaseHookEndpoint({
     stateFile: phaseStallFile(pane.configDir, identity.id),
     claim: () => claim?.capability(),
+    booted: claimBooted.promise,
     readState: () => daemon.state(),
-    project: configuredValue(process.env["LEGION_PROJECT"]),
-    limits: stallLimits(process.env, phaseLog),
+    inbox: inbox === undefined ? undefined : (text) => inbox.notification({
+      method: CHANNEL_NOTIFICATION_METHOD,
+      params: { content: text, meta: {} }
+    }),
+    publish: client.publish,
+    env: process.env,
     log: phaseLog
   });
   const toolDefinitions = [
@@ -49376,7 +49479,12 @@ async function runEnvoyChannelServer() {
       throw new Error("Envoy channel server is still starting");
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments));
   });
-  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket);
+  const notifier = inbox === undefined ? server : phaseHook === undefined ? inbox : {
+    notification: async (notification) => {
+      phaseHook.deliveryWritten(notification.params.content);
+      await inbox.notification(notification);
+    }
+  };
   const capabilities = inboxSocket !== undefined ? INBOX_CAPABILITIES : channel.loaded ? CHANNEL_CAPABILITIES : [];
   const booting = new AbortController;
   const stopped = Promise.withResolvers();
@@ -49387,6 +49495,7 @@ async function runEnvoyChannelServer() {
       return;
     stopping = true;
     booting.abort();
+    phaseHook?.stop();
     if (session === undefined) {
       stopped.resolve();
       return;
@@ -49442,6 +49551,7 @@ async function runEnvoyChannelServer() {
         log: logLegion,
         stop: endPane
       });
+      claim.booted.then(claimBooted.resolve);
     }
     if (stopping)
       await session.shutdown();

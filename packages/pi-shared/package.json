@@ -65,6 +65,10 @@
       "types": "./src/stall-limits.ts",
       "bun": "./src/stall-limits.ts"
     },
+    "./workspace-recreated": {
+      "types": "./src/workspace-recreated.ts",
+      "bun": "./src/workspace-recreated.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"
