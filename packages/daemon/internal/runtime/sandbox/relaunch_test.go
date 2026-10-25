@@ -1656,3 +1656,36 @@ func TestALaunchWhoseRunningPatchTimesOutAfterApplyingLeavesItsSandboxSuspended(
 		t.Fatalf("the launch left its sandbox %s after an ambiguous Running patch", mode)
 	}
 }
+
+// A launch that runs out of time on a pod still Pending reports that pod's events beside its
+// phase. A pod whose disk the kubelet cannot provision — one waiting behind the claim of a
+// predecessor the garbage collector has not reaped — reports nothing but Pending, and the event is
+// the whole of the reason (INFRA-80). A pod past Pending carries none: its phase is the answer.
+func TestALaunchThatWaitedOutAPendingPodReportsItsEvents(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	name := loc.Sandbox.Name
+	pod := g.pod(name)
+	if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: name + ".1", Namespace: testNamespace},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: name, UID: pod.UID},
+		Type:           "Warning", Reason: "FailedBinding",
+		Message: "volume issue is still bound to the previous pod",
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if detail := g.r.waitedOut(g.ctx, g.sandbox(name)); strings.Contains(detail, "events:") {
+		t.Errorf("waitedOut over a running pod = %q, want no events: its phase is the answer", detail)
+	}
+	g.update(pod, func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending })
+	g.eventually("the informer to see the pending pod", func() bool {
+		p := g.r.storedPod(name)
+		return p != nil && p.Status.Phase == corev1.PodPending
+	})
+	detail := g.r.waitedOut(g.ctx, g.sandbox(name))
+	for _, want := range []string{"sandbox " + name + " is Running", "Pending", "events: Warning FailedBinding: volume issue is still bound to the previous pod"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("waitedOut over a pending pod = %q, want it to carry %q", detail, want)
+		}
+	}
+}

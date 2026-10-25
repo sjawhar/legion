@@ -637,16 +637,20 @@ func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID
 		return true, nil
 	})
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		return nil, fmt.Errorf("%w; %s", err, r.waitedOut(s))
+		return nil, fmt.Errorf("%w; %s", err, r.waitedOut(ctx, s))
 	}
 	return found, err
 }
 
 // waitedOut is what the daemon's own stores say about a launch that ran out of time: the Sandbox's
 // Ready condition, where the controller reports why it made no pod, and the pod's phase where one
-// exists and the wait was for something else. A timeout that says only how long it waited sends an
-// operator to the cluster for a condition the daemon was already holding.
-func (r *Runtime) waitedOut(s *sandbox) string {
+// exists and the wait was for something else. A pod still Pending carries its events too, as an
+// unschedulable pod's verdict does (observe's evaluate): a pod whose disk the kubelet cannot
+// provision — one waiting behind a predecessor's claim the garbage collector has not reaped —
+// reports nothing but Pending, and the FailedBinding event is the whole of the reason. A timeout
+// that says only how long it waited sends an operator to the cluster for a condition the daemon
+// was already holding.
+func (r *Runtime) waitedOut(ctx context.Context, s *sandbox) string {
 	stored, err := r.storedSandbox(s.Name)
 	switch {
 	case err != nil:
@@ -658,10 +662,15 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 	if ready := stored.condition(conditionReady); ready != nil {
 		detail += fmt.Sprintf("; Ready=%s %s: %s", ready.Status, ready.Reason, ready.Message)
 	}
-	if pod := r.storedPod(s.Name); ownedBy(pod, s.UID) {
-		return detail + fmt.Sprintf("; its pod %s is %s", pod.UID, phaseOf(pod))
+	pod := r.storedPod(s.Name)
+	if !ownedBy(pod, s.UID) {
+		return detail + "; it has no pod"
 	}
-	return detail + "; it has no pod"
+	detail += fmt.Sprintf("; its pod %s is %s", pod.UID, phaseOf(pod))
+	if pod.Status.Phase == corev1.PodPending {
+		detail += fmt.Sprintf("; events: %s", r.events(ctx, pod))
+	}
+	return detail
 }
 
 // writeLauncherSecrets makes, for each launcher role of the pod (l.roles), a role-private Secret
