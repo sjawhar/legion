@@ -2,122 +2,143 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T00:05:00Z",
+  "completed": "2026-10-25T23:46:00Z",
+  "generation": 2,
+  "scope": "Generation 2 plans only the gap that kept generation 1 from acceptance: scripts/e2e/claude-backend-tmux.sh and scripts/e2e/claude-backend-sandbox.sh stopped in prerequisites on the devbox, so spec acceptance bullets 1 and 13 have no live run. The code on legion/INFRA-220 (PR sjawhar/legion#2186) stands and is not re-planned. Full plan: dispatch://INFRA-220/artifact/plan-md version 5, section 'Generation 2'.",
   "requiredSkills": {
     "implement": [
-      "legion-worker: the implementer's rules here — references/pr-body.md (the proof and the PR body; the production-like surfaces reachable from a pod are the pinned Oh My Pi binary, the real MCP server over stdio, the real Claude Code binary against stand-ins, and `go test ./...`), references/default-branch-check.md before each push, references/cleanup-deletion.md for the Go cut of claudebridge/stall.go and for the tmux-only prose this change makes false, references/conflicts-and-rewrites.md only on a conflict.",
-      "ce-simplify-code: the simplify pass over the settled diff. Two copies are the risk this change exists to avoid: the phase-stall machine (already one, in @legion/pi-shared) and the Claude launch shapes, which the plan puts in packages/daemon/internal/claudelaunch for both runtimes to import.",
-      "dispatch-first: search before any Dispatch write; a problem outside this issue is a dispatch ask, never an issue the implementer files (skill://legion-worker/references/findings.md)."
+      "legion-worker: references/pr-body.md for the two E2E lines and the delegated devbox runs (what a proof is, the negative control, the head), references/default-branch-check.md before the push; references/conflicts-and-rewrites.md only on a conflict.",
+      "envoy: the devbox runs are requested from the devbox agent session 01a13c57-d826-7242-80fe-5f0670188b11 with envoy_send.",
+      "dispatch-first and dispatch: the run transcripts are uploaded to the issue with dispatch artifact, and a dispatch ask on this issue replaces the devbox agent if it stops answering.",
+      "ce-simplify-code: the simplify pass, which here means one bridge library serving both callers rather than a second copy, and no dead aws-only code paths."
     ],
     "test": [
-      "legion-worker: references/pr-body.md — the tester drives the application and reads CI for everything static. The pod-runnable surfaces are `go test ./...` in packages/daemon, `bun test` in pi-legion, pi-shared and claude-envoy, the pinned Oh My Pi real-binary test, and the real Claude Code probe; the two live proofs (scripts/e2e/claude-backend-tmux.sh and the new scripts/e2e/claude-backend-sandbox.sh) need a devbox and a cluster, as every live proof in this repository does, and the tester records that rather than claiming them.",
+      "legion-worker: references/pr-body.md — the tester verifies the implementer's uploaded run transcripts and directs its own devbox runs of both scripts at the same code head, with its own negative control, and reads CI for everything static.",
+      "envoy: the tester's runs are requested from the devbox agent with envoy_send.",
       "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
     ],
     "review": [
-      "legion-worker: references/review-threads.md for one disposition reply and one resolution per thread, references/merge-gate.md for the order of the round.",
-      "ce-simplify-code: the reviewer judges whether the Claude launch really has one definition rather than two, and whether the pod path grew a backend seam rather than a second runtime.",
+      "legion-worker: references/review-threads.md and references/merge-gate.md — a new round on the new head, judged from the diff and the uploaded run evidence.",
+      "ce-simplify-code: whether lib/bridge-tunnel.sh stays one library for both callers and whether the host/bind_host split leaves no use unassigned.",
       "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
     ]
   },
+  "decisions": {
+    "G1": "claude-backend-tmux.sh takes LEGION_E2E_MODEL_ROUTE=gateway|key-file exactly as stage3-devbox-workflow.sh:586-591,625-644; key-file via lib/install-key-file-model-route.sh with LEGION_E2E_ANTHROPIC_KEY_FILE and --key-dir \"$work/model-gateway-key\", removed first and unconditionally in cleanup; hawk-token only under gateway.",
+    "G2": "claude-backend-sandbox.sh takes LEGION_E2E_POD_REACHABILITY=aws-private-ip|bridge; host (pod-facing) and bind_host (devbox-local) split, every use assigned; bridge: host=bridge-<run label>.legion.svc.cluster.local, bind_host=127.0.0.1; bind: 0.0.0.0 unchanged; instance metadata only under aws-private-ip.",
+    "G3": "Under bridge the daemon alone runs in a root-made private mount namespace (sudo -n unshare --mount, setpriv back to the devbox user, explicit environment, pidfile from the exec chain) whose /etc/hosts adds 127.0.0.1 <host>; prerequisites refuse without passwordless sudo or when the wrapper probe does not print the user's ids and 127.0.0.1, or the devbox /etc/hosts changes.",
+    "G4": "lib/bridge-tunnel.sh bridge_start takes PORT... (one or more); stage4a's call is unchanged; kill_harness is part of the caller contract.",
+    "G5": "The sandbox script sources the bridge library, defines kill_harness (TERM to the daemon pid), runs begin bridge after begin snapshot, and calls bridge_stop in cleanup after the daemon stop and before the services, the process sweep, teardown and namespace_clean.",
+    "G6": "start_daemon checks only the daemon API and worker-stream ports.",
+    "G7": "The runtime kubeconfig stays an operator input; the README's GKE example documents how to build one for ServiceAccount legion-daemon.",
+    "G8": "Both headers, both README sections with a second example each, the port-admission note, the bridge section and library table, and AGENTS.md's two command lines; no CHANGELOG; no private names in the tree or PR text."
+  },
+  "order": [
+    "G1 tmux route switch",
+    "G4 bridge library",
+    "G2, G3, G5, G6 sandbox script",
+    "G7, G8 documents",
+    "Issue-pod checks: bash -n on every changed script and library; bun test scripts/e2e/lib; the two new refusals driven (route unset and 'nope'; reachability unset and 'nope')",
+    "Commit, identity check, push, PR body",
+    "R1: the implementer's devbox runs of both scripts at the pushed code head via the devbox agent, transcripts uploaded to the issue; fix and re-run on any harness defect; complete only after both pass",
+    "R2: the tester verifies R1's transcripts and directs its own devbox runs"
+  ],
+  "acceptance": [
+    {
+      "criterion": "C1 the tmux proof passes on a devbox with no Hawk gateway",
+      "surface": "devbox",
+      "command": "LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> LEGION_E2E_CLAUDE_KEY_FILE=<file> bash scripts/e2e/claude-backend-tmux.sh",
+      "seen": "claude backend e2e: PASS, exit 0 after cleanup, every check ok including stop-hook-reminds-the-open-phase"
+    },
+    {
+      "criterion": "C2 the sandbox proof passes on the GKE cluster from a devbox with no instance metadata",
+      "surface": "devbox against namespace legion",
+      "command": "the README's GKE example: LEGION_E2E_POD_REACHABILITY=bridge LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_STORAGE_CLASS=standard-rwo, runtime kubeconfig per G7, image per step 7, bash scripts/e2e/claude-backend-sandbox.sh",
+      "seen": "claude backend sandbox e2e: PASS, exit 0 after cleanup; five reverse listeners; pod endpoints name the bridge host; install, reminder, handoff and resume checks ok; namespace snapshots identical"
+    },
+    {
+      "criterion": "C3 a missing or wrong route or reachability is refused by name before anything is created",
+      "surface": "issue pod, and devbox as negative control",
+      "command": "each script with the variable unset, then 'nope'",
+      "seen": "FAIL prerequisites naming the variable, exit 1"
+    },
+    {
+      "criterion": "C4 the private /etc/hosts is the daemon's alone",
+      "surface": "the sandbox run's prerequisites probe",
+      "command": "the wrapper on id -u; id -g; getent hosts <host>, and getent hosts <host> outside it",
+      "seen": "the user's ids and 127.0.0.1 inside; nothing outside; /etc/hosts sha256 unchanged"
+    },
+    {
+      "criterion": "C5 Stage 4a's bridge keeps working",
+      "surface": "code",
+      "command": "read the bridge_start diff against the two-port original; bash -n",
+      "seen": "stage4a-sandbox-runtime.sh:330 unchanged; two ports render what they rendered"
+    },
+    {
+      "criterion": "C6 the documents agree with the scripts",
+      "surface": "AGENTS.md, scripts/e2e/README.md, script headers; CI lint",
+      "command": "read; check-private-names and check-pr-text in CI",
+      "seen": "every input a refusal names is documented; private-name checks pass"
+    }
+  ],
+  "risks": [
+    "The bridge needs passwordless sudo on the devbox (present; refused by name otherwise).",
+    "Network policy for five ports from issue pods to a scratch Service is unmeasured on this cluster for this script.",
+    "deploy/kubernetes/operator-route/pod-key-file.yml has not driven a daemon-launched pod on this cluster before.",
+    "The devbox agent is a separate session; a dispatch ask replaces it if it stops answering.",
+    "The runtime token must outlive the run."
+  ],
   "gapAnalysis": {
     "findings": [
       {
-        "finding": "F1 — the spec calls the model route out of scope on the strength of shim.go:380, but the documented pod route (deploy/kubernetes/operator-route/) is Oh My Pi's profile configuration, which Claude Code reads none of; the only variable route is provider_keys through the shim, and pod.env refuses a credential-shaped name.",
-        "answer": "D20: no new Legion surface. A deployment that runs Claude Code roles sets provider_keys for the Anthropic credential (the shim exports it into the child's environment) and the non-credential names ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env; the planner measured that Claude Code reads all three from its environment. The two consequences — the key reaching every role's child, and Oh My Pi's model configuration reaching Claude Code not at all — are written into the documents, and the departure is recorded for the architect."
+        "finding": "1 (blocking) — The daemon is not the only devbox process that dials the pod-facing URLs: the scratch Envoy listener dials NATS, scratch Dispatch dials NATS and the listener, and the script's readiness curls and lib/workflow.sh Dispatch calls dial dispatch_base; legion.yaml's dispatch_url and the script's dispatch_base are one variable today.",
+        "answer": "G2: the script's one host becomes two names, host (pod-facing: advertise_host, daemon_url, envoy_url, nats_urls, a new pod_dispatch_url written as dispatch_url, DISPATCH_SERVER_URL, the pod endpoint assertions) and bind_host (devbox-local: every bind, the listener's and Dispatch's outbound NATS/Envoy URLs, dispatch_base, every readiness curl), with a table assigning each use. The daemon's own Envoy dial is confirmed (workflow.go:477, notify.go:97-106)."
       },
       {
-        "finding": "F2 — the daemon API contract is defined as the pane and pod environment a worker reads, and this work adds four LEGION_STALL_* variables under both runtimes and three CLAUDE_* variables in a pod; the spec never mentions the contract.",
-        "answer": "D25: one bump to 36, in the same commit as the variables, with contracts/fixtures/daemon-api/version.json, pi-legion's and claude-envoy's legion.daemonApiVersion and pi-legion's daemon-api-version test; the boot gate then holds the daemon and the image's plugins together."
+        "finding": "2 (blocking) — The private-hosts namespace wrapper was unverified on the devbox, and must keep the daemon's uid, D-Bus/secrets access, recorded pid and the wildcard bind.",
+        "answer": "Measured on the devbox: unprivileged user namespaces are refused by AppArmor (bwrap and unshare --user both fail at the uid map); passwordless sudo works. G3 therefore uses sudo -n unshare --mount, setpriv back to the devbox user with its groups, an explicit environment, and a pidfile written by the exec chain's shell so daemon_pid is the daemon's own; prerequisites probe the wrapper (ids, getent, /etc/hosts sha256 unchanged) and refuse by name. bind: 0.0.0.0 stays (config/kubernetes.go:1456-1459)."
       },
       {
-        "finding": "F3 — the earlier K10 named workerSpawnSpec for both edits, but the stale-plugin decision is in stalePluginInstall (reached from SpawnSpec, which also covers the controller), and workerSpawnSpec replaces spec.Env with the git identity's map rather than merging into it.",
-        "answer": "D26: the four variables are merged into spec.Env after `spec.Env = id.Env()`, and the Claude branch is inside stalePluginInstall, which gains the claim's backend from the resolver launchBackend uses."
+        "finding": "3 (blocking) — start_daemon re-runs ports_free over all five ports after the run's own NATS, listener and Dispatch already hold three of them, so every run would stop at the daemon's boot.",
+        "answer": "G6: start_daemon checks only the daemon API and worker-stream ports; the five-port check stays in prerequisites."
       },
       {
-        "finding": "F4 — a Backend field on shimwire.LauncherStart buys nothing the child's environment does not already decide, and would be ignored silently by an image whose launcher predates it.",
-        "answer": "D21: no wire field. A Claude pod is simply not told OMP_SESSION_STORAGE and OMP_SESSION_SQL_DSN_FILE, so the in-pod launcher takes its file branch and stats the transcript."
+        "finding": "4 (blocking) — The bridge watchdog calls stage4a's kill_harness before kill -TERM $$; the sandbox script defines none, and under errexit the watchdog would die before signalling.",
+        "answer": "G4 makes kill_harness part of the library's documented caller contract; G5 defines it in the sandbox script as a TERM to the daemon's pid from $work/daemon.pid, without sourcing lib/teardown.sh."
       },
       {
-        "finding": "F5 — the claim's session for a Claude worker travels through four more code points than the spec names: what claude-envoy registers, validateSessionPath, SessionOnVolume with `legion sessions import`, and the store's IssueHasSessions.",
-        "answer": "D21 and D22 name each: the transcript under the pod's own Claude directory, a backend-aware validateSessionPath whose refusal names a backend change, `--resume <uuid>` in the argv, a refusal with a line of its own from `legion sessions import`, and expectVolume losing its sessionsInDatabase term for a Claude claim."
+        "finding": "5 (blocking) — namespace-rig's teardown deletes no standalone Pod or Service, so the bridge must be stopped explicitly and before namespace_clean; bridge creation must follow the before-snapshot.",
+        "answer": "G5: begin bridge right after begin snapshot and before operator-route; cleanup adds bridge_stop after the transcripts and the daemon stop and before the scratch services, the process sweep, teardown and namespace_clean; bridge_stop is safe after a partial start."
       },
       {
-        "finding": "F6 — under Kubernetes nothing resolves claude, bun or the plugin directory: the three LEGION_CLAUDE_*/LEGION_BUN_PATH reads are tmux's boot alone.",
-        "answer": "D16: the pod's paths are image constants beside defaultAgent and join imageOwnedPaths so an operator mount cannot hide them; claudelaunch holds the shapes and not the paths, and docs/deployment.md's 'boot resolves three things' becomes tmux's boot alone."
+        "finding": "6 (blocking) — The devbox's restricted kubeconfig does not parse, and a token alone is not a kubeconfig; the operator context must not stand in for the runtime identity.",
+        "answer": "G7: the runtime kubeconfig stays an operator input; the README's GKE example gains the recipe (operator context's server and CA, a token from kubectl create token legion-daemon with a duration longer than the run, auth can-i --list as the identity check); the devbox agent builds it outside the repository and leaves ~/.kube/legion-daemon-production alone."
       },
       {
-        "finding": "F7 — a Claude-only pod variable makes the runtimeOwned pinning test red either way: in the list, the test's two specs do not set it; out of it, a spec or an operator could override the claim's own config directory.",
-        "answer": "D19: the three names join runtimeOwned and the test gains a Claude worker spec beside its Oh My Pi and controller ones; the operator's own CLAUDE_CODE_USE_FOUNDRY stays settable."
+        "finding": "7 (blocking) — The run needs non-script inputs: storage class, five free ports, routes, Claude model, contexts, and an image whose provenance matches the proof head.",
+        "answer": "Step 7 lists every non-secret input the implementer gives the devbox agent, and takes the image from the pull request's latest successful Worker Image run only when jj diff over worker-image.yaml's paths list between that run's commit and the proof head is empty, recording run id, digest and revision label."
       },
       {
-        "finding": "F8 — ten more Go tests and eight pod goldens pin the pod's command line, environment, mounts, refusals and plugin install.",
-        "answer": "B8 lists them by file and line, and takes a ninth golden — a Claude worker pod — rather than editing the eight, so an Oh My Pi pod keeps proving it is unchanged."
+        "finding": "8 (blocking) — The evidence protocol for a tester and reviewer who cannot run the proofs was missing, and one delegated run must not stand for two.",
+        "answer": "Steps 7 and 8: the implementer's runs (R1) and the tester's own runs (R2) are separate devbox runs; each run's transcript.log (and the sandbox's namespace snapshots) is uploaded to the Dispatch issue; the E2E lines name command shape, head, PASS line, exit status after cleanup, artifact references and a negative control; the reviewer reviews the new head as a new round."
       },
       {
-        "finding": "F9 — a SiteImage capability row makes Claude Code mandatory in every image and moves the contracts fixture, the probe goldens and the docs; and nothing yet holds claude-envoy's declared contract to the daemon's.",
-        "answer": "D24 accepts the first and names it as risk 2, and gives the probe's Claude lane the second: it holds packages/claude-envoy's legion.daemonApiVersion to the daemon's contract as the pod lane holds pi-legion's."
+        "finding": "9 (blocking) — Making bridge_start variadic must cover every port-dependent part and keep stage4a's two-port behaviour; executable regressions were asked for.",
+        "answer": "G4 names every port-dependent part (containerPorts, Service ports, free-port exclusion, reverse forwards, readiness lines) and keeps stage4a's call unchanged; C5 is checked by reading the diff against the two-port original and bash -n, and the sandbox run drives the five-port path live. No stub-driven test of the library is added: it would test kubectl/chisel wiring, which the repository's test rules exclude."
       },
       {
-        "finding": "F10 — the image workflow's paths allowlist covers only packages/claude-envoy/package.json, and check-image-trigger-paths.sh fails the lint job for a COPY it does not cover.",
-        "answer": "B2: packages/claude-envoy/** joins the allowlist with the new lockfile directory; the plan also records that the image's Bun ARG and .bun-version are already equal and kept so by check-bun-version.sh, which is what lets `bun run check-dist` run inside the build."
+        "finding": "10 (blocking) — The key-file installer requires its --key-dir removed on every exit; the tmux script's cleanup does not do that.",
+        "answer": "G1 copies stage3-devbox-workflow.sh:124-128's unconditional rm -rf \"$work/model-gateway-key\" as the first line of cleanup, keeping the call record under $evidence/model-gateway."
       },
       {
-        "finding": "F11 — nothing in a pod makes the claim's Claude directory, and the shim's directory-making list is pinned.",
-        "answer": "D19: the generation's start script makes it with one mkdir before the exec, which is the wrapper that already exists for installing launches and operator setup; the shim's pinned list is left alone."
-      },
-      {
-        "finding": "F12 — the launcher's Files map is a legitimate home for a non-secret file, with two conditions.",
-        "answer": "D18 carries both: the entry is added in launcherCommand and never through spec.Secrets, and the argv names it as the generation directory's own file so a repeated start with the same id carries an unchanged payload."
-      },
-      {
-        "finding": "F13 — the pod baseline is Oh My Pi-shaped and would wrap a Claude child, including the turn-scoping overlay quiescence depends on.",
-        "answer": "D19: --pod-safety stays, because its scratch directories and state home are harness-neutral and its Oh My Pi variables are inert for a child that reads none of them; the two CLAUDE_CODE_DISABLE_* variables are named as Claude Code's analogue of the overlay rather than as a nicety."
-      },
-      {
-        "finding": "F14 — K6's `--check-config` half had no home, and nothing there prints anything about a per-launch plugin decision today.",
-        "answer": "D23: the existing plugin-pair line gains one sentence naming each Claude-backed role and saying its plugin comes from the image; a Claude claim with a stale recorded contract still relaunches, and the image probe is what refuses a wrong plugin."
-      },
-      {
-        "finding": "F15 — a Claude worker in a pod is told LEGION_WORKSPACE_RECREATED and nothing reads it; the only consumer is the Oh My Pi plugin.",
-        "answer": "Out of scope, named as risk 5 and reported to the architect: a Claude worker resumed into a recreated workspace is not told so."
-      },
-      {
-        "finding": "F16 — acceptance bullet 1's 'a live proof drives one on the cluster' reads as either a throwaway kind cluster or a real one, with different costs, locking and credential paths.",
-        "answer": "D27: a new devbox script against a real cluster by context with a digest-pinned image, carrying the tmux proof's scratch rig and its five assertions; the kind library is named as the iteration path, and the recorded run that satisfies acceptance is the cluster one."
-      },
-      {
-        "finding": "F17 — every pod proof needs a published image built from the branch head, and the image gate is the thing being changed.",
-        "answer": "D27 and risk 1: the proof pins the pull-request build's digest, and B2 and B3 land together so the image answers the probe it ships; a build that cannot be produced is a report to the architect, not a line marked proven."
-      },
-      {
-        "finding": "F18 — nine places state the tmux-only rule and one pinned refusal message.",
-        "answer": "D28 lists each document and B11 takes the refusals and their tests last."
-      },
-      {
-        "finding": "F19 — the issue volume, roleStateHome and the one-line expectVolume change hold as assumed.",
-        "answer": "Recorded; D19 and D22 rely on it."
-      },
-      {
-        "finding": "F20 — `--permission-mode bypassPermissions` with a fresh CLAUDE_CONFIG_DIR under a non-root uid is unmeasured.",
-        "answer": "Risk 4: the real-binary Claude probe adds that flag set and a fresh directory under the pod's own uid, so the pod lane is measured before the cluster proof depends on it."
-      },
-      {
-        "finding": "F21 — the spec's sentence that a launch carries 'a command line, an environment and its secrets and nothing else' overstates the constraint; it also carries files.",
-        "answer": "Departure 1 records the correction, which is what D18 uses."
-      },
-      {
-        "finding": "F22 — the acceptance list holds thirteen bullets, not twelve, and its second uses `*` where the others use `-`.",
-        "answer": "Departure 5 and §3: the plan maps all thirteen and reads the last as the evidence clause of the other twelve; the owner decides whether it is a criterion of its own."
-      },
-      {
-        "finding": "F23 — no acceptance bullet names a command except two, and four of them cannot be decided in an issue pod.",
-        "answer": "§3 maps all thirteen to a suite and a command, names the four suites that run in a pod and the two live proofs that do not, and says the implementer's own proof is the pod-runnable four."
+        "finding": "11 (non-blocking) — Documentation of the sandbox's new input, the bridge library's contract and the port-admission note was missing; one daemon citation pointed at the tmux runtime.",
+        "answer": "G8 lists every document; the plan cites internal/daemon/kubernetes.go:330-334 for the sandbox's URL forwarding; no CHANGELOG (no package owns scripts/e2e); no private name in the tree or pull request text."
       }
     ]
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 4
+    "rounds": 1
   },
   "specDepartures": [
     {
@@ -166,5 +187,124 @@
         ]
       }
     }
-  ]
+  ],
+  "generation1": {
+    "completed": "2026-10-25T00:05:00Z",
+    "requiredSkills": {
+      "implement": [
+        "legion-worker: the implementer's rules here — references/pr-body.md (the proof and the PR body; the production-like surfaces reachable from a pod are the pinned Oh My Pi binary, the real MCP server over stdio, the real Claude Code binary against stand-ins, and `go test ./...`), references/default-branch-check.md before each push, references/cleanup-deletion.md for the Go cut of claudebridge/stall.go and for the tmux-only prose this change makes false, references/conflicts-and-rewrites.md only on a conflict.",
+        "ce-simplify-code: the simplify pass over the settled diff. Two copies are the risk this change exists to avoid: the phase-stall machine (already one, in @legion/pi-shared) and the Claude launch shapes, which the plan puts in packages/daemon/internal/claudelaunch for both runtimes to import.",
+        "dispatch-first: search before any Dispatch write; a problem outside this issue is a dispatch ask, never an issue the implementer files (skill://legion-worker/references/findings.md)."
+      ],
+      "test": [
+        "legion-worker: references/pr-body.md — the tester drives the application and reads CI for everything static. The pod-runnable surfaces are `go test ./...` in packages/daemon, `bun test` in pi-legion, pi-shared and claude-envoy, the pinned Oh My Pi real-binary test, and the real Claude Code probe; the two live proofs (scripts/e2e/claude-backend-tmux.sh and the new scripts/e2e/claude-backend-sandbox.sh) need a devbox and a cluster, as every live proof in this repository does, and the tester records that rather than claiming them.",
+        "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
+      ],
+      "review": [
+        "legion-worker: references/review-threads.md for one disposition reply and one resolution per thread, references/merge-gate.md for the order of the round.",
+        "ce-simplify-code: the reviewer judges whether the Claude launch really has one definition rather than two, and whether the pod path grew a backend seam rather than a second runtime.",
+        "dispatch-first: search before any Dispatch write; findings outside this issue are asks."
+      ]
+    },
+    "gapAnalysis": {
+      "findings": [
+        {
+          "finding": "F1 — the spec calls the model route out of scope on the strength of shim.go:380, but the documented pod route (deploy/kubernetes/operator-route/) is Oh My Pi's profile configuration, which Claude Code reads none of; the only variable route is provider_keys through the shim, and pod.env refuses a credential-shaped name.",
+          "answer": "D20: no new Legion surface. A deployment that runs Claude Code roles sets provider_keys for the Anthropic credential (the shim exports it into the child's environment) and the non-credential names ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env; the planner measured that Claude Code reads all three from its environment. The two consequences — the key reaching every role's child, and Oh My Pi's model configuration reaching Claude Code not at all — are written into the documents, and the departure is recorded for the architect."
+        },
+        {
+          "finding": "F2 — the daemon API contract is defined as the pane and pod environment a worker reads, and this work adds four LEGION_STALL_* variables under both runtimes and three CLAUDE_* variables in a pod; the spec never mentions the contract.",
+          "answer": "D25: one bump to 36, in the same commit as the variables, with contracts/fixtures/daemon-api/version.json, pi-legion's and claude-envoy's legion.daemonApiVersion and pi-legion's daemon-api-version test; the boot gate then holds the daemon and the image's plugins together."
+        },
+        {
+          "finding": "F3 — the earlier K10 named workerSpawnSpec for both edits, but the stale-plugin decision is in stalePluginInstall (reached from SpawnSpec, which also covers the controller), and workerSpawnSpec replaces spec.Env with the git identity's map rather than merging into it.",
+          "answer": "D26: the four variables are merged into spec.Env after `spec.Env = id.Env()`, and the Claude branch is inside stalePluginInstall, which gains the claim's backend from the resolver launchBackend uses."
+        },
+        {
+          "finding": "F4 — a Backend field on shimwire.LauncherStart buys nothing the child's environment does not already decide, and would be ignored silently by an image whose launcher predates it.",
+          "answer": "D21: no wire field. A Claude pod is simply not told OMP_SESSION_STORAGE and OMP_SESSION_SQL_DSN_FILE, so the in-pod launcher takes its file branch and stats the transcript."
+        },
+        {
+          "finding": "F5 — the claim's session for a Claude worker travels through four more code points than the spec names: what claude-envoy registers, validateSessionPath, SessionOnVolume with `legion sessions import`, and the store's IssueHasSessions.",
+          "answer": "D21 and D22 name each: the transcript under the pod's own Claude directory, a backend-aware validateSessionPath whose refusal names a backend change, `--resume <uuid>` in the argv, a refusal with a line of its own from `legion sessions import`, and expectVolume losing its sessionsInDatabase term for a Claude claim."
+        },
+        {
+          "finding": "F6 — under Kubernetes nothing resolves claude, bun or the plugin directory: the three LEGION_CLAUDE_*/LEGION_BUN_PATH reads are tmux's boot alone.",
+          "answer": "D16: the pod's paths are image constants beside defaultAgent and join imageOwnedPaths so an operator mount cannot hide them; claudelaunch holds the shapes and not the paths, and docs/deployment.md's 'boot resolves three things' becomes tmux's boot alone."
+        },
+        {
+          "finding": "F7 — a Claude-only pod variable makes the runtimeOwned pinning test red either way: in the list, the test's two specs do not set it; out of it, a spec or an operator could override the claim's own config directory.",
+          "answer": "D19: the three names join runtimeOwned and the test gains a Claude worker spec beside its Oh My Pi and controller ones; the operator's own CLAUDE_CODE_USE_FOUNDRY stays settable."
+        },
+        {
+          "finding": "F8 — ten more Go tests and eight pod goldens pin the pod's command line, environment, mounts, refusals and plugin install.",
+          "answer": "B8 lists them by file and line, and takes a ninth golden — a Claude worker pod — rather than editing the eight, so an Oh My Pi pod keeps proving it is unchanged."
+        },
+        {
+          "finding": "F9 — a SiteImage capability row makes Claude Code mandatory in every image and moves the contracts fixture, the probe goldens and the docs; and nothing yet holds claude-envoy's declared contract to the daemon's.",
+          "answer": "D24 accepts the first and names it as risk 2, and gives the probe's Claude lane the second: it holds packages/claude-envoy's legion.daemonApiVersion to the daemon's contract as the pod lane holds pi-legion's."
+        },
+        {
+          "finding": "F10 — the image workflow's paths allowlist covers only packages/claude-envoy/package.json, and check-image-trigger-paths.sh fails the lint job for a COPY it does not cover.",
+          "answer": "B2: packages/claude-envoy/** joins the allowlist with the new lockfile directory; the plan also records that the image's Bun ARG and .bun-version are already equal and kept so by check-bun-version.sh, which is what lets `bun run check-dist` run inside the build."
+        },
+        {
+          "finding": "F11 — nothing in a pod makes the claim's Claude directory, and the shim's directory-making list is pinned.",
+          "answer": "D19: the generation's start script makes it with one mkdir before the exec, which is the wrapper that already exists for installing launches and operator setup; the shim's pinned list is left alone."
+        },
+        {
+          "finding": "F12 — the launcher's Files map is a legitimate home for a non-secret file, with two conditions.",
+          "answer": "D18 carries both: the entry is added in launcherCommand and never through spec.Secrets, and the argv names it as the generation directory's own file so a repeated start with the same id carries an unchanged payload."
+        },
+        {
+          "finding": "F13 — the pod baseline is Oh My Pi-shaped and would wrap a Claude child, including the turn-scoping overlay quiescence depends on.",
+          "answer": "D19: --pod-safety stays, because its scratch directories and state home are harness-neutral and its Oh My Pi variables are inert for a child that reads none of them; the two CLAUDE_CODE_DISABLE_* variables are named as Claude Code's analogue of the overlay rather than as a nicety."
+        },
+        {
+          "finding": "F14 — K6's `--check-config` half had no home, and nothing there prints anything about a per-launch plugin decision today.",
+          "answer": "D23: the existing plugin-pair line gains one sentence naming each Claude-backed role and saying its plugin comes from the image; a Claude claim with a stale recorded contract still relaunches, and the image probe is what refuses a wrong plugin."
+        },
+        {
+          "finding": "F15 — a Claude worker in a pod is told LEGION_WORKSPACE_RECREATED and nothing reads it; the only consumer is the Oh My Pi plugin.",
+          "answer": "Out of scope, named as risk 5 and reported to the architect: a Claude worker resumed into a recreated workspace is not told so."
+        },
+        {
+          "finding": "F16 — acceptance bullet 1's 'a live proof drives one on the cluster' reads as either a throwaway kind cluster or a real one, with different costs, locking and credential paths.",
+          "answer": "D27: a new devbox script against a real cluster by context with a digest-pinned image, carrying the tmux proof's scratch rig and its five assertions; the kind library is named as the iteration path, and the recorded run that satisfies acceptance is the cluster one."
+        },
+        {
+          "finding": "F17 — every pod proof needs a published image built from the branch head, and the image gate is the thing being changed.",
+          "answer": "D27 and risk 1: the proof pins the pull-request build's digest, and B2 and B3 land together so the image answers the probe it ships; a build that cannot be produced is a report to the architect, not a line marked proven."
+        },
+        {
+          "finding": "F18 — nine places state the tmux-only rule and one pinned refusal message.",
+          "answer": "D28 lists each document and B11 takes the refusals and their tests last."
+        },
+        {
+          "finding": "F19 — the issue volume, roleStateHome and the one-line expectVolume change hold as assumed.",
+          "answer": "Recorded; D19 and D22 rely on it."
+        },
+        {
+          "finding": "F20 — `--permission-mode bypassPermissions` with a fresh CLAUDE_CONFIG_DIR under a non-root uid is unmeasured.",
+          "answer": "Risk 4: the real-binary Claude probe adds that flag set and a fresh directory under the pod's own uid, so the pod lane is measured before the cluster proof depends on it."
+        },
+        {
+          "finding": "F21 — the spec's sentence that a launch carries 'a command line, an environment and its secrets and nothing else' overstates the constraint; it also carries files.",
+          "answer": "Departure 1 records the correction, which is what D18 uses."
+        },
+        {
+          "finding": "F22 — the acceptance list holds thirteen bullets, not twelve, and its second uses `*` where the others use `-`.",
+          "answer": "Departure 5 and §3: the plan maps all thirteen and reads the last as the evidence clause of the other twelve; the owner decides whether it is a criterion of its own."
+        },
+        {
+          "finding": "F23 — no acceptance bullet names a command except two, and four of them cannot be decided in an issue pod.",
+          "answer": "§3 maps all thirteen to a suite and a command, names the four suites that run in a pod and the two live proofs that do not, and says the implementer's own proof is the pod-runnable four."
+        }
+      ]
+    },
+    "planReview": {
+      "verdict": "approved",
+      "rounds": 4
+    }
+  }
 }
