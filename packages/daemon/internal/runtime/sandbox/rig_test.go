@@ -273,6 +273,23 @@ func claudeWorkerSpec(t *testing.T) runtime.SpawnSpec {
 	return spec
 }
 
+// claudeTranscriptID is the session id of the transcript the Claude specs below resume, and
+// claudeTranscript the path a role's Claude Code recorded it at: its own configuration directory
+// on the issue's volume (claudeConfigDir), `projects/<cwd>/<id>.jsonl`.
+const claudeTranscriptID = "9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f"
+
+func claudeTranscript(role claim.Role) string {
+	return claudeConfigDir(role) + "/projects/--legion-workspaces-sjawhar-legion-smoke-legion-208--/" + claudeTranscriptID + ".jsonl"
+}
+
+// claudeResumeSpec is claudeWorkerSpec relaunched on the transcript its replaced pod left, the
+// session a Claude claim records (packages/claude-envoy's legion-claim.ts).
+func claudeResumeSpec(t *testing.T) runtime.SpawnSpec {
+	spec := claudeWorkerSpec(t)
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", claudeTranscript(spec.Role)
+	return spec
+}
+
 // claudeInKubernetes lets a test reach the pod's Claude Code lane while the runtime still refuses
 // one: runtime.Backends names tmux alone as Claude Code's runtime, and prepare refuses a backend
 // whose entry does not name this one. The pod's path is built before that entry is widened — the

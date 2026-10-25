@@ -1888,8 +1888,9 @@ var uuid = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a
 // launcher writes into its private directory, the claude-envoy plugin and the generated Legion
 // plugin, a fresh session, and the one system prompt word — the same text the Oh My Pi branch of
 // the same launch inlines, since a pod cannot read the daemon's prompt files whichever harness it
-// runs. `--resume` of the transcript a replaced pod left is a later change: until it lands every
-// Claude launch starts a session of its own, which is what the fresh uuid here says.
+// runs. A launch with no recorded session starts a session of its own, which is what the fresh
+// uuid here says; one that resumes names the transcript's id instead
+// (TestAResumingClaudePodContinuesItsTranscriptByItsID).
 func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 	claudeInKubernetes(t)
 	opts := goldenOptions()
@@ -1963,6 +1964,103 @@ func TestOnlyAClaudeWorkerIsToldClaudeCodesOwnVariables(t *testing.T) {
 		}
 		if !runtimeOwned[name] {
 			t.Errorf("%s is not runtimeOwned: a spec or an operator could set it", name)
+		}
+	}
+}
+
+// A Claude Code role's relaunch continues the transcript its replaced pod left: the agent command
+// ends `--resume <uuid>`, the id parsed from the recorded path, and names neither a --session-id
+// nor the path itself — Claude Code resumes by id alone. The recorded path still reaches the role
+// launcher, which stats it before the child starts (internal/launcher). prepare is where the rule
+// is applied, so a Claude claim still recording an Oh My Pi session is refused there, naming the
+// backend change that left it recorded.
+func TestAResumingClaudePodContinuesItsTranscriptByItsID(t *testing.T) {
+	claudeInKubernetes(t)
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeResumeSpec(t)
+	l := launchOf(t, r, spec)
+	argv := l.agentArgv(r.agent)
+	want := []string{"--resume", claudeTranscriptID, "--append-system-prompt", l.prompt}
+	if got := argv[max(len(argv)-4, 0):]; !slices.Equal(got, want) {
+		t.Errorf("the resuming Claude command ends %q, want %q", got, want)
+	}
+	if slices.Contains(argv, "--session-id") {
+		t.Errorf("the resuming Claude command %q names --session-id, want the recorded session continued", argv)
+	}
+	for _, arg := range argv {
+		if strings.Contains(arg, spec.ResumeSessionFile) {
+			t.Errorf("the resuming Claude command carries the recorded path in %q, want its session id alone", arg)
+		}
+	}
+	if start := launcherCommand(l, r); start.ResumeFile != spec.ResumeSessionFile {
+		t.Errorf("the start command resumes %q, want the recorded transcript %s", start.ResumeFile, spec.ResumeSessionFile)
+	}
+	stale := claudeWorkerSpec(t)
+	stale.Generation, stale.BootToken, stale.ResumeSessionFile = 2, "boot-g2", resumeSession
+	if _, err := r.prepare(stale); err == nil || !strings.Contains(err.Error(), "the role's backend changed since it was recorded") {
+		t.Errorf("prepare of a Claude claim recording the Oh My Pi session %s = %v, want a refusal naming the backend change", resumeSession, err)
+	}
+}
+
+// validateSessionPath holds each backend's recorded session to its own harness's rule. A Claude
+// claim resumes a transcript of the pod's own Claude Code directory and nothing else: one of
+// another role's directory, an Oh My Pi session file, or a name that is no session id is refused,
+// and a session of the other harness is refused naming the backend change that left it recorded,
+// as the tmux lane's resume refuses one (claudelaunch.ResumeSession). An Oh My Pi claim's rule is
+// the pod's sessions directory, unchanged, and a Claude transcript is no session of it.
+func TestValidateSessionPathIsEachBackendsOwnRule(t *testing.T) {
+	transcript := claudeTranscript(claim.RoleTester)
+	session, err := validateSessionPath(transcript, runtime.BackendClaude, claim.RoleTester)
+	if err != nil || session != claudeTranscriptID {
+		t.Fatalf("validateSessionPath(%s, claude) = %q, %v; want the transcript's session id %s", transcript, session, err, claudeTranscriptID)
+	}
+	for name, file := range map[string]string{
+		"a transcript of another role's directory": claudeTranscript(claim.RolePlanner),
+		"an Oh My Pi session file":                 resumeSession,
+	} {
+		_, err := validateSessionPath(file, runtime.BackendClaude, claim.RoleTester)
+		if err == nil || !strings.Contains(err.Error(), file) ||
+			!strings.Contains(err.Error(), "the role's backend changed since it was recorded") {
+			t.Errorf("validateSessionPath(%s, %s, claude) = %v, want a refusal naming it and the backend change", name, file, err)
+		}
+	}
+	named := claudeConfigDir(claim.RoleTester) + "/projects/--cwd--/2026-09-23T12-00-00-000Z_0198.jsonl"
+	if _, err := validateSessionPath(named, runtime.BackendClaude, claim.RoleTester); err == nil ||
+		!strings.Contains(err.Error(), "not named for a Claude Code session id") {
+		t.Errorf("validateSessionPath(%s, claude) = %v, want it refused as no session id", named, err)
+	}
+	if _, err := validateSessionPath(resumeSession, runtime.BackendOmp, claim.RoleTester); err != nil {
+		t.Errorf("validateSessionPath(%s, omp) = %v, want the pod's sessions directory accepted", resumeSession, err)
+	}
+	if _, err := validateSessionPath(transcript, runtime.BackendOmp, claim.RoleTester); err == nil ||
+		!strings.Contains(err.Error(), "cannot be resumed on this runtime") {
+		t.Errorf("validateSessionPath(%s, omp) = %v, want it refused as no file of the pod's sessions directory", transcript, err)
+	}
+}
+
+// SessionOnVolume moves an Oh My Pi session file's recorded path onto a mounted volume and refuses
+// a Claude Code transcript with a line naming it: the one-off copy that path is computed for
+// (`legion sessions import`) fills Oh My Pi's session table, which holds no session of a
+// transcript, and a Claude claim's session stays on the volume its role's own Claude Code reads it
+// from. A pane's transcript, under the daemon's state directory rather than a pod's volume, is
+// refused alike: the check is told no configuration directory and reads the shape itself.
+func TestSessionOnVolumeRefusesAClaudeTranscript(t *testing.T) {
+	const root = "/mnt/tree"
+	onVolume, err := SessionOnVolume(resumeSession, root)
+	want := root + "/" + SessionsSubPath + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
+	if err != nil || onVolume != want {
+		t.Fatalf("SessionOnVolume(%s) = %q, %v; want %q", resumeSession, onVolume, err, want)
+	}
+	for _, file := range []string{
+		claudeTranscript(claim.RoleTester),
+		"/var/lib/legion/claude/legion-legion-legion-208-tester/projects/--cwd--/" + claudeTranscriptID + ".jsonl",
+	} {
+		if _, err := SessionOnVolume(file, root); err == nil ||
+			!strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "Claude Code transcript") {
+			t.Errorf("SessionOnVolume(%s) = %v, want a refusal naming it a Claude Code transcript", file, err)
 		}
 	}
 }

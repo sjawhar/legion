@@ -95,7 +95,8 @@ type importedClaim struct {
 // mounted there (sandbox.SessionOnVolume). It prints one line per claim it copies, then one line
 // for every claim of the whole list, whatever --tree says, whose recorded session the table does
 // not hold (missingSessions), then a count of each outcome. It exits 1 when any claim's session
-// could not be copied (a file it cannot read, or a session the table already holds with other
+// could not be copied (a file it cannot read, a Claude Code transcript, which this table has no
+// session of and which stays on the volume, or a session the table already holds with other
 // content) or a recorded session of the claims it was asked to copy is missing from the table; a
 // missing one of another tree is reported and leaves the exit as it is. A rerun copies nothing
 // twice: a session the table already holds byte for byte is reported as copied before.
@@ -352,8 +353,15 @@ type importedSession struct {
 }
 
 // importSession copies the session recorded at file into the table: read at file itself, or from
-// the tree volume mounted at treeVolume when one is given, with the file's modification time.
+// the tree volume mounted at treeVolume when one is given, with the file's modification time. It
+// refuses a Claude Code transcript (sandbox.ClaudeSessionRefusal) wherever it would read it, and
+// for the same reason that SessionOnVolume refuses one: this copy moves Oh My Pi file sessions
+// into Oh My Pi's table, which holds no session of a transcript, and a Claude claim's session
+// stays on the volume its role's own Claude Code reads it from.
 func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string) (importedSession, error) {
+	if err := sandbox.ClaudeSessionRefusal(file); err != nil {
+		return importedSession{}, err
+	}
 	source := file
 	if treeVolume != "" {
 		onVolume, err := sandbox.SessionOnVolume(file, treeVolume)

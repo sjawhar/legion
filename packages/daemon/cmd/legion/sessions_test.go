@@ -333,3 +333,24 @@ func TestSessionsImportRefusesWhatIsNotAClaimsList(t *testing.T) {
 		t.Errorf("import from stdin = %d:\n%s", code, out.String())
 	}
 }
+
+// `legion sessions import` copies Oh My Pi file sessions into Oh My Pi's table, and that table
+// holds no session of a Claude Code transcript: a claim recording one is refused with a line
+// naming it, wherever the copy would have read it — at its recorded path, and on a tree volume —
+// and the transcript stays on the issue's volume its role's own Claude Code reads it from. The
+// refusal comes before anything is read, so no database is touched; an Oh My Pi session file of a
+// pod is read as before.
+func TestSessionsImportRefusesAClaudeTranscript(t *testing.T) {
+	transcript := "/legion/scratch/state/tester/claude/projects/--legion-workspaces-sjawhar-legion-legion-1--/9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f.jsonl"
+	for _, volume := range []string{"", t.TempDir()} {
+		if _, err := importSession(context.Background(), nil, transcript, volume); err == nil ||
+			!strings.Contains(err.Error(), transcript) || !strings.Contains(err.Error(), "Claude Code transcript") {
+			t.Errorf("importSession(--tree-volume %q) = %v, want a refusal naming %s a Claude Code transcript", volume, err, transcript)
+		}
+	}
+	session := agentSessions + "/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-08T12-00-00-000Z_0001.jsonl"
+	if _, err := importSession(context.Background(), nil, session, t.TempDir()); err == nil ||
+		!strings.Contains(err.Error(), "read the session file") {
+		t.Errorf("importSession(%s) = %v, want it read from the volume rather than refused for its name", session, err)
+	}
+}
