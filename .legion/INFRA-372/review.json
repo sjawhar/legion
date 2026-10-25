@@ -2,22 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-372",
-  "completed": "2026-10-25T09:29:40Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "ce9ec359dbc7c865049b4787eba0f147feddeeb1",
+  "completed": "2026-10-25T10:00:00Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedCodeHead": "0cc10cbf30576c8ef90ca70c22897fd0f882a2b4",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "AGENTS.md",
-      "description": "AGENTS.md:128 (the 'Run a database, broker or server the work needs' row, the row clause 2 already edits) still names the gate as \"`kubectl auth can-i create jobs`, `create services` and `get services` are the gate\": the form without -n that the page now says a role cannot trust. AGENTS.md is auto-loaded into every session in this repository, so it is the copy most agents copy. The architect ruled it in scope (Envoy reply e33544ba, and the pull-request comment of 09:27:48Z): the row's middle sentence becomes \"`kubectl -n <namespace> auth can-i create jobs`, `create services` and `get services` are the gate\", nothing else in the row changes; the check script must allow that one edit; the PR body says the page and the row were corrected together and why the row matters more."
-    }
+  "keyFindings": [],
+  "roundTwoFinding": "Fixed at 0cc10cbf3057: AGENTS.md:128 names the gate as `kubectl -n <namespace> auth can-i create jobs`, `create services` and `get services`; the diff from b112d81d changes only that sentence. Thread PRRT_kwDORFy7ds6wAEbc answered (accepted) and resolved by the implementer.",
+  "verified": [
+    "Clause 1 (docs/kubernetes.md reason paragraph), clause 2 (AGENTS.md back pointer), the gate's -n <namespace> and its namespace paragraph, and the AGENTS.md gate sentence: the widened check_clauses.py exits 0 at b73eedfc against merge base 158654c89e8b; check-private-names.sh and check-plugin-names.sh exit 0.",
+    "PR body states that the page and the row were corrected together and why the row matters more, as the architect asked."
   ],
-  "roundOneFinding": "Fixed at ce9ec359dbc7: the three gate commands carry -n <namespace> (docs/kubernetes.md:2671-2673), and the paragraph at 2699-2709 replaces 'no command here passes -n' with the measured mechanism (POD_NAMESPACE, else the projected namespace file, else default; client-go's in-cluster Namespace()), consistent with this reviewer's own 09:17Z measurement (bare yes x3, -n legion no x3). The five-sentence paragraph is accepted per the architect's ruling.",
-  "ci": "At code head ce9ec359dbc7 (compare to 5133686b changes only .legion/): required lint, typecheck, test, pr-title queued at 09:28Z, none red. Not waited on: the request for changes stands whatever CI says.",
+  "ci": "Required set (base ruleset): lint, typecheck, test, pr-title. CI head 0cc10cbf3057 (newest pull_request run): lint, typecheck, test success; pr-title success (runs 40181067681 et al.; an older duplicate 40181033333 cancelled); Tests 40181033336 and Legion Envoy and Contracts 40181033335 success. Compare 0cc10cbf...b73eedfc changes only .legion/.",
   "thermonuclear": "not run: docs-only diff",
-  "threads": "none on the pull request"
+  "threads": "1 thread, opened by this reviewer, answered and resolved"
 }
