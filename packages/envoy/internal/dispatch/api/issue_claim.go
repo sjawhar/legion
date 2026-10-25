@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -299,52 +300,14 @@ type claimChange struct {
 	changed   bool
 }
 
-// legionLabel is the label that hands an issue's status to the Legion daemon. The daemon holds
-// its own copy of the spelling (packages/daemon/internal/dispatch/types.go, LegionLabel): the two
-// are separate constants in separate Go modules that have to be changed together, not one shared
-// value. packages/envoy otherwise knows nothing about Legion, so this is the one Legion-specific
-// rule Dispatch itself carries.
-const legionLabel = "legion"
-
-// legionManagedStatusSQL answers whether the Legion daemon owns the status of the issue keyed by
-// $1: whether that issue, or any issue on its parent chain, carries the legion label. Labels keep
-// the case they were typed in and are only de-duplicated case-insensitively, so `Legion` is a real
-// stored value and the match is on lower(label). The walk starts at the issue itself, so one query
-// answers both its own labels and its ancestors', and is bounded by parentDepthCap like every
-// other issue walk, so it terminates even if a raced reparent ever commits a cycle. A chain deeper
-// than the cap answers false. A claim never reaches that case - loadIssue refuses such a chain
-// before this runs - but a write's advice does (computeWriteAdvice, write_advice.go), and there it
-// means the issue is treated as one Legion does not run: the "still in triage" line prints.
-// A chain that deep needs a reparent that refuseParentTooDeep would have refused.
-var legionManagedStatusSQL = `
-	with recursive chain as (
-		select i.parent_key, i.labels, 0 as depth
-		from issues i where i.key = $1
-		union
-		select p.parent_key, p.labels, c.depth + 1
-		from issues p join chain c on p.key = c.parent_key
-		where c.depth < ` + parentDepthCapSQL + `
-	)
-	select exists (
-		select 1 from chain c, unnest(c.labels) as label where lower(label) = '` + legionLabel + `'
-	)`
-
-// legionManagedStatus runs legionManagedStatusSQL inside the caller's transaction, so the answer
-// is the one the issue's row lock already holds still.
-func legionManagedStatus(ctx context.Context, tx pgx.Tx, key string) (bool, error) {
-	var managed bool
-	if err := tx.QueryRow(ctx, legionManagedStatusSQL, key).Scan(&managed); err != nil {
-		return false, fmt.Errorf("resolve whether Legion manages the status of %s: %w", key, err)
-	}
-	return managed, nil
-}
-
 // claimApplied is the outcome of one locked attempt: the issue as it stands, whether the Legion
 // daemon owns its status, and the event to publish, which is the zero event when nothing was
 // written.
 type claimApplied struct {
-	issue               model.Issue
-	legionManagedStatus bool
+	issue model.Issue
+	// legionManagedStatus is nil when the walk failed: the claim still stands, so the answer
+	// says nothing rather than losing it (claimWrite).
+	legionManagedStatus *bool
 	event               model.Event
 }
 
@@ -354,9 +317,41 @@ type claimApplied struct {
 // Issue in the response rather than in it — model.Issue is embedded in model.IssueEventPayload,
 // the payload of every issue.* event. The JSON stays flat because a caller merges the body
 // straight into the issue it already holds.
+//
+// The field is omitted when the walk failed (claimWrite logs that and keeps the claim), exactly
+// as writeAdvice.LegionManagedStatus is omitted when it was not asked (write_advice.go). A
+// client reads an absent field as "not Legion-managed", the wording every client had before
+// this field existed and the safe direction: it prints the status guidance rather than
+// suppressing it.
 type claimAnswer struct {
 	model.Issue
-	LegionManagedStatus bool `json:"legion_managed_status"`
+	LegionManagedStatus *bool `json:"legion_managed_status,omitempty"`
+}
+
+// claimLegionManagedStatus answers whether Legion owns key's status for a claim answer, or nil
+// when the walk failed. It runs in a savepoint of the claim's own transaction rather than on it
+// directly, because a failed statement aborts the transaction it ran in: on the transaction
+// itself, a failed advisory walk would make the claim's COMMIT a rollback and lose a claim that
+// had otherwise succeeded. The savepoint is the same device writeAdvice uses to keep a write
+// whose advice query failed (write_advice.go), and the failure is logged once there too
+// (logAdviceError). It is never retried: the field is a hint, the claim is the write.
+func claimLegionManagedStatus(ctx context.Context, tx pgx.Tx, key string) *bool {
+	walk, err := tx.Begin(ctx)
+	if err != nil {
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	managed, err := legionManagedStatus(ctx, walk, key)
+	if err != nil {
+		_ = walk.Rollback(ctx)
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	if err := walk.Commit(ctx); err != nil {
+		slog.Warn("dispatch: claim legion_managed_status omitted", "issue", key, "error", err)
+		return nil
+	}
+	return &managed
 }
 
 // claimWrite is the locked half of every claim write - resolveThenLock's `write` - and the
@@ -407,12 +402,12 @@ func (s *server) claimWrite(
 		applied = claimApplied{issue: after, event: event}
 	}
 	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
-	// claim changed or not: one query, under the row lock this transaction already holds.
-	managed, err := legionManagedStatus(ctx, tx, key)
-	if err != nil {
-		return claimApplied{}, err
-	}
-	applied.legionManagedStatus = managed
+	// claim changed or not: one query, either way. The row lock this transaction holds is not
+	// what makes that answer stable - it holds the issue's own row, not its ancestors' - so the
+	// chain is read as it stands, which is enough for a sentence of guidance. Its failure is
+	// never the claim's: a claim is what stops two sessions working one issue, and the deferred
+	// rollback above would discard one that had otherwise succeeded for an advisory lookup.
+	applied.legionManagedStatus = claimLegionManagedStatus(ctx, tx, key)
 	if err := tx.Commit(ctx); err != nil {
 		return claimApplied{}, err
 	}

@@ -3007,7 +3007,8 @@ export async function executeDispatchTool(
       const held = after.claim;
       // On an issue Legion runs, only its daemon writes the status: a status this session sets
       // is undone, so the result says who owns it rather than asking for a move.
-      const legionManaged = after.legion_managed_status;
+      // An absent field (an older Dispatch, or a failed label walk) reads as not managed.
+      const legionManaged = after.legion_managed_status === true;
       // A release answers with the claim cleared or it does not answer at all: the server
       // refuses a release the caller may not make (409 ISSUE_CLAIMED, naming the live holder),
       // and loads the issue inside the releasing transaction. So there is no "released but

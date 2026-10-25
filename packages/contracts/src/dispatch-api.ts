@@ -326,7 +326,12 @@ export interface IssueRouteReach {
  * `Issue`.
  */
 export interface ClaimedIssue extends Issue {
-  readonly legion_managed_status: boolean;
+  /**
+   * Absent when the server did not answer it: a Dispatch older than the field, or a label walk
+   * that failed (the claim still stands). A client reads an absent field as not Legion-managed,
+   * which is what every client said before the field existed.
+   */
+  readonly legion_managed_status?: boolean;
 }
 
 export interface IssueSummary

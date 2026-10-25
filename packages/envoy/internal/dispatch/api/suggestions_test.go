@@ -340,9 +340,14 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 	createAdviceProject(t, handler, "ADVFAIL")
 	decisionSpec := ""
 	decisionIssue := createAdviceIssue(t, handler, "ADVFAIL", "Choose a transport for the billing service", &decisionSpec)
-	decisionAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+decisionIssue.Key+"/asks", map[string]any{
-		"question": "Should the billing service public API use REST or GraphQL?",
-	}, "alice")
+	// Both asks are opened by a session, not a human: the armed advice hook fires from
+	// computeWriteAdvice, which writeAdvice runs for a session actor alone (write_advice.go), so
+	// a human-actor write would never reach the failing query this test is about and the
+	// suggestions-only fallback (asks.go) would never run.
+	askActor := adviceSessionActor("session-advice-fails")
+	decisionAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+decisionIssue.Key+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?", "actor": askActor,
+	})
 	decisionAskID := decodeBody[testAskWithSuggestions](t, decisionAsk).ID
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+decisionAskID+"/answer", map[string]any{
 		"text": "REST.", "expected_edited_at": nil,
@@ -352,9 +357,9 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 
 	targetSpec := ""
 	target := createAdviceIssue(t, handler, "ADVFAIL", "Pick a transport for the notifications service", &targetSpec)
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/asks", map[string]any{
-		"question": "Should the billing service public API use REST or GraphQL?",
-	}, "alice")
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/asks", map[string]any{
+		"question": "Should the billing service public API use REST or GraphQL?", "actor": askActor,
+	})
 	if response.Code != http.StatusCreated {
 		t.Fatalf("open ask with failed write-advice: status=%d body=%s", response.Code, response.Body.String())
 	}

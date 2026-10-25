@@ -121,8 +121,6 @@ func (s *server) computeWriteAdvice(
 		if err := s.runAdviceQueryHook(ctx, tx, "legion_managed_status"); err != nil {
 			return nil, &adviceQueryError{query: "legion_managed_status", err: err}
 		}
-		// The same helper the claim routes use (issue_claim.go), so the write advice and the
-		// claim result never disagree about who owns the status.
 		managed, err := legionManagedStatus(ctx, tx, issueKey)
 		if err != nil {
 			return nil, &adviceQueryError{query: "legion_managed_status", err: err}
@@ -148,11 +146,16 @@ func (s *server) writeAdvice(
 	excludeAskID string,
 	status string,
 ) *writeAdvice {
-	// A human or service write has no advice query to run - every one of them is about the
-	// calling session, and the triage line this answers is about what a session is told - so it
-	// is answered here, outside the savepoint and the two statement_timeout statements that
-	// would otherwise run inside the write's own transaction while it holds the issue row. Such
-	// a write still gets the triage advice, which is true for a reader who may move the status.
+	// A human write has no advice query to run - every one of them is about the calling session,
+	// and the triage line this answers is about what a session is told - so it is answered here,
+	// outside the savepoint and the two statement_timeout statements that would otherwise run
+	// inside the write's own transaction while it holds the issue row. Such a write still gets
+	// the triage advice, which is true for a reader who may move the status. A human is the only
+	// non-session actor that reaches a write: optionalActor returns an actor only for the cookie
+	// identity, which is always Kind "user", and every bearer goes through bearerSessionActor,
+	// which refuses an actor that is not a session (server.go). The guard is on the kind rather
+	// than on "is a human" so an actor kind the server does not produce today cannot silently
+	// acquire session-shaped advice.
 	if actor.Kind != "session" {
 		return &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
 	}

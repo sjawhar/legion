@@ -124,7 +124,9 @@ type claimedIssue struct {
 		} `json:"actor"`
 		At string `json:"at"`
 	} `json:"claim"`
-	LegionManagedStatus bool `json:"legion_managed_status"`
+	// A pointer: the answer omits the field when the walk failed (claimAnswer, issue_claim.go),
+	// and a test has to tell that apart from a stored false.
+	LegionManagedStatus *bool `json:"legion_managed_status,omitempty"`
 }
 
 func claimActorBody(id, title string) map[string]any {
@@ -418,6 +420,8 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 	uppercase := labelledIssueKey(t, handler, "TEST", "Back up the metrics volume", []string{"Legion"}, "")
 	parent := labelledIssueKey(t, handler, "TEST", "Split the billing worker", []string{"legion"}, "")
 	child := labelledIssueKey(t, handler, "TEST", "Draft an invoice renderer", nil, parent)
+	grandchild := labelledIssueKey(t, handler, "TEST", "Number the invoices", nil, child)
+	thirdCase := labelledIssueKey(t, handler, "TEST", "Drain the delivery queue", []string{"LEGION"}, "")
 	plain := labelledIssueKey(t, handler, "TEST", "Tidy the onboarding checklist", []string{"infra"}, "")
 
 	for _, want := range []struct {
@@ -428,6 +432,10 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 		{"the legion label", lowercase, true},
 		{"the label as Legion", uppercase, true},
 		{"a child under a labelled parent", child, true},
+		// Two links below the label: the answer is the recursive walk's, not a parent lookup's.
+		{"a grandchild under a labelled root", grandchild, true},
+		// A third case: the match is on lower(label), not on the two spellings above.
+		{"the label as LEGION", thirdCase, true},
 		{"no such label on it or above it", plain, false},
 	} {
 		t.Run(want.name, func(t *testing.T) {
@@ -438,7 +446,7 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 				t.Fatalf("claim: status=%d body=%s", claimed.Code, claimed.Body.String())
 			}
 			answer := decodeBody[claimedIssue](t, claimed)
-			if answer.LegionManagedStatus != want.managed {
+			if answer.LegionManagedStatus == nil || *answer.LegionManagedStatus != want.managed {
 				t.Fatalf("claim legion_managed_status=%v, want %v", answer.LegionManagedStatus, want.managed)
 			}
 			// The issue is still the body's own shape: the dashboard merges it into its cache.
@@ -452,7 +460,7 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 			if released.Code != http.StatusOK {
 				t.Fatalf("release: status=%d body=%s", released.Code, released.Body.String())
 			}
-			if got := decodeBody[claimedIssue](t, released).LegionManagedStatus; got != want.managed {
+			if got := decodeBody[claimedIssue](t, released).LegionManagedStatus; got == nil || *got != want.managed {
 				t.Fatalf("release legion_managed_status=%v, want %v", got, want.managed)
 			}
 			// A release of an issue nobody holds writes nothing and answers the issue as it
@@ -463,10 +471,53 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 			if again.Code != http.StatusOK {
 				t.Fatalf("release an unclaimed issue: status=%d body=%s", again.Code, again.Body.String())
 			}
-			if got := decodeBody[claimedIssue](t, again).LegionManagedStatus; got != want.managed {
+			if got := decodeBody[claimedIssue](t, again).LegionManagedStatus; got == nil || *got != want.managed {
 				t.Fatalf("second release legion_managed_status=%v, want %v", got, want.managed)
 			}
 		})
+	}
+}
+
+// TestClaimSurvivesAFailingLegionLabelWalk: the walk that answers who owns the status runs inside
+// the claim's own transaction, so its failure once rolled back a claim that had otherwise
+// succeeded. A claim is what stops two sessions working one issue; the advisory answer is not.
+// The failure is forced by pointing legionManagedStatusSQL at a statement Postgres refuses: the
+// package's advice hook (newFailingAdviceHandler, write_advice_test.go) fires from
+// computeWriteAdvice alone and never reaches claimWrite, and a hook that exists only for this
+// test has no business in the claim path.
+func TestClaimSurvivesAFailingLegionLabelWalk(t *testing.T) {
+	live := &liveRegistry{}
+	live.set("session-one")
+	handler, _ := claimHandler(t, live)
+	key := claimIssueKey(t, handler, "triage")
+
+	healthy := legionManagedStatusSQL
+	legionManagedStatusSQL = `select from no_such_relation_for_the_legion_walk`
+	t.Cleanup(func() { legionManagedStatusSQL = healthy })
+
+	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-one", "Implementer"),
+	})
+	if claimed.Code != http.StatusOK {
+		t.Fatalf("claim with a failing label walk: status=%d body=%s", claimed.Code, claimed.Body.String())
+	}
+	if answer := decodeBody[claimedIssue](t, claimed); answer.Claim == nil || answer.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the claim was discarded by the failed walk: %s", claimed.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(claimed.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode claim answer: %v body=%s", err, claimed.Body.String())
+	}
+	if _, answered := body["legion_managed_status"]; answered {
+		t.Fatalf("a failed walk must omit legion_managed_status rather than answer it: %s", claimed.Body.String())
+	}
+	// The claim is the issue's, not the response's: a reader sees the same holder.
+	read := bearerRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the issue back: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if issue := decodeBody[claimedIssue](t, read); issue.Claim == nil || issue.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the issue holds no claim after a failed walk: %s", read.Body.String())
 	}
 }
 

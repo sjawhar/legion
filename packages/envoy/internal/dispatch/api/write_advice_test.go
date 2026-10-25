@@ -511,6 +511,7 @@ func TestWriteAdviceAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 	actor := adviceSessionActor("session-owner")
 
 	parent := labelledIssueKey(t, handler, "OWNED", "Split the billing worker", []string{"legion"}, "")
+	child := labelledIssueKey(t, handler, "OWNED", "Draft an invoice renderer", nil, parent)
 	for _, want := range []struct {
 		name    string
 		key     string
@@ -518,7 +519,11 @@ func TestWriteAdviceAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 	}{
 		{"the legion label", labelledIssueKey(t, handler, "OWNED", "Rotate the certificates", []string{"legion"}, ""), true},
 		{"the label as Legion", labelledIssueKey(t, handler, "OWNED", "Back up the volume", []string{"Legion"}, ""), true},
-		{"a child under a labelled parent", labelledIssueKey(t, handler, "OWNED", "Draft an invoice renderer", nil, parent), true},
+		{"a child under a labelled parent", child, true},
+		// Two links below the label: the answer is the recursive walk's, not a parent lookup's.
+		{"a grandchild under a labelled root", labelledIssueKey(t, handler, "OWNED", "Number the invoices", nil, child), true},
+		// A third case: the match is on lower(label), not on the two spellings above.
+		{"the label as LEGION", labelledIssueKey(t, handler, "OWNED", "Drain the queue", []string{"LEGION"}, ""), true},
 		{"no such label on it or above it", labelledIssueKey(t, handler, "OWNED", "Tidy the checklist", []string{"infra"}, ""), false},
 	} {
 		t.Run(want.name, func(t *testing.T) {

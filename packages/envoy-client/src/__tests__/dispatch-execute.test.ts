@@ -1971,6 +1971,45 @@ describe("executeDispatchTool", () => {
     expect(released.text).not.toContain("issue-update");
   });
 
+  test("dispatch_claim reads an omitted legion_managed_status as not Legion-managed", async () => {
+    const claim = {
+      actor: { kind: "session", id: "session-one" },
+      at: "2026-09-24T06:00:00Z",
+    };
+    // An older Dispatch, or a failed label walk on this one, answers without the field; the
+    // claim stands and the wording is the one every client had before the field existed.
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const claimed = await run({ issue: "DSP-1" });
+    expect(claimed.text).toContain("move it to in_progress with dispatch issue-update");
+    expect(claimed.text).not.toContain("Legion's daemon");
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(released.text).toContain(
+      "DSP-1: claim released; nobody is working it now. Its status is still todo — move it yourself"
+    );
+    expect(released.text).not.toContain("Legion's daemon");
+  });
+
   test("a refused dispatch_claim reaches the caller with the code it must act on", async () => {
     const refusal =
       "session session-two (worker session-two) claimed this issue at 2026-09-24T06:00:00Z and is still running; ask that session to release it, or a human can force the claim";

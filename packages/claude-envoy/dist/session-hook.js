@@ -18001,7 +18001,7 @@ async function executeDispatchTool(input) {
         throw refusalWithCode(error48);
       }
       const held = after.claim;
-      const legionManaged = after.legion_managed_status;
+      const legionManaged = after.legion_managed_status === true;
       let text;
       if (release) {
         const released = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status}`;
