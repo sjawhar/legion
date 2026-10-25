@@ -403,23 +403,26 @@ test("queryTmux is bounded even by a tmux that ignores SIGTERM", () => {
     mode: 0o755,
   })
   // A child of its own, so the stub is first on the PATH it starts with: execFileSync looks
-  // `tmux` up on the PATH the process was launched with.
+  // `tmux` up on the PATH the process was launched with. The child times its own call and prints
+  // the milliseconds beside the answer, because what is bounded is `queryTmux`, not Bun's
+  // start-up and this import, which on a loaded machine take longer than the bound itself.
   const source = join(import.meta.dir, "../src/session-title.ts")
-  const started = Date.now()
   try {
     const child = Bun.spawnSync(
       [
         process.execPath,
         "-e",
-        `import { queryTmux } from ${JSON.stringify(source)}; process.stdout.write(String(queryTmux("/nonexistent/tmux.sock", "%0", "x")))`,
+        `import { queryTmux } from ${JSON.stringify(source)}; const started = Date.now(); const answer = queryTmux("/nonexistent/tmux.sock", "%0", "x"); process.stdout.write(\`\${String(answer)} \${Date.now() - started}\`)`,
       ],
       { env: { ...process.env, PATH: `${directory}:${process.env["PATH"] ?? ""}` } },
     )
-    const elapsed = Date.now() - started
-    expect(child.stdout.toString()).toBe("undefined")
+    const [answer, elapsed] = child.stdout.toString().split(" ")
+    expect(answer).toBe("undefined")
     expect(existsSync(marker)).toBe(true)
-    expect(elapsed).toBeGreaterThanOrEqual(1_000)
-    expect(elapsed).toBeLessThan(3_000)
+    // The stub ignores TERM and would sleep five seconds: the call waits out the one-second
+    // timeout, then is killed rather than waited for.
+    expect(Number(elapsed)).toBeGreaterThanOrEqual(1_000)
+    expect(Number(elapsed)).toBeLessThan(3_000)
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

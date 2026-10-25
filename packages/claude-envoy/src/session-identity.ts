@@ -1,8 +1,8 @@
-import { readFileSync } from "node:fs"
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { readFile } from "node:fs/promises"
+import { basename, join } from "node:path"
 import { hasErrnoCode } from "@legion/envoy-client/errors"
 import { z } from "zod"
+import { pruneStateDirectory, writeAtomicStateFile, writtenLongAgo } from "./session-state"
 
 const PersistedRole = z.object({ session_id: z.string().min(1), role: z.string().min(1) })
 
@@ -47,39 +47,14 @@ export function sessionHandoffFile(stateDirectory: string, claudePid: number): s
   return join(sessionHandoffDirectory(stateDirectory, claudePid), "session-id")
 }
 
-/** Role state is keyed by session id so `claude --resume <id>` finds the role it held. */
+/** The directory the role records live in, named once for the writer and the sweep. */
+const ROLES_DIRECTORY = "roles"
+
+/** Role state is keyed by session id so `claude --resume <id>` finds the role it held. The
+ *  `.json` suffix keeps the name a path segment: `encodeURIComponent` leaves a dot alone, so a
+ *  session id of `.` or `..` would otherwise name the directory itself or its parent. */
 export function roleStateFile(stateDirectory: string, sessionId: string): string {
-  return join(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`)
-}
-
-/** Title state is keyed by session id, like role state, so `claude --resume <id>` finds the name
- *  the user gave that session and a `/clear`'s new id starts without one. */
-export function sessionTitleFile(stateDirectory: string, sessionId: string): string {
-  return join(stateDirectory, "titles", encodeURIComponent(sessionId))
-}
-
-export async function writeChosenTitle(file: string, title: string): Promise<void> {
-  await writeAtomicStateFile(file, `${title}\n`)
-}
-
-/** The session has no custom title any more: a rename can be undone, and the fallback returns. */
-export async function removeChosenTitle(file: string): Promise<void> {
-  await rm(file, { force: true })
-}
-
-/**
- * The name a user gave the session, as recorded; undefined when the file cannot be read.
- *
- * Synchronous and never throwing, because the registration path reads it inside a
- * `(sessionId: string) => string`: the title is cosmetic, so a failed read must leave the session
- * on its fallback name rather than fail the registration that carries it.
- */
-export function readChosenTitleSync(file: string): string | undefined {
-  try {
-    return readFileSync(file, "utf8")
-  } catch {
-    return undefined
-  }
+  return join(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`)
 }
 
 /** The role a session held, from its role file; undefined when it has none. */
@@ -99,17 +74,6 @@ export async function writePersistedRole(
   state: z.infer<typeof PersistedRole>,
 ): Promise<void> {
   await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}\n`)
-}
-
-/**
- * Write a private state file atomically: a 0700 directory, a 0600 temporary file
- * unique to this process, then a rename onto `file`.
- */
-export async function writeAtomicStateFile(file: string, contents: string): Promise<void> {
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 })
-  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
-  await writeFile(temporary, contents, { mode: 0o600 })
-  await rename(temporary, file)
 }
 
 export async function writeSessionHandoff(file: string, sessionId: string): Promise<void> {
@@ -135,40 +99,24 @@ function processExists(pid: number): boolean {
   }
 }
 
-/** Drop `sessions/<pid>` directories whose Claude process has exited. */
+/** Drop `sessions/<pid>` directories whose Claude process has exited. Anything else under
+ *  `sessions/` is left alone: it was never this sweep's to name. */
 export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise<void> {
-  const sessions = join(stateDirectory, "sessions")
-  const entries = await readdir(sessions).catch((error: unknown) => {
-    if (hasErrnoCode(error, "ENOENT")) return []
-    throw error
+  await pruneStateDirectory(join(stateDirectory, "sessions"), (file) => {
+    const pid = basename(file)
+    return /^\d+$/.test(pid) && !processExists(Number(pid))
   })
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || processExists(Number(entry))) continue
-    await rm(join(sessions, entry), { recursive: true, force: true })
-  }
 }
 
-/** Thirty days: long enough that a session resumed weeks later still finds its name. */
-export const SESSION_TITLE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000
-
 /**
- * Drop `titles/<session id>` files last written longer than `SESSION_TITLE_MAX_AGE_MS` ago.
- * Nothing else deletes a file keyed by session id — a session's id dies with it, unmourned — so
- * without this the directory grows by one file per named session for ever.
+ * Drop `roles/` records nothing has touched in `STATE_FILE_MAX_AGE_MS`, by the age rule the
+ * title records follow.
+ *
+ * Only one path removes a role file by hand — a soft `setRole` that comes back unclaimed — so a
+ * session that holds its role to the end leaves its file behind, and the handoff sweep cannot
+ * reach it: that one walks `sessions/<pid>/` and asks the operating system about a pid, while a
+ * role file is keyed by session id and has no process left to ask about.
  */
-export async function pruneStaleSessionTitles(stateDirectory: string): Promise<void> {
-  const titles = join(stateDirectory, "titles")
-  const entries = await readdir(titles).catch((error: unknown) => {
-    if (hasErrnoCode(error, "ENOENT")) return []
-    throw error
-  })
-  for (const entry of entries) {
-    const file = join(titles, entry)
-    const modified = await stat(file).then(
-      (stats) => stats.mtimeMs,
-      () => undefined,
-    )
-    if (modified === undefined || Date.now() - modified <= SESSION_TITLE_MAX_AGE_MS) continue
-    await rm(file, { force: true })
-  }
+export async function pruneStaleSessionRoles(stateDirectory: string): Promise<void> {
+  await pruneStateDirectory(join(stateDirectory, ROLES_DIRECTORY), writtenLongAgo)
 }

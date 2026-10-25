@@ -43,7 +43,10 @@ events and sends them to the current Claude Code session as supported
   session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
   its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
   resume or fork Claude Code adds it only when the transcript does not already hold the same text,
-  so a session keeps one copy, and one opened before the skill shipped gets it.
+  so a session keeps one copy, and one opened before the skill shipped gets it. On every
+  `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person gave the session
+  (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own because Claude
+  Code holds the prompt until it returns.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe`. It renders every envelope with the shared
   `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
@@ -238,9 +241,10 @@ with the bundle and never edit it by hand. A standalone Claude Code session does
 The marketplace installs this package's git tree into Claude Code's plugin cache with no
 `node_modules`: `workspace:*` dependencies cannot resolve there, and Claude Code skips its automatic
 dependency install because the package has no lockfile of its own (the monorepo's lives at the
-root). So the three executables ship as committed single-file Bun bundles, `dist/envoy-channel.js`,
-`dist/session-hook.js` and `dist/dispatch.js` (the `dispatch` command, built from
-`@legion/envoy-client`'s `bin/dispatch.ts`), with every dependency inlined (`@legion/contracts`,
+root). So the four executables ship as committed single-file Bun bundles,
+`dist/envoy-channel.js`, `dist/session-hook.js`, `dist/session-title-hook.js` and
+`dist/dispatch.js` (the `dispatch` command, built from `@legion/envoy-client`'s
+`bin/dispatch.ts`), with every dependency inlined (`@legion/contracts`,
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod` and theirs; the package version
 is inlined from `package.json`, so the MCP server reports `package.json`'s version, which
 `.omp-plugin/plugin.json` repeats). `dist/THIRD_PARTY_NOTICES` beside them carries the license of
@@ -367,14 +371,19 @@ Otherwise the title is a name and the first eight characters of the session id
 outside tmux, keep apart, and the id part follows the new id after `/clear`.
 
 Claude Code hands the chosen name to a hook and to nothing else, as `session_title` on the
-`SessionStart` and `UserPromptSubmit` payloads, so the plugin's hook records it under
+`SessionStart` and `UserPromptSubmit` payloads, so the plugin's hooks record it under
 `${CLAUDE_PLUGIN_DATA}/titles/`, by session id, and the channel server reads that file every time
-it registers. A rename therefore reaches the Agents page on the session's next prompt and the
-registration heartbeat that follows it, within about two minutes; nothing watches the file. Taking
-the name away removes the record, so the session returns to the name-and-short-id title instead of
-wearing a name nobody chose any more, and a name that is blank, invisible once cleaned, or more
-than one line falls back the same way. Records untouched for thirty days are pruned at startup, so
-a session resumed weeks later still finds its name and the directory does not grow for ever.
+it registers. The `UserPromptSubmit` hook is a bundle of its own, `dist/session-title-hook.js`,
+because Claude Code holds the prompt until it returns: it parses its payload and writes one file,
+and costs about what starting `bun` at all costs. A rename therefore reaches the Agents page on
+the session's next prompt and the registration heartbeat that follows it, within about two
+minutes; nothing watches the file. Taking the name away removes the record, so the session
+returns to the name-and-short-id title instead of wearing a name nobody chose any more, and a
+name that is blank or invisible once cleaned falls back the same way; a name written on several
+lines is put on one, not refused. Records untouched for thirty days are pruned as the channel
+server starts — the titles, and the role files beside them — so a session resumed weeks later
+still finds its name and its role, and neither directory grows for ever; a sweep that fails says
+so on stderr and the session starts regardless.
 
 Inside tmux that fallback name is `session:window` for a window whose `automatic-rename` is off
 (one named with `rename-window` or `new-window -n`, one a program in it renamed through
@@ -464,13 +473,13 @@ ENVOY_NATS_URL=nats://127.0.0.1:4222 packages/claude-envoy/scripts/smoke-clear-r
 
 `smoke-session-title.sh` checks that the name a person gave a session is what the plugin
 registers. It starts a nats-server and an Envoy listener built from this tree, runs the committed
-`dist/session-hook.js` on the payloads Claude Code's hooks reference documents and
-`dist/envoy-channel.js` as the session, and reads each title back through the listener's
-`GET /v1/sessions`: the chosen name registers alone, a rename replaces it, taking the name away
-brings the folder-and-short-id title back, and the `dispatch` command's stamp in the session's
-Dispatch state directory carries the same name. Its negative control runs the first case again
-against the `dist/envoy-channel.js` of `BASE_REV` (default `main@origin`), which registers the
-folder name instead. It needs `bun`, `curl`, `jq`, `go` and `nats-server`
+`dist/session-hook.js` and `dist/session-title-hook.js` on the payloads Claude Code's hooks
+reference documents and `dist/envoy-channel.js` as the session, and reads each title back through
+the listener's `GET /v1/sessions`: the chosen name registers alone, a rename replaces it, taking
+the name away brings the folder-and-short-id title back, and the `dispatch` command's stamp in
+the session's Dispatch state directory carries the same name. Its negative control runs the first
+case again against the `dist/envoy-channel.js` of `BASE_REV` (default `main@origin`), which
+registers the folder name instead. It needs `bun`, `curl`, `jq`, `go` and `nats-server`
 (`go install github.com/nats-io/nats-server/v2@v2.11.4`), and no Claude authentication, since
 Claude Code is not installed in an issue pod and the two hook payloads are written by the script;
 that the field arrives at all rests on Claude Code's documentation. Like the other two, it is

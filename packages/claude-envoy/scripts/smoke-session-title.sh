@@ -157,13 +157,19 @@ await_title() {
   return 1
 }
 
-# One hook run, with the environment Claude Code gives a hook and `payload` on its stdin.
+# One hook run, with the environment Claude Code gives a hook and `payload` on its stdin. The
+# title hook is a bundle of its own and takes no mode argument: Claude Code blocks the user's
+# prompt on it, so it carries none of the SessionStart bundle's weight.
 run_hook() {
   local mode="$1" payload="$2"
+  local -a command=("${package_dir}/dist/session-hook.js" "$mode")
+  if [[ "$mode" == session-title ]]; then
+    command=("${package_dir}/dist/session-title-hook.js")
+  fi
   printf '%s' "$payload" | env -i PATH="$PATH" HOME="$workdir" \
     CLAUDE_CONFIG_DIR="$config_dir" CLAUDE_PLUGIN_DATA="$plugin_data" \
     CLAUDE_PROJECT_DIR="$project_dir" \
-    bun "${package_dir}/dist/session-hook.js" "$mode" >"${workdir}/hook-${mode}.out" 2>&1 ||
+    bun "${command[@]}" >"${workdir}/hook-${mode}.out" 2>&1 ||
     fail "the ${mode} hook exited non-zero: $(cat "${workdir}/hook-${mode}.out")"
 }
 

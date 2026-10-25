@@ -100,7 +100,10 @@
   alone, as `session_title`, so a new `UserPromptSubmit` hook, and the `SessionStart` one, records
   it under `${CLAUDE_PLUGIN_DATA}/titles/` and the channel server reads it on every registration:
   a rename shows after the session's next prompt and the heartbeat that follows, and taking the
-  name away brings the fallback title back. Title files are pruned at thirty days.
+  name away brings the fallback title back. That hook is a bundle of its own, since Claude Code
+  holds the prompt until it returns: it costs about what starting `bun` at all costs. Title files
+  are pruned at thirty days, and so are the role files beside them, which a session that held its
+  role to the end used to leave behind for ever.
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight
   characters. Inside tmux the name is `session:window` for a window whose `automatic-rename` is

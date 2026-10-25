@@ -8,14 +8,12 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import {
-  readChosenTitleSync,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
-  sessionTitleFile,
-  writeChosenTitle,
   writeSessionHandoff,
 } from "../src/session-identity"
+import { readChosenTitleSync, sessionTitleFile, writeChosenTitle } from "../src/session-state"
 import { sessionTitle } from "../src/session-title"
 import {
   deliveryRaw,

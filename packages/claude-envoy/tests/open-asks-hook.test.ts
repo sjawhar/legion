@@ -122,7 +122,7 @@ test("reports an unreachable Dispatch as unavailable, still exits 0, and still r
 test("a SessionStart carrying a session title records it, and one carrying none removes it", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-title-"))
   const pluginData = join(scratch, "plugin-data")
-  const titleFile = join(pluginData, "titles", "s-1")
+  const titleFile = join(pluginData, "titles", "s-1.txt")
   try {
     const named = await runHook(
       { ...hookInput, session_title: "review the listener" },

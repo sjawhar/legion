@@ -77,16 +77,15 @@ import {
 } from "./legion-tool"
 import {
   pruneStaleSessionHandoffs,
-  pruneStaleSessionTitles,
-  readChosenTitleSync,
+  pruneStaleSessionRoles,
   readPersistedRole,
   readSessionHandoff,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
-  sessionTitleFile,
   writePersistedRole,
 } from "./session-identity"
+import { pruneStaleSessionTitles, readChosenTitleSync, sessionTitleFile } from "./session-state"
 import { type SessionTitle, sessionTitle } from "./session-title"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
@@ -806,8 +805,23 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     await register()
     await restoreRole()
   })
-  await pruneStaleSessionHandoffs(options.stateDirectory)
-  await pruneStaleSessionTitles(options.stateDirectory)
+  // Housekeeping of the plugin's own state directories, each best-effort for the reason the
+  // interests read above is: the heartbeat timer below is not armed yet, so a sweep that threw
+  // here would take the session's whole channel down over a dead pid's handoff, a cosmetic title
+  // or a role the session can restore anyway. Everything else this state adds degrades the same
+  // way — the reader swallows a failed read, the hook always exits 0 — and a directory this run
+  // could not sweep is swept by the next session that starts.
+  for (const prune of [
+    pruneStaleSessionHandoffs,
+    pruneStaleSessionTitles,
+    pruneStaleSessionRoles,
+  ]) {
+    await prune(options.stateDirectory).catch((error: unknown) => {
+      process.stderr.write(
+        `envoy-channel: could not prune stale session state (${messageFor(error)})\n`,
+      )
+    })
+  }
   const heartbeatTimer = setInterval(() => {
     void heartbeat()
   }, options.heartbeatMs)

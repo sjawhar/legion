@@ -4,17 +4,21 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   pruneStaleSessionHandoffs,
-  pruneStaleSessionTitles,
+  pruneStaleSessionRoles,
   readSessionHandoff,
   roleStateFile,
-  SESSION_TITLE_MAX_AGE_MS,
   SessionIdentity,
   sessionHandoffDirectory,
   sessionHandoffFile,
-  sessionTitleFile,
-  writeChosenTitle,
+  writePersistedRole,
   writeSessionHandoff,
 } from "../src/session-identity"
+import {
+  pruneStaleSessionTitles,
+  STATE_FILE_MAX_AGE_MS,
+  sessionTitleFile,
+  writeChosenTitle,
+} from "../src/session-state"
 
 test("the handoff file round-trips the current session id per Claude process", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-identity-"))
@@ -34,6 +38,15 @@ test("the handoff file round-trips the current session id per Claude process", a
 test("role state is keyed by session id, never by process", () => {
   expect(roleStateFile("/data", "ses_a")).toBe("/data/roles/ses_a.json")
   expect(roleStateFile("/data", "qa/override")).toBe("/data/roles/qa%2Foverride.json")
+  // A session id that is nothing but dots stays inside `roles/`: encodeURIComponent leaves a dot
+  // alone, and only the suffix keeps the name a path segment of its own.
+  expect(roleStateFile("/data", "..")).toBe("/data/roles/...json")
+})
+
+test("title state is keyed by session id, and a dotted id names a file inside titles/", () => {
+  expect(sessionTitleFile("/data", "ses_a")).toBe("/data/titles/ses_a.txt")
+  expect(sessionTitleFile("/data", "qa/override")).toBe("/data/titles/qa%2Foverride.txt")
+  expect(sessionTitleFile("/data", "..")).toBe("/data/titles/...txt")
 })
 
 test("pruning removes handoff directories whose Claude process is gone and keeps live ones", async () => {
@@ -64,12 +77,35 @@ test("pruning drops title files older than the age, keeps fresh ones, and tolera
     const old = sessionTitleFile(stateDirectory, "ses_old")
     await writeChosenTitle(fresh, "review the listener")
     await writeChosenTitle(old, "last month")
-    const past = new Date(Date.now() - SESSION_TITLE_MAX_AGE_MS - 60_000)
+    const past = new Date(Date.now() - STATE_FILE_MAX_AGE_MS - 60_000)
     await utimes(old, past, past)
 
     await pruneStaleSessionTitles(stateDirectory)
 
-    expect(await readdir(join(stateDirectory, "titles"))).toEqual(["ses_fresh"])
+    expect(await readdir(join(stateDirectory, "titles"))).toEqual(["ses_fresh.txt"])
+  } finally {
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+// Only one path removes a role file by hand (a soft setRole that comes back unclaimed), and the
+// handoff prune cannot reach one: it walks `sessions/<pid>/` and asks about a pid, while a role
+// file is keyed by session id.
+test("pruning drops role files older than the age, keeps fresh ones, and tolerates no directory", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-roles-"))
+  try {
+    await pruneStaleSessionRoles(stateDirectory)
+
+    const fresh = roleStateFile(stateDirectory, "ses_fresh")
+    const old = roleStateFile(stateDirectory, "ses_old")
+    await writePersistedRole(fresh, { session_id: "ses_fresh", role: "implementer" })
+    await writePersistedRole(old, { session_id: "ses_old", role: "reviewer" })
+    const past = new Date(Date.now() - STATE_FILE_MAX_AGE_MS - 60_000)
+    await utimes(old, past, past)
+
+    await pruneStaleSessionRoles(stateDirectory)
+
+    expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_fresh.json"])
   } finally {
     await rm(stateDirectory, { recursive: true, force: true })
   }

@@ -38,7 +38,7 @@
           {
             "type": "command",
             "command": "bun",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/session-hook.js", "session-title"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/session-title-hook.js"],
             "timeout": 5
           }
         ]
