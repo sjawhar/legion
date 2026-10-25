@@ -562,9 +562,15 @@ test.skipIf(claude === undefined)(
     // 4. No `PostToolUse` ran at all: the model called no tool, and the four `mcp_tool` hook calls
     // of this run are Claude Code's own, not the model's. The count the real server recorded is
     // the same fact from its side — a `PostToolUse` for the hook's own call would have put it
-    // back to 0.
+    // back to 0. The record also carries what the worker last said, which is what an architect
+    // notice earned after a relaunch quotes.
     expect(run.hooks.filter(({ event }) => event === "PostToolUse")).toEqual([])
-    expect(run.record).toEqual({ state: "open", count: 1, reported: false })
+    expect(run.record).toEqual({
+      state: "open",
+      count: 1,
+      reported: false,
+      lastMessage: "Still going.",
+    })
   },
   180_000,
 )
@@ -603,8 +609,14 @@ test.skipIf(claude === undefined)(
     expect([...new Set(run.mcpHookCalls)]).toEqual(["legion/legion_phase_hook"])
     expect(run.mcpHookCalls).toHaveLength(6)
     // The real server's own record says the same: the reminder the block carried took the count
-    // to 1, and the model's tool call in the continuation put it back to 0.
-    expect(run.record).toEqual({ state: "open", count: 0, reported: false })
+    // to 1, and the model's tool call in the continuation put it back to 0. The record carries
+    // the worker's last words with it, bounded, for a relaunch's architect notice to quote.
+    expect(run.record).toEqual({
+      state: "open",
+      count: 0,
+      reported: false,
+      lastMessage: "Done for now.",
+    })
     expect(run.stopHookActive.slice(-2)).toEqual(["false", "true"])
   },
   180_000,
