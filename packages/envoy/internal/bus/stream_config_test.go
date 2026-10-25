@@ -418,9 +418,10 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 // splits a subject another deployment still holds, each start (and a rollback's) must still
 // succeed, with the starting binary's shape of that subject in the stream.
 //
-// Each subtest deletes and recreates Stream, so each takes an account of its own (testnats.URL):
-// in one account shared by both, the second would recreate the name the first left as the
-// account's last stream while nats-server may still be removing that account's streams directory.
+// Each subtest takes its own testnats.URL, inside the subtest, so each runs in an account of its
+// own. Its reset deletes Stream: in a fresh account there is nothing to delete, but in one account
+// shared by both, the second subtest's reset would delete the stream the first left, and its
+// recreate of that name would race nats-server's removal of the deleted stream's directory.
 func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
 	shaped := func(legion string) nats.StreamConfig {
 		cfg := *streamCfg

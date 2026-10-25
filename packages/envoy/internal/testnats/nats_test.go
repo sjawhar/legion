@@ -608,14 +608,21 @@ const containerModule = "github.com/testcontainers/testcontainers-go"
 var dockerDriver = regexp.MustCompile(
 	`exec\.Command(Context)?\([^\n]*` + `"docker"` + `|NewDockerClient` + `WithOpts`)
 
-// No package of this module outside the rigs above may start a container: Envoy's agents have no
-// container runtime, and a test that needs one cannot run where they do. This pins the two ways
-// to get one — an import of testcontainers, and a hand-driven docker — against the packages
-// allowed to have it. internal/smoke's containers are behind the smoke build tag and the rig's
-// own behind natslive, so an untagged go list never sees their imports. The walk does not go by
-// tag: it reads every .go file, those included, and passes them because none drives docker by
-// hand.
-func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
+// No package of this module outside the rigs above imports a container runtime directly or drives
+// docker by hand: Envoy's agents have no container runtime, and a test that needs one cannot run
+// where they do. This pins those two ways to get one — a direct import of testcontainers, read
+// from go list's Imports, TestImports and XTestImports, and a hand-driven docker — against the
+// packages allowed to have them. It does not prove that no other package needs a runtime: a
+// package that imports an allowlisted rig passes and still starts that rig's container, as
+// cmd/listener's tests do through testpg.URL whenever DISPATCH_TEST_DATABASE_URL is unset. Direct
+// imports are the right scope today because that is the one such case with no opt-out (tests3's
+// one consumer, internal/dispatch/files, skips under DISPATCH_TEST_NO_CONTAINERS=1), and a
+// separate issue removes Postgres through testpg; widening this guard to walk go list -deps is
+// that issue's work, not this one's. internal/smoke's containers are behind the smoke build tag
+// and the rig's own behind natslive, so an untagged go list never sees their imports. The walk
+// does not go by tag: it reads every .go file, those included, and passes them because none
+// drives docker by hand.
+func TestNoPackageOutsideTheRigsImportsOrDrivesAContainerRuntime(t *testing.T) {
 	t.Run("imports", func(t *testing.T) {
 		for _, finding := range containerImporters(t) {
 			t.Errorf("package %s imports %s, which belongs to a container runtime; a test that needs a NATS server starts it with testnats.Start, StartConfig or URL", finding.pkg, finding.imported)

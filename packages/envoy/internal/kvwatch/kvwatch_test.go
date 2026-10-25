@@ -809,9 +809,13 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	// accountKeeper exists so the account is never emptied by the deletes below: deleting an
-	// account's last stream schedules the removal of its streams directory in the background,
-	// and the restore of the same stream name would then race that removal and fail.
+	// accountKeeper exists so the account is never emptied by the deletes below. nats-server
+	// schedules the removal of the account's streams directory, in the background, on every stream
+	// delete, not only on the last one; that removal is an os.Remove, which fails on a directory that
+	// is not empty. Without the keeper, each delete below empties the directory, so the removal it
+	// schedules succeeds, and the restore after the second delete races that removal and fails. With
+	// the keeper's stream in it, the directory is never empty, so every scheduled removal fails and
+	// leaves it in place.
 	const accountKeeper = "kvwatch-test-account-keeper"
 	if _, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: accountKeeper}); err != nil {
 		t.Fatalf("create the account keeper bucket: %v", err)
