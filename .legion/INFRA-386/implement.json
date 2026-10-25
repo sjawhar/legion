@@ -2,10 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T15:42:30Z",
+  "completed": "2026-10-25T16:06:23Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+  "codeHead": "feda29facc745cd103d31bed0fc57979aaf08017",
   "proof": [
+    {
+      "criterion": "Round 2: the page states that no wait was measured and that an empty re-list shows only that no such Job was stored by the time it ran; no sentence says the closing comment does not cover the case; the recovery paragraph names the late-stored create beside the SIGKILL; A1-A8 still hold",
+      "surface": "docs/kubernetes.md as a role reads it, fetched from GitHub at the pushed head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=feda29facc745cd103d31bed0fc57979aaf08017\" -H \"Accept: application/vnd.github.raw\"; the plan's section 4 checks plus grep -cF 'No wait was measured', 'shows only that no such Job was stored by the time the listing ran', 'neither the listing nor the block', and the recovery paragraph joined grep -c 'or a stop or failed connection whose create'; hunks2.awk = hunks.awk with 3198-3202 allowed",
+      "observed": "A1 0; A2 1 for all seven patterns; 'neither the listing nor the block' 0; recovery second member 1, no line over 100; A3 date 4; A4 abe1b4cf... (base); block byte-identical to 97e9883b's; A6 no NONCOMMENT, old-closing 0, old-listing 1; A7 0; A8 0; A5 five hunks all ok, exit 0; diff from 97e9883b two hunks (3171, 3214)",
+      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+      "negativeControl": "the same checks at 97e9883b: 'No wait was measured' 0, the 'shows only' sentence 0, 'neither the listing nor the block' 1, recovery second member 0"
+    },
+    {
+      "criterion": "A11, round 2: a reader no longer concludes an empty re-list proves nothing is left",
+      "surface": "two fresh scout subagents, each given only the trap and recovery paragraphs, the output of a SIGTERM stop during the create (run label, 'cleanup: no Job name was read; deleting by label ...', 'No resources found', 'sequence: exit 143') and an empty 'kubectl get jobs -l sequence-run=5c1e9a07' run a minute later",
+      "command": "task(agent=scout) x2 over probe-new.txt (head paragraphs) and probe-prev.txt (97e9883b paragraphs): can the role conclude now that nothing is left; what does the passage say the empty listing proves; which runs end without a printed name",
+      "observed": "head: 'No. The relist is empty, but the passage says the server's latest possible store time is unknown, so the role cannot rule out that this run's Job is stored later', quoting 'an empty listing shows only that no such Job was stored by the time the listing ran', and naming the late-stored create beside the SIGKILL as runs whose name never printed",
+      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+      "negativeControl": "97e9883b's paragraphs: 'Yes, but only by inference ... It never says outright that an empty re-list proves nothing is left, and it gives no time limit for a late create'"
+    },
+    {
+      "criterion": "A9, round 2: no private name enters the change",
+      "surface": "the repository at the head, the round's added lines, the commit message, the live PR body",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over the round's added lines and the PR body before the PATCH",
+      "observed": "check-private-names exit 0 (5005 files); sweep 0 literal, 0 whole-word for each",
+      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+      "negativeControl": "a scratch file holding the reachability label gives literal 1 (round 1, same script)"
+    },
     {
       "criterion": "A1-A3, A7, A8: the trap paragraph no longer states the unconditional clean-up; it names the unmeasured sub-case, gives the label re-list and delete, dates its evidence, the bullet drops 'exactly as published above', no paragraph line over 100 characters",
       "surface": "docs/kubernetes.md as a role reads it, fetched from GitHub at the pushed head from this issue's role container",
@@ -48,8 +72,12 @@
   ],
   "deviations": [
     "The docs edit was written by the implementer directly rather than by a deep-worker subagent: one prose file, with the plan's draft text and checks, where the wording is the deliverable.",
-    "The refusal is quoted with its rule message elided as well as the policy name, since the rule message contains the compute class's name as a word and the sweep counts it."
+    "The refusal is quoted with its rule message elided as well as the policy name, since the rule message contains the compute class's name as a word and the sweep counts it.",
+    "Round 2: P1 was not re-run; the sequence block is byte-identical to 97e9883b's, where P1 and its control ran, and the architect ruled that no stop is re-measured."
   ],
   "openQuestions": [],
-  "discoveredComplexity": []
+  "discoveredComplexity": [],
+  "round": 2,
+  "roundReason": "Sent back from retro: the architect ruled to fix three sentences in this pull request (docs/kubernetes.md 3178-3180 no wait measured / empty re-list; 3171-3173 closing comment names the case; 3216-3220 recovery paragraph names the late-stored create).",
+  "previousCodeHead": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453"
 }
