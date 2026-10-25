@@ -186,8 +186,9 @@ func viewCounts(t *testing.T, ctx context.Context, store *Store, kind string, id
 }
 
 // refs.BacklinkCounts reads the arms of graph_edges one by one so each can use an index. Its
-// answer is the view's, for every node kind, with and without an excluded edge kind, and the
-// statement it runs reads no table sequentially.
+// answer is the view's, for every node kind, with and without an excluded edge kind, and every
+// scan the statement it runs makes is driven by an index condition, in the plan its values give
+// and in the generic plan a prepared statement's cache could settle on.
 func TestBacklinkCountsEqualTheViewAndScanNoTable(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -196,12 +197,6 @@ func TestBacklinkCountsEqualTheViewAndScanNoTable(t *testing.T) {
 	}
 	seedEveryInboundArm(t, ctx, store)
 
-	// Every table an arm reads. A plan with sequential scans off still falls back to one when
-	// no index serves a predicate, so a plan free of them proves each arm has its index.
-	armTables := []string{
-		"refs", "issues", "issue_links", "artifacts", "asks", "comments", "messages",
-		"ask_followers", "components", "component_depends", "issue_component_members",
-	}
 	// Each node kind with the exclusions its callers pass: none, the ask card's own thread,
 	// and the mention arm, which is the one every kind shares.
 	for _, probe := range []struct {
@@ -239,10 +234,12 @@ func TestBacklinkCountsEqualTheViewAndScanNoTable(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s: counts = %v, want the view's %v", name, got, want)
 		}
-		plan := explainWithoutSeqScanArgs(t, store, recorder.sql, recorder.args)
-		for _, table := range armTables {
-			if strings.Contains(plan, "Seq Scan on "+table) {
-				t.Errorf("%s: the count scans %s sequentially:\n%s", name, table, plan)
+		for _, plan := range []string{
+			explainWithoutSeqScanArgs(t, store, "explain (costs off) "+recorder.sql, recorder.args),
+			explainGenericWithoutSeqScan(t, store, recorder.sql, recorder.args),
+		} {
+			if unkeyed := scansWithoutIndexCond(plan); len(unkeyed) > 0 {
+				t.Errorf("%s: the count reads %v without an index condition:\n%s", name, unkeyed, plan)
 			}
 		}
 	}
@@ -261,8 +258,9 @@ func TestBacklinkCountsEqualTheViewAndScanNoTable(t *testing.T) {
 	}
 }
 
-// refs.Kinds is every edge kind graph_edges emits, and each one is either a mention or an arm
-// the count knows, so an edge kind added to the view without an arm here fails this test.
+// The fixture fills every arm of graph_edges, and the view has the fifteen arms the count
+// declares (refs' mentions and refs.BacklinkCounts' fourteen structural arms), so an arm added
+// to the view fails this test until the count and the fixture carry it too.
 func TestEveryEdgeKindHasAnInboundArm(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -312,9 +310,61 @@ func TestEveryEdgeKindHasAnInboundArm(t *testing.T) {
 	if !reflect.DeepEqual(seeded, want) {
 		t.Fatalf("the fixture's edges are %v,\nwant every arm of the view: %v", seeded, want)
 	}
+
+	var definition string
+	if err := store.Pool.QueryRow(ctx, `select pg_get_viewdef('graph_edges'::regclass)`).Scan(&definition); err != nil {
+		t.Fatalf("read the graph_edges definition: %v", err)
+	}
+	if arms := strings.Count(definition, "UNION ALL") + 1; arms != 15 {
+		t.Fatalf("graph_edges has %d arms; refs.BacklinkCounts declares 15 (the mention arm and 14 structural arms): add the new arm to inboundArms and to seedEveryInboundArm", arms)
+	}
 }
 
-func explainWithoutSeqScanArgs(t *testing.T, store *Store, query string, args []any) string {
+// scansWithoutIndexCond names each scan in an EXPLAIN plan that reads a table without an index
+// condition: a sequential scan, or an index scan that only filters the rows it walks, which a
+// plan with sequential scans turned off picks when no index serves the predicate.
+func scansWithoutIndexCond(plan string) []string {
+	lines := strings.Split(plan, "\n")
+	var unkeyed []string
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "->"))
+		switch {
+		case strings.HasPrefix(trimmed, "Seq Scan on "):
+			unkeyed = append(unkeyed, trimmed)
+		case strings.HasPrefix(trimmed, "Index Scan "),
+			strings.HasPrefix(trimmed, "Index Only Scan "),
+			strings.HasPrefix(trimmed, "Bitmap Index Scan "):
+			keyed := false
+			for _, detail := range lines[index+1:] {
+				detail = strings.TrimSpace(detail)
+				if strings.HasPrefix(detail, "->") {
+					break
+				}
+				if strings.HasPrefix(detail, "Index Cond:") {
+					keyed = true
+					break
+				}
+			}
+			if !keyed {
+				unkeyed = append(unkeyed, trimmed)
+			}
+		}
+	}
+	return unkeyed
+}
+
+// indexOnlyPlanSettings leave the planner only plans that reach each table through an index:
+// with sequential scans off it can still hash a whole partial index into a join, so hash and
+// merge joins go too, and a scan with no index condition left in the plan is one no index serves.
+var indexOnlyPlanSettings = []string{
+	`set local enable_seqscan = off`,
+	`set local enable_hashjoin = off`,
+	`set local enable_mergejoin = off`,
+}
+
+// explainWithoutSeqScanArgs runs explain, an EXPLAIN statement around the count's SQL, binding
+// args, under indexOnlyPlanSettings.
+func explainWithoutSeqScanArgs(t *testing.T, store *Store, explain string, args []any) string {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := store.Pool.Begin(ctx)
@@ -322,12 +372,77 @@ func explainWithoutSeqScanArgs(t *testing.T, store *Store, query string, args []
 		t.Fatalf("begin explain: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `set local enable_seqscan = off`); err != nil {
-		t.Fatalf("disable seq scans: %v", err)
+	for _, statement := range indexOnlyPlanSettings {
+		if _, err := tx.Exec(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
 	}
-	rows, err := tx.Query(ctx, "explain (costs off) "+query, args...)
+	return planLines(t, tx, explain, args...)
+}
+
+// explainGenericWithoutSeqScan is the plan a prepared statement's cache settles on when it
+// chooses a generic plan: the count is prepared with no values and executed under
+// plan_cache_mode = force_generic_plan, under indexOnlyPlanSettings. A prepared statement outlives
+// the transaction, so it is deallocated by name.
+func explainGenericWithoutSeqScan(t *testing.T, store *Store, query string, args []any) string {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := store.Pool.Acquire(ctx)
 	if err != nil {
-		t.Fatalf("explain %q: %v", query, err)
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin explain: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	literals := make([]string, len(args))
+	for index, arg := range args {
+		literals[index] = sqlLiteral(t, arg)
+	}
+	for _, statement := range append(indexOnlyPlanSettings,
+		`set local plan_cache_mode = force_generic_plan`,
+		`prepare backlink_count_probe as `+query,
+	) {
+		if _, err := tx.Exec(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	defer func() {
+		if _, err := conn.Exec(ctx, `deallocate backlink_count_probe`); err != nil {
+			t.Errorf("deallocate the probe: %v", err)
+		}
+	}()
+	return planLines(t, tx, `explain (costs off) execute backlink_count_probe(`+strings.Join(literals, ", ")+`)`)
+}
+
+// sqlLiteral writes one of the count's arguments, a string or a list of strings, as a quoted SQL
+// literal for EXECUTE, which takes no bind parameters of its own here.
+func sqlLiteral(t *testing.T, arg any) string {
+	t.Helper()
+	quote := func(text string) string { return "'" + strings.ReplaceAll(text, "'", "''") + "'" }
+	switch value := arg.(type) {
+	case string:
+		return quote(value) + "::text"
+	case []string:
+		elements := make([]string, len(value))
+		for index, element := range value {
+			element = strings.ReplaceAll(element, `\`, `\\`)
+			elements[index] = `"` + strings.ReplaceAll(element, `"`, `\"`) + `"`
+		}
+		return quote("{"+strings.Join(elements, ",")+"}") + "::text[]"
+	default:
+		t.Fatalf("count argument %T has no literal form", arg)
+		return ""
+	}
+}
+
+func planLines(t *testing.T, tx pgx.Tx, explain string, args ...any) string {
+	t.Helper()
+	rows, err := tx.Query(context.Background(), explain, args...)
+	if err != nil {
+		t.Fatalf("%s: %v", explain, err)
 	}
 	defer rows.Close()
 	var lines []string

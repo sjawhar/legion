@@ -45,11 +45,10 @@ var AskBacklinkExclusions = []string{"replies_to"}
 
 // inboundArm is one arm of graph_edges whose to side can be a given node kind: the edge kind
 // the arm emits, and the SQL listing the arm's to_id for each id of $1. Each arm reads the
-// index named beside it, which is why BacklinkCounts reads the arms rather than the view: every
-// arm of graph_edges computes the address it compares (`k.id::text`, `project_key || '/' || id`,
-// an artifact's ref_key through a join), so a `to_id = any(...)` predicate over the view is a
-// filter on each arm rather than an index condition, and the view costs every reader a plan over
-// all fifteen arms however few of them its node kind can have.
+// index named beside it. BacklinkCounts reads these arms rather than the view because the view
+// has fifteen arms and its to_kind is a parameter: every call plans all fifteen, about 1 ms of
+// planning each time a prepared statement takes a custom plan (the plan cache's default for this
+// statement), where the arms of one kind plan in about a fifth of that.
 type inboundArm struct {
 	kind string
 	sql  string
@@ -61,9 +60,9 @@ const mentionsArm = `select to_id from refs where to_kind = $2 and to_id = any($
 
 // inboundArms is, per node kind, every structural arm of graph_edges whose to side is that
 // kind, read off the view's own definition (migration 0094, which re-states 0038's arms). A
-// node kind absent from the map is refused rather than counted low, so an arm added to the view
-// for a new kind fails loudly here; store's equivalence test compares every kind's count with
-// the view's.
+// node kind absent from the map is refused rather than counted low. store's equivalence test
+// compares every kind's count with the view's, and fails when the view gains an arm, so an arm
+// added to the view is added here in the same change.
 //
 // Each arm selects only the address it is keyed on, so the joins the view makes for an edge's
 // created_at are left out: components.snapshot_id, component_depends' two component keys and
@@ -129,8 +128,8 @@ var inboundArms = map[string][]inboundArm{
 // list carries beside a row, counted the same way the rows behind it are listed. A node with no
 // inbound edge is absent from the result; the caller decides what zero means. It unions the
 // arms of graph_edges that can point at toKind, each read through its own index, rather than
-// the view, which no index can serve; the counts are the view's, which store's equivalence test
-// holds it to.
+// planning the whole view; the counts are the view's, which store's equivalence test holds it
+// to.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
