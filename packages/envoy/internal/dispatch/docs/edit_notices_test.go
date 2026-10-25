@@ -878,3 +878,29 @@ func TestEditNoticeAPersonsRebuildOpensTheWindow(t *testing.T) {
 		t.Fatalf("notice = to %d editors %v, want to %d naming alice", row.to, row.editors, written.Version.Number)
 	}
 }
+
+// A person's edit of an ask block's question changes the spec's words, not only the server's state
+// beside them: the version it leaves sends exactly one notice, whose diff holds the new question.
+// It guards the sweep's server-state filter (serverStateOnly) against dropping a real edit.
+func TestEditNoticeAPersonsQuestionEditSendsOne(t *testing.T) {
+	service, artifactID, _, settle, _ := blockAskHarness(t)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	if err := joinedWrite(service, func(ctx context.Context) error {
+		_, err := service.SetAskBlockText(ctx, artifactID, "decision", AskBlockEdit{Question: new("Which transport, gRPC or REST?")}, alice)
+		return err
+	}); err != nil {
+		t.Fatalf("edit the ask block's question: %v", err)
+	}
+	settle()
+	if _, open := readEditNotice(t, service, artifactID); !open {
+		t.Fatal("a person's question edit opened no edit notice")
+	}
+	makeEditNoticeDue(t, service.store, artifactID)
+	if sent, err := service.sendDueEditNotices(context.Background()); err != nil || sent != 1 {
+		t.Fatalf("sweep after a question edit = %d sent, %v; want 1 sent", sent, err)
+	}
+	edits := humanEdits(t, service.store, artifactID)
+	if len(edits) != 1 || !strings.Contains(edits[0].payload.Diff, "+Which transport, gRPC or REST?") {
+		t.Fatalf("edit notices = %+v, want one whose diff adds the new question", edits)
+	}
+}
