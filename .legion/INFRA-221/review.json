@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T02:40:00Z",
-  "round": 7,
+  "completed": "2026-10-25T06:52:00Z",
+  "round": 8,
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
@@ -11,35 +11,29 @@
   "keyFindings": [
     {
       "severity": "important",
-      "file": "skills/legion-worker/references/tools.md:47",
-      "description": "The restated test loses the location condition in the one paragraph that is about an extraction under $HOME, so the page sanctions at :47 what it refuses at :156. The paragraph opens on exactly that case — ':41 So that writable $HOME, and the issue's disk, are where an install for yourself would go', ':42-44 redis-cli, sqlite3 and dig did run from an extraction prefix under $HOME' — then rules: ':45-47 What rules such an attempt out is not the filesystem and not the unpacking: it is what the prefix leaves resolving ... and the test is scope. A prefix you export for the commands of your own run is sanctioned', closing at ':53-54 the room on the issue's disk does not touch it either'. The section that defines the test decides the same case the other way: ':119-123' makes condition 1 that what is written lands under the issue's own volume through a variable the runtime sets, and ':155-157' says 'an install under $HOME fails the first condition and is outside the sanctioned form, however little else it changes'. That section's own restatement of the scope test is correctly guarded — ':159-160 Between two installs that both land in the right place, the test is resolution, not disk' — and the copy at :47 lost the guard. So a role that asks the page's entry question, may I unpack a client under $HOME and export the prefix just around my own harness commands, is told yes at :47 and no at :156, and the placement :47 blesses is the one roleEnvironment exists to prevent after GKE Autopilot evicted issue pods for it (:152-155), for an extraction the options table measures at 105 MiB. The worked case itself is right ('into one root on the issue's volume', :173), which is what makes this a slip rather than a decision. One clause at :47 and :53-54 — borrow the guard the section below already has — and docs/kubernetes.md:176-187 carries the same unqualified sentence with no such section beside it."
+      "file": "docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md:43-49",
+      "description": "The INFRA-221 note this PR added calls the recipe above it 'still the step' and 'the clearest instance' of the line tools.md draws, summarising that line as 'about scope rather than about unpacking'. The recipe builds Postgres under literal /tmp (:37-39), which is not a mount in a role container (INFRA-44 note :53) and lost the harness twice in one morning (INFRA-43 :68); tools.md:84-91's first condition refuses it, and tools.md:182-186 cites this note as 'the illustration' of the test 'passed again'. Same class as round 7's finding 1: the location condition dropped from a hand-kept summary, here in a note marked status: active that a role follows."
     },
     {
       "severity": "important",
-      "file": "docs/site/src/content/docs/legion/running-legion.md:188-190",
-      "description": "The published operator page still carries the blanket mechanism ban this round removed everywhere else: 'apt cannot write a system prefix in an unprivileged container, unpacking one by hand works for some tools and not others, and Legion rules that route out as the withheld operator-setup capability'. That route is unpacking by hand, and Legion does not rule it out at this head: tools.md:47-49 states the rule as scope, tools.md:170-189 makes a hand-unpacked dpkg-deb -x root the worked sanctioned case, and four status: active learnings prescribe it, each annotated this round with 'still the step'. This round corrected the identical sentence in docs/kubernetes.md — the diff reads '-Legion rules that route out as the withheld operator-setup capability' / '+a client a role unpacks onto its own PATH is the withheld operator-setup capability' at :160 — and did not carry it here. It is the third hand-kept copy of one proposition, corrected in two. `grep -rn 'route out as the withheld' docs skills packages/claude-envoy AGENTS.md` returns exactly this one hit; my own sweep this round grepped three phrasings of the ban and this is a fourth, so the miss is on both of us and is itself the argument. One sentence, mirroring docs/kubernetes.md:159-161."
+      "file": "docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md:41-44",
+      "description": "The note says 'still the step' for a recipe whose <root> and <data> are unplaced (:30, :36-38), and gives as the reason only that the line is drawn 'by what a prefix leaves resolving'. A role that reads this note alone has nothing telling it the root goes on the issue's volume; the INFRA-43 and INFRA-44 notes carry the same one-condition paraphrase, true of their own recipes only because those recipes already place the root on the volume. Name both conditions, or point at tools.md's 'The test: where it lands, and what it leaves resolving' heading, in all four notes."
     }
   ],
-  "ciRead": "Base main requires lint, typecheck, test and pr-title. The branch's newest pull_request run head is the code head eab8e6fda490; its check-runs show all four completed/success. compare eab8e6fd...73fc4503 is `ahead` with only .legion/ files, and GitHub reports the pull request MERGEABLE.",
-  "threads": "Thirty-two threads, all of rounds 1 to 6, every one carrying the implementer's disposition and resolved by it. I read round 6's three resolutions against the tree and accept them; I unresolved none. This round's two findings are new threads.",
+  "ciRead": "Base main requires lint, typecheck, test and pr-title (rulesets; branch protection names none). The branch's newest pull_request run head is the code head 21c0047b30ea; its check-runs show all four completed/success. compare 21c0047b...4e5e344b is `ahead` with only .legion/ files; GitHub reports the pull request MERGEABLE.",
+  "threads": "Thirty-four threads, all resolved by the implementer. Round 7's two (PRRT_kwDORFy7ds6v9qYb, PRRT_kwDORFy7ds6v9qYf) were read against 4ec472c97eb1: both fixed as described; I accept both and unresolved none. This round's two findings are new threads.",
   "verifiedMyself": [
-    "No blanket ban survives in docs, skills or the bundle for the three phrasings round 6 named ('never an extraction', 'under any reading', the improvising clause): zero hits. The fourth phrasing is finding 2.",
-    "Both figures the architect ruled dropped are gone: no 'about 20 KB', no '2.5 GiB used', no '5.2 GiB used' anywhere in docs or skills.",
-    "The two grep commands run as printed find every site a new tool's name must reach, including worker.Dockerfile:417 (a redis-tools hit) and capabilitiestest.go (a redis-cli hit), plus all four Go files, AGENTS.md, docs/kubernetes.md and running-legion.md.",
-    "The committed bundle is byte-identical to skills/ (diff -r clean).",
-    "tools.md:155-157 and :159-160 say what finding 1 quotes, and running-legion.md:189 is the single surviving hit for the fourth phrasing."
+    "Round 7 finding 1 fixed: tools.md:45-51 no longer states the test, says a $HOME extraction fails its first condition whatever it is scoped to, and agrees with :158-165.",
+    "Round 7 finding 2 fixed: running-legion.md:188-190 rules out a client on a role's own PATH, not the unpacking.",
+    "The test is stated once, under '### The test: where it lands, and what it leaves resolving' (tools.md:82); the pointers at :45-46, :395 and docs/kubernetes.md:176-181,195 name headings that exist.",
+    "The committed bundle is byte-identical to skills/ (diff -r clean for legion-worker; legion-architect SKILL.md identical).",
+    "/tmp is not a mount in a role container: manifest.go:453-461 mounts the issue volume at /legion only, and TMPDIR (manifest.go:734) does not move an explicit /tmp path."
   ],
-  "acceptedThisRound": [
-    "The prohibition restated as scope rather than mechanism, with the Dispatch e2e stack as the worked case and the harness's handoff note as what crosses to the next role.",
-    "The five learning notes, each pointing at the rule rather than superseding the recipe, and LEGION-748's second reason written as the contrast that makes the rest legible.",
-    "The site list replaced by two grep commands with the four gated Go sites named, the two kinds of hit that need more than a substitution called out, and the notices warning marked as a fact about this build with dispatch://INFRA-255 named as what ends it.",
-    "AGENTS.md:125 back to a pointer, naming the resolution test rather than carrying a second copy of the list."
-  ],
-  "reported": "The scope test is now stated five times inside tools.md (:46-52, :100-107, :160-164, :179-183, :394-396), three of them in one 132-line section, two sharing a verbatim run. Every statement is true, so it does not meet the bar — but it is the generator of finding 1: a proposition held in N hand-kept copies gets corrected in N-1. The page's own thesis, written at :356-357, is 'Do not work from a list of those sites. This page has carried one twice and it was wrong both times.' The same move applies to the test: state it once where the section defines it, and let the other places point at it.",
   "thermonuclear": {
-    "head": "73fc4503e6852d990d24556d7f1fa803a4decc52",
-    "deepReview": "CHANGES at 73fc4503 — 1 medium meeting the bar (the scope test losing its location condition in the $HOME paragraph), the rest reported; it checked the five learning notes, the grep replacement, the worked case and every consumer of the toolchain row.",
-    "codeQuality": "CHANGES at 73fc4503 — 1 blocking meeting the bar (running-legion.md's surviving mechanism ban, the third copy of a proposition corrected in two), with the five-fold statement of the test reported as its generator."
+    "head": "4e5e344bbaa2be195b0c88e3d33589b66124ab7d",
+    "deepReview": "CHANGES at 4e5e344b: 1 medium, the LEGION-695 note endorsing a /tmp build that fails the first condition; confirmed both round-7 fixes, the toolchain consumers (CheckImage, probe-image, bootprobe, legion-api capability shape, stage4b) and the bundle hashes.",
+    "codeQuality": "CHANGES at 4e5e344b: 1 blocking, the same LEGION-695 note; Go capability changes sound; no reported findings."
   },
-  "fastFollow": "State the scope test once, where the section defines it, and have the other four places point at it — the same move this round applied to the site list."
+  "bodyNote": "E2E (implementer) carries eight successive 'Negative control:' lines (PR body :31-38), one per round; the proof line needs one, at this round's head.",
+  "fastFollow": "none"
 }
