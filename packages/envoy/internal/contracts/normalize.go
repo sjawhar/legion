@@ -1100,14 +1100,20 @@ func slackEventSlice(event, message map[string]any, key string) []any {
 	return nil
 }
 
-// slackDisplayFields are the field names an attachment or a block shows words under, in the order
-// Slack renders them; fallback is last because it is the plain-text copy of the rest. alt_text is
-// the string Slack renders in an image block's place, and author_subname the one it renders beside
-// author_name.
+// slackDisplayFields are the field names an attachment or a block shows words under, ranked in
+// the order Slack renders them. alt_text is the string Slack renders in an image block's place,
+// and author_subname the one it renders beside author_name. The ninth, slackFallbackField, is not
+// ranked among them: it is read after everything else its object carries.
 var slackDisplayFields = []string{
 	"pretext", "author_name", "author_subname", "title", "text", "alt_text", "value", "footer",
-	"fallback",
 }
+
+// slackFallbackField is an attachment's fallback: the plain-text copy of the attachment that Slack
+// shows only where the attachment itself cannot be shown, so nobody who sees the attachment's own
+// fields and blocks render sees it. It is read last, once the object's whole subtree has been read,
+// and only when that subtree has not already yielded it, so it never stands ahead of the body it
+// copies and never says that body's words a second time.
+const slackFallbackField = "fallback"
 
 // slackOwnTextEntities resolves the three entities Slack escapes in a message's own text, in one
 // left-to-right pass, so that a rich_text segment's unescaped copy of those same words reads as
@@ -1118,7 +1124,7 @@ var slackOwnTextEntities = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;"
 // string its blocks and its attachments carry that neither repeats the message's own words nor a
 // string the object showing it has already shown, a line apiece. Blocks come first because Slack
 // renders them as the message body and an attachment after it, so an attachment's fallback is
-// never the first line read. An app posts its words there as often as in the message's own text,
+// never read ahead of the body. An app posts its words there as often as in the message's own text,
 // and a deleted message delivers none. A rich_text block that only repeats the message's own
 // words is left unread: it is the Slack client's structured copy of them.
 func slackDeliveredText(body map[string]any) string {
@@ -1221,13 +1227,20 @@ func (w *slackTextWalk) walk(value any) {
 // place the object shows it; an array is descended in index order. A string that holds no word is
 // never yielded.
 //
-// An object yields a given string once: an attachment whose fallback repeats its title shows one
-// word under two of its own names, and that is one piece. The comparison reaches the object's own
-// keys and never its subtree — a nested text object, and each element of a fields array, is an
-// object of its own with a tally of its own — because a subtree-wide tally would drop a nested
-// block's word for matching a title above it, and nothing is compared across objects, so two
-// attachments reading "web-1 ok" and "web-2 ok" both deliver their ok. At most one string is
-// yielded per display name, so the tally holds nine at the most and is scanned straight through.
+// An object yields a given string once: an attachment whose title is also its text shows one word
+// under two of its own names, and that is one piece. The comparison reaches the object's own keys
+// and never its subtree — a nested text object, and each element of a fields array, is an object
+// of its own with a tally of its own — because a subtree-wide tally would drop a nested block's
+// word for matching a title above it, and nothing is compared across objects, so two attachments
+// reading "web-1 ok" and "web-2 ok" both deliver their ok. At most one string is yielded per ranked
+// display name, so the tally holds eight at the most and is scanned straight through.
+//
+// fallback is the one exception to both, and slackWalkFallback reads it: a string fallback that
+// holds a word is yielded after every other key of its object, and only when nothing anywhere in
+// that object's subtree yielded the same string, because it is the plain-text copy of exactly that
+// subtree. An attachment whose fallback repeats its title, or the text of its own section block,
+// delivers that line once. A fallback that is not a string is no piece, and is descended into in
+// the alphabetical tail like any other container.
 //
 // measure is the message's own text, with Slack's entities resolved, while a rich_text object is
 // still to be measured against it, and empty once one has been. rich_text is the only kind name
@@ -1247,26 +1260,52 @@ func slackWalkPieces(value any, measure string, visit func(string) bool) bool {
 			}
 			measure = ""
 		}
-		var yielded []string
-		for _, key := range slackWalkKeys(node) {
-			text, isString := node[key].(string)
-			switch {
-			case !isString:
-				if !slackWalkPieces(node[key], measure, visit) {
-					return false
-				}
-			case strings.TrimSpace(text) == "" || slices.Contains(yielded, text):
-				// No word to read, or this object's own word under a second of its names.
-			default:
-				yielded = append(yielded, text)
-				if !visit(text) {
-					return false
-				}
-			}
+		if fallback, isString := node[slackFallbackField].(string); isString && strings.TrimSpace(fallback) != "" {
+			return slackWalkFallback(node, fallback, measure, visit)
 		}
+		return slackWalkObject(node, measure, visit)
 	case []any:
 		for _, item := range node {
 			if !slackWalkPieces(item, measure, visit) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// slackWalkFallback reads an object that carries fallback, a string holding a word: every other key
+// of it first, through slackWalkObject, with visit wrapped to note whether the subtree yields
+// fallback, then fallback itself unless it did. Only such an object pays for the wrapper, so every
+// other object's pieces reach visit with no call in between.
+func slackWalkFallback(node map[string]any, fallback, measure string, visit func(string) bool) bool {
+	said := false
+	if !slackWalkObject(node, measure, func(piece string) bool {
+		said = said || piece == fallback
+		return visit(piece)
+	}) {
+		return false
+	}
+	return said || visit(fallback)
+}
+
+// slackWalkObject reads an object's keys in the order slackWalkKeys gives them, as slackWalkPieces
+// describes: a string under a display name is a piece unless the object has already yielded it
+// under another, and every other value is descended into.
+func slackWalkObject(node map[string]any, measure string, visit func(string) bool) bool {
+	var yielded []string
+	for _, key := range slackWalkKeys(node) {
+		text, isString := node[key].(string)
+		switch {
+		case !isString:
+			if !slackWalkPieces(node[key], measure, visit) {
+				return false
+			}
+		case strings.TrimSpace(text) == "" || slices.Contains(yielded, text):
+			// No word to read, or this object's own word under a second of its names.
+		default:
+			yielded = append(yielded, text)
+			if !visit(text) {
 				return false
 			}
 		}
@@ -1292,7 +1331,9 @@ func slackOwnWordsOnly(value any, own string) bool {
 // slackWalkKeys is the order an object's keys are read in: the display names it carries, ranked as
 // slackDisplayFields ranks them, then its remaining keys alphabetically. A remaining key whose
 // value is a string is left out: a string under a name Slack does not display is not a word a
-// person reads, and a string is nothing to descend into, so such a key can contribute nothing.
+// person reads, and a string is nothing to descend into, so such a key can contribute nothing. A
+// string fallback is left out with them, because slackWalkFallback reads it once the rest is read;
+// a fallback holding anything else is a remaining key like any other.
 func slackWalkKeys(node map[string]any) []string {
 	var keys []string
 	for _, field := range slackDisplayFields {
