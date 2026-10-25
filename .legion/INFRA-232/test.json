@@ -2,19 +2,18 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-232",
-  "completed": "2026-10-25T14:05:00Z",
-  "headTested": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a (docs/kubernetes.md byte-identical to code head 81e2fa83374f515a0badcbbc5f6133ac22129e40, compared with cmp)",
-  "ci": "Tests run 40198850552 (lint, typecheck, test) success, Legion Envoy and Contracts run 40198850664 success, PR Title run 40198850653 success, all at 81e2fa83374f515a0badcbbc5f6133ac22129e40; read on GitHub, not re-run.",
+  "completed": "2026-10-25T14:10:00Z",
+  "headTested": "a640505e6e3d10e651da1cf6e4745896c8c2ffe2 (round 2). The real-surface runs below ran at ea9496984ee3c7ff5d09f1722e2c944b7902fd4a; the commits since then change only .legion/INFRA-232/, and docs/kubernetes.md at a640505e is byte-identical (cmp) to ea949698 and to code head 81e2fa83374f515a0badcbbc5f6133ac22129e40, so the runs stand.",
+  "ci": "Tests run 40198850552 (lint, typecheck, test) success, Legion Envoy and Contracts run 40198850664 success, PR Title run 40198850653 success, all at code head 81e2fa83374f515a0badcbbc5f6133ac22129e40; read on GitHub, not re-run. The daemon's record shows checksVerdict green at a640505e (a skip-checks handoff head).",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Re-ran P1, P3 and P5 independently at the PR head under new generated names, and P2 and P6; every observation matches the implementer's. The proof is rejected only as recorded: its A1, A6 and A7 entries, the PR body's E2E (implementer) line and that line's [recorded runs] link name head 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7, which is no commit, so a reviewer cannot check the proof against GitHub. The real code head is 81e2fa83374f515a0badcbbc5f6133ac22129e40. The A2-A5 entries name 91847e71e8a16c9741c6ff057e98c87099e7336d, which is correct."
+    "verdict": "verified",
+    "how": "Round 1: re-ran P1, P3 and P5 independently under new generated names, and P2 and P6; every observation matched the implementer's. Round 1 rejected the proof only as recorded, because its head SHA named no commit. Round 2: implement.json's A1, A6 and A7 entries, the PR body's E2E (implementer) line and its [recorded runs] link now name 81e2fa83374f515a0badcbbc5f6133ac22129e40. gh api repos/sjawhar/legion/commits/<sha> resolves it and every other full SHA in the body and implement.json, and the link answers HTTP 200. The only remaining copies of the old SHA are quotes in implement.json's round-2 note and in the tester's own history."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "A1 (plan section 5: A1's headSha is the head that merges), and the proof rule that every proof records the head SHA it ran at and an E2E line links its run",
-      "evidence": "implement.json proof entries A1, A6 and A7 have headSha 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7; the PR #2195 body's E2E (implementer) line says 'at head 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7' and links https://github.com/sjawhar/legion/blob/81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7/docs/kubernetes.md#L3245-L3268. `gh api repos/sjawhar/legion/commits/81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7` -> HTTP 422 'No commit found for SHA'; curl of the link -> 404; the same URL at 81e2fa83374f515a0badcbbc5f6133ac22129e40 -> 200, and `jj log -r 'main..@-' -T commit_id` shows 81e2fa83374f515a0badcbbc5f6133ac22129e40 as the code head. Only the first 12 hex characters are right. Fix: correct the SHA and the link in the PR body and in implement.json (a handoff-only push). No repository test can pin a record in a PR body or a handoff, so this failure carries no red test; the two commands above show it. The documentation change itself passed every check below."
-    }
+  "failed": 0,
+  "failures": [],
+  "rounds": [
+    {"round": 1, "head": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a", "verdict": "fail", "failure": "The proof's headSha and the E2E (implementer) link named 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7, which is no commit (HTTP 422 / 404)."},
+    {"round": 2, "head": "a640505e6e3d10e651da1cf6e4745896c8c2ffe2", "verdict": "pass", "change": "A handoff and PR body correction only: docs/kubernetes.md unchanged, every recorded SHA resolves, and the elision sweep over the body and implement.json finds 0 hits."}
   ],
   "proof": [
     {
