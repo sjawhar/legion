@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-188",
+  "completed": "2026-10-25T04:38:00Z",
+  "planDocument": "dispatch://INFRA-188/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase's own rules — one commit per logical path, the pull request body template and its E2E lines, the push procedure and the handoff gate this issue's implementer is held to.",
+      "dispatch-first: every write this change makes to Dispatch (the proof fixtures in project SMOKE, any ask) is preceded by the search that skill requires.",
+      "dispatch: the proof creates, moves and closes issues with the dispatch command; this skill owns how an issue is created, claimed, moved and closed, and what a reason must say.",
+      "ce-simplify-code: the simplify pass over the executor and contracts edits before the phase completes, as skill://legion-worker/references/pr-body.md requires."
+    ],
+    "test": [
+      "legion-worker: the tester drives the application rather than re-running CI, writes its own E2E line and proof array, and completes with a verdict; that is this skill's contract.",
+      "dispatch-first: the tester's own proof fixtures are Dispatch writes, so its search and posting rules apply before any of them.",
+      "dispatch: the tester creates and closes its own fixtures in project SMOKE and must follow the issue-creation, status and close rules while doing it."
+    ],
+    "review": [
+      "legion-worker: the review round's order (read the code head's checks, push the handoff, review that head, then complete) and the review-thread rules are this skill's.",
+      "dispatch: the reviewer judges four texts agents read and the tool description, each of which is held to this skill's rules for what an agent-facing Dispatch instruction may say.",
+      "thermonuclear-deep-review: a diff-scoped correctness audit fits this change, whose one real hazard is a silently wrong PATCH body (a rank object with no neighbour moves the issue to the bottom of its board)."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: `rank: {}` is not a no-op — the server falls through to lastProjectRank and moves the issue to the bottom of its project's board, so the natural spread spelling would make every ordinary `dispatch issue-update --status testing` drop its issue to the bottom.",
+        "answer": "Plan T2.2 builds the `rank` key only when at least one of `before`/`after` is a string, and T4 pins it with a recorded-fetch test asserting a status-only call sends a body with no `rank` key at all; the tester re-runs the same shape live and re-lists the board."
+      },
+      {
+        "finding": "F2: retiring `notifications.role.backlog-order` leaves a session with no Legion controller (skills/dispatch ships to every session with Dispatch) no escalation address.",
+        "answer": "Plan T5(a) names both worlds: the controller at `notifications.role.legion-<project>-controller` where a Legion deployment runs one, and saying it on the issue where none does. The planner decided this wording rather than asking, since R3 settles that the controller is named; it is called out to the architect in the completion report."
+      },
+      {
+        "finding": "F3: 'four texts' under-counts — packages/pi-envoy/AGENTS.md:278, packages/envoy-client/README.md:355-356 and packages/contracts/AGENTS.md:64 also state the retired rule, and skills/dispatch/references/issues.md:7 repeats a priority-first order.",
+        "answer": "Plan T6 rewrites the three guides and the published command table; recorded as spec departure 2. issues.md:7 is deliberately left: it is how an agent chooses work, not the daemon's admission rule, and the spec's non-goals name priority — reported to the architect as its own decision."
+      },
+      {
+        "finding": "F4: A1's two clauses are not checkable as written — `--dry-run` prints the tool arguments, never the PATCH body, and no expected printed string is given.",
+        "answer": "Plan T2.3 fixes the printed forms exactly (`rank -> before KEY`, `rank -> after KEY`, `rank -> after KEY, before KEY`), T4 asserts the PATCH body in a recorded-fetch test, and the proof table names the live command for each form."
+      },
+      {
+        "finding": "F5: A4 is a prose grep with no pattern, an ambiguous expected hit count for `backlog-order`, and a scope that misses the committed claude-envoy mirror.",
+        "answer": "The proof table's A4 row gives five exact greps with their expected output (`backlog-order` exactly at skills/legion-controller/SKILL.md:59 and backlog-stewardship.md:11; no `\"rank\"` in skills/; `--before` in the two rewritten places; no 'highest priority, then board rank'; no 'not settable here' in packages/contracts/src/), plus the skills-guard tests and `bun run check-dist` for the mirror."
+      },
+      {
+        "finding": "F6: the fate of the `## Board rank, priority, and assignee on a read` heading is unsettled, and it is a live skill:// anchor.",
+        "answer": "Plan T5(b) renames it to `## Board rank, priority, and assignee`, keeps the read bullet, drops the raw-request bullet with its ACTOR_KIND note, and T5(c) rewrites the one link to it in the same change; the skills-guard anchor test is the check."
+      },
+      {
+        "finding": "F7: `--before ''` collides with this command's 'empty clears' convention, and nothing said whether an empty value counts as a field.",
+        "answer": "Plan T1.2 counts any string, empty included, as a field, so the call reaches the server and gets the server's `rank neighbor must name another issue`; T1.4's argument text says an empty value is refused and is not a clear; the proof table runs it as an A2 row. The plan also records that a closed issue accepts the move."
+      },
+      {
+        "finding": "F8: the executor block already binds locals named `before` and `after` (the issue read before the PATCH, and the PATCH's answer).",
+        "answer": "Plan T2.1 names the new locals `rankBefore` and `rankAfter` and leaves the existing locals untouched, so the diff stays inside the new lines."
+      },
+      {
+        "finding": "F9: ISSUE_UPDATE_FIELDS_RULE has a verbatim second copy in the contracts test, and the spec names only dist/ as generated output.",
+        "answer": "Plan T3.1 edits the test copy at dispatch-tools.test.ts:120-121; T7 regenerates dist/ and legion/ with one `bun run build` and checks with `bun run check-dist`; recorded as spec departure 3."
+      },
+      {
+        "finding": "F10: A4 reads as deleting the `rank: 'a0'` refusal assertion, which is the guard for the ruling that the tool takes flat arguments and no nested rank object.",
+        "answer": "Plan T3.3 renames the test and rewrites its comment but keeps that assertion, explicitly as the no-nested-object guard under `strict: true`."
+      },
+      {
+        "finding": "F11: 'the three packages that change' is wrong; five change.",
+        "answer": "Plan T8 names all five (contracts, envoy-client, pi-envoy, pi-legion, claude-envoy) with what each records; recorded as spec departure 1."
+      },
+      {
+        "finding": "F12: proving against live production Dispatch has side effects the spec does not bound (issues created in triage, assigned to a person, a message posted on close, NATS events).",
+        "answer": "The plan's proof section bounds it: three fixtures in project SMOKE named as fixtures, moved to todo, used only as each other's neighbours so no real card's rank changes, carrying no `legion` label so no tree can start from them, each closed with a reason at the end and its key recorded on the pull request; the cluster-Job Postgres route is named as the fallback and its three gate commands were measured `yes` from this pod."
+      },
+      {
+        "finding": "F13: correcting the admission rule leaves 'set the coarse priority and board rank together' unexplained.",
+        "answer": "Plan T5(c) rewrites the whole step: rank carries the plan's order (the daemon admits by rank alone) and priority is the signal people and filters read, which changes no order; line 4-5 of the same file is corrected with it."
+      },
+      {
+        "finding": "F14: claims checked — the board drag sends the same field, the server owns every refusal, Legion admits by rank alone, the flags follow from the schema with no CLI edit, and no Go mirror of the tool's argument list exists.",
+        "answer": "The plan cites these file:line facts rather than restating them, and marks the live-Dispatch facts (bun install, the tree-built command reaching production, no Docker or psql, the kubectl gate answers) as the planner's own measurements of 2026-10-25."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 1 },
+  "specDepartures": [
+    {
+      "spec": "Design 3: 'the three packages that change record it in their changelogs'.",
+      "plan": "Five packages change and each records an entry: @legion/contracts and @legion/envoy-client for the code, @sjawhar/pi-envoy and @sjawhar/pi-legion because they ship the two edited skill trees, and @sjawhar/claude-envoy because its committed dist/ and legion/ carry the tool strings and the controller skill.",
+      "evidence": "scripts/pi-plugin-prepack.sh:36-38 partitions skills/dispatch to pi-envoy and skills/legion-controller to pi-legion; packages/claude-envoy/scripts/build.ts writes both dist/ and legion/, and .github/workflows/envoy-and-contracts.yaml:745-773 runs check-dist over them.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Design 3: 'Four texts agents read change with the code'.",
+      "plan": "The four skill and tool texts change, and so do three package guides and one published page that state the retired rule and would be left false: packages/contracts/AGENTS.md:64, packages/envoy-client/README.md:355-356, packages/pi-envoy/AGENTS.md:278, docs/site/src/content/docs/dispatch/for-agents.md (the Issues row).",
+      "evidence": "Each of the three guides says 'rank, the board's own order, is not exposed' or 'strict: no rank'; the published table lists what dispatch issue-update changes and omits the board move.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Design 3: 'The built copies of these strings under packages/claude-envoy/dist are made by that package's build'.",
+      "plan": "The same `bun run build` also regenerates the committed packages/claude-envoy/legion/ tree, which carries the controller skill this change rewrites; both are committed and checked by `bun run check-dist` and tests/legion-plugin-fresh.test.ts.",
+      "evidence": "packages/claude-envoy/scripts/build.ts generates legion/ beside dist/ and --check covers both; packages/claude-envoy/legion/skills/legion-controller/references/backlog-stewardship.md:26 is the committed copy of the rewritten link.",
+      "outcome": { "kind": "unchanged" }
+    }
+  ],
+  "tasks": [
+    "T1 packages/contracts/src/dispatch-tools.ts: the fields rule, issueUpdateProblem, the description, and the two flat optional arguments before/after after repo.",
+    "T2 packages/envoy-client/src/dispatch-execute.ts: read them as rankBefore/rankAfter, send rank only when one is given, print `rank -> before KEY` / `rank -> after KEY` / `rank -> after KEY, before KEY`.",
+    "T3 packages/contracts/src/dispatch-tools.test.ts: the rule's test copy, the accepted single-field rows, and the renamed rank test that keeps the no-nested-object assertion.",
+    "T4 packages/envoy-client/src/__tests__/dispatch-execute.test.ts: a recorded-fetch test for the three move shapes and for a status-only call sending no rank key.",
+    "T5 skills/dispatch/references/issues.md:12 and :42-45, skills/legion-controller/references/backlog-stewardship.md:4-5 and :21-26.",
+    "T6 packages/contracts/AGENTS.md:64, packages/envoy-client/README.md:355-356, packages/pi-envoy/AGENTS.md:278, docs/site/src/content/docs/dispatch/for-agents.md.",
+    "T7 cd packages/claude-envoy && bun run build, then bun run check-dist.",
+    "T8 one CHANGELOG entry in each of the five packages.",
+    "T9 bunx biome check ., bunx tsc --noEmit, bun test for the five packages, then the live proof on production Dispatch and the pull request."
+  ]
+}
