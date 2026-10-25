@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-215",
+  "completed": "2026-10-25T11:40:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2193",
+  "codeHead": "16ed0a2fcc4cfe277a6e0098a852ab22b2d71248",
+  "proof": [
+    {
+      "criterion": "A role whose reachability check ends in a refusal after the full wait is told, where it reads the result, that the workload is reachable and never listened, and what to look at (its log and the port its Service fronts), distinct from the two readings already there.",
+      "surface": "The implementer's role container of this deployment, against the cluster its projected credential reaches; the sequence block extracted from docs/kubernetes.md at the head (116 lines, extract sha256 994dccaa805c...), only the issue key and the two declaration lines filled in from a private file under TMPDIR.",
+      "command": "vrun.py V2 --fixture 's|targetPort: 5432|targetPort: 5433|' (driver under $TMPDIR/infra215/impl: render.sh substitutes the three bracketed lines, applies the one fixture line, runs `bash <rendered block>`, timestamps output); captures https://github.com/sjawhar/legion/pull/2193#issuecomment-6397168183",
+      "observed": "2026-10-25 11:29-11:30Z: after 60 s `never answered: ConnectionRefusedError: [Errno 111] Connection refused` then `reading: reachable, and nothing listens on that port: read the pod's status, log and ports printed below`; the trap then printed the pod line (Running, with labels), the log tail, the container state (running) and `port 5432 -> targetPort 5433`, deleted the Job, listing empty, exit 1. Stopped servers (V3 invalid postgres setting, V3b container exiting at once): Ready, same refusal reading, pod `Error`, log and container state (FallbackToLogsOnError) both carrying the server's last line.",
+      "headSha": "16ed0a2fcc4cfe277a6e0098a852ab22b2d71248",
+      "negativeControl": "Same extract, other single-line fixtures: reachability label line removed (V4) -> `TimeoutError: timed out` with the label reading; address renamed (V5b) -> `gaierror: [Errno -2] Name or service not known` with the name reading; as published (V1) -> `answered`, exit 0."
+    },
+    {
+      "criterion": "Whatever is written is driven from a role container against a workload in that state, rather than reasoned about.",
+      "surface": "Same role container and cluster; same extract at the head.",
+      "command": "vrun.py V1 --xtrace (as published); vrun.py V3 / V3b (server stops on its own configuration / at once); quota read every 10 s by quota-poll.sh",
+      "observed": "V1: Ready 79 s after submission on a cold machine, `answered` 2.1 s later, trap's `kubectl delete job --cascade=foreground` returned in 6.0 s, `kubectl wait --for=delete service/...` in 0.1 s, `kubectl get job,service <name> --ignore-not-found` printed nothing, pods listing `No resources found`, exit 0. Jobs' quota requests.cpu peaked at 48 with twelve runs and read 0 after the last delete.",
+      "headSha": "16ed0a2fcc4cfe277a6e0098a852ab22b2d71248",
+      "negativeControl": "V7: SIGKILL to the sequence's bash during the Ready wait -> no trap, Job left (listed by `kubectl get jobs`); the published recovery lines with the printed name removed it in 1.7 s, `kubectl wait --for=delete` exit 0, listing empty."
+    },
+    {
+      "criterion": "F4/F5 (banked): the clean-up is a trap that runs on any exit short of SIGKILL, and a stopped role has a line that removes what it left.",
+      "surface": "Same role container and cluster; same extract at the head.",
+      "command": "vrun.py V6a (--sig SIGTERM --target pid, Ready wait), V6b (SIGHUP group, Ready wait), V6c (SIGINT group, check), V6d (SIGINT pid, check), V6e (SIGTERM group, check), V6f (SIGINT group, Ready wait), V5a (Service selector job-name, refused by admission)",
+      "observed": "Group signals ran the trap within 0.1-0.6 s and left nothing; SIGTERM to the bash alone during the Ready wait ran it 76 s later when the wait returned (exit 143); SIGINT to it alone during a refused check ran it 58 s later when the check ended (exit 130); V5a: Service refused at apply, the trap deleted the Job within 6 s while its pod was Pending, exit 1.",
+      "headSha": "16ed0a2fcc4cfe277a6e0098a852ab22b2d71248",
+      "negativeControl": "V7 SIGKILL: trap did not run, Job remained until the recovery line removed it."
+    }
+  ],
+  "filesChanged": [
+    "docs/kubernetes.md",
+    "skills/legion-worker/references/tools.md",
+    "packages/claude-envoy/legion/skills/legion-worker/references/tools.md (generated: bun run build; bun run check-dist passes)",
+    "docs/solutions/legion/a-pod-rehearses-a-checkpoints-own-readers-over-its-session-and-probes-the-release-rootfs-under-unshare-before-asking-for-a-four-hour-run-LEGION-578.md"
+  ],
+  "trickyParts": [
+    "The bash tool is not a bash process, so the sequence is written to a mktemp file and run as `bash \"$sequence\"`; a trap typed into the tool's shell would never fire. T0 measured (local, then on the cluster) that a signal to the process group runs the trap at once and one to the bash pid alone runs it only when the foreground step returns.",
+    "A server that stops on its own configuration, and even a container that exits the moment it starts, was reported Ready by `kubectl wait --for=condition=Ready` (no readiness probe), so it shows at the check as ConnectionRefusedError, not at the Ready wait.",
+    "`kubectl logs` of an exited pod timed out (kubelet unreachable) in 2 of 8 stopped-server runs, so the Job sets `terminationMessagePolicy: FallbackToLogsOnError` and the trap prints the container state from the API as well.",
+    "The Service's ownerReference is written without blockOwnerDeletion, so `--cascade=foreground` waits for the pod but not the Service; the trap waits for the Service explicitly. `kubectl wait --for=delete` on an absent object exits 0 silently.",
+    "Fixture runs under $TMPDIR/infra215/impl: extract.sh (awk from `sequence=$(mktemp` to `bash \"$sequence\"`), render.sh + private.env (the three bracketed lines), vrun.py (one fixture line, one optional signal). The tester can reuse them; private.env holds the deployment's label and compute-class lines.",
+    "Fourteen sequences submitted within four seconds made one Service apply fail `Conflict` on the namespace's quota object; recorded in the evidence passage; the trap cleaned it."
+  ],
+  "deviations": [
+    "Documentation only: the prose and the block were written directly rather than through a deep-worker, since each sentence is tied to a capture made in this session.",
+    "Beyond the plan's T5 list: the trap also prints the pod's labels (`--show-labels`, so the TimeoutError reading can be followed after the pod is gone) and the container state, and the Job sets FallbackToLogsOnError, because the log read failed in 2 of 8 stopped-server runs.",
+    "T7 adds a fourth case under ConnectionRefusedError that the plan did not name: a pod still `Running` may be a server listening elsewhere or one still starting a minute after Ready.",
+    "The evidence passage's INFRA-215 bullet records only runs at the final block (extract 994dccaa805c); the trap paragraph's 31 s foreground-delete figure and the 2-of-8 log-read count include earlier runs of this issue with the same trap and wait lines."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "packages/pi-legion skills-guard test fails locally on legion-architect/SKILL.md (51,256 bytes at base 3ff60972, untouched here); current main has it at 33,651 bytes, so the PR's merge ref carries the fix."
+  ]
+}
