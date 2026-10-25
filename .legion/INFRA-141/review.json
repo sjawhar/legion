@@ -2,57 +2,45 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-25T19:30:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T20:15:00Z",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 3,
-  "round": 8,
-  "whyAFullRound": "A second conflict-forced merge against main (69b76b4ba86c), resolving against the two siblings that landed first, #2189 (INFRA-250) and #2164 (INFRA-246). The fingerprint at the reviewer's last submitted review (edc4b892afa81ad33af8d8041df001737b22fab2, review 5643682740, APPROVED) is 1f31363f1bdf2e3f... and at this head 6205a0f758f720e0..., which differ, so the thermonuclear pair ran again.",
-  "mergeConfinement": "Recomputed per file: 34 files before, 29 after. 27 byte-identical; two changed (scripts/README.md and scripts/e2e-local.sh, both by the deletion below); five left the diff entirely (.github/workflows/envoy-and-contracts.yaml, internal/testnats/local.go, internal/testnats/nats.go, internal/testnats/nats_test.go, scripts/e2e-local.test.sh) because main now owns the in-process server, so they are no longer differences from main at all. NOTHING ENTERED - no file appears in the branch's diff that was not there before.",
-  "deletionVerified": "By identifier search across packages/ and .github/, not by file: ENVOY_TEST_NATS_BIN, E2E_NATS_SERVER, E2E_NATS_CONTAINER, LocalServerEnv, startLocalServer and accountSecret return nothing. local.go is gone. The workflow's nats_image scrape step is gone, the script declares no nats_image and runs no container, and e2e-local.test.sh's scrape case is gone - the coupling the reviewer flagged before the round, which round one broke once, moved together. The forge observation rather than the argument: envoy-e2e-local job 121256612049 at the code head has step 6 = 'Refusal test for e2e-local.sh' where it was 'Pull the NATS image the script starts', and step 7 Local end-to-end acceptance completed/success.",
-  "exposureReassessed": "The random per-test-binary NATS account password this change added in round three is gone with local.go, and accounts are back to user tN / password tN. That does not reopen the exposure it closed: #2189's server binds 127.0.0.1 only (internal/testnats/nats.go:383,477 and cmd/natsd/main.go:47), and internal/bus/remote_nats_test.go:236-256 keeps its remote guard testable by putting a relay of the test's own on a non-loopback address that forwards to the loopback server. That is strictly better than either the reviewer's original -a 127.0.0.1 proposal or the drawn password that replaced it: the port is closed outright and the guard still runs.",
-  "siblingHunksPresent": "INFRA-246's delivery.go change is present at delivery.go:316-317 in its merged wording ('90 seconds - DEFAULT_HEARTBEAT_MS ... three missed heartbeats') and its main.go boot line at 719-724; this change's nil-deferral-set panic is intact at delivery.go:277-279 and its one shared set at main.go:799. Both hunk sets present and mutually consistent. They no longer appear in the branch's own diff because they are the base's now, which is why delivery.go is among the 27 byte-identical files.",
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/scripts/e2e-local.sh:25-26",
-      "description": "The usage() text a developer reads from `e2e-local.sh --help` still says 'NATS runs in Docker, or as a local nats-server process on a host that has no container runtime.' Neither is true at this head: the script builds and starts internal/testnats/cmd/natsd, which the file's own header comment at :5-6 says correctly, so the one file contradicts itself twenty lines apart and the only thing --help says about where NATS comes from is wrong in both halves. Introduced by this round, which deleted the mechanism and left the sentence. Both thermonuclear passes found it independently. Two lines."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/dispatch_resolution_test.go:137-138",
-      "description": "The comment above this rig's deferral set makes two claims the code does not support. 'One deferral set per handler, as main.go builds it' is the inverse of what main.go does: main.go:799 builds one set for the process and shares it through deliveryConfig with every handler, which is the invariant that took three rounds to establish and whose absence was the round-two blocking finding. And 'an agent delivery this rig cannot place is held here and retried rather than acknowledged away' is false of this rig: it never sets unplaceableRetryWindow, so the window is zero and delivery.go gives such a message up on its first delivery. Added by the previous round's merge; the previous round's security pass half-flagged it and the reviewer let it through as an observation, which was the reviewer's error to correct here. Two lines."
-    },
-    {
-      "severity": "minor",
-      "file": "pull request body, Threads, thread PRRT_kwDORFy7ds6wAwgM",
-      "description": "The disposition line reads 'no production change - the cancellation window does not exist, ensureConnWithContext's reconnect wait selects on ctx.Done()'. The window does exist and is narrowed rather than closed: ensureConnWithContext returns at the top of its loop on IsConnected||IsDraining without consulting ctx, its ctx.Done() arm sits only in the select taken when the connection is down but not closed and beside a 10 ms timer Go may pick, and a successful connectWithContext returns nil whatever the context did. The same body's Not proven / risk entry says so and says it supersedes implement.json's identical claim - so the body now contradicts itself, and the merger quotes this body into the READY packet, which lands on the Dispatch issue permanently. One clause."
-    }
+  "minor": 0,
+  "round": 9,
+  "note": "No approved-head field is stamped here. The approval lives on GitHub at the head this handoff's own push makes, and nothing is written into this file afterwards; round seven's error, a stamp that put a commit above the approved head, is not repeated.",
+  "roundNineFindingsClosed": [
+    "scripts/e2e-local.sh usage(): checked by running `bash scripts/e2e-local.sh --help` rather than by reading the diff. It now prints 'NATS is a server of this checkout's own build (internal/testnats/cmd/natsd), so no container runtime is needed', which matches the file header at :5-6. Identifier search over e2e-local.sh, e2e-local.test.sh and the workflow returns no docker, nats-server, E2E_NATS_SERVER, E2E_NATS_CONTAINER, ENVOY_TEST_NATS_BIN, LocalServerEnv or startLocalServer attributable to this rig; the workflow's remaining docker hits belong to other jobs, and its one `docker pull mirror.gcr.io/library/nats:2.10` is the envoy-client job's credential tests, not envoy-e2e-local, whose two steps are now the refusal test and the acceptance.",
+    "cmd/listener/dispatch_resolution_test.go:137-142: the comment is replaced, and each of its claims was checked against the mechanism rather than against the other texts. 'main.go builds one for the whole process and passes it through deliveryConfig' holds: main.go:799 makes one set and :805, :842 and :926 all build their handlers from that same deliveryConfig. 'its unplaceableRetryWindow is zero' holds: the identifier appears in that file only inside the comment itself, so the rig never sets it. 'nothing here is ever deferred' follows: delivery.go:788-790 leaves windowDeferrals at 0 when the window is 0, and the gate at :812 is metadata.NumDelivered <= windowDeferrals, false for every delivery, so take is never called.",
+    "The pull request body's Threads record for PRRT_kwDORFy7ds6wAwgM and its Not proven / risk entry now both say narrowed-not-closed and name the same three mechanisms. They agree, and each is separately true of ensureConnWithContext: the loop's top returns nil on IsConnected()||IsDraining() without consulting ctx, the ctx.Done() arm sits only in the down-but-not-closed select beside a 10 ms timer, and a successful connectWithContext returns nil whatever the context did. Agreement was treated as necessary and not sufficient, as the reviewer told the architect it would be."
   ],
-  "notHeld": "File growth (delivery.go 728 -> 1,019), owned by dispatch://INFRA-410, which both passes point at again; it changes no behaviour, hides no error and breaks no gate. The readiness-probe finding of the previous round is retired with the code it described: the process backend it named no longer exists.",
+  "noThermoThisRound": "The fingerprint differs (6205a0f758f720e0... -> 8e14c1adf3209a50...), which by the letter makes this a new round. It was settled by measurement instead: NO EXECUTABLE BYTE CHANGED since the last review. The comment-stripped AST of dispatch_resolution_test.go is byte-identical at both heads, sha256 192d7659d97345fc56bb, 17803 bytes each from 26862- and 27214-byte sources; and e2e-local.sh outside its usage() heredoc is byte-identical, sha256 49e480eb013ebdb0017c, with the whole-file diff four lines. The fingerprint moved only because comments and heredoc prose are lines in a diff. On that measurement the docs-only carve-out applies in fact, so no pair ran and the pair's verdicts at abac2fa64c5927bcdd29d2c0aabcace56fcc5d77 stand.",
+  "aTrapCaughtWhileMeasuring": "The first AST attempt printed two equal hashes of e3b0c44298fc1c14 - the sha256 of empty input - because `go run strip.go file.go` took the second .go path as another source file and compiled nothing to stdout, and a later attempt read zero bytes because jj -R resolves paths from the cwd rather than the repo root. Two equal hashes of nothing would have read as 'identical'. Recorded because it is the same shape as the compare predicate that answers true over an empty file list: a well-formed answer to a question that was never asked.",
+  "crossFamilyCheck": "ASKED FOR BY THE ARCHITECT AND ANSWERED BY SEARCH, NOT BY RECOLLECTION. This pull request's record contains no claim, verified or otherwise, about which model or provider served any review or either thermonuclear pass. Corpus: all posted reviews, every review comment, every issue comment and the live body concatenated (215268 bytes), the four committed handoffs, and the branch's whole diff against its fork point. Terms: claude, anthropic, openai, gpt, opus, sonnet, haiku, gemini, cross-family, resolvedModelIsFallback, model family, served by, and the bare words model and provider. The words model and provider occur zero times as whole words in the entire corpus; every other term returns nothing. The six apparent opus hits are all the substring oPus inside the identifier ErrNoPushTarget / ReasonNoPushTarget, printed with context rather than counted. docs/solutions/ carries no INFRA-141 learning yet, so retro's writing is outside this check and needs its own. The boundary: this covers what READY carries - the GitHub surface and the committed handoffs - and not Envoy messages between roles.",
+  "keyFindings": [],
   "ciRead": {
-    "ciHead": "69b76b4ba86cff03078805960aed90da35fd93aa",
-    "prHead": "abac2fa64c5927bcdd29d2c0aabcace56fcc5d77",
-    "compare": "ahead by two files, .legion/INFRA-141/implement.json and .legion/INFRA-141/test.json, printed and read.",
+    "ciHead": "2d318c6473d9",
+    "prHead": "5da0bb894e997071e8ec79e3f17c50a27fd698b7",
+    "compare": "ahead by one file, .legion/INFRA-141/test.json, printed and read rather than inferred from a predicate that answers true over an empty list.",
     "requiredChecks": [
       "lint",
       "typecheck",
       "test",
       "pr-title"
     ],
-    "observed": "All four success. envoy-e2e-local success (job 121256612049) with step 7 Local end-to-end acceptance completed/success and step 6 now the refusal test rather than the image pull. broker-multiprocess, build, changes, dispatch-multiprocess, envoy-infra-go and envoy-smoke success; envoy-go, envoy-go-race, dispatch and dispatch-memory still running and none required. A request for changes does not wait on them."
+    "observed": "All four success. envoy-e2e-local success (job 121265623957), read as a step list: step 6 Refusal test for e2e-local.sh and step 7 Local end-to-end acceptance both completed/success. broker-multiprocess, build, changes, dispatch-multiprocess, envoy-infra-go and envoy-smoke success; envoy-go, envoy-go-race, dispatch and dispatch-memory still running, none required, and the approval waits on nothing at the handoff commit."
   },
-  "thermonuclear": {
-    "head": "abac2fa64c5927bcdd29d2c0aabcace56fcc5d77",
-    "ran": "both passes at the reviewed head",
-    "result": "Both CHANGES, and neither on the merge. Both independently found the stranded --help text; the security pass additionally found the rig comment. Every finding was verified in the code by the reviewer before it was recorded."
-  },
+  "residualsCarried": [
+    "The cancellation window at the acquisition instant, narrowed and not closed, with the body's Not proven / risk entry the governing text and superseding implement.json's line that it does not exist.",
+    "deliveryOutcome.exceptionFailureRetries, unreachable and pre-existing, verified at refs/heads/main and routed by the architect.",
+    "The publish route's role-holder read outside sendRequestBudget; the unplaceableDeferrals orphan case, unreachable at a 72-hour MaxAge against a 60 s window; the retired WARN and delivery_status label with no in-repo consumer but possible external dashboards; capability_refused and role_lapsed asserted by no test."
+  ],
+  "staleNumbers": "The container-only skip set is cmd/listener 4 at this head, where earlier rounds recorded 22, 18 and 15. The previous rounds' readiness-probe finding retired with the process backend it described.",
   "threads": {
-    "openedByReviewer": 23,
+    "openedByReviewer": 25,
     "unresolvedByReviewer": [],
     "botThreadsAccepted": [],
-    "note": "Twenty-three threads, every one the reviewer's own, all resolved, read in gh api graphql at this head. The merge opened none. Finding 3 is in the body's Threads record rather than in a thread."
+    "note": "Twenty-five threads, every one the reviewer's own, all resolved, read in gh api graphql at this head. No bot opened one on this pull request at any point."
   },
-  "staleNumber": "The container-only skip set is now cmd/listener 4 - the Postgres-backed dispatch-resolution tests - where earlier rounds recorded 22, 18 and 15, and internal/bus, session, store, kvwatch and cistore are at none. Any later role quoting an earlier number is quoting a dead one."
+  "fastFollow": "dispatch://INFRA-410 owns the file growth. It changes no behaviour, hides no error and breaks no gate, and did not hold the merge."
 }
