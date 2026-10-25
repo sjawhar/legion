@@ -51,8 +51,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   host restores the address it was sent with (the docked composer's and the phone thread
   composer's reply, an Agents row's reply and issue). An entry leaves when its send lands - the
   store refreshes what it wrote whether or not a composer is mounted - or when the reader discards
-  its refusal; a reload loses every entry, as it loses the page, and what the reader wrote over a
-  refusal goes back to the entry as its composer unmounts. Sending closes a `Discard draft?`
+  its refusal; a reload loses every entry but a keyed send's (below), as it loses the page, and
+  what the reader wrote over a refusal goes back to the entry as its composer unmounts. Sending
+  closes a `Discard draft?`
   prompt, mention suggestions, and a reference picker; Escape raises no prompt or ends no reply; the reference
   picker and an upload's Retry wait for the answer; and Conversation and Agents hold every Reply,
   and Agents its issue picker, from Send's own task on, by reading the send from TanStack's
@@ -61,20 +62,31 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   sees. A refusal therefore hands back exactly the draft that was sent, over nothing written since,
   and Discard only ever drops a send that has its answer. A send has a client deadline
   (`SEND_DEADLINE_MS` in `send-request.ts`, 30 s), and it is not a refusal: a comment that
-  mentions agents can take the server longer. A send to one session is distinct: it has an
+  mentions agents can take the server longer. Past it the request goes on under
+  `pastDeadlineKey` (`hooks/useSending.ts`), and its answer is still the send's outcome - a
+  success clears the draft and refreshes what it wrote (`refreshAfter` in `held-sends.ts`), a
+  refusal hands the draft back with Retry. Until then the composer says `Still sending — the
+  server has not answered in 30 seconds. The draft stays here until it does.`, offers no Retry,
+  and holds its draft, and every Reply and issue pick still holds; only a host's Back, Escape and
+  Collapse thread let go (`useSending`'s `untilDeadline`), so a request that hangs never keeps a
+  reader in front of it. A send to one session is the keyed exception: it has an
   `idempotency_key` minted with the request, each attempt is bounded by
   `KEYED_SEND_ATTEMPT_MS` (15 s), and a transport failure, timeout, 5xx, 429, or a 2xx whose
   message's one attempt is still pending (another request is sending it, or a sender that died
   holds its claim, which Dispatch resumes for the first repeat after the claim lapses) retries
-  under that same key after 1 s, 2 s, 4 s, and so on up to 30 s; another 4xx is its refusal. The
-  held-send store keeps that keyed send under the session's `agentSendKey`, so the Agents row and
-  the live view share it across navigation. Past the send deadline it says that Dispatch has not
-  confirmed the message and it keeps trying; **Stop trying** ends retries only between attempts,
-  lets an in-flight attempt settle, and returns a refusal whose Retry sends the identical request
-  under the same key. A success clears the draft and refreshes the written data; a refusal hands
-  the draft back with Retry. Other sends retain the existing `Still sending` behavior, and only a
-  host's Back, Escape, and Collapse thread let go, so a request that hangs never keeps a reader in
-  front of it.
+  under that same key after 1 s, 2 s, 4 s, and so on up to 30 s; another 4xx is its refusal
+  (`sendKeyedAgentMessage`). The held-send store keeps that keyed send under the session's
+  `agentSendKey`, so the Agents row and the live view share it across navigation, and in
+  `sessionStorage` - its request, key, draft and state - so a reload resumes it under its key,
+  which makes the resend safe, and a refusal it held shows again; a send that lands or is
+  discarded leaves storage, and while any keyed send is unconfirmed a `beforeunload` handler asks
+  the browser to confirm leaving. Past the send deadline it says `KEYED_SEND_LATE_TEXT` (`Still
+  sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered
+  once.`) in place of the plain `Still sending`, and holds its draft, Reply and the picker as any
+  late send does; **Stop trying** ends retries only between attempts, lets an in-flight attempt
+  settle, and returns a refusal (`SendStoppedError`) whose Retry sends the identical request
+  under the same key. A broadcast is keyed the same way (`features/agents/BroadcastSends.tsx`,
+  below).
   An upload carries its target as its own mutation variable, taken by the paste or drop that
   starts it, so a pick in that task moves the next message, never the file.
   On a phone, a comment's thread opens full-screen over the Conversation. The docked composer stays
@@ -209,26 +221,69 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   the refused send back would replace it. The reason shows under the send's row, and Restore
   draft is described by it.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
-  browser API boundary.
+  browser API boundary. A GET waits `REQUEST_DEADLINE_MS` (30 s) for its response's headers: one
+  Dispatch has not started answering by then is aborted and fails with `RequestTimeoutError`,
+  which the queries' shared retry policy retries as it does a dropped connection, and once the
+  headers arrive the body downloads without that deadline, however long it streams. Every other
+  method has no deadline unless its caller names one (`RequestBounds.deadlineMs`, which covers
+  the body too; a keyed send's attempt passes `KEYED_SEND_ATTEMPT_MS`).
 - `features/agent-view/` owns the live view (`/agents/:sessionId/live`), the one route that does not scroll the document: `app.tsx` gives it (the routes `routeFillsViewport` in `features/refs/routes.ts` names) a viewport-tall shell (`h-dvh`, `h-screen` where dynamic viewport units are missing) whose `<main>` is a flex column, the page takes all of it, and the thread is its only scroller, so the page header and the composer stay on screen at any height. `index.html`'s `interactive-widget=resizes-content` makes Chromium on Android shrink that shell for the on-screen keyboard; iOS Safari shrinks only the visual viewport, so while the composer has focus `features/shell/useKeyboardFit.ts` caps `<main>` at the visual viewport's bottom edge (`offsetTop + height`, so a panned visual viewport counts), keeping the composer one page gutter above the keyboard. On Chromium Android the same cap equals `<main>`'s own height and changes nothing. Every other route keeps document scrolling, which `ViewportAnchor` and the sticky composers depend on.
   The transcript owns its scrolling (`features/agent-view/use-live-follow.ts`), and all four of assistant-ui's auto-scroll options are off on its viewport (`autoScroll`, `scrollToBottomOnInitialize`, `scrollToBottomOnRunStart`, `scrollToBottomOnThreadSwitch`): with them off the library plants no scroll intent and performs no scroll, and Dispatch does all of it. The library's own `thread.runStart` handler scrolled to the bottom every time the session started a turn without asking where the reader was, which was the complaint; its scroll-up detector requires `scrollHeight` to be unchanged, so it never notices a reader scrolling back while a turn streams; and the follow flag it would then keep is internal, so nothing outside the library can clear it. `@assistant-ui/react` is pinned to an exact version, so re-reading those four options and that handler is part of any upgrade of it: a default that moves takes the reader's place away again with nothing failing. The viewport also carries `[overflow-anchor:none]` (the same utility the desktop sidebar wears in `app.tsx`), so the hook's own compensation is the only adjustment the transcript ever makes and no scroll event the browser wrote arrives for the hook to tell from the reader's - WebKit, which has no scroll anchoring to turn off, and Chromium therefore behave alike. The viewport is at the live end when its scroll bottom is within a pixel of its content's, or the transcript is shorter than the viewport. A fall in `scrollTop` is the reader taking over and stops following, whether or not a turn is streaming; the one fall no reader made is a shrink's clamp (a fold collapsing, a rebuild that is shorter), which by definition lands at the live end and is read as following there. While the reader is not following, the transcript shows `Jump to latest`, or `Jump to latest · N new`, centred just above its foot: the control is the viewport's sibling and out of flow, so it changes neither `scrollHeight` nor `scrollTop`, moves the composer nowhere, and can never cover it. N counts every turn added to the merged transcript since the reader scrolled back, whoever wrote it - the session's own turns, the viewer's messages, anything anyone else sent it - and a hidden tab keeps counting, with no cap, as the live view's unread marks already do. An own send the session accepted (the page counts only an accepted one, so a refusal, which renders above the transcript, leaves a reader scrolled back where they are), a move to another session, and a reload each land at the live end. So does a rebuild of the whole transcript from the session's replay (`useAgentStream`'s `replays`: the first connection, a reconnect, and a new session's first replay) that dropped the turn the reader was on, which a replay answered newest-first inside a budget routinely does; a rebuild that still carries that turn puts it back where the reader had it, found by a hit test at the viewport's own top edge rather than a scan over every turn (`features/shell/ViewportAnchor.tsx` makes the same choice). One turn keeps one key across a rebuild, which every rendered turn carries in `data-message-id`: the `turn` mark where a streamed turn took a stored Dispatch message over (`dispatch-marks.ts`, set in `AgentRuntimeThread`), and the message's own id otherwise, so the streamed frame and the stored `dispatch:<id>` copy that replaces it are one turn. The issue page's `Jump to latest` (`features/conversation/`, above) is a pill of its own with rules of its own: it scrolls the window with the newest turn pinned at the top under the composer, this one scrolls the transcript element with the newest turn at its foot.
   A rebuild's turns are not always in the DOM when its ids arrive: assistant-ui applies a rebuilt transcript in a passive effect, one commit after the render carrying the new `contentIds`, so the hook holds the rebuild and watches the viewport's `[data-message-id]` set, settling the reader's place in the commit the turns themselves changed in. Compensating against the transcript still on screen would move them by nothing and leave their place wherever the rebuild put it. The hook is handed the viewport element itself, not a ref holding it, so the fresh node the error boundary renders when a reset clears its error re-binds the scroll listener and both observers and lets the old one go.
 - `web/src/api/live-socket.ts` owns the one `GET /ws/live` socket per `QueryClient`, the delivery
   view subscriptions, `useLiveSocketState`, and the shell's `useLiveSocketPill`. It reconnects
   subscriptions from their delivery revisions or event cursor: a 4001 rotation reopens at once
-  without a gap, a 1012 restart reopens at once after marking a gap, and every other loss backs
-  off. A socket silent for 45 s is replaced; after two minutes reconnecting the pill says live
-  updates are not reaching this page and offers Reload. `api/event-feed.ts`'s `useEventFeed`
-  subscribes the `events` view, starts its cursor from `whoami.event_head` when present, adopts
-  `events_start` only when it has no cursor, and maps every event to the query keys it refreshes.
-  After a gap it refreshes the whole cache and re-asks a held credential list, once, at the feed's
-  next `events_start`; after a rotation it does neither. An events subscription Dispatch ends
-  before it started (a database that does not answer ends each a second after it is sent) is sent
-  again after the backoff an events `error` gets, from 1 s doubling to 30 s, rather than at once.
-  `features/agent-view/useAgentStream.ts` subscribes each agent view through the
-  same socket and rebuilds its transcript from the session replay. Query keys remain literal arrays
-  at their call sites (`["issue", key]`, `["issues", "project", project]`, `["artifact", id]`,
-  `["project", project, "artifacts"]`, `["ask-thread", id]`, …), with no key-builder module.
+  without a gap (a reopen that fails is then a loss like any other), a 1012 restart reopens at
+  once after marking a gap, and every other loss backs off, 1 s doubling to 30 s, give or take a
+  quarter. A socket silent for 45 s is replaced, a handshake that never ends included; `offline`
+  lets the socket go at once, `online` opens one at once, and a `visibilitychange` to visible
+  replaces a socket that went silent while hidden. A socket refused before it opened, or closed
+  with 1008, reads `["whoami"]` again, at most every 30 s, so a person who was signed out reaches
+  the sign-in page. After two minutes reconnecting the pill says live updates are not reaching
+  this page and offers Reload.
+  `api/event-feed.ts`'s `useEventFeed` subscribes the `events` view, starts its cursor from
+  `whoami.event_head` when present (`AuthGate` mounts the app, and so every read it makes, only
+  once that answer is in, so the first subscription replays exactly what committed since), adopts
+  `events_start` only when it has no cursor, advances the cursor before it reads an event (one it
+  cannot read is skipped by the next resume rather than replayed), and maps every event to the
+  query keys it refreshes (`eventQueryKeys`). Those invalidations coalesce in a leading 100 ms
+  window (`INVALIDATION_DEBOUNCE_MS`): the first event of a burst schedules the refresh, and later
+  ones join it without extending it. An ask or comment event refreshes only the document it names
+  — the ask's `block_artifact` or its `anchor.artifact_id`, a comment's `anchor.artifact_id` — and
+  no document when it has neither; `message.*` refreshes no document (so an artifact page's
+  `Referenced by` list picks up a new citation from a message or an un-anchored comment on its next
+  refetch — focus or staleTime — not live); `["projects"]` (the sidebar's open-ask counts)
+  refreshes on `ask.opened` / `ask.answered` / `ask.resolved`, not on an edit.
+  `ask.follower_added` / `ask.follower_removed` carry the ask under `ask_id` and refresh that
+  ask's read and thread. Every issue-keyed event is also prepended to its `["events", key]` log
+  the moment it arrives (`prependEventToLog`; only an event with no `issue_key` is skipped), ahead
+  of the debounced refetch; that refetch's read can predate an event the feed already delivered,
+  so the Activity tab's `["events", key]` query reconciles every response through
+  `mergeEventPages` (inside its `structuralSharing`): the response is authoritative for the range
+  it covers, and cached events above its head stay in front of it, never wiped and re-fetched. The
+  Conversation's `useFollowLatest` (`features/conversation/use-follow-latest.ts`) follows the
+  newest card alone: it re-settles the reader at that card when it changes while they are still
+  at the top, or after their own send, and leaves them where they are once they have scrolled
+  away. After a gap — any reconnect but a 4001 rotation whose next socket opens: a lost or
+  replaced socket, a first handshake that failed, an events subscription Dispatch ended or
+  refused — the feed refreshes every query the app holds but the Delivery and Pipeline pages'
+  live views (`meta.live`, skipped by `api/query-refresh.ts`), which their own subscriptions keep
+  current, and re-asks a held credential list, once, at the feed's next `events_start`, however
+  many sends it took to start again; the page can briefly show its earlier reads, but no event
+  committed during the gap stays absent. After a rotation it does neither. A whole-cache refresh,
+  a gap's or an unreadable event's, runs at most once a `WHOLE_CACHE_REFRESH_MS` (5 s). An events
+  subscription Dispatch ends before it started (a database that does not answer ends each a
+  second after it is sent) is sent again after the backoff an events `error` gets, from 1 s
+  doubling to 30 s, rather than at once. `features/agent-view/useAgentStream.ts` subscribes each
+  agent view through the same socket and rebuilds its transcript from the session replay. Query
+  keys remain literal arrays at their call sites (`["issue", key]`,
+  `["issues", "project", project]`, `["artifact", id]`, `["project", project, "artifacts"]`,
+  `["ask-thread", id]`, …) — one convention, no key-builder module; a component that needs the
+  same data as another reuses the same literal (the label popover reads the
+  `["issues", "project", project]` list the board and list load, through `projectIssuesQuery`, and
+  the Conversation reads the issue's comments under the `["comments", key]` the margin already
+  holds, and its asks under `["asks", key, "thread"]`, beneath the margin's `["asks", key]`, so
+  every invalidation of that key reaches it).
 - `web/src/main.tsx` installs React Router and the shared Query client.
 - `web/src/features/search/` owns the global palette and the rail `Search` control. It opens in one of three modes (`PaletteMode`): `all` - `Ctrl/Cmd+K` and the rail control - lists this page's actions and the search hits, `search` (`/`) lists hits alone, and `projects` (`g p`) lists the projects, Enter opening one. Each open is a global keymap binding in `app.tsx`, and the palette registers its own `Ctrl/Cmd+K` close in the `dialog` scope while open. The palette's dialog is mounted only while it is open, so each open starts on its first row and a closed palette holds no search of its own; `Ctrl/Cmd+K` and `g p` open with an empty query, since a query left there would filter a new page's actions, or its projects, down to nothing, while `/` reopens on its last search, selected so that typing replaces it, since its hits do not depend on the page. The action rows are `appKeymap.actions()`, taken on the render that opens the palette (the registry bullet below says why), so the rail control and `Ctrl/Cmd+K` offer the same rows for the same page and focus; with an empty query they all render under `Actions`, above the `Type at least 2 characters` message, and a query filters them by label. An action whose label the query starts stays under `Actions`, above the hits; one that holds the query further in (`issue` in `Close issue`, `status` in `Move card to the next status`) moves to `More actions`, below the hits, so a search and Enter opens a hit rather than running an action that only shares a word with it. Actions, projects and hits are one list of `role="option"` rows, so the arrows, Enter and `aria-activedescendant` cover all three, and an action row shows the keys that also run it (a palette-only action has none). The highlight is the row the reader sees highlighted, held by its id rather than a position: hits that arrive below the actions after the reader has arrowed, or a refetch that re-ranks them, leave it on that row; a new query returns it to the head, and so does its row leaving the list, the head then keeping it when the row comes back. The head is the first row unless the list holds only `More actions`: then nothing is highlighted and Enter runs nothing until the reader arrows, Down to the first row and Up to the last. While the query's search is still out, the arrows walk only the rows above where its hits will go, and with none they do nothing, so a key pressed before the answer cannot land on a `More actions` row that the hits then arrive above. A refresh that fails keeps the hits the query already has, and `Search failed.` shows only when it has none. The dialog is a column no taller than the screen below it, in which only the list scrolls; the list keeps one row's height, so a short window cuts the key hints and then the message rather than the row, and it scrolls the highlighted row into view whenever the highlight moves or the list's own height changes. It groups hits by their issue or standalone project-document owner; document-owned hits use the document name and `/projects/:key/documents/:slug` route, adding an ask or comment query parameter for discussion hits. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node. It queries between 2 and `SEARCH_QUERY_MAX` (`@legion/contracts/dispatch-tools`, 1,000) characters of trimmed text, the server's own bounds, and names the limit in place of a request past it.
 - The palette lists one page of hits, `GET /api/v1/search`'s first 20 in the server's fused order (`packages/envoy/cmd/dispatch/README.md`, "Search"), grouped under each owner in the order of its first hit. When the query matches more than the page holds, the message slot under the list says `Showing the best <n> of <total> matches`, so a partial list never reads as complete.
@@ -242,13 +297,37 @@ through the page's one `GET /ws/live` socket, Dispatch answers with the
 changed, and the client writes both into the query cache (`lib/applyDelta.ts`). Nothing reads again
 on focus, reconnect, or a timer. While the socket is open the freshness row
 (`SourceFreshness`, `lib/freshness.ts`) says Live with the time of the last change the page applied,
-and Reconnecting in red while the socket is lost. A 4001 rotation resumes without a gap; another
-loss refreshes ordinary queries after the socket reopens. Until the timeline's configuration record
-exists, Dispatch refuses the view with a `DELIVERY_NOT_CONFIGURED` error frame, which the client
-raises as the GET route's `404` and the shared retry policy takes as definitive
-(`isDeliveryNotConfigured`), and the page renders `Set up the delivery timeline`, one sentence on
-what it will show, and `DeliverySettingsForm` in the timeline's place, under the same `Delivery`
-heading.
+and Reconnecting in red while the socket is lost. Every reconnect resumes the view from the change
+and revisions it holds: a 4001 rotation shows nothing of it, and any other loss also refreshes the
+page's ordinary queries once the event feed starts again. Dispatch sends the freshness verdict it
+holds right after each subscription's first answer, so a verdict that changed while the socket was
+down, or while the page held no delivery view, shows once the view is back. Until the timeline's
+configuration record exists, Dispatch refuses the view with a `DELIVERY_NOT_CONFIGURED` error
+frame, which the client raises as the GET route's `404` and the shared retry policy takes as
+definitive (`isDeliveryNotConfigured`), and the page renders `Set up the delivery timeline`, one
+sentence on what it will show, and `DeliverySettingsForm` in the timeline's place, under the same
+`Delivery` heading. The page decides that from the last answer that settled and holds it while a
+new subscription is out, because starting one (a Retry) clears the query's error, and switching on
+it would unmount the form and the draft typed into it. An answer that settles on anything else
+shows that instead: the timeline, or the failure with Retry. Dispatch refuses the view exactly when
+no record is stored, so the page hands the form `initial={null}` and the form reads nothing: its
+fields start empty at once, with placeholders saying what each holds, because this repository is
+public and no deployment's values ship in it. Settings renders the same form as its
+`Delivery timeline` section, after Architecture sources, where the record is changed later; there
+it reads `GET /api/v1/settings/delivery` under `["delivery-settings"]` and starts from the stored
+record (empty, as above, when that answers `null`). Either way the fields are keyed by the record's
+`updated_at`, so a save, or another record handed in, starts them over from that record. A required
+field holding only whitespace, or a required list holding only separators, is kept empty, so the
+browser's `required` check refuses it before the server's `400 DELIVERY_SETTINGS_INPUT` would.
+Save sends `PUT /api/v1/settings/delivery` with each list split on line breaks, commas and spaces,
+shows a refusal under the form as the server wrote it (`409 DELIVERY_SETTINGS_ACCESS` when the
+GitHub App cannot read the deploy repository), and on success invalidates `["delivery-settings"]`
+and every `["delivery", …]` read that is not live (an open run's drill-down). The live views learn
+of the save from Dispatch: the delivery hub keeps a refused view's subscription on the socket and
+answers it with its snapshot once a configuration exists. The `owner/repo` fields here and in
+Settings share one `pattern`, `ownerRepoPattern` in `features/settings/classes.ts`, which the
+browser compiles with the `v` flag, so its `/` is escaped inside each class; `e2e/settings.e2e.ts`
+checks the browser refuses `a/b/c` against it.
 
 The configured page ports the prototype's timeline view (`dispatch://LEGION-567`): the facet column (`FacetPanel`, every option counted by the server's `facet_counts`), the controls row (Timeline/List, `Color merges by`, Swimlanes), `Timeline` (an ECharts canvas, loaded only in the route's chunk), `PRList` and `DrillDown`, with `colorBy`, `lanes`, `mode` and the brush window (`ws`/`we`) kept in the URL and dropped there at their defaults. The chart is pointer-only, as the prototype's is: its host is `role="img"` with a label summarising the window, and List mode is the keyboard path. The list's rows are one tab stop with arrow, Home and End keys and Enter to open, and a deployed row's "deployed" opens its deploy run's drill-down, which is a dialog (`useDialog`). One deviation from the prototype: the waiting-to-deploy line counts the pull requests still waiting at the read window's start (the timeline's `waiting`) and every tracked merge of the window, so the brush narrows its time range and never its population; the prototype dropped every merge before the visible window and drew a stuck pull request as zero.
 
@@ -435,12 +514,14 @@ the SPA learns so from the pending list itself, never a separate capability flag
 `200` with `null` (every other credential route answers `404 FEATURE_OFF`), since every page reads
 that list for the `Needs you` badge and a 404 made each page of a deployment without a broker log a
 failed request. The server reads its broker setting once, at boot, so `credentialPendingQuery` holds
-a `null` answer until the page reloads or the events subscription reconnects: the query is not
-fetched again while its data is `null` (`enabled` is false) - not when another reader mounts, on a
-focus, or when the event feed refreshes every query - but a reconnect, the one moment the server
-may have restarted with a broker configured, asks it once more over the held answer
-(`reaskHeldCredentialList`, from `api/event-feed.ts`), so nothing blinks while it is out and a list
-that comes back makes it an ordinary query. `features/inbox/Inbox.no-broker.test.tsx` holds both.
+a `null` answer until the page reloads or the event feed starts again after a gap (any reconnect
+but a 4001 rotation whose next socket opens, `api/live-socket.ts` above): the query is not fetched
+again while its data is `null` (`enabled` is false) - not when another reader mounts, on a focus,
+or when the event feed refreshes every query - but the feed's first `events_start` after a gap,
+the one moment the server may have restarted with a broker configured, asks it once more over the
+held answer (`reaskHeldCredentialList`, from `api/event-feed.ts`); a rotation, which no restart
+caused, asks nothing. Nothing blinks while it is out, and a list that comes back makes it an
+ordinary query. `features/inbox/Inbox.no-broker.test.tsx` holds both.
 `CredentialRequestsSection.tsx`
 mounts in `features/inbox/Inbox.tsx`, above the ask sections and outside its
 roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row shows a kind
@@ -684,9 +765,9 @@ code `4409` (`DOCUMENT_SCHEMA_CLOSE_CODE` in `packages/contracts`) before any sy
 `connection.ts` stops the provider and calls `onOutsideSchema`, where `ProofDocument` tears the
 editor down and admits again after 0, 1, 2, 4 and 8 seconds for successive refusals; the sixth in a
 row stops reconnecting and asks for a reload, and a socket that syncs ends the run. Later refetches
-of the text - every `artifact.version` event and every reconnect of the events subscription that
-refreshes it - leave a connected editor alone whether they succeed or fail, so an outage that
-answers them 500 or 503 keeps the editor and the edits it holds.
+of the text - every `artifact.version` event, and the whole-cache refresh the event feed runs after
+every gap - leave a connected editor alone whether they succeed or fail, so an outage that answers
+them 500 or 503 keeps the editor and the edits it holds.
 
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
 version for the session. It passes that schema to the live editor, historical-version editor, and
@@ -971,7 +1052,15 @@ wherever it means "mounted but hidden" it needs `toHaveCount(1)` beside it. A hi
 screen for every purpose: its list marks nothing read (`open` is expanded and not hidden).
 `e2e/sends.ts` holds what a send needs from the network and the clipboard: `holdPosts` and
 `refusePosts` hold a route's `POST`s until released or refused, as a slow or failing server
-would, and `pasteFile` pastes a file into a field as the clipboard does (`pastePicture` a PNG).
+would. `refusePosts` takes the refusal it answers (`Refusal`: status, code and reason; a 503 from a
+server that is down by default), and throws before it routes anything when that is a 5xx or a 429
+on the agent-messages route: a send to one session tries those again under its key rather than
+taking them as a refusal, so a row that needs one refused passes `MESSAGE_REFUSED`, a
+`400 MESSAGE_INPUT`. `keyed-send.e2e.ts` runs the keyed send against the real server: the first
+`POST` to a session reaches Dispatch through `route.fetch()` and its answer is then dropped
+(`route.abort`), or a server that is down answers it 503; either way the page tries again under
+the same key, the fake Envoy records one send, and the composer clears with no refusal.
+`pasteFile` pastes a file into a field as the clipboard does (`pastePicture` a PNG).
 `pictures.e2e.ts` pastes a picture into an issue message, an ask's answer and a direct message
 and checks each `<img>` loads from its version's bytes route; it also writes a picture line into
 a spec and checks the live editor and a past version draw it from that route, that a markdown
@@ -1110,10 +1199,16 @@ routes for the last window it applied and writes whether the pull request ids, r
 measure are equal, exiting 1 when one does not. `docs/site/src/content/docs/dispatch/delivery.md`
 ("For agents") is its user's guide. `e2e/__tests__/delivery-live-probe.test.ts` (`bun run test`)
 runs it as a process against a Bun websocket server that replays `packages/contracts/fixtures/live`
-and holds the body it applies to `after.json`.
+and holds the body it applies to `after.json`. It also checks that the probe reopens at once
+after a 4001 and after a 1012: its second subscribe arrives within 500 ms of the close, where any
+other close waits out a first backoff of at least 750 ms.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Where a caret lands beside
+`e2e/keyboard-agents-picker.e2e.ts`, `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`.
+Of the live-socket spec only its one-socket row (`a tab holds one live socket for every live
+view`) runs outside `chromium`, here and in `firefox`: a tab holds one live socket in every engine,
+and WebKit is the one iOS Safari uses for every subscription the row opens; each of its other
+rows skips outside `chromium`, since its proof needs to run once. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`), which holds only because every engine
@@ -1145,19 +1240,19 @@ reader's by counting rendering frames, not milliseconds, since a busy page can d
 task (CI's WebKit did), and a text change in the margin opens that window too: a `dispatch://` reference resolving to
 its title can resize an ask card and make Firefox or WebKit anchor the margin's scroll.
 
-The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` and the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
+The `webkit-iphone` project runs, in WebKit with the iPhone 13 profile, four rows of `e2e/agent-view.e2e.ts` (the live view's phone layout, its Jump to latest, a capped model name, and a document-scrolling route the keyboard cap leaves alone), the rows of `e2e/phone-conversation.e2e.ts` titled `covers none of`, which check what the Conversation's floating pills cover on a phone (the stuck live-updates pill's Reload among them), `e2e/delivery-live.e2e.ts`'s `on a phone the delivery page` row, and `e2e/live-socket.e2e.ts`'s one-socket row: iOS Safari is the engine the keyboard cap and those layouts exist for, and the `iphone` project is Chromium. Its project `grep` selects those rows by title, so renaming any of them silently drops its WebKit run with no failure; rename the `grep` with it. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so the live view's rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
 No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (the count falls by one, with no error), then restore it. Repeat it whenever the `grep` or the titles change.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts`, `e2e/deep-links.e2e.ts`,
-`e2e/keyboard-agents-picker.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
+`e2e/keyboard-agents-picker.e2e.ts`, `e2e/live-socket.e2e.ts`, `e2e/offline-edits.e2e.ts`, and
 `e2e/picture-link-click.e2e.ts`: Firefox's native editing puts text typed over a code block's last
 line before that line's newline, and deletes a paragraph's hard break along with the text after it,
-which Chromium and WebKit never do, so that spec is the one that needs a second engine; the picker
-and deep-links specs run for the reasons given under `webkit` above; and a click on a link inside
-the editor meets the engine's focus rule — Firefox focuses the editing host, not the link — so the
-picture view's fallback link is clicked there too. CI installs Firefox beside Chromium for them
-(`bun run e2e:install` does the same locally).
+which Chromium and WebKit never do, so that spec is the one that needs a second engine; the picker,
+deep-links and live-socket specs run for the reasons given under `webkit` above; and a click on a
+link inside the editor meets the engine's focus rule — Firefox focuses the editing host, not the
+link — so the picture view's fallback link is clicked there too. CI installs Firefox beside
+Chromium for them (`bun run e2e:install` does the same locally).
 
 The `chromium-plain-http` project runs `e2e/plain-http-origin.e2e.ts` and
 `e2e/plain-http-proxy.e2e.ts`, selected by file name: Chromium maps `dispatch-e2e.test` to
@@ -1170,8 +1265,11 @@ loopback - what a LAN address, a tailnet name or the phone of the manual check g
 for itself: a request whose `Host` is not `dispatch-e2e.test:<PLAIN_HTTP_PORT>` is answered
 `421 HOST_MISMATCH` before anything is forwarded, since the proxy sends the target's own `Host`
 upstream and would otherwise sign in a page that reached loopback by any name. It sets no idle
-timeout, since the live socket can be quiet between the server's 15 s heartbeats, and ends each
-upstream request when its browser request ends, so a closed page leaves the server no subscriber.
+timeout (`idleTimeout: 0`): a request the server under test is slow to answer sends nothing while
+it waits, and Bun's default 10 s idle timeout would cut it, while the browser and the server keep
+deadlines of their own. A closed page leaves the server nothing: each upstream request carries its
+browser request's `signal`, so it ends when that request does, and the proxy's websocket `close`
+handler closes the upstream socket when the page's live socket closes.
 The origin spec's two tests sign in by opening the dev sign-in route through the proxy
 (`asPlainHttpUser` in `e2e/users.ts`), then open a document and type a paragraph into it, and
 check a comment body renders formatted - block ids and Markdown bodies both mint through

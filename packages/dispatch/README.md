@@ -172,15 +172,19 @@ docker rmi "ghcr.io/sjawhar/legion/envoy:${acceptance_image_tag}"
 
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
-The suite has six projects. `chromium` and `iphone` run every spec except the two plain-HTTP specs;
-the iPhone project uses Chromium with iPhone 13 viewport, touch, and user-agent emulation. `webkit`
-runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor differs by
-engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
+The suite has seven projects. `chromium` and `iphone` run every spec except the two plain-HTTP
+specs; the iPhone project uses Chromium with iPhone 13 viewport, touch, and user-agent emulation.
+`webkit` runs `e2e/collab-cursor.e2e.ts`, since where a caret lands beside a collaborator's cursor
+differs by engine, and `firefox` runs `e2e/code-line-replace.e2e.ts`, since Firefox's own editing
 mishandles text typed over what follows a block's last line break; both also run
-`e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch.
-`webkit-iphone` runs the live view's two phone-layout rows of `e2e/agent-view.e2e.ts`, and the
-rows of `e2e/phone-conversation.e2e.ts` that check what the Conversation's floating pills cover, in
-WebKit with the iPhone 13 profile, since iOS Safari is the engine those layouts exist for.
+`e2e/keyboard-agents-picker.e2e.ts`, whose keyboard rule rests on each engine's select dispatch,
+and the one-socket row of `e2e/live-socket.e2e.ts`, since a tab holds one live socket in every
+engine (`AGENTS.md` lists the rest of each project's specs). `webkit-iphone` runs the live view's
+phone rows of `e2e/agent-view.e2e.ts`, the rows of `e2e/phone-conversation.e2e.ts` that check what
+the Conversation's floating pills cover, the phone row of `e2e/delivery-live.e2e.ts` and the
+one-socket row, in WebKit with the iPhone 13 profile, since iOS Safari is the engine those layouts
+exist for. `firefox-download-navigation` runs the `e2e/shell.e2e.ts` row that fails a chunk after
+a Download link was followed.
 `chromium-plain-http` runs `e2e/plain-http-origin.e2e.ts` and `e2e/plain-http-proxy.e2e.ts`, with
 the page opened at `http://dispatch-e2e.test:<PLAIN_HTTP_PORT>` (Chromium maps that name to the
 local proxy), a plain-HTTP origin that is not loopback and so not a secure context. The proxy
