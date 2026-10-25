@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -226,8 +227,11 @@ func (a *Admission) wakeForFreeSlot(ctx context.Context, tx pgx.Tx, released []s
 const todoWakeDelay = 30 * time.Second
 
 // slotFree says whether an admission slot stands free: fewer slots in use than the cap, counting a
-// slot a waiting root will take as taken. The controller is woken about it and takes nothing for
-// it; only a person hands Legion work (skill://legion-controller, "Free slots").
+// slot a waiting root will take as taken. A root promotion skips because it waits on an unfinished
+// Dispatch issue (waitsOn) will take none, so it hides no free capacity from the project: the
+// controller hears of the slot and may hand Legion work that can actually run. The controller is
+// woken about it and takes nothing for it; only a person hands Legion work
+// (skill://legion-controller, "Free slots").
 func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if a.cap <= 0 {
 		return false, nil
@@ -240,8 +244,18 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("list admission slots: %w", err)
 	}
+	rows, err := a.mirror(ctx, tx)
+	if err != nil {
+		return false, err
+	}
 	own := ownSlots(issues, slots)
-	return len(own)+len(record.Waiting(issues, own)) < a.cap, nil
+	taking := 0
+	for _, waiting := range record.Waiting(issues, own) {
+		if len(waitsOn(rows, waiting)) == 0 {
+			taking++
+		}
+	}
+	return len(own)+taking < a.cap, nil
 }
 
 // wakeController queues a controller notice of kind on issue, due at dueAt, when a controller is
@@ -485,6 +499,9 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 			if err != nil {
 				return err
 			}
+			// The carry's own test is startedRun, deliberately and only that: what the child waits
+			// on is not read here. A hand-over moves work already under way into a root of its
+			// own, and promotion admits such a candidate whatever its links say (waitsOn).
 			if !handover.Cancelled && root != nil && root.LingersAt(handover.Generation) {
 				a.log.Info("admission hand-over", "issue", stored.Key, "tree", handover.Tree, "linger", handover.Generation)
 				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, startedRun(stored))
@@ -515,7 +532,8 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 // It is the direct equivalent of the daemon-authored event path, but cannot be mistaken for an
 // ordinary daemon todo echo because it carries the persisted fence identity. It logs the hand-over
 // as the event path does, marked as the outbox's, once it commits: the live proof tells the two
-// consumers of a person's labelled todo (this, or admission's orphan carry) apart by it.
+// consumers of a person's labelled todo (this, or admission's orphan carry) apart by it. Its carry
+// is the event path's: startedRun, and not what the child waits on.
 func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.Handover) error {
 	stored, err := a.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || stored == nil {
@@ -607,6 +625,31 @@ func readmittable(stored record.Issue) bool {
 // a hand-over's event, the outbox's direct consumption, and a person's labelling of an orphan.
 func startedRun(issue record.Issue) bool {
 	return issue.Phase != phase.Admitted && issue.Phase != phase.Done
+}
+
+// mirror is this project's whole mirror of what Dispatch says each of its issues waits on, in one
+// query (record.Store.DispatchIssues). Admission decides inside a transaction that performs no
+// I/O, so it cannot ask Dispatch what a root is blocked by: it reads the rows the blockers.Mirror
+// handler wrote, this fact's own included, and judges them in memory. Every call that judges reads
+// them once, whatever the number of candidates it then judges.
+func (a *Admission) mirror(ctx context.Context, tx pgx.Tx) (map[string]blockers.Row, error) {
+	mirrored, err := a.store.DispatchIssues(ctx, tx, a.project)
+	if err != nil {
+		return nil, fmt.Errorf("list what the issues of %s wait on: %w", a.project, err)
+	}
+	return blockers.Rows(mirrored), nil
+}
+
+// waitsOn is what candidate still waits on, from rows: the issues Dispatch says it is blocked by
+// that are not done (blockers.Unfinished, which counts a blocker the daemon has no row of as not
+// done), and nothing at all for a candidate that carries a run (startedRun). An issue that carries
+// a run into a tree of its own — a handed-over child, a re-admitted tree — is work already under
+// way, and work already under way is never stopped and never re-checked, whatever its links say.
+func waitsOn(rows map[string]blockers.Row, candidate record.Issue) []string {
+	if startedRun(candidate) {
+		return nil
+	}
+	return blockers.Unfinished(rows, candidate.Key)
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
@@ -764,6 +807,12 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 // Reconcile deferred. The in-memory pending set itself only clears after that whole call's
 // transaction commits (see release), so without this, promote's own membership check would hold
 // every one of them back in the very call that released them.
+//
+// It reads the project's mirror of what Dispatch says each issue waits on once (mirror), for two
+// judgements: the candidates it skips here, and the held children of every live tree the engine
+// starts from the same rows once the waiting line is done with (StartUnblockedChildren). Every
+// path that promotes comes through here — a live fact, the controller tick, a hold's release, the
+// boot's Reconcile — so each of them is also a look at every child a blocker holds.
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, error) {
 	issues, err := a.store.Issues(ctx, tx)
 	if err != nil {
@@ -785,6 +834,10 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			return 0, fmt.Errorf("list admission issues: %w", err)
 		}
 	}
+	rows, err := a.mirror(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
 	own := ownSlots(issues, slots)
 	waiting := record.Waiting(issues, own)
 	admitted := 0
@@ -792,6 +845,16 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		candidate := waiting[0]
 		waiting = waiting[1:]
 		if respectHolds && a.held(candidate.Key) {
+			continue
+		}
+		// A root that waits on an unfinished Dispatch issue is skipped before any tree of its own
+		// is opened, and keeps its place in the waiting line: the next pass admits it, once the
+		// last issue it waits on is done. record.Waiting still carries it, deliberately — dropped
+		// from the waiting line it would make record.TreeLive false for itself, and its children
+		// would be recorded as orphans admitted as roots of their own. A blocked root stays the
+		// live tree of its children; it simply takes no slot (slotFree counts it as taking none).
+		if waits := waitsOn(rows, candidate); len(waits) > 0 {
+			a.log.Info("admission waits for what this root waits on", "issue", candidate.Key, "blockers", waits)
 			continue
 		}
 		if candidate.Key == candidate.Tree {
@@ -843,6 +906,12 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		slots, own = append(slots, slot), append(own, slot)
 		admitted++
 		a.logSlot(ctx, "taken", candidate.Key, len(own))
+	}
+	// The waiting line is roots; a child a blocker held is the engine's to start, from the issues
+	// and the mirror rows this call already holds. It runs here rather than in promote because
+	// release bypasses promote, and a hold's release is one of the looks every held child gets.
+	if err := a.engine.StartUnblockedChildren(ctx, tx, issues, rows); err != nil {
+		return admitted, err
 	}
 	return admitted, nil
 }
@@ -1035,6 +1104,10 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // workflow.ResumePhase, recorded before its start: a child of a re-admitted tree, and a root a
 // hand-over created, left awaiting its merge resume in merging, since the old tree's linger disarmed
 // the pull request (beginLinger) and only a new READY, whose merge the daemon submits, arms it again.
+//
+// What an issue waits on is deliberately not read here: every member this starts is mid-phase,
+// work already under way, and the only member it leaves at phase.Admitted is left alone anyway,
+// since RoleFor(phase.Admitted) is empty.
 func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
@@ -1097,6 +1170,10 @@ func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root re
 // its own live event, and a later todo observation of one already todo changes nothing. The
 // synthetic fact carries the child's own already-recorded fields: no live event reopened it, so
 // there is nothing newer to apply, only its own next generation to start.
+//
+// What a child waits on is deliberately not read here either: this re-enters a child whose
+// previous run finished (phase.Done), and Engine.ReenterChild's own entry withholds the start of
+// one that waits on unfinished work.
 func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, candidate record.Issue, issues []record.Issue) error {
 	for _, child := range issues {
 		if child.Key == candidate.Key || child.Tree != candidate.Tree {

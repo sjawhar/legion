@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -334,6 +335,17 @@ func HeldNotice(issue record.Issue) record.Notice {
 // root's own promotion made the tree live.
 func ChildReenteredNotice(child, root string) record.Notice {
 	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child, root)}
+}
+
+// ChildUnblockedNotice is the notice the tree's architect is told when a child it holds starts
+// because the last Dispatch issue that child waited on closed (Engine.StartUnblockedChildren).
+// waited is every issue it waited on, in Dispatch's own order, all of them done by now. It is the
+// same child-status kind a child's leave and a re-entry are told with — the daemon's notice
+// routing sends one on a non-root child to the architect that owns it — and not phase-finished:
+// no phase of the child ended, it is beginning its first.
+func ChildUnblockedNotice(child, root string, waited []string) record.Notice {
+	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf(
+		"%s starts planning under %s: every issue it waited on (%s) is done", child, root, strings.Join(waited, ", "))}
 }
 
 func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }
