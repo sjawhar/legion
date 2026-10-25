@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-122",
+  "completed": "2026-10-25T15:56:42Z",
+  "plan": "dispatch://INFRA-122/artifact/plan-md",
+  "base": "The branch had no commits of its own and pointed at 5c182bd1, an older main from before #2170; this handoff commit sits on main 371d6c87, so the branch fast-forwards and the implementer starts on the code the plan cites.",
+  "summary": "Opt-in ENVOY_SUBSCRIBE_ALL_TOPICS=1 (off by default; the hub's and Dispatch's grants refuse notifications.>). When on, a second bus.Connect client holds one core queue subscription notifications.> in its own group envoy-listener-live-<machine>; it drops subjects under notifications.role. or captured by the stream, reuses listenerDeliveryHandler with a no-retry liveDelivery mode, requires Topic == subject, and fans out. session.Deliverer reaches a session at the bridge (own machine), else its recorded Host, else today's fallback, with net.JoinHostPort. Subscribe refuses a port>0 registration with a malformed non-empty host. A denied live subscribe ends the start; /healthz reports live_topics and 503s on a dead live lane; shutdown drains it in 3 s (26 s total). The envoy-infra plugin gains ListenerConfig.SubscribeAllTopics and an optional subscribeAllTopics input on host:Listener and aws:WebhookListener; compose files set it; agent-infra's in-cluster listener sets it in the production record.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: push, pull request, E2E (implementer) line, simplify pass (references/pr-body.md), and the draft-PR before-run order in the plan's Integration section",
+      "envoy: the topic and delivery contract this changes; skills/envoy/SKILL.md is an edited file",
+      "ce-simplify-code: the simplify pass the pr-body reference requires"
+    ],
+    "test": [
+      "legion-worker: drive the changed surface and try to break it, read CI rather than rerun it (references/pr-body.md)",
+      "envoy: subscribe, publish and read deliveries when driving the listener"
+    ],
+    "review": [
+      "legion-worker: review and approval of the head (references/merge-gate.md, references/review-threads.md)",
+      "envoy: judge the delivery contract and the corrected text against how Envoy routes topics"
+    ]
+  },
+  "acceptance": [
+    {"criterion": "1. A serving-port session receives a topic the stream does not store within 2 s; fails before, passes after", "surface": "built envoy-listener, real NATS, fake serving port", "command": "cd packages/envoy && go test ./cmd/listener/ -run TestAServingPortReceivesATopicTheStreamDoesNotStore -count=1 -v (CI envoy-go; before-run on the draft PR's test-only commit, after-run at the change's head)"},
+    {"criterion": "2. Nothing else changes and nothing arrives twice", "surface": "built listener and unit suites", "command": "cd packages/envoy && go test ./..."},
+    {"criterion": "3. The bus permits what each listener does", "surface": "real listener under real nats-server per grant", "command": "cd packages/envoy/infra && go test -tags natslive ./core/ -run 'TestListenerAndCredentialFreeSessionsOnRealServers|TestHostPermissionsOnRealServers' -count=1 -v"},
+    {"criterion": "4. Text corrected", "surface": "the named files", "command": "grep -rnE 'receives nothing on such a topic|receives no team topic|INFRA-122|never the routing key' <the files listed in plan.md> prints nothing; cd packages/claude-envoy && bun scripts/build.ts --check"},
+    {"criterion": "5. A session is reached at its recorded host", "surface": "built listener; then production", "command": "cd packages/envoy && go test ./internal/session/ ./cmd/listener/ -count=1; production record: agent-infra PR moves envoy-cluster envoyImage and adds ENVOY_SUBSCRIBE_ALL_TOPICS=1, then a probe from the implementer's pod with host=<pod IP>"}
+  ],
+  "smoke": "No Docker in the pod: GOBIN=$TMPDIR/bin go install github.com/nats-io/nats-server/v2@v2.10.29; build ./cmd/listener; run nats-server -js and the listener with ENVOY_SUBSCRIBE_ALL_TOPICS=1; a python3 fake port answering 204; curl /v1/interests/subscribe with port and host, then /v1/messages/publish on notifications.team.smoke; one prompt within 2 s. Negative controls: the variable unset, and the parent commit's binary, print nothing in 4 s.",
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Host validation might reject an absent or empty host, breaking older plugins and the bridge fallback.", "answer": "Only a non-empty host on a port>0 registration is checked; empty or absent is accepted and falls back as today; a port-0 host is stored unchecked (decision 5; api_test case with no host stays 200)."},
+      {"finding": "A connected client plus a valid core subscription does not prove NATS accepted it (nats.go v1.50.0 records a subscribe denial without closing the sub), and the handle returned at startup goes stale after recovery.", "answer": "After SubscribeCore the live client flushes and a permission violation in LastError ends the start (exit 1) naming ENVOY_SUBSCRIBE_ALL_TOPICS; /healthz reads a new Client.CoreSubOK over the client's current subscription; a hub-grant natslive subtest proves the refusal and a bus recovery test proves the current handle (decision 6)."},
+      {"finding": "aws:WebhookListener renders its environment from explicit inputs, so a core field alone cannot enable it.", "answer": "Both host:Listener and aws:WebhookListener gain an optional subscribeAllTopics input (default false), aws also through envoy-infra render webhook-listener-env --subscribe-all-topics; hub and Dispatch renderings stay byte-identical (decision 1, task 6)."},
+      {"finding": "Two separately bounded drains can exceed the 30 s grace period; the live lane publishes exceptions through the main client.", "answer": "HTTP 10 s, then the live client drained in 3 s, then the main client 13 s: 26 s; the early shutdown on a failed bind drains it too; comments updated; a SIGTERM test with a blocked live delivery exits inside 30 s (decision 7)."},
+      {"finding": "The live adapter must keep the existing decode and wire/envelope validation before fanout.", "answer": "The live wrapper filters by msg.Subject, then calls listenerDeliveryHandler with liveDelivery, which validates as today; the Topic == subject rule applies to the live lane only; TestALiveLaneDropsAnInvalidEnvelope (decision 3, task 5)."},
+      {"finding": "The two-listener test cannot use waitHealthy, since the second listener waits on the durable bind.", "answer": "The live lane opens before /v1 and the durable bind and logs an INFO line once accepted; the test waits for that line in both outputs, publishes three events and counts three prompts (decision 2, task 5)."},
+      {"finding": "Exceptions on a non-stored topic go over core NATS (client.Publish routes by usesCoreTransport), and an ordinary HTTP failure on a general topic raises none, so the read-back test needs a real refusal.", "answer": "The test provokes a delivery-mode refusal (payload {\"delivery\":{\"mode\":\"btw\"}} to a session advertising none), observes the exception prompt on a second session subscribed to notifications.envoy.exceptions.> through the live lane, and asserts exactly one exception on the bus (decision 3, task 5)."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "The spec names the listener's own code and the corrected text as the change, and the production record as moving the in-cluster listener's image pin in theorem-labs/agent-infra; it leaves to the plan which input tells a listener whether its grant allows every notification topic.",
+      "plan": "The input is an opt-in, ENVOY_SUBSCRIBE_ALL_TOPICS=1, off by default. The plan also changes the envoy-infra plugin (core.ListenerConfig.SubscribeAllTopics and an optional subscribeAllTopics input on host:Listener and aws:WebhookListener, plus envoy-infra render's flag), sets it in both compose files, and adds it to the in-cluster listener's environment in the same agent-infra change that moves the pin.",
+      "evidence": "Nothing a listener reads tells ListenerPermissions (hub, Dispatch: infra/core/permissions.go:50-69,108-125) from HostPermissions (:150-156); NATS reports no grant and a probing subscribe is a refusal the live grant tests fail on; the hub cannot opt out without a cloud-config re-render that replaces its VM; the component-rendered and hand-written environments (infra/host/listener.go:106, infra/aws/rendering/listener.go:120, agent-infra envoy-cluster/listener.go:117-123) have no other way to set it. Every existing rendering, the hub's and Dispatch's included, stays byte-identical.",
+      "outcome": {"kind": "changed", "scope": "Adds the envoy-infra plugin's ListenerConfig field and optional subscribeAllTopics inputs on host:Listener and aws:WebhookListener, the two compose files, and one environment variable in the agent-infra change the production record already needs."}
+    }
+  ]
+}
