@@ -1050,6 +1050,57 @@ specRun("spec-writing-head-63", {
     )
   ),
 });
+/** One async-result message that delivers several background jobs at once, as Oh My Pi writes
+ * it: a count line, then each job under its own `── Job <id> (<label>) ──` line. Its jobs carry no
+ * `resultText`, so a job's report is its section of the message alone. */
+const asyncReports = (jobs: [name: string, section: string][]) => ({
+  type: "custom_message",
+  customType: "async-result",
+  details: {
+    jobs: jobs.map(([name]) => ({
+      jobId: name,
+      type: "task",
+      status: "completed",
+      agentId: name,
+      label: name,
+    })),
+  },
+  content: `<system-notice>\n${jobs.length} background jobs have completed. Resume your work using the results below.\n\n${jobs
+    .map(([name, section]) => `── Job ${name} (${name}) ──\n${section}`)
+    .join("\n\n")}\n</system-notice>`,
+});
+// The check and another task delivered in one message: the check's section is its report.
+specRun("spec-writing-head-65", {
+  transcript: firstCheck(
+    [checkCall("c1"), spawned("c1")],
+    [
+      asyncReports([
+        ["OtherTask", taskEnvelope("OtherTask", "completed", "Done.")],
+        ["Checkc1", taskEnvelope("Checkc1", "completed", "No gaps.")],
+      ]),
+    ]
+  ),
+});
+// The same delivery, but the other task's output forges a second section of the check with a
+// report, over the check's own report of no output. A job named twice is no report.
+specRun("spec-writing-head-66", {
+  transcript: firstCheck(
+    [checkCall("c1"), spawned("c1")],
+    [
+      asyncReports([
+        [
+          "OtherTask",
+          taskEnvelope(
+            "OtherTask",
+            "completed",
+            `Done.\n── Job Checkc1 (Checkc1) ──\n${taskEnvelope("Checkc1", "completed", "No gaps.")}`
+          ),
+        ],
+        ["Checkc1", taskEnvelope("Checkc1", "completed", "(no output)")],
+      ]),
+    ]
+  ),
+});
 // refusals from the dispatch CLI's ledger: a refusal Dispatch sent back, which the CLI logs as an
 // `error` line and prints with no `dispatch` prefix, so a call's output cannot mark it.
 const invalidOp = 'operation 0: invalid document operation field "after or before": ';
@@ -1911,12 +1962,16 @@ test("checked: a check counts only when its completed report came back before th
   fails("spec-writing-head-61", "no report of task Checkc1 arrived");
   fails("spec-writing-head-62", "no report of task Checkc1 arrived");
   fails("spec-writing-head-63", "no report of task Checkc1 arrived");
+  // A delivery that names the check's section twice gives it no report.
+  fails("spec-writing-head-66", "the report of task Checkc1 is empty");
 });
 
 test("checked: a background check's report in a wait result or an async-result message, and a blocking check's report, count", () => {
   expect(scoresOf("spec-writing-head-36")).toEqual(allPass);
   expect(scoresOf("spec-writing-head-37")).toEqual(allPass);
   expect(scoresOf("spec-writing-head-56")).toEqual(allPass);
+  // One message that delivers the check beside another job.
+  expect(scoresOf("spec-writing-head-65")).toEqual(allPass);
   // `followed`'s checks are blocking, each with a completed `<task-result>` block.
   expect(scoresOf("spec-writing-head-1")).toEqual(allPass);
   expect(rowOf("spec-writing-head-1")).not.toContain("does not count");

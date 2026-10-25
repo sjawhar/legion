@@ -1339,6 +1339,32 @@ function taskNames(step: Step, own: Outcome | undefined): string[] {
   }
   return [...names];
 }
+/** The text Oh My Pi delivered for job `name` in the body of an `async-result` message that
+ * delivers `count` jobs. Its task jobs carry no `resultText`, so the body is the only report. A
+ * message of one job is a `Background job <name> has completed…` line, then the job's envelope;
+ * a message of several is a count line, then each job under a `── Job <id> (<label>) ──` line.
+ * A job's section runs to the next such line of another job, or to the end. A message that names
+ * the job's section other than once (another job's output can print a line of that form) gives it
+ * no text: which section is the job's own cannot be told. */
+function jobSection(body: string, name: string, count: number): string {
+  const text = body.replace(/^\s*<system-notice>\s*/, "").replace(/\s*<\/system-notice>\s*$/, "");
+  if (count === 1) {
+    const lead = new RegExp(`^Background job ${escaped(name)} has completed\\.[^\\n]*\\n`).exec(
+      text
+    );
+    return lead === null ? "" : text.slice(lead[0].length);
+  }
+  const marks = [...text.matchAll(/^── Job (\S+) \(.*\) ──$/gm)].map((mark) => ({
+    id: mark[1],
+    start: mark.index ?? 0,
+    end: (mark.index ?? 0) + mark[0].length,
+  }));
+  const own = marks.filter((mark) => mark.id === name);
+  const mark = own[0];
+  if (own.length !== 1 || mark === undefined) return "";
+  const after = marks.find((other) => other.start > mark.start && other.id !== name);
+  return text.slice(mark.end, after?.start ?? text.length);
+}
 /** What a spec-only check came to before the spec write whose assistant message is entry `before`:
  * its tasks' reports, or why it does not count. Every task the call started must have ended
  * `completed` with a report that is not empty, in an entry before the write. A report counts only
@@ -1397,10 +1423,11 @@ function checkOutcome(
       const status = field(job, "status");
       if (typeof name !== "string" || typeof status !== "string") continue;
       const resultText = field(job, "resultText");
-      const text = typeof resultText === "string" ? resultText : strings(entry.content).join("");
-      const envelope = new RegExp(
-        `^\\s*(?:<system-notice>\\s*Background job ${escaped(name)} has completed\\.[^\\n]*\\n)?\\s*<task-result\\b([^>]*)>([\\s\\S]*)<\\/task-result>\\s*(?:<\\/system-notice>\\s*)?$`
-      ).exec(text);
+      const text =
+        typeof resultText === "string"
+          ? resultText
+          : jobSection(strings(entry.content).join(""), name, jobs.length);
+      const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>\s*$/.exec(text);
       const body =
         envelope !== null && attribute(envelope[1] ?? "", "id") === name ? (envelope[2] ?? "") : "";
       ended.push({ name, status, report: reportOf(body), index });

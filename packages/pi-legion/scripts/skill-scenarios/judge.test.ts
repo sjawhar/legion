@@ -150,7 +150,8 @@ const transcript = [
     '<task-result id="SpecCheck1" agent="task" status="completed" duration="30s">\n<output>\nR2 names no source.\n</output>\n</task-result>'
   ),
   ...docEdit("2026-10-24T10:02:00.000Z", "w1", 2),
-  // A spec-only check that runs in the background: its report arrives as a message of its own.
+  // A spec-only check that runs in the background: its report arrives as a message of its own,
+  // with the job's structured record as Oh My Pi writes it (a task job carries no resultText there).
   call("2026-10-24T10:04:00.000Z", "c2", "task", {
     context: `Read this spec alone.\n\n${v3}`,
     tasks: [{ name: "SpecCheck2", task: "List each gap." }],
@@ -165,6 +166,18 @@ const transcript = [
     type: "custom_message",
     customType: "async-result",
     timestamp: "2026-10-24T10:05:00.000Z",
+    details: {
+      jobs: [
+        {
+          jobId: "SpecCheck2",
+          type: "task",
+          status: "completed",
+          agentId: "SpecCheck2",
+          label: "SpecCheck2",
+          durationMs: 60000,
+        },
+      ],
+    },
     content:
       '<system-notice>\nBackground job SpecCheck2 has completed.\n<task-result id="SpecCheck2" agent="task" status="completed">\nA1 tests no requirement alone.\n</task-result>\n</system-notice>',
   },
