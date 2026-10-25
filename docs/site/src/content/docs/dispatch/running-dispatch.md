@@ -242,6 +242,17 @@ Sign in, then open **Settings**:
   stamped.
 - `schema_version` is the newest database migration applied.
 
+## Behind a proxy
+
+A page's live updates ride one WebSocket per tab, `GET /ws/live`. A browser keeps WebSockets apart
+from the six connections it opens to a host for ordinary requests, so a socket that stays open
+never takes one of them. That holds only while the load balancer or proxy in front of Dispatch
+does not advertise HTTP/2 extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`): a browser that
+sees it runs the socket inside its HTTP/2 connection instead, and pages can hang until the tab is
+reloaded. From a checkout, `bun scripts/e2e/lib/h2-settings.ts https://<dispatch>` prints the
+settings the proxy sends and exits 1 when it advertises extended CONNECT. Run it after any change
+to the proxy.
+
 ## Running more than one copy
 
 Dispatch runs as more than one server against one database, so a new version rolls out without
@@ -312,6 +323,12 @@ never happening: the one that adds each issue's repository (migration `0113`) ho
 32 links below its root in its API alone, and an issue an older server puts deeper fails to load
 until you clear the parent of an ancestor that still loads. That release was deployed with the
 running server stopped first, and no server older than it has run against the database since.
+
+The release that moves live updates onto one WebSocket per tab (INFRA-258) is deployed the same
+way, for its API rather than a migration: its pages send a key with every message to one agent,
+which an older server refuses, so a message that reaches an older server while the release rolls
+is refused. Stop the running server before it starts. A tab opened before that deploy shows
+**Live updates unavailable**, and its messages to one agent are refused, until it is reloaded.
 
 ## The HTTP API
 
