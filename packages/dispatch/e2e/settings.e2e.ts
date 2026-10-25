@@ -72,7 +72,8 @@ test("a project's default repository moves with its Default radio, and a mapping
 
   try {
     await page.goto("/settings");
-    await expect(page.getByRole("columnheader", { name: "Default" })).toBeVisible();
+    // Exact: the Projects table above carries a "Default assignee" header of its own.
+    await expect(page.getByRole("columnheader", { exact: true, name: "Default" })).toBeVisible();
     await expect(radio("acme/widgets")).toBeChecked();
     await expect(radio("acme/gadgets")).not.toBeChecked();
 
@@ -378,6 +379,10 @@ test("a person sets, changes and clears a project's default assignee, and a proj
     await expect(page.getByText("no project mapping")).toBeVisible();
     await expect(ops).toHaveValue("");
 
+    // Who has signed in is read only once the reader reaches for the control.
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
+
     const saved = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
@@ -387,9 +392,7 @@ test("a person sets, changes and clears a project's default assignee, and a proj
     expect((await saved).ok()).toBe(true);
 
     await page.reload();
-    await expect(
-      page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
-    ).toHaveValue("bob");
+    await expect(core).toHaveValue("bob");
     await page.screenshot({
       path: testInfo.outputPath("project-default-assignee-settings.png"),
       fullPage: true,
@@ -400,27 +403,22 @@ test("a person sets, changes and clears a project's default assignee, and a proj
         response.request().method() === "PUT" &&
         new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
     );
-    await page
-      .getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
-      .selectOption("alice");
+    await core.focus();
+    await core.selectOption("alice");
     expect((await changed).ok()).toBe(true);
     await page.reload();
-    await expect(
-      page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
-    ).toHaveValue("alice");
-    await expect(
-      page.getByRole("combobox", { exact: true, name: "Default assignee of OPS" })
-    ).toHaveValue("");
+    await expect(core).toHaveValue("alice");
+    await expect(ops).toHaveValue("");
 
     const cleared = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
         new URL(response.url()).pathname === "/api/v1/projects/CORE/default-assignee"
     );
-    await page
-      .getByRole("combobox", { exact: true, name: "Default assignee of CORE" })
-      .selectOption({ label: "Unassigned" });
+    await core.selectOption({ label: "Unassigned" });
     expect((await cleared).ok()).toBe(true);
+    await page.reload();
+    await expect(core).toHaveValue("");
     const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
     expect(defaults.map((row) => row.project)).not.toContain("CORE");
     expect(defaults.map((row) => row.project)).not.toContain("OPS");

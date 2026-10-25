@@ -3,8 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
-import { projectsQuery } from "../../api/queries";
-import type { CreateProjectInput } from "../../api/types";
+import { projectDefaultAssigneesQuery, projectsQuery, usersQuery } from "../../api/queries";
+import type { CreateProjectInput, ProjectDefaultAssignee } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -27,7 +27,8 @@ import {
   settingsTableWrapper,
 } from "./classes";
 
-/** Lists native projects and lets a human create one; the Settings route's repository
+/** Lists native projects, lets a human create one, and carries each project's default assignee -
+ * the person an issue created with nobody named lands on. The Settings route's repository
  * mapping form reads the same `["projects"]` query, so a project created here is
  * immediately selectable there without any explicit wiring between the two sections. */
 export function ProjectsSection(): ReactNode {
@@ -49,6 +50,19 @@ export function ProjectsSection(): ReactNode {
     event.preventDefault();
     projectSubmitGuard.guard(() => createProject.mutate({ key: projectKey, name: projectName }));
   };
+  const defaults = useQuery(projectDefaultAssigneesQuery());
+  // The people list is read only once a reader reaches for a picker, as `AssigneeControl` does
+  // it, so opening Settings makes no request for it.
+  const [wantUsers, setWantUsers] = useState(false);
+  const users = useQuery({ ...usersQuery(), enabled: wantUsers });
+  const setDefaultAssignee = useMutation({
+    mutationFn: ({ assignee, project }: ProjectDefaultAssignee) =>
+      api.putProjectDefaultAssignee(project, { assignee }),
+    onSettled: () =>
+      void queryClient.invalidateQueries({ queryKey: projectDefaultAssigneesQuery().queryKey }),
+  });
+  const defaultAssignees = new Map((defaults.data ?? []).map((row) => [row.project, row.assignee]));
+  const logins = (users.data ?? []).map((user) => user.login);
 
   return (
     <section aria-labelledby="projects-heading">
@@ -82,6 +96,9 @@ export function ProjectsSection(): ReactNode {
                     Name
                   </th>
                   <th className="px-4 py-3 font-semibold" scope="col">
+                    Default assignee
+                  </th>
+                  <th className="px-4 py-3 font-semibold" scope="col">
                     Created
                   </th>
                 </tr>
@@ -89,7 +106,7 @@ export function ProjectsSection(): ReactNode {
               <tbody>
                 {projects.data.length === 0 ? (
                   <tr>
-                    <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={3}>
+                    <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={4}>
                       No projects yet.
                     </td>
                   </tr>
@@ -100,6 +117,17 @@ export function ProjectsSection(): ReactNode {
                         {candidate.key}
                       </td>
                       <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>{candidate.name}</td>
+                      <td className="px-4 py-3">
+                        <DefaultAssigneeSelect
+                          assignee={defaultAssignees.get(candidate.key) ?? null}
+                          logins={logins}
+                          onPick={(assignee) =>
+                            setDefaultAssignee.mutate({ assignee, project: candidate.key })
+                          }
+                          onReach={() => setWantUsers(true)}
+                          project={candidate.key}
+                        />
+                      </td>
                       <td className={`px-4 py-3 ${textMutedOnSurface}`}>
                         <Timestamp at={candidate.created_at} />
                       </td>
@@ -109,6 +137,32 @@ export function ProjectsSection(): ReactNode {
               </tbody>
             </table>
           </div>
+          <p className={`mt-2 text-sm ${textSecondaryOnCanvas}`}>
+            An issue created from a repository with no project mapping lands in the default project,
+            so a default assignee set on that project reaches that person for every one of its
+            issues.
+          </p>
+          {defaults.isError ? (
+            <div className="mt-4">
+              <QueryError
+                message="Couldn't load the default assignees."
+                onRetry={() => void defaults.refetch()}
+                retrying={defaults.isFetching}
+              />
+            </div>
+          ) : null}
+          {setDefaultAssignee.isError ? (
+            <div className="mt-4">
+              <QueryError
+                message={apiErrorMessage(
+                  setDefaultAssignee.error,
+                  "Couldn't update the default assignee."
+                )}
+                onRetry={() => setDefaultAssignee.mutate(setDefaultAssignee.variables)}
+                retrying={setDefaultAssignee.isPending}
+              />
+            </div>
+          ) : null}
 
           <form
             className={`mt-6 grid gap-4 rounded-xl border p-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end ${borderDefault}`}
@@ -159,5 +213,44 @@ export function ProjectsSection(): ReactNode {
         </>
       ) : null}
     </section>
+  );
+}
+
+/** One project's default-assignee picker: everyone who has signed in, with Unassigned first for
+ *  clearing it. `onReach` fires the moment a reader points at, touches or focuses the control,
+ *  which is when the people list is fetched. Labelled `Default assignee of <KEY>`. */
+function DefaultAssigneeSelect({
+  assignee,
+  logins,
+  onPick,
+  onReach,
+  project,
+}: {
+  assignee: string | null;
+  logins: readonly string[];
+  onPick: (assignee: string | null) => void;
+  onReach: () => void;
+  project: string;
+}): ReactNode {
+  // A stored default whose person the list does not carry still holds the project; keep it
+  // selectable so the control never shows a value its options lack.
+  const options = assignee === null || logins.includes(assignee) ? logins : [assignee, ...logins];
+  return (
+    <select
+      aria-label={`Default assignee of ${project}`}
+      className={`rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
+      onChange={(event) => onPick(event.target.value === "" ? null : event.target.value)}
+      onFocus={onReach}
+      onPointerEnter={onReach}
+      onTouchStart={onReach}
+      value={assignee ?? ""}
+    >
+      <option value="">Unassigned</option>
+      {options.map((login) => (
+        <option key={login} value={login}>
+          {login}
+        </option>
+      ))}
+    </select>
   );
 }

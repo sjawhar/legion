@@ -125,6 +125,23 @@ export interface Project {
   readonly created_at: string;
 }
 
+/**
+ * A project's default assignee: the last step of an issue create's assignee chain, reached when
+ * the create named nobody, the session acts for nobody, and no parent carries one. `assignee` is
+ * a person's lowercase email, or null for a project that names nobody — which
+ * `GET /api/v1/settings/project-default-assignees` leaves out of its list entirely.
+ */
+export interface ProjectDefaultAssignee {
+  readonly project: string;
+  readonly assignee: string | null;
+}
+
+/** The body of `PUT /api/v1/projects/{key}/default-assignee`: the person the project's unowned
+ *  work lands on, or null to clear the default. */
+export interface ProjectDefaultAssigneeInput {
+  readonly assignee: string | null;
+}
+
 export interface RepoProject {
   readonly repo: string;
   readonly project: string;
@@ -1671,6 +1688,10 @@ export interface RepoProjectUpdatedEventPayload {
   readonly deleted: boolean;
 }
 
+/** `settings.project_default_assignee.updated`: a human set or cleared a project's default
+ *  assignee. The payload is the stored row, so a clear carries `assignee: null`. */
+export type ProjectDefaultAssigneeUpdatedEventPayload = ProjectDefaultAssignee;
+
 export interface ArchitectureSourceUpdatedEventPayload {
   readonly source: ArchitectureSource;
   readonly deleted: boolean;
@@ -1790,6 +1811,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "settings.repo_project.updated";
       readonly payload: RepoProjectUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "settings.project_default_assignee.updated";
+      readonly payload: ProjectDefaultAssigneeUpdatedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "settings.architecture_source.updated";

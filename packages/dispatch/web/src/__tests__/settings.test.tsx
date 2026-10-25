@@ -78,6 +78,7 @@ test("human users manage repository project mappings from the settings route", a
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -157,6 +158,7 @@ test("human users manage repository project mappings from the settings route", a
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
@@ -186,6 +188,7 @@ test("a delayed mapping response does not undo a newer default the page has read
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -234,6 +237,7 @@ test("a delayed mapping response does not undo a newer default the page has read
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
@@ -252,6 +256,7 @@ test("repository settings retries a failed mapping query", async () => {
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -283,6 +288,7 @@ test("repository settings retries a failed mapping query", async () => {
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
   }
@@ -299,6 +305,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects")
     .mockResolvedValueOnce([core])
@@ -343,6 +350,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
@@ -359,6 +367,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
@@ -394,6 +403,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
@@ -423,6 +433,7 @@ test("a human adds an architecture source and the verified row appears", async (
   const listArchitectureSources = spyOn(api, "listArchitectureSources")
     .mockResolvedValueOnce([])
     .mockResolvedValue([architectureSource]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -468,6 +479,7 @@ test("a human adds an architecture source and the verified row appears", async (
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putArchitectureSource.mockRestore();
@@ -483,6 +495,7 @@ test("a failed architecture source access check shows the server's reason inline
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
@@ -527,8 +540,155 @@ test("a failed architecture source access check shows the server's reason inline
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    listDefaults.mockRestore();
     getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putArchitectureSource.mockRestore();
+  }
+});
+
+test("a human sets and clears a project's default assignee from the Projects table", async () => {
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
+  const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
+    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
+  ]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([
+    { assignee: "alice@example.com", project: "CORE" },
+  ]);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([
+    { login: "alice@example.com" },
+    { login: "bob@example.com" },
+  ]);
+  const putDefault = spyOn(api, "putProjectDefaultAssignee").mockResolvedValue({
+    assignee: "bob@example.com",
+    project: "CORE",
+  });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  try {
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <QueryClientProvider client={queryClient}>
+          <App />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+
+    const section = within(await screen.findByRole("region", { name: "Projects" }));
+    // A default set on the project an unmapped repository falls back to is what a reader has to
+    // weigh while setting one, so the consequence sits beside the control.
+    expect(section.getByText(/no project mapping/).textContent).toContain("default project");
+
+    const control = await screen.findByRole("combobox", { name: "Default assignee of CORE" });
+    expect(control).toHaveProperty("value", "alice@example.com");
+    // Nobody is listed until a reader reaches for the picker.
+    expect(listUsers).not.toHaveBeenCalled();
+
+    fireEvent.focus(control);
+    await waitFor(() =>
+      expect(within(control).getByRole("option", { name: "bob@example.com" })).toBeDefined()
+    );
+    expect(
+      within(control)
+        .getAllByRole("option")
+        .map((option) => option.textContent)
+    ).toEqual(["Unassigned", "alice@example.com", "bob@example.com"]);
+
+    fireEvent.change(control, { target: { value: "bob@example.com" } });
+    await waitFor(() =>
+      expect(putDefault).toHaveBeenLastCalledWith("CORE", { assignee: "bob@example.com" })
+    );
+    await waitFor(() => expect(listDefaults).toHaveBeenCalledTimes(2));
+
+    fireEvent.change(control, { target: { value: "" } });
+    await waitFor(() => expect(putDefault).toHaveBeenLastCalledWith("CORE", { assignee: null }));
+  } finally {
+    cleanup();
+    queryClient.clear();
+    whoAmI.mockRestore();
+    listIssues.mockRestore();
+    getMyState.mockRestore();
+    getInbox.mockRestore();
+    listRepoProjects.mockRestore();
+    listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
+    listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
+    listProjects.mockRestore();
+    listDefaults.mockRestore();
+    listUsers.mockRestore();
+    putDefault.mockRestore();
+  }
+});
+
+test("a refused default assignee shows the server's reason inline", async () => {
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
+  const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
+    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
+  ]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([{ login: "bob@example.com" }]);
+  const putDefault = spyOn(api, "putProjectDefaultAssignee").mockRejectedValue(
+    new ApiError(400, {
+      code: "ASSIGNEE_NOT_ALLOWED",
+      error: "bob@example.com has never signed in",
+    })
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  try {
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <QueryClientProvider client={queryClient}>
+          <App />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+
+    const control = await screen.findByRole("combobox", { name: "Default assignee of CORE" });
+    fireEvent.focus(control);
+    await waitFor(() =>
+      expect(within(control).getByRole("option", { name: "bob@example.com" })).toBeDefined()
+    );
+    fireEvent.change(control, { target: { value: "bob@example.com" } });
+
+    const section = within(await screen.findByRole("region", { name: "Projects" }));
+    await waitFor(() =>
+      expect(section.getByRole("alert").textContent).toContain(
+        "bob@example.com has never signed in"
+      )
+    );
+  } finally {
+    cleanup();
+    queryClient.clear();
+    whoAmI.mockRestore();
+    listIssues.mockRestore();
+    getMyState.mockRestore();
+    getInbox.mockRestore();
+    listRepoProjects.mockRestore();
+    listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
+    listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
+    listProjects.mockRestore();
+    listDefaults.mockRestore();
+    listUsers.mockRestore();
+    putDefault.mockRestore();
   }
 });
