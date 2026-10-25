@@ -25,10 +25,11 @@ line.
 
 The delivery's `message` holds Slack's fields: `channel_id`, `user_id` (a Slack user id such as
 `U0123ABCD`), `text` (the message's own words, then the display text its attachments and blocks
-carry that those words do not already hold, a line apiece; the mention itself appears in it as
-`<@U…>`, the app's own id), `ts` (the mention's own timestamp), `thread_ts` (the thread's root,
-only when the mention was posted inside a thread), and `bot_id` and `bot_name` when a bot posted
-it.
+carry, a line apiece, each line delivered once and a line exactly equal to an earlier one left
+out; a mention a person typed in a Slack client carries its own words alone, since the client's
+`rich_text` copy of them is not read; the mention itself appears in it as `<@U…>`, the app's own
+id), `ts` (the mention's own timestamp), `thread_ts` (the thread's root, only when the mention was
+posted inside a thread), and `bot_id` and `bot_name` when a bot posted it.
 
 ## Answer in the thread
 

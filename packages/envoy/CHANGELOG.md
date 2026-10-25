@@ -1031,14 +1031,17 @@
 - An agent woken by a Slack message now reads the words the message carries, wherever it carries
   them. A Slack delivery's `text` is the message's own text and then every display string its
   attachments and blocks hold — the strings under `pretext`, `author_name`, `title`, `text`,
-  `value`, `footer` and `fallback`, at any depth, no attachment or block kind recognised by name —
-  joined by line feeds, and the summary shows its first line. An app that posts a formatted
-  message leaves `text` empty and puts the words in `attachments` or `blocks`, and such a wake
-  used to carry a summary ending in `: ` and a payload with no words in it at all. A piece the
-  text already holds is not repeated, so a message composed in a Slack client, whose `rich_text`
-  block copies the words of its own `text`, reads as it did; the delivered text is still cut at
-  2,048 runes and marked `body_truncated`; and a deleted message still delivers nothing
-  (INFRA-180).
+  `value`, `footer` and `fallback`, at any depth, each object read in the order Slack shows it
+  (those names in that rank, then its remaining keys alphabetically), so a section's own text
+  precedes its fields and a button's label its hidden value — joined by line feeds, and the
+  summary shows the first line. An app that posts a formatted message leaves `text` empty and puts
+  the words in `attachments` or `blocks`, and such a wake used to carry a summary ending in `: `
+  and a payload with no words in it at all. A string exactly equal to one already delivered is not
+  delivered twice, and a message that carries words of its own has its `rich_text` blocks left
+  unread, since that tree is the Slack client's own copy of those words — the one block kind the
+  walk knows by name, and the reason a message composed in a client reads as it did, the `&`, `<`
+  and `>` a person typed included. The delivered text is still cut at 2,048 runes and marked
+  `body_truncated`, and a deleted message still delivers nothing (INFRA-180).
 
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
