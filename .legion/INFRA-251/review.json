@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-251",
+  "completed": "2026-10-25T04:05:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 5,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workflow/catch_up.go:52-63",
+      "description": "claimReady takes the kept decisions (TakeParkedDecisions deletes them) and their only remaining copy is the prose in CatchUp.Decided inside one outbox row. DropCatchUps carries that text forward when a later ready drops the row, but the three undelivered branches of the notice executor (outbox.go:645 errNoticeUnroutable, :667 stoppedWithTree, :687 architectEnded) re-keep nothing, so a catch-up that finishes undelivered destroys what it took. Judged minor, not a change this round requires: every decision claimReady can take was already relayed to the controller, which holds the record and comments on the issue, except through a three-way race (a root waiting for its slot, a decision kept with no controller notice, and an architect claim that becomes ready and then fails before its catch-up row runs — the last needs an operator relaunch). Closing it properly means structuring CatchUp.Decided as rows rather than prose, which changes the agent-facing notice shape; that is the architect's call. Recorded in the pull request's Not proven / risk line."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/parked_decision.go:56-86",
+      "description": "The two relay paths disagree on one root state. workflow/parked_decision.go:39-44 suppresses the controller notice for a root that waits for its slot (waitsForSlot) and keeps the decision only; the outbox path has no such check, so a spec decision whose publish meets no holder relays to the controller for the same root. Reachable only narrowly — a re-admitted root's gate is cleared by ClearTreeGeneration, so applyArtifact has no registered gate to fire on — and harmless when it happens: the controller reads issues.<root>.phase, finds it is not done, and does nothing (skills/legion-controller/references/parked-decisions.md:41-50). Stating the rule once (a record-level helper both relays consult, as record.TreeLingers already does for the linger) is the fix if it is ever made."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/legion-controller/references/parked-decisions.md:54-82",
+      "description": "Security[agent-def]: the controller decides \"is this park my own hold?\" from a magic comment string (`Parked by Legion while it waits on:`) posted by any session within 10 minutes of a park line authored by `session legion-daemon:<PROJECT>`. The park line's author cannot be forged (only the daemon writes it), so an attacker must wait for a daemon-written park — an operator's `legion status` among them — and post the mark inside the window to make the controller set the root to `todo`. The consequence is that the tree runs again, which is what a person does anyway, so this is hardening, not an exploit. The daemon knows the fact exactly (record.Issue.Hold, surfaced as holdReason) and could carry it on the notice; that is a design change the architect owns."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/parked_decision.go:24-48",
+      "description": "parkedDecision's {key, sent, unnamed, ref} struct and its log method exist only so the three call sites can log; all three pass the same argument list but for the row id. Giving parkDecision the row id and logging inside it would delete the struct, the method and three call-site blocks. Named as the one Fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/record/outbox.go:722-730",
+      "description": "Validate's three ControllerNotice checks overlap: the first ((Kind == ParkedDecisionNotice) != (Decision != \"\")) is already covered by the second for the parked side and by the third for every other kind. Two branches state it once. Wording only; no behaviour differs."
+    }
+  ],
+  "verified": {
+    "ci": {
+      "requiredSet": ["lint", "typecheck", "test", "pr-title"],
+      "source": "repos/sjawhar/legion/rules/branches/main required_status_checks; branch protection names none",
+      "ciHead": "7e7b935b9f3dd3090047a700e65eadb58e07b9ab",
+      "ciHeadSource": "repos/sjawhar/legion/actions/runs?branch=legion/INFRA-251&event=pull_request&per_page=30, newest first",
+      "checkRuns": "lint completed/success, typecheck completed/success, test completed/success, pr-title completed/success at the CI head; the non-required dispatch job was still in_progress",
+      "compare": "repos/sjawhar/legion/compare/7e7b935b...57b75ece: status ahead, the only file is .legion/INFRA-251/test.json, so the code under review is the CI head's"
+    },
+    "threads": "gh api graphql at the time of the round: reviewThreads [] and reviews []. This is the first round; no thread to answer and none for the implementer to resolve.",
+    "e2eLines": "Both E2E (implementer) and E2E (tester) are present in the pull request body at this head.",
+    "thermonuclear": "The pair ran once at the reviewed head over this issue's own commits only (6b30f38e..d800380c, 9d54ed0a..bd3892e4, af040b13..c3955ada). thermonuclear-deep-review: one Important and one Minor, both re-judged minor above, and clean on the migration's constraints, the parkDecision dedupe key across its three call sites, relayParkedDecision's actor refusal, AddParkedDecision's upsert under concurrency, DropCatchUps' callers, Validate's reachability, and the e2e script's quoting, verdict strength and private names. thermonuclear-code-quality: three Important and three Minor, all re-judged minor above, and clean on file growth, skill-copy drift (byte-identical and staged by scripts/build.ts with a --check gate), and doc-vs-code agreement."
+  },
+  "reviewedAgainst": {
+    "spec": "dispatch://INFRA-251/artifact/spec v3",
+    "plan": "dispatch://INFRA-251/artifact/plan-md, with .legion/INFRA-251/plan.json's two specDepartures (base main with gate G1 instead of a retarget; the arranged developer-machine run of the e2e proof). The spec's scope allows the second: 'Re-run the end-to-end proof at the head that is reviewed, or state plainly which surface can run it.'",
+    "acceptance": "A1 and A2 are proven at the code head by the implementer's and tester's own runs against a real PostgreSQL 17.2 and re-verified by the tester. A3 and A4 are the arranged developer-machine run of scripts/e2e/parked-decision-devbox.sh, which no Legion pod can run (no docker, no tmux, no implement App key); they stand in the pull request's Not proven / risk line. A5 is the production check after the close."
+  },
+  "contractChangeCensus": "Not required: the diff adds no refusal at a process or package boundary that an outside caller meets, makes no field required, removes and renames none, and changes no exported signature a consumer outside this module calls. record.Store's DropCatchUps gains a return value and GateRegistered, DispatchArtifact and DispatchAskReply gain fields; all are internal to packages/daemon, and every implementation and caller is in the diff (record/store.go, the fakes in the daemon, admit, workflow and intake tests). The record.Notice and record.ControllerNotice JSON fields are additive and omitempty, and no TypeScript package enumerates controller notice kinds."
+}
