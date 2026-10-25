@@ -18,7 +18,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   person (requesting approval again, or a thread reply that leaves the turn with them) starts the
   next wait and returns the slot; the controller skill reads the new `awaiting-person` notice. The
   strict state reader refuses a 35 state, and a 35 plugin refuses this one. Install this release
-  with a `legion` built from the same commit.
+  with a `legion` built from the same commit. Dispatch (migration 0116) deploys before that daemon
+  (its migration 0051).
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,

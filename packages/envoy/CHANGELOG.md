@@ -10,7 +10,9 @@
   (`artifact_reviews.event_seq`, migration 0116, written in the same transaction). The owner's row
   lock orders those events as they commit, so `seq` places a review among them where `at`, its
   transaction's start, cannot; the Legion daemon orders a review against the start of a root's wait
-  by it. A review recorded before the migration reads with its `at` and no `seq`.
+  by it. A review recorded before the migration reads with its `at` and no `seq`. Deploy order:
+  Dispatch (migration 0116) deploys before the Legion daemon (its migration 0051); a daemon against
+  a Dispatch without `seq` falls back to a review's `at`.
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
