@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-168",
+  "completed": "2026-10-25T01:52:00Z",
+  "plan": "dispatch://INFRA-168/artifact/plan-md (plan.md version 6, rev 9)",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — the phase contract: the shared workspace, the push procedure, the handoff and the completion gate.",
+      "skill://legion-worker/references/pr-body.md — the implementer writes the body and the E2E (implementer) proof lines for the live pod runs of plan Task 8, and never waits on CI.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — the forward merge of main when sjawhar/legion#2159 lands, and the one sanctioned rewrite if GitHub still reports the pull request mergeable with the move's files in the compare.",
+      "skill://legion-worker/references/default-branch-check.md — the author/committer check before each push, which matters here because 29 adopted commits were authored outside this tree.",
+      "skill://legion-worker/references/review-threads.md — the implementer resolves each thread it answered after the push.",
+      "skill://dispatch-first and skill://dispatch — every Dispatch write of the proof runs: the scratch issue, the retractions of the asks that open, the day-1 counts on dispatch://INFRA-168/artifact/askcheck-outcome-md.",
+      "skill://ce-simplify-code — the simplify pass after the last review round, on code this tree adopted as well as code it wrote.",
+      "skill://envoy — reaching the architect and the Legion stream lead (notifications.role.legion-infra-controller) about #2159 and about findings outside this issue."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's phase contract, its handoff fields and its verdict.",
+      "skill://legion-worker/references/pr-body.md — the tester drives the application rather than re-running CI, owes its own proof with a negative control (plan Task 8 cases 2 and 5), and reads CI for everything static, including the non-required pi-envoy job that carries A1's pin test.",
+      "skill://dispatch-first and skill://dispatch — the scratch issue, the retraction of every ask that opens in a run, and anything it posts on INFRA-168."
+    ],
+    "review": [
+      "skill://legion-worker — the reviewer's phase contract and the order of a review round.",
+      "skill://legion-worker/references/merge-gate.md — the round's order, the approval of a head by SHA, and why nothing but retro's commits may sit above the approved head (the #2159 forward merge must land before the approving round).",
+      "skill://legion-worker/references/review-threads.md — one disposition reply per thread, never in bulk.",
+      "skill://dispatch — anything the reviewer writes on the issue."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1 — the pull request's base decides whether this tree merges into main or into another session's topic branch, and nothing in the daemon re-checks it (ghautomerge.go:163-217 names no base; decode.go:371-402 drops GitHub's `edited` action; requiredchecks.go:47-104 reads the live base, and a topic base requires nothing).",
+        "answer": "The plan opens the pull request on base main from the start and rejects the stacked-then-retargeted alternative on that evidence (section 'The branch and the pull request'). The READY-time check is that `gh pr view <n> --json baseRefName` equals the repository's default branch."
+      },
+      {
+        "finding": "F2 — #2159's squash leaves this branch carrying copies of the move's commits that are no longer main's ancestors, and the adoption must merge its current head 57e9c31a, which conflicts in packages/pi-envoy/CHANGELOG.md.",
+        "answer": "Task 1 merges 57e9c31a and resolves that one file; Task 3 re-merges the move's branch at the start of every implementing turn; the section 'When #2159 merges' gives the measurement (`gh pr view --json mergeable,mergeStateStatus` plus the compare's file count) and the two licensed answers, forward merge on CONFLICTING or the sanctioned rewrite on MERGEABLE, both before the approving review round."
+      },
+      {
+        "finding": "F3 — the adopted commits' messages and author/committer identities are read by the required lint job's private-name check, and four are `fixup!` commits.",
+        "answer": "Task 1 step 4 runs the compare's commit text through `.github/scripts/check-private-names.sh` before the push. The four fixup commits are carried as they are, with the reason stated: the repository squash-merges, the reviewer reads the diff, and rewriting commits already pushed on another branch buys only cosmetics."
+      },
+      {
+        "finding": "F4 — A1 has no check a machine can run at the head: the pin test proves prompt bytes, not the measured outcome, and the 282+25-ask measurement is not reproducible in a pod.",
+        "answer": "The acceptance table states A1 plainly as pinned, not re-run: the pin test (askgate.test.ts:3219-3257) proves the shipped prompts and the rendered request are byte for byte the ones measured, and dispatch://INFRA/artifact/askcheck-rules-2026-10-23-md holds the numbers (4 of 38 matches were asks he changed; none of the 17 that needed him). A red pin test means the change is reverted or the measurement is run again before the phase completes."
+      },
+      {
+        "finding": "F5 — the job that runs A1's pin test is not a check main requires, so the merge gate does not enforce it.",
+        "answer": "The paragraph after the acceptance table has the tester read the pi-envoy job explicitly with `gh api repos/sjawhar/legion/commits/<head>/check-runs` and the reviewer treat a red there as a finding; the CI line names both runs."
+      },
+      {
+        "finding": "F6 — A2-A4's live proof needs a negative control, and a negative control on production Dispatch posts a real ask to a human.",
+        "answer": "Task 8 runs every case on one unassigned scratch INFRA issue, makes cases 2 and 5 (the rebuttal and the ask carrying the agent's own error) the negative controls, and retracts every ask that opens in the same run with `dispatch resolve-ask --kind retracted`, so nothing is left in a person's Inbox."
+      },
+      {
+        "finding": "F7 — the six scenario runs that a 401 interrupted have no surface in a Legion pod (no docker, no tmux; the rig also needs the operator's model gateway), and a cluster Job cannot supply docker.",
+        "answer": "Task 8 states that this tree does not run them, that no acceptance line depends on them, and that the five scenario cases ship unexercised here; the pod instead proves A2-A4 on a nested headless Oh My Pi session on the branch build against the real model and production Dispatch, a surface measured working on 2026-10-25."
+      },
+      {
+        "finding": "F8 — A5's session half named no record: what is counted, its fields, privacy of ask text, where it is written, how a pod and a person's machine are told apart in a public repository, and what happens when the write fails.",
+        "answer": "Task 5 fixes the whole contract: every gated call whose rules check ran; named fields with no ask text and no quote, so no privacy decision is needed; one Dispatch project document per session through POST /api/v1/projects/{key}/artifacts; the project from OMP_ASKGATE_RECORD_PROJECT, else LEGION_PROJECT in a pod, else no record; written after the decision with a 5 second timeout that never changes it, failures recorded as recordError; and the loss cases stated."
+      },
+      {
+        "finding": "F9 — A5's Dispatch half probably already has its runner (scripts/dispatch/ask-census.ts, already covered by the required test job), and a second counter would split the series.",
+        "answer": "Task 6 reuses ask-census.ts and adds only a --json output mode with a test beside the existing ones under scripts/dispatch."
+      },
+      {
+        "finding": "F10 — the spec's sentence that the check 'is a second pull request on top of that move' no longer matches the plan, and the planner may not edit the spec.",
+        "answer": "Checked against spec version 22: that sentence is prose in the section 'The check', not inside the spec's one `:::ask` block (which is the answered decision in 'What the data shows'). The plan records the departure in its own 'What departs from the spec' section and in specDepartures below; the spec stays as approved."
+      },
+      {
+        "finding": "F11 — A5 cannot be proven inside this tree as a 14-day count, because acceptance happens before the merge and the counts start after release.",
+        "answer": "The architect settled the split on 2026-10-25 at 00:59Z and the plan carries it: this tree delivers the record mechanism, the two one-command runners, the day-1 counts and the release tag; the Legion stream lead owns the remaining 13 days, named in the acceptance table and in Task 10."
+      },
+      {
+        "finding": "F12 — the pull request also builds the worker image, and the plan should say which surface proves what before and after the merge.",
+        "answer": "The acceptance table names the branch build in this pod as the pre-merge surface for A2-A4, and Task 10 names the released plugin and the worker-image pin as the post-merge path, with the implementer's production check after the close."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Spec version 22, section 'The check': 'The check is a second pull request on top of that move. ... The check's pull request is stacked on it.'",
+      "plan": "The pull request is opened on base main from the start and carries the AskGate move's commits until sjawhar/legion#2159 merges; it is never based on the topic branch infra-140-s4, so no retarget is needed.",
+      "evidence": "The daemon submits mergePullRequest(pullRequestId, expectedHeadOid) with no base (packages/daemon/internal/ghautomerge/ghautomerge.go:163-217), never learns of a retarget (packages/daemon/internal/intake/decode.go:371-402 drops GitHub's `edited` action), and reads required checks from the live base, where an unprotected topic branch requires nothing (packages/daemon/internal/requiredchecks/requiredchecks.go:47-104). CI is unaffected by the base: pr-and-main.yaml and envoy-and-contracts.yaml both trigger on every pull request with no base filter.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "Spec version 22, acceptance line A5: 'For the two weeks after release, I count each day the agent asks on your issues, the asks that wait on you, the asks that break a rule by the rule check, split by your machines and Legion pods, and the refused asks that an agent sent again with a reason.' The spec describes no mechanism for collecting the session-side counts.",
+      "plan": "AskGate publishes one record per rule decision to a Dispatch project document per session (Task 5), the report script gains a reader for it, and scripts/dispatch/ask-census.ts gains a --json mode (Task 6); this tree ships both runners and day 1, and the Legion stream lead's daily pass owns the remaining 13 days.",
+      "evidence": "The gate's record is written with pi.appendEntry into the session's own Oh My Pi record (askgate-core.ts:1455) and askgate-report.ts reads session files from disk, which no standing session can reach: the stream lead's pod has no devbox access and no kubectl in the legion namespace (architect, 2026-10-25 00:59Z). Dispatch's project-document routes are open to a session's own bearer (packages/envoy/internal/dispatch/api/routes_table.go:56-57), and a Legion pod has no envoy.json, so the project comes from the environment with LEGION_PROJECT as its default.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Added to this issue's build: the per-decision Dispatch record in AskGate, the reader mode of packages/pi-envoy/scripts/askgate-report.ts, the --json mode of scripts/dispatch/ask-census.ts, and a charterLatencyMs field on the advisor-gate entry. Acceptance lines A1-A5 are unchanged; the architect stated on 2026-10-25 at 00:59Z that spec version 22 stands."
+      }
+    }
+  ]
+}
