@@ -3218,9 +3218,9 @@ kubectl wait --for=delete service/<the printed workload name> --timeout=60s
 
 A role that lost the name lists the Jobs with `kubectl get jobs`. Its issue's start with its issue
 key, and so do its sibling roles', so it deletes only the one it started. A run that left a Job
-without printing its name — a `SIGKILL` or the role's pod going away during the create, or a stop
-or failed connection whose create the server stored only after the trap's label delete had listed
-the Jobs (above) — printed its label first, and
+without printing its name — a `SIGKILL` or the role's pod going away before the name printed, or a
+stop or failed connection whose create the server stored only after the trap's label delete had
+listed the Jobs (above) — printed its label first, and
 `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removes that Job once
 the server has stored it, as it removed the one a `SIGKILL` left on 2026-10-25; it had no Service
 yet.
@@ -3300,11 +3300,12 @@ gate commands itself rather than trusting the answers recorded here:
   `cleanup: no Job name was read; nothing removed` and left its Job running until a delete by name
   removed it. Twenty-six more runs, each sent `kill -TERM -- -<process>` between 0.10 s and 0.45 s
   after its first line while the first run was still under way: the earliest, before the trap was
-  installed, printed nothing and made nothing; those that landed before the create's request found
-  nothing by the label; two that landed inside the create deleted the Job it had made by the
-  label; the later ones had read the name and deleted their Job by it. Each of the others ended
-  `sequence: exit 143`, and no Job of theirs was left. A `kill -KILL -- -<process>` that landed
-  inside the create left a Job with no name printed, and
+  installed, printed nothing and made nothing; of those that took the label path, two found the Job
+  the create had made and deleted it by the label, and the rest found nothing; the later ones had
+  read the name and deleted their Job by it. Each of the others ended `sequence: exit 143`, and no
+  Job of theirs was left. Nothing those runs printed shows when a stop landed relative to the
+  create's request and answer. A `kill -KILL -- -<process>` that landed before the name printed
+  left a Job with no name printed, and
   `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removed it in
   31 s, its pod still initialising. With the Job's `cpu` request `"1"`: the create refused by
   admission naming the four-processor rule, under a name the server had already generated, the
