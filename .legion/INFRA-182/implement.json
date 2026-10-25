@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T08:22:00Z",
-  "round": 4,
-  "answers": "Review round 2 at dd2fb2b41ecf: one finding, a racy log capture in package bus tests (PRRT_kwDORFy7ds6v_jdd), fixed in 29ebf098c578, replied to and resolved. Round 3's proofs stand at this head: no production file changed since dd2fb2b41ecf.",
+  "completed": "2026-10-25T08:47:00Z",
+  "round": 5,
+  "answers": "Review round 3 at 29ebf098c578: one finding (PRRT_kwDORFy7ds6v_r00), three remote_nats_test.go assertions that round 2's refusal redaction broke, fixed in the tests (93b84d82e4c5), replied to and resolved. No production file changed since dd2fb2b41ecf, so round 3's real-surface proofs stand.",
   "proof": [
+    {
+      "criterion": "Review round 3 finding PRRT_kwDORFy7ds6v_r00: the remote-NATS refusal tests assert that the refusal names the server without its userinfo, names the override, and carries neither the user name nor the password.",
+      "surface": "The real bus.Connect refusal path (read off the URL, no dial) through a throwaway package bus_test test (deleted) that calls the new checkRefusal helper.",
+      "command": "go test -count=1 -v -run TestZZHelper ./internal/bus/ (throwaway zz_helper_test.go: bus.Connect([]string{\"nats://t7:t7@10.0.0.1:4222\"}) with ENVOY_ALLOW_REMOTE_NATS and the SOCKS5 proxy variable empty, then two fake refusals)",
+      "observed": "Real refusal 'bus: refusing a NATS server that is not this machine's: nats://10.0.0.1:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)': checkRefusal PASS.",
+      "headSha": "93b84d82e4c5a3221cab2d8faabd4553d65625cd",
+      "negativeControl": "A fake refusal carrying nats://t7:t7@10.0.0.1:4222 failed checkRefusal five ways (server without userinfo not named, '@', the userinfo, the user name 't7', the password 't7'); one with only a bare 't7' token failed on the user name and the password."
+    },
     {
       "criterion": "Review round 2 finding PRRT_kwDORFy7ds6v_jdd: package bus tests read the captured default log only behind the writer's lock, so a closed client's late callback cannot race a read in envoy-go-race.",
       "surface": "go test -race in the issue pod (zig 0.13.0 as the C compiler, -ldflags=-linkmode=external; the pod has none); a throwaway in-package test (deleted) with a goroutine logging through the default slog while the test reads the capture for 500 ms, as nats.go's async dispatcher does for a client an earlier test closed (nats.go:5892-5910).",
@@ -48,6 +56,7 @@
     }
   ],
   "filesChanged": [
+    "packages/envoy/internal/bus/remote_nats_test.go: checkRefusal; the three refusal tests use it",
     "packages/envoy/internal/bus/stream_config_test.go: capturedLogs (mutex-guarded Write/String), records, recordsWithMsg, captureLogs: the one capture helper of package bus",
     "packages/envoy/internal/bus/log_url_test.go: captureDefaultSlog and decodeRecords removed; the two tests use captureLogs",
     "packages/envoy/internal/bus/async_error_test.go: TestAConsumerNotActiveReportIsAWarning uses captureLogs and keeps only its own client's records",
@@ -73,6 +82,7 @@
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "go test -race runs in the pod with zig as the C compiler and external linking (the race runtime needs __popcountdi2, which only the external link resolves). The container-backed tests still run only in CI's envoy-go and envoy-go-race."
+    "go test -race runs in the pod with zig as the C compiler and external linking (the race runtime needs __popcountdi2, which only the external link resolves). The container-backed tests still run only in CI's envoy-go and envoy-go-race.",
+    "Round 5, at the architect's request: I searched packages/envoy, packages/daemon, scripts, docs and .github for every assertion on a string this PR changed (URL rendering, reconnect and reconnected lines, watcher-stopped level, watcher was not repaired, 503 body). Only this PR's own tests and the docs it updated depend on them. The process tests that fail on any ERROR passed in envoy-go at 171bf849883c (job 121087933638) with this PR's watcher behaviour. envoy-go and envoy-go-race have not yet passed at a head with the round-2 to round-5 changes; that is the next round's gate."
   ]
 }
