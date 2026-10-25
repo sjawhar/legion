@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-180",
+  "completed": "2026-10-25T03:12:00Z",
+  "plan": "dispatch://INFRA-180/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase contract this repository runs on — the handoff, the push procedure, the pull request body and the proof rules in skill://legion-worker/references/pr-body.md, which the implementer's E2E line must follow.",
+      "skill://ce-simplify-code: legion-worker requires it once per pull request in the first implementing round when the diff touches runtime code, and this diff changes Go in packages/envoy/internal/contracts/normalize.go.",
+      "skill://envoy: how to wait for a CI re-run by subscription and end the turn, instead of a sleep loop, which pr-body.md's 'Never waiting on CI' points at.",
+      "skill://dispatch-first and skill://dispatch: required before any write to Dispatch, including an ask about a blocker."
+    ],
+    "test": [
+      "skill://legion-worker with skill://legion-worker/references/pr-body.md: what the tester drives on the real surface, what it may cite from CI rather than re-run, and the shape of the E2E (tester) line and the test handoff's implementerProof, failures and proof fields.",
+      "skill://envoy: the CI-wake rule, so a lane that is still running is cited rather than waited on."
+    ],
+    "review": [
+      "skill://legion-worker with skill://legion-worker/references/review-threads.md: one disposition reply and one resolution per thread, never in bulk.",
+      "skill://legion-worker/references/merge-gate.md: the order of a review round, approval of a head by SHA, and what READY checks before the merge."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the one rule also rewrites the text of messages that already have words. Slack sends a rich_text block tree beside text for messages composed in current clients, and its leaf strings are per-segment, so an ordinary message gains a partly duplicated second line. No captured Slack body exists in the repository and the Legion Slack app cannot read one back.",
+        "answer": "The plan builds the rule as the human approved it and pins the consequence with a test case built from Slack's documented rich-text block shape ('Own words and a rich-text block' in the plan's table), so the effect is one assertion the architect can read. Recorded as consequence C1 of plan.md and sent to the architect, which owns any narrowing of the rule."
+      },
+      {
+        "finding": "F2: the acceptance case 'nothing to deliver' pins today's summary, which ends in a bare colon, so a message that carries no words anywhere keeps the shape the issue complains about (with a file, a double space before the file suffix).",
+        "answer": "Out of the approved scope: the spec asks for that case to be covered, not changed. The plan's table asserts the exact string 'slack message in C01234567 from U01234567:  (1 file(s): design)' and marks the case a guard that passes on both sides. Recorded as consequence C3 for the architect."
+      },
+      {
+        "finding": "F3: 'in the order Slack sends them' is undefined inside one object, and the seven field names may be a set or an order.",
+        "answer": "Plan decision D1: array order across attachments, blocks and child slices; inside one object the fixed order pretext, author_name, title, text, value, footer, fallback (Slack's own display order, fallback last because it is the plain-text copy), then the remaining keys in sorted order. Evidence: the body is decoded into map[string]any (webhook/slack.go:34-36) and Go's encoding/json keeps no key order. Recorded as a spec departure."
+      },
+      {
+        "finding": "F4: taking fallback beside text, and value from anywhere, puts near-duplicate and machine-opaque strings in the agent's wake.",
+        "answer": "Plan decision D6: all seven names, always — the spec names them and the human approved the list. An exactly equal fallback disappears in the repeat check; a differing one is delivered last by D1's order. The 'words only in an attachment' and 'a repeated piece' cases pin both. Recorded for the architect as part of C1's weighing."
+      },
+      {
+        "finding": "F5: 'the object the attachment count is already read from' is not one object — the existing fallback is per-field and conditional, and blocks has no precedent.",
+        "answer": "Plan decision D3: per field, the new message's list, falling back to the event's only when the message's list is empty and the subtype is message_changed, which is exactly normalize.go:1062-1068 and slackFiles at :1098-1106, generalised into one slackEventSlice helper. event['previous_message'] and a thread broadcast's event['root'] are never walked. Two table cases cover the edited message and the fallback."
+      },
+      {
+        "finding": "F6: values that are not strings, and attachments or blocks that are not arrays, are unspecified.",
+        "answer": "Plan decision D4: a number, boolean or null under one of the names contributes nothing (stringValue, normalize.go:1208-1215); a non-array attachments or blocks contributes nothing (sliceValue, :1203-1206); a string at an array index, not under one of the names, is not taken. One table case, 'Shapes that carry nothing', covers all three."
+      },
+      {
+        "finding": "F7: the 2,048-rune acceptance case states no expected string, and an early stop can disagree with capBody's truncation flag.",
+        "answer": "Plan decision D5 and two table rows: collection stops only once the text is longer than the cap, so capBody (normalize.go:1263-1269) still reports the cut; 2,040 a's plus a 100-rune attachment gives exactly 2,048 runes ending in seven b's with body_truncated true, and 2,040 a's plus a 7-rune attachment gives 2,048 runes with no body_truncated key."
+      },
+      {
+        "finding": "F8: whitespace-only own text is a hole in 'a message that has its own text keeps today's summary'.",
+        "answer": "Plan decision D2: empty means the empty string alone, so whitespace-only own text is a piece and seeds the repeat check, and the summary shows the attachment's words because firstNonEmptyLine skips blank lines (normalize.go:1217-1230). That fixes the whitespace form of the reported symptom. One table case asserts both the text and the summary."
+      },
+      {
+        "finding": "F9: consumers the spec does not name — the agent's wake renderers, the foreign-session note, and the controller's documented contract for a mention's text.",
+        "answer": "The blast radius inside Envoy is the envelope (slackSummary and slackPayload are called only from SlackEnvelope, normalize.go:252-253). Task T4 rewrites the text clause of skills/legion-controller/references/slack-mentions.md:26-29. The foreign-session note is recorded as consequence C4 and accepted: it is the treatment any Slack text gets today. Whether a mention should carry the extra words at all is C2, for the architect."
+      },
+      {
+        "finding": "F10: 'all failing at the commit before the change' cannot hold for cases that assert behaviour which does not change.",
+        "answer": "The plan's table has a 'Fails before the change' column; three rows are guards (the file-only message, the deleted message, and the 'today's' summaries). The plan names the exact control that measures the failing set — a copy of packages/envoy with the parent's normalize.go restored by jj file show -r @- — which was run on this pod and takes about five seconds. Recorded as a spec departure against acceptance 1."
+      },
+      {
+        "finding": "F11: acceptance 2 needs a stream reader the package does not have, and the whole integration package needs Docker.",
+        "answer": "Task T3 names the reader (streamEnvelopes beside streamDedupeKeys, with streamDedupeKeys reading from it) and the test name TestSlackAttachmentWordsReachTheStream. The plan states that this lane runs in CI only (the envoy-go job's 'Integration test envoy (testcontainers + NATS)' step), is cited by run id, and must not be weakened into a unit test; it is a regression lock, not the proof of the symptom."
+      },
+      {
+        "finding": "F12: extending packages/envoy/scripts/e2e-local.sh is unapproved scope and touches the required envoy-e2e-local CI job, whose step greps the script's unindented docker run line for the NATS image.",
+        "answer": "Dropped from the plan. The symptom is proven instead by a throwaway rig under packages/envoy/out/e2e/ (an ignored path, .gitignore:155) that runs a real nats-server, the real listener and a fake session; the plan carries its text so the tester can re-create it. Recorded in the plan's Risks."
+      },
+      {
+        "finding": "F13: no committed check reaches the agent's wake; only the e2e rig's captured prompts do.",
+        "answer": "The plan makes that rig the implementer's proof surface (T5) and the tester's re-run (T6), with its negative control being the same post under a broken signature, refused 401 with no wake. Its run at the branch head, reproducing the empty summary, is quoted at the top of plan.md."
+      },
+      {
+        "finding": "F14: the spec names no home for a Slack fixture, and the GitHub fixtures double as a golden corpus.",
+        "answer": "No fixture file and no Slack golden are added: the unit cases are Go literals as the existing Slack tables are, the integration body is a literal in its test as the existing Slack bodies are (webhook_redelivery_test.go:83-88), and the rig holds its own body."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The pieces are joined 'in the order Slack sends them'.",
+      "plan": "Array order is kept across attachments, blocks and every child slice. Inside one object the walk reads a fixed order instead: pretext, author_name, title, text, value, footer, fallback, then the remaining keys in sorted order.",
+      "evidence": "The webhook body is decoded with json.Unmarshal into map[string]any (packages/envoy/internal/webhook/slack.go:34-36); Go's encoding/json does not retain an object's key order, so the order Slack sent an object's fields in is not recoverable at all. The fixed order chosen is Slack's own display order for an attachment, which puts an alert's title rather than its body line first in the summary.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "Acceptance 1: the Go test cases 'fail at the commit before the change'.",
+      "plan": "Three of the cases are guards that pass at the parent commit as well: the file-only message with nothing to deliver, the deleted message, and the 'today's summary' assertions of the own-words cases. The plan's table marks each case, and the implementer measures the failing set with the named parent-commit control and reports it against the table.",
+      "evidence": "A deleted message already gets no text (normalize.go:973-976 and :1031-1039) and payloadJSON already drops an empty text (:1170-1174), so a case asserting either passes before the change; an assertion that a summary is unchanged cannot fail before the change by construction.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Acceptance 1's 'they fail at the commit before the change' holds for the cases the plan's table marks, not for its three guards."
+        ]
+      }
+    },
+    {
+      "spec": "Acceptance 3 names one document to update, packages/envoy/CHANGELOG.md.",
+      "plan": "Task T4 also rewrites the text clause of skills/legion-controller/references/slack-mentions.md:26-29, which tells the controller that a mention's text is the message's own words.",
+      "evidence": "That file documents the delivery's fields for the controller, which reads a mention's text to decide what a person wants (slack-mentions.md:26-29 and :56). After this change the field can also carry attachment and block strings, so the sentence would be false.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "One further document is edited: skills/legion-controller/references/slack-mentions.md."
+      }
+    }
+  ]
+}
