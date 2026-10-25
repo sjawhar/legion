@@ -83,11 +83,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-controller",
                 "readOnly": true

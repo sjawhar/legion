@@ -14,8 +14,6 @@ import (
 // credential.
 func TestWorkspaceInitControllerMakesTheSessionsDirectoryAndNothingElse(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("LEGION_RESUME_SESSION_FILE", "")
-	os.Unsetenv("LEGION_RESUME_SESSION_FILE")
 	code, stdout, stderr := runWorkspaceInitHere([]string{"controller", "--root", root})
 	if code != 0 || stderr != "" {
 		t.Fatalf("exit %d, stdout %q, stderr %q; want 0", code, stdout, stderr)
@@ -34,31 +32,6 @@ func TestWorkspaceInitControllerMakesTheSessionsDirectoryAndNothingElse(t *testi
 			names = append(names, entry.Name())
 		}
 		t.Fatalf("the controller's volume holds %v, want the sessions directory alone", names)
-	}
-}
-
-// A resume of the controller whose recorded session is gone from its volume means the volume was
-// lost: exit 3, which the runtime reads as a lost volume, so the daemon relaunches a fresh
-// controller rather than charging launch failures for a session no attempt can find. A session
-// that is present lets the same invocation through.
-func TestWorkspaceInitControllerReportsALostVolumeWhenTheResumedSessionIsGone(t *testing.T) {
-	root := t.TempDir()
-	session := filepath.Join(root, "sessions", "--legion--", "2026-10-06T12-00-00-000Z_0001.jsonl")
-	t.Setenv("LEGION_RESUME_SESSION_FILE", session)
-	code, stdout, stderr := runWorkspaceInitHere([]string{"controller", "--root", root})
-	want := "The controller's volume holds no recorded OMP session file (" + session + "): the volume was lost"
-	if code != 3 || !strings.Contains(stderr, want) || stdout != "" {
-		t.Fatalf("lost session: exit %d, stdout %q, stderr %q; want 3 naming %q", code, stdout, stderr, want)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(session), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if code, stdout, stderr := runWorkspaceInitHere([]string{"controller", "--root", root}); code != 0 || stderr != "" {
-		t.Fatalf("present session: exit %d, stdout %q, stderr %q; want 0", code, stdout, stderr)
 	}
 }
 

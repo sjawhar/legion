@@ -72,8 +72,8 @@ func TestAnOldTreesCleanupBeforeTheNewTreesStartHandsTheCarriedChildsSandboxOver
 		t.Fatal(err)
 	}
 	for _, c := range stored {
-		if c.Token == implementer.Token && (c.Tree != childKey || c.SessionFile != implementer.SessionFile || c.WorkspaceLost) {
-			t.Fatalf("the implementer after the new tree's start = %+v; want it in %s with its session file and no loss", c, childKey)
+		if c.Token == implementer.Token && (c.Tree != childKey || c.SessionFile != implementer.SessionFile) {
+			t.Fatalf("the implementer after the new tree's start = %+v; want it in %s with its session file", c, childKey)
 		}
 	}
 	if strings.Contains(logs.String(), "volume was lost") {
@@ -195,7 +195,6 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 	sup := newSupervisor(runtimeCtx, st, "legion", t.TempDir(), logger)
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: issueLaunchSpecs{prompt: prompt}, Clock: stillClock{}, Log: logger,
-		VolumeLost:     sup.volumeLost,
 		Limits:         supervise.Limits{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 2},
 		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 		PluginContract: 24,

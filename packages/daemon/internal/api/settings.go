@@ -93,7 +93,7 @@ type KubernetesSettings struct {
 	IssueVolume  string                           `json:"issue_volume"`
 	Scheduling   SchedulingSettings               `json:"scheduling"`
 	Resources    map[string]RoleResourcesSettings `json:"resources"`
-	// SessionStore is "postgres" when the file names a session DSN secret, else "pvc".
+	// SessionStore is always "postgres": the only store `runtime: kubernetes` loads (readSessionStore).
 	SessionStore string                `json:"session_store"`
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
 	// Plugins is the settled pair, whatever its source, absent while the daemon knows none.
@@ -282,7 +282,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			PriorityClass: block.Scheduling.PriorityClass,
 		},
 		Resources:    make(map[string]RoleResourcesSettings, len(block.Resources)),
-		SessionStore: "pvc",
+		SessionStore: "postgres",
 		Setup:        stringsOf(block.Setup),
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
@@ -297,9 +297,6 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	}
 	for role, reservation := range block.Resources {
 		settings.Resources[string(role)] = roleResourcesSettingsOf(reservation)
-	}
-	if block.SessionDSNSecret != "" {
-		settings.SessionStore = "postgres"
 	}
 	if broker := block.AgentSecrets; broker != nil {
 		settings.AgentSecrets = &AgentSecretsSettings{URL: broker.URL, Audience: broker.Audience, TokenExpirySeconds: broker.TokenExpirySeconds}

@@ -138,7 +138,7 @@ func legionVolumeNames() []string {
 // already covers, is named for the read-only mount every issue pod's role container carries there.
 func legionMountPaths() []string {
 	paths := []string{
-		TreeRoot, FeedDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
+		TreeRoot, FeedDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
 		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir,
 	}
 	slices.Sort(paths)
@@ -166,20 +166,10 @@ type launch struct {
 	secrets map[string]string
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is checked by the role launcher before it starts the child, on the issue's volume
-	// or, under a session database, in the session table (internal/launcher); an issue pod's init
-	// checks the issue's volume, not a triggering role's transcript, and another role's stored
-	// session can also require the volume to hold what it left.
+	// resumeFile is the session the role launcher resumes the child on, looked up in the session
+	// table before it starts the child (internal/launcher). It is the spec's, verbatim: the table's
+	// key, not a place on any disk.
 	resumeFile string
-	// expectVolume is an issue pod's workspace-init input (initEnvironment), which the issue pod
-	// sets itself (issuePod.prepare, issuePod.provision): whether the issue's volume must already
-	// hold the clone or a retained session, which only sessions kept on the volume can say.
-	expectVolume bool
-	// sessionsInDatabase is whether the runtime keeps every session in a database
-	// (Options.SessionDSNKey) rather than as files on the volume: then no recorded session says
-	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
-	// controller's is held to one.
-	sessionsInDatabase bool
 	// cacheURL is the address of the issue's repository's cache (cacheURL, set by
 	// issuePod.provision), which its fetch container is told (fetchEnvironment).
 	cacheURL string
@@ -222,17 +212,11 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if backend := runtime.Of(spec.Backend); !runtime.Backends[backend].LaunchedBy(configName) {
 		return launch{}, refuse("its role runs on %s, which the worker image does not carry: a pod runs Oh My Pi alone", backend)
 	}
-	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != "", gh: r.tools.GH}
+	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, resumeFile: spec.ResumeSessionFile, gh: r.tools.GH}
 	if spec.Role == claim.RoleController {
 		l.kind = controllerPod{}
 	} else {
 		l.cacheURL = r.cacheURL(CacheSandboxName(r.project, spec.Repository))
-	}
-	if spec.ResumeSessionFile != "" {
-		if err := validateSessionPath(spec.ResumeSessionFile); err != nil {
-			return launch{}, refuse("%v", err)
-		}
-		l.resumeFile = spec.ResumeSessionFile
 	}
 	if err := l.kind.prepare(&l); err != nil {
 		return launch{}, refuse("%v", err)
@@ -301,30 +285,19 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 	return strings.Join(fragments, "\n\n"), nil
 }
 
-// validateSessionPath keeps a recorded session on the volume every replacement pod mounts.
-func validateSessionPath(file string) error {
+// SessionOnVolume is where a recorded session file sits on a tree or controller volume mounted at
+// root: an agent's sessions directory was the volume's SessionsSubPath, so a session's path below
+// the one is its path below the other. No pod keeps sessions on a volume any more (INFRA-80), so
+// its one caller is `legion sessions import --tree-volume`, the copy of a legion-v10.0.0
+// deployment's session files into the session table. It refuses a path no pod ever kept a session
+// at, which names no place on such a volume.
+func SessionOnVolume(file, root string) (string, error) {
 	rest, ok := strings.CutPrefix(file, ompSessionsDir+"/")
 	if !ok || rest == "" || filepath.Clean(rest) != rest || strings.HasPrefix(rest, "../") {
-		return fmt.Errorf("recorded OMP session file %s is not under %s, the only directory a pod keeps sessions in; it cannot be resumed on this runtime",
+		return "", fmt.Errorf("recorded OMP session file %s is not under %s, the only directory a pod kept sessions in; it names no place on a tree volume",
 			file, ompSessionsDir)
 	}
-	return nil
-}
-
-// SessionOnVolume is where a recorded session file sits on a tree or controller volume mounted at
-// root: an agent's sessions directory is the volume's SessionsSubPath, so a session's path below
-// the one is its path below the other. It refuses a session file no pod keeps there
-// (validateSessionPath).
-func SessionOnVolume(file, root string) (string, error) {
-	if err := validateSessionPath(file); err != nil {
-		return "", err
-	}
-	return sessionOnVolume(file, root), nil
-}
-
-// sessionOnVolume is SessionOnVolume of a session file validateSessionPath already passed.
-func sessionOnVolume(file, root string) string {
-	return filepath.Join(root, SessionsSubPath, strings.TrimPrefix(file, ompSessionsDir+"/"))
+	return filepath.Join(root, SessionsSubPath, rest), nil
 }
 
 // agentArgv is the command the shim runs: the agent with its two explicit extensions, the Envoy
@@ -448,7 +421,6 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 	for _, role := range l.roles {
 		mounts := []corev1.VolumeMount{
 			{Name: issueVolume, MountPath: TreeRoot},
-			{Name: issueVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
 			{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
 			{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
 			{Name: roleVolume(stateVolume, role), MountPath: StateDir},
@@ -820,23 +792,15 @@ func fetchEnvironment(l launch) []corev1.EnvVar {
 
 // initEnvironment is `workspace-init provision`'s contract (research runtime §2.3), the one
 // provisioning every role of the issue pod shares. Its PATH is the image's alone, naming no
-// directory on the issue's volume, so the git and jj it resolves from PATH are never ones an agent
+// directory on the issue's disk, so the git and jj it resolves from PATH are never ones an agent
 // put there; it carries no tool-path variables, and it is never pointed at the provisioning token.
-// It gives shared provisioning the issue's storage expectation (LEGION_EXPECT_ISSUE_VOLUME: the
-// issue's volume must already hold the clone or a retained session) and never carries one role's
-// session path: a missing transcript must not prevent sibling launchers from starting. A relaunch
-// after the volume was lost names the ref the recreated workspace is recovered from; both are
-// workspace-init's alone, never the agent's. Nothing here sizes a wait on another pod: each issue
-// pod provisions its own clone on its own volume, so no two provisions share a repository.
-func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
-	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
-	if l.expectVolume {
-		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_ISSUE_VOLUME", Value: "true"})
-	}
-	if l.spec.WorkspaceRecoveredFrom != "" {
-		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
-	}
-	return append(env, xdgEnvironment()...)
+// It carries no role's session path either: a missing transcript must not prevent sibling
+// launchers from starting, and no session lives on the disk at all (INFRA-80). It expects nothing
+// of the disk: a pod's disk is created with the pod and empty, so every provision is the first.
+// Nothing here sizes a wait on another pod: each issue pod provisions its own clone on its own
+// disk, so no two provisions share a repository.
+func (r *Runtime) initEnvironment(launch) []corev1.EnvVar {
+	return append([]corev1.EnvVar{{Name: "PATH", Value: imagePath}}, xdgEnvironment()...)
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the

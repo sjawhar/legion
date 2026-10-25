@@ -21,10 +21,6 @@ import (
 // logTailLines is how much of a failed container's log a Gone quotes (runtime-kubernetes.ts:678-689).
 const logTailLines = 20
 
-// workspaceLostExitCode is workspace-init's exit code for an issue's volume that lost its clone and
-// the session being resumed (decision 11): a Gone that says so carries Observation.WorkspaceLost.
-const workspaceLostExitCode = 3
-
 // view is what the stores hold for one claim's name: its Sandbox, the pod the Sandbox owns, and a
 // same-named pod it does not own, which is no process of the claim's.
 type view struct {
@@ -124,9 +120,11 @@ func (r *Runtime) readSandbox(ctx context.Context, name string) (*sandbox, error
 }
 
 // ends reports whether obs is a final verdict the daemon's own replacement of a pod can account
-// for: a Gone or NotRecordedProcess, never a lost workspace, which no replacement causes.
+// for: a Gone or NotRecordedProcess, never one a failed init container made, which no replacement
+// causes — that is what has a relaunch replace a pod whose init keeps failing rather than read its
+// roles as displaced into it.
 func ends(obs runtime.Observation) bool {
-	return (obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess) && !obs.WorkspaceLost
+	return (obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess) && !obs.InitFailed
 }
 
 // names reports whether s names loc's recorded pod as the live pod a relaunch replaced
@@ -183,9 +181,8 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runt
 	pod := v.pod
 	initName, initExit := failedInit(pod)
 	if terminal(pod) || initExit != nil {
-		detail, workspaceLost := r.ended(ctx, v, loc.Sandbox.Container, initName, initExit)
-		ended := observe(runtime.Gone, "%s", detail)
-		ended.WorkspaceLost = workspaceLost
+		ended := observe(runtime.Gone, "%s", r.ended(ctx, v, loc.Sandbox.Container, initName, initExit))
+		ended.InitFailed = initExit != nil
 		return ended
 	}
 	if scheduled := podCondition(pod, corev1.PodScheduled); pod.Status.Phase == corev1.PodPending && scheduled != nil &&
@@ -274,7 +271,7 @@ func podAbsent(v view) string {
 
 // ended is the terminal pod verdict. A failed init container applies to every role; otherwise the
 // locator's role container is the process that ended.
-func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName string, initExit *corev1.ContainerStateTerminated) (string, bool) {
+func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName string, initExit *corev1.ContainerStateTerminated) string {
 	pod := v.pod
 	kind, container, state := "role", roleContainer, initExit
 	if initExit != nil {
@@ -286,10 +283,6 @@ func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName str
 		}
 	}
 	var detail strings.Builder
-	workspaceLost := kind == "init" && container == initContainer && state != nil && state.ExitCode == workspaceLostExitCode
-	if workspaceLost {
-		detail.WriteString("the issue's volume was lost: ")
-	}
 	fmt.Fprintf(&detail, "pod %s (uid %s) %s", pod.Name, pod.UID, pod.Status.Phase)
 	if state != nil {
 		fmt.Fprintf(&detail, ": %s container %s terminated (%s, exit code %d)", kind, container, state.Reason, state.ExitCode)
@@ -303,7 +296,7 @@ func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName str
 		detail.WriteString(r.fetchCacheState(pod))
 	}
 	fmt.Fprintf(&detail, "; last lines of %s:\n%s", container, r.logTail(ctx, pod.Name, container))
-	return detail.String(), workspaceLost
+	return detail.String()
 }
 
 // fetchCacheState is what a failed workspace-fetch's detail says of the repository cache it fills

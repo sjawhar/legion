@@ -82,9 +82,9 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 }
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
-// the workspace's place on the issue's volume. A resume of a session kept on the volume expects
-// the volume to hold what it left; a session kept in the database expects nothing of the volume, so
-// a resume on a new one provisions its workspace from the issue's pushed branch and continues.
+// the workspace's place on the issue's disk. It expects nothing of that disk: it is created with
+// the pod and deleted with it (INFRA-80), so every launch, a resume included, provisions its
+// workspace afresh from the issue's pushed branch while the session continues in the database.
 func (issuePod) prepare(l *launch) error {
 	spec := l.spec
 	if spec.Repository.IsZero() {
@@ -95,7 +95,6 @@ func (issuePod) prepare(l *launch) error {
 		return err
 	}
 	l.workspace = working.Dir
-	l.expectVolume = l.resumeFile != "" && !l.sessionsInDatabase
 	return nil
 }
 
@@ -241,25 +240,16 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 	}
 }
 
-// provision is what a new issue pod needs before it starts: it reads whether workspace-init must
-// find the issue's volume holding retained sessions (never under a session database, which keeps
-// none on it), mints the provisioning token for the repository's owner, makes sure the repository
-// has its cache (EnsureRepositoryCache: one a sweep has not made yet is made now), since a fresh
-// feed comes from that cache alone, waits until the cache's Service is its own
-// (awaitCacheService), since the fetch presents the cache's token at that Service's name, and
-// writes the token to the pod's init-only provisioning Secret with the cache's bearer token. It
-// waits on no other pod, the cache's included: the fetch waits for the cache to be ready itself,
-// and the issue's clone lives on the issue's own volume, which no other pod mounts. A cache that
-// cannot be made, or whose Service is not its own by the boot timeout, fails the launch, with
-// nothing written: the fetch could fill no fresh feed without it.
+// provision is what a new issue pod needs before it starts: it mints the provisioning token for
+// the repository's owner, makes sure the repository has its cache (EnsureRepositoryCache: one a
+// sweep has not made yet is made now), since a fresh feed comes from that cache alone, waits until
+// the cache's Service is its own (awaitCacheService), since the fetch presents the cache's token
+// at that Service's name, and writes the token to the pod's init-only provisioning Secret with the
+// cache's bearer token. It waits on no other pod, the cache's included: the fetch waits for the
+// cache to be ready itself, and the issue's clone lives on the pod's own disk, which no other pod
+// mounts. A cache that cannot be made, or whose Service is not its own by the boot timeout, fails
+// the launch, with nothing written: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionsInDatabase {
-		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
-		if err != nil {
-			return fmt.Errorf("read its issue's retained sessions: %w", err)
-		}
-		l.expectVolume = sessions
-	}
 	owner := l.spec.Repository.Owner()
 	minting, cancel := call(ctx)
 	token, err := r.tokens.Token(minting, owner)
@@ -337,16 +327,11 @@ func (controllerPod) diskSource(_ *Runtime, l launch) corev1.VolumeSource {
 func (controllerPod) secretAnnotations(launch) map[string]string { return nil }
 
 // initContainers are one workspace-init, which mounts the controller's volume alone: `workspace-init
-// controller` provisions nothing and waits on no lock. It is told the image's PATH and, when the
-// pod is created to resume a controller whose session is a file on the volume, the session it must
-// find, as the volume holds it, so a lost volume brings up a fresh controller before any launcher
-// starts; a session kept in the database is the launcher's to find (internal/launcher). It takes
-// the controller's resources.
+// controller` provisions nothing and waits on no lock. It is told the image's PATH and nothing of
+// any session: every session is a row in the session database, which the role launcher looks up
+// before it starts the child (internal/launcher). It takes the controller's resources.
 func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
 	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
-	if l.resumeFile != "" && !l.sessionsInDatabase {
-		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: sessionOnVolume(l.resumeFile, TreeRoot)})
-	}
 	return []corev1.Container{{
 		Name:            initContainer,
 		Image:           r.image,

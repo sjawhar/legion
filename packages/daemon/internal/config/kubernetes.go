@@ -66,8 +66,8 @@ type Kubernetes struct {
 	// nil when the deployment enrolls none, in which case pods carry no token for it.
 	AgentSecrets *AgentSecretsConfig
 	// SessionDSNSecret is the providers Secret's key that holds the postgres:// URL of the database
-	// every pod's Oh My Pi keeps its sessions in (`session_store: postgres`, `session_dsn_secret`);
-	// "" under `session_store: pvc`, the default, where each session is a file on the issue's volume.
+	// every pod's Oh My Pi keeps its sessions in (`session_store: postgres`, `session_dsn_secret`).
+	// Both keys are required under `runtime: kubernetes` (readSessionStore), so it is never "".
 	SessionDSNSecret string
 	// Plugins is `runtime.kubernetes.plugins`: the exact pi-legion/pi-envoy pair a stale-plugin
 	// relaunch installs into a kept pod, when the file names one. Nil when the file sets none and
@@ -1111,26 +1111,22 @@ func requestsUnderLimits(prefix string, settled RoleResources) error {
 var secretDataKey = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
 
 // readSessionStore reads `session_store` and `session_dsn_secret`: the providers Secret's key that
-// holds the session database's URL under `postgres`, "" under `pvc`, the default, where each
-// session is a file on the issue's volume. postgres names its key, and pvc names none: an inert key
-// is refused, never ignored.
+// holds the session database's URL. `postgres` is the only store this runtime has, and an omitted
+// `session_store` is the same refusal as an explicit `pvc`, never a silent default — the
+// deployment must name the store and its secret. `pvc` kept each session as a file on the issue's
+// disk, and that disk is now the pod's own generic ephemeral volume, deleted with it (INFRA-80):
+// the file would die with the pod, the next launch's resume would fail on the missing file
+// (internal/launcher's sessionWritten), and three such failures retire the claim.
 func readSessionStore(store, dsnSecret *yaml.Node) (string, error) {
 	name, err := readString(store, kubernetesKey+".session_store")
 	if err != nil {
 		return "", err
 	}
-	switch {
-	case name == nil || *name == "pvc":
-		if dsnSecret != nil {
-			return "", errors.New("runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it")
-		}
-		return "", nil
-	case *name == "postgres":
-	default:
-		return "", errors.New("runtime.kubernetes.session_store must be 'pvc' or 'postgres'")
+	if name == nil || *name != "postgres" {
+		return "", errors.New("runtime.kubernetes.session_store must be 'postgres': an issue pod's disk is deleted with the pod, so a session kept as a file on it ('pvc') dies with it and the next launch's resume fails on the missing file, retiring the claim after three failures")
 	}
 	key, err := requiredString(dsnSecret, kubernetesKey+".session_dsn_secret",
-		" with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL")
+		" when runtime is kubernetes: the key of the providers Secret that holds the session database's postgres:// URL")
 	if err != nil {
 		return "", err
 	}

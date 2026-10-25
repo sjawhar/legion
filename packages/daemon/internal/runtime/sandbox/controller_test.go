@@ -29,9 +29,8 @@ import (
 
 var controllerToken = claim.ControllerToken(testProject)
 
-// controllerSession is a session the controller saved, as the supervisor records it: under Oh My
-// Pi's sessions directory, which the controller's launcher mounts from its volume's sessions
-// directory, as every launcher does.
+// controllerSession is a session the controller saved, as the supervisor records it: the path Oh
+// My Pi wrote it at in the pod it ran in.
 const controllerSession = ompSessionsDir + "/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl"
 
 // controllerSpec is the project controller's launch under `controller: daemon`: its role, its
@@ -44,12 +43,12 @@ func controllerSpec(t *testing.T) runtime.SpawnSpec {
 }
 
 // The controller's pod is the runtime's other kind of pod: the controller's launcher alone, on a
-// volume of its own the Sandbox owns, so a relaunch resumes its session. It provisions no
-// workspace but holds the review App's GitHub credential like any workflow role's: its one init
-// container makes the sessions directory and holds a resume to its session, and its labels name
-// the controller and no tree or issue, so no tree's cleanup takes it for one of the tree's issue
-// pods. Where the runtime enrolls pods with the secrets broker it is enrolled as every workflow
-// role's launcher is, so its agent can be granted the secrets the Legion daemon's service owns.
+// volume of its own the Sandbox owns, so a relaunch finds its workspace where it left it. It
+// provisions no workspace but holds the review App's GitHub credential like any workflow role's:
+// its one init container is told the image's PATH and nothing else, and its labels name the
+// controller and no tree or issue, so no tree's cleanup takes it for one of the tree's issue pods.
+// Where the runtime enrolls pods with the secrets broker it is enrolled as every workflow role's
+// launcher is, so its agent can be granted the secrets the Legion daemon's service owns.
 func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -89,8 +88,10 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if want := []string{opts.Tools.Legion, "workspace-init", "controller", "--root", TreeRoot}; !slices.Equal(init.Command, want) {
 		t.Errorf("init command %q, want %q", init.Command, want)
 	}
-	if got := envOf(init)["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/"+SessionsSubPath+"/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl" {
-		t.Errorf("init LEGION_RESUME_SESSION_FILE = %q, want the session on the controller's volume", got)
+	// Its session is a row in the session database, which the role launcher looks up before it
+	// starts the child, so the init container is told nothing of a resume.
+	if env := envOf(init); len(env) != 1 || env["PATH"] != imagePath {
+		t.Errorf("init env %v, want the image's PATH alone: the controller's session is in the database, not a file on its volume", env)
 	}
 	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != issueVolume || mounts[0].MountPath != TreeRoot {
 		t.Errorf("init mounts %+v, want the controller's volume at %s alone", mounts, TreeRoot)

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const launcherChildEnv = "LEGION_LAUNCHER_TEST_CHILD"
@@ -393,44 +392,6 @@ func TestStartsAreIdempotentAndRefusedBeforeWriting(t *testing.T) {
 	}
 }
 
-// A resume naming a session file the tree volume no longer holds is refused before anything
-// starts: no child runs and no generation directory is written, so a missing retained session
-// never becomes a fresh agent (LEGION-462). A later generation naming a session file that exists
-// starts normally in the same launcher.
-func TestStartRefusesAMissingResumeFile(t *testing.T) {
-	g := newRig(t)
-	marker := filepath.Join(t.TempDir(), "marker")
-	absent := filepath.Join(t.TempDir(), "sessions", "absent.marker")
-	refused := g.childStart(7, marker, nil)
-	refused.ResumeFile = absent
-	got := g.start(refused)
-	if got.OK {
-		t.Fatalf("start result = %#v, want a refusal: a missing resume file must never become a fresh agent", got)
-	}
-	want := "resume session file " + absent + ": stat " + absent
-	if !strings.Contains(got.Error, want) {
-		t.Fatalf("refusal = %q, want it to quote the missing session file %q", got.Error, want)
-	}
-	if _, err := os.Lstat(filepath.Join(g.private, "g7")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a refused resume wrote its generation directory: %v", err)
-	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("a refused resume started the child: its marker was published")
-	}
-
-	resumeFile := filepath.Join(t.TempDir(), "session")
-	if err := os.WriteFile(resumeFile, []byte("session"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fixed := g.childStart(8, marker, nil)
-	fixed.ResumeFile = resumeFile
-	if got := g.start(fixed); !got.OK || got.RunningGeneration != 8 {
-		t.Fatalf("start with an existing resume file = %#v, want generation 8 to run", got)
-	}
-	published(t, marker)
-	g.stop(8)
-}
-
 // toldRecreated starts generation with env (resuming resume, "" for none), returns the
 // WorkspaceRecreatedVariable value its child was started with, and stops it.
 func (g *rig) toldRecreated(generation uint64, env []string, resume string) string {
@@ -465,61 +426,4 @@ func newWorkspace(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
-}
-
-// A resumed generation is told whether its workspace (LEGION_WORKSPACE) was recreated since its
-// session was last written, which the Legion plugin tells the agent on its first turn: "true" once
-// provisioning's creation record is later than the session file's last write, "false" when it is
-// earlier or there is none. A fresh generation resumes nothing and is told "false", and so is every
-// generation whatever the container's own environment says, so no other value reaches the child. A
-// record that is empty or not an instant, which an init container killed mid-write can leave, only
-// decides the notice: the resume starts, told "false", and the launcher logs the record.
-func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten(t *testing.T) {
-	t.Setenv(WorkspaceRecreatedVariable, "true")
-	g := newRig(t)
-	session := filepath.Join(t.TempDir(), "session.jsonl")
-	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	written := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
-	if err := os.Chtimes(session, written, written); err != nil {
-		t.Fatal(err)
-	}
-	dir := newWorkspace(t)
-	env := []string{"LEGION_WORKSPACE=" + dir}
-
-	if got := g.toldRecreated(1, env, session); got != "false" {
-		t.Errorf("a resume in a workspace with no creation record was told %q, want false", got)
-	}
-	if err := workspace.RecordCreated(dir, written.Add(-time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if got := g.toldRecreated(2, env, session); got != "false" {
-		t.Errorf("a resume in a workspace created before its session's last write was told %q, want false", got)
-	}
-	if err := workspace.RecordCreated(dir, written.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if got := g.toldRecreated(3, env, session); got != "true" {
-		t.Errorf("a resume in a workspace created after its session's last write was told %q, want true", got)
-	}
-	if got := g.toldRecreated(4, env, ""); got != "false" {
-		t.Errorf("a fresh generation was told %q, want false", got)
-	}
-	if got := g.toldRecreated(5, nil, session); got != "false" {
-		t.Errorf("a resume with no workspace was told %q, want false", got)
-	}
-
-	for i, record := range []string{"soon\n", ""} {
-		if err := os.WriteFile(filepath.Join(dir, ".jj", "legion-created"), []byte(record), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if got := g.toldRecreated(uint64(6+i), env, session); got != "false" {
-			t.Errorf("a resume in a workspace whose creation record is %q was told %q, want false", record, got)
-		}
-	}
-	if logged := g.stderr.String(); !strings.Contains(logged, filepath.Join(dir, ".jj", "legion-created")) ||
-		!strings.Contains(logged, "the workspace is taken as not recreated") {
-		t.Errorf("the launcher logged %q, want the unreadable creation record named", logged)
-	}
 }

@@ -233,9 +233,8 @@ func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 // resumeSession is a session file Oh My Pi recorded in a pod.
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
-// manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; a relaunch whose
-// workspace is recovered after its volume was lost; the root enrolled with the secrets broker; and
-// the project controller's pod, launched fresh and resuming. Every one owns its volume.
+// manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; the root enrolled
+// with the secrets broker; and the project controller's pod, launched fresh and resuming.
 // agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
 // (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
 // building that case's manifest, and restore nil after — every other case runs unenrolled).
@@ -245,8 +244,6 @@ func manifestCases(t *testing.T) map[string]struct {
 } {
 	resume := workerSpec(t)
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
-	recovered := workerSpec(t)
-	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
 	controllerResume := controllerSpec(t)
 	controllerResume.Generation, controllerResume.BootToken = 2, "boot-g2"
 	controllerResume.ResumeSessionFile = controllerSession
@@ -257,7 +254,6 @@ func manifestCases(t *testing.T) map[string]struct {
 		"root":              {rootSpec(t), nil},
 		"worker":            {workerSpec(t), nil},
 		"resume":            {resume, nil},
-		"recovered":         {recovered, nil},
 		"controller":        {controllerSpec(t), nil},
 		"controller-resume": {controllerResume, nil},
 		"root-enrolled": {rootSpec(t), &AgentSecrets{
@@ -1031,7 +1027,6 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 	}{
 		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = ghrepo.Repository{} }, "no repository"},
 		"no default branch":   {func(s *runtime.SpawnSpec) { s.DefaultBranch = "" }, "no default branch for repository sjawhar/legion-smoke"},
-		"session off volume":  {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
 		"runtime-owned env":   {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
 		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "x" }, "credential-shaped"},
 		"gh token in env":     {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "Env sets GH_TOKEN"},
@@ -1244,38 +1239,6 @@ func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
 			}
 			if want := generationDir(workerSpec(t).Generation) + "/" + dispatchTokenKey; pointed && pointer != want {
 				t.Fatalf("DISPATCH_TOKEN_FILE = %q, want the generation's private %s", pointer, want)
-			}
-		})
-	}
-}
-
-// A workspace recovered after its volume was lost is workspace-init's to recreate and mark
-// (LEGION_WORKSPACE_RECOVERED_FROM, cmd/legion/workspace_init.go): the ref reaches the
-// workspace-init container alone, never the agent, and a launch recovering nothing names none.
-func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	recovered := workerSpec(t)
-	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
-	for name, tc := range map[string]struct {
-		spec runtime.SpawnSpec
-		want string
-	}{
-		"recovered": {recovered, "legion/LEGION-208"},
-		"fresh":     {workerSpec(t), ""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec)
-			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_WORKSPACE_RECOVERED_FROM"]
-			if got != tc.want || set != (tc.want != "") {
-				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
-			}
-			for _, name := range []string{fetchContainer, workerContainer} {
-				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
-					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
-				}
 			}
 		})
 	}

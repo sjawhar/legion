@@ -562,7 +562,6 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	sup := newSupervisor(runtimeCtx, st, "legion", t.TempDir(), logger)
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: st, Specs: issueLaunchSpecs{prompt: prompt}, Clock: stillClock{}, Log: logger,
-		VolumeLost:     sup.volumeLost,
 		Limits:         supervise.Limits{LaunchFailures: 1, PromptFailures: 2, PromptRetires: 2},
 		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 		PluginContract: 24,
@@ -646,11 +645,8 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	if _, touched := api.deleted(rootSandbox); touched || api.pvcRequests != 0 {
 		t.Fatalf("the child's close deleted the root's Sandbox (%t) or sent %d PVC requests, want neither", touched, api.pvcRequests)
 	}
-	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "" || got.SessionFile != "" || got.WorkspaceLost || got.Locator != nil {
-		t.Fatalf("done child's planner after the close = %+v, want retired with no session, no loss and no locator", got)
-	}
-	if sessions, err := st.IssueHasSessions(ctx, "legion", done.Key); err != nil || sessions {
-		t.Fatalf("IssueHasSessions(%s) = %t, %v after the close, want false", done.Key, sessions, err)
+	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "" || got.SessionFile != "" || got.Locator != nil {
+		t.Fatalf("done child's planner after the close = %+v, want retired with no session and no locator", got)
 	}
 	if got := storedClaim(architect.Token); got.State != supervise.StateWorking || got.Session != "saved-architect" {
 		t.Fatalf("root architect after the child's close = %+v, want it working with its session", got)
@@ -702,13 +698,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	if !slices.Contains(env, "PATH") {
 		t.Fatalf("the re-entered child's workspace-init environment %v names no PATH; the Running patch wrote no pod template", env)
 	}
-	if slices.Contains(env, "LEGION_EXPECT_ISSUE_VOLUME") {
-		t.Fatalf("the re-entered child's workspace-init environment %v expects a volume that was released", env)
-	}
-	if got := storedClaim(planner.Token); got.SessionFile != "" || got.WorkspaceLost {
-		t.Fatalf("re-entered child's planner = %+v, want a fresh launch with no session to resume and no loss", got)
-	}
-	if logged := logs.String(); strings.Contains(logged, "volume was lost") {
-		t.Fatalf("the re-entered child's launch reported a lost volume:\n%s", logged)
+	if got := storedClaim(planner.Token); got.SessionFile != "" {
+		t.Fatalf("re-entered child's planner = %+v, want a fresh launch with no session to resume", got)
 	}
 }

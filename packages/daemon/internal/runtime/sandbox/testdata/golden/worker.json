@@ -85,11 +85,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-architect",
                 "readOnly": true
@@ -176,11 +171,6 @@
               {
                 "mountPath": "/legion",
                 "name": "issue"
-              },
-              {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
               },
               {
                 "mountPath": "/var/run/legion/launcher",
@@ -271,11 +261,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-implementer",
                 "readOnly": true
@@ -362,11 +347,6 @@
               {
                 "mountPath": "/legion",
                 "name": "issue"
-              },
-              {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
               },
               {
                 "mountPath": "/var/run/legion/launcher",
@@ -457,11 +437,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-reviewer",
                 "readOnly": true
@@ -548,11 +523,6 @@
               {
                 "mountPath": "/legion",
                 "name": "issue"
-              },
-              {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
               },
               {
                 "mountPath": "/var/run/legion/launcher",

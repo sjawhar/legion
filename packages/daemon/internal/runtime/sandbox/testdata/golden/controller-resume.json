@@ -83,11 +83,6 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
-              },
-              {
                 "mountPath": "/var/run/legion/launcher",
                 "name": "launcher-controller",
                 "readOnly": true
@@ -127,10 +122,6 @@
               {
                 "name": "PATH",
                 "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
-              },
-              {
-                "name": "LEGION_RESUME_SESSION_FILE",
-                "value": "/legion/sessions/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",

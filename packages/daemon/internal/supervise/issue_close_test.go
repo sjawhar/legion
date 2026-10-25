@@ -32,11 +32,11 @@ func TestAnIssueCloseRetiresTheClaimAndDropsItsSessionWithoutALostWorkspace(t *t
 				t.Errorf("released %+v, want the process %+v", released, before.Locator)
 			}
 			h.wantState(StateRetired)
-			if c := h.claim(); c.Session != "" || c.SessionFile != "" || c.WorkspaceLost || c.Locator != nil {
-				t.Errorf("claim %+v after the close, want it retired with no session, no loss and no locator", c)
+			if c := h.claim(); c.Session != "" || c.SessionFile != "" || c.Locator != nil {
+				t.Errorf("claim %+v after the close, want it retired with no session and no locator", c)
 			}
-			if stored := h.store.load(testToken); stored.State != StateRetired || stored.Session != "" || stored.SessionFile != "" || stored.WorkspaceLost {
-				t.Errorf("stored %+v, want the retired claim with its session dropped and no loss", stored)
+			if stored := h.store.load(testToken); stored.State != StateRetired || stored.Session != "" || stored.SessionFile != "" {
+				t.Errorf("stored %+v, want the retired claim with its session dropped", stored)
 			}
 		})
 	}
@@ -82,8 +82,8 @@ func TestAnIssueCloseOfARetiredClaimDropsTheSessionItKept(t *testing.T) {
 	h.must(RequestIssueClose{Claim: testToken})
 
 	h.wantState(StateRetired)
-	if c := h.claim(); c.Session != "" || c.SessionFile != "" || c.WorkspaceLost {
-		t.Errorf("claim %+v after the issue close, want its session dropped and no loss", c)
+	if c := h.claim(); c.Session != "" || c.SessionFile != "" {
+		t.Errorf("claim %+v after the issue close, want its session dropped", c)
 	}
 	if stored := h.store.load(testToken); stored.Session != "" || stored.SessionFile != "" {
 		t.Errorf("stored %+v, want the session dropped", stored)
@@ -117,7 +117,7 @@ func TestAClaimAnIssueCloseRetiredRelaunchesFresh(t *testing.T) {
 	if last := h.rt.Calls()[len(h.rt.Calls())-1]; last.Method != "Spawn" || last.Spec.ResumeSessionFile != "" {
 		t.Errorf("the relaunch was %s %+v, want a fresh spawn", last.Method, last.Spec)
 	}
-	if built := h.specs.last(t); built.WorkspaceLost || built.Session != "" || built.SessionFile != "" {
-		t.Errorf("the relaunch was built for %+v, want a claim with no session and no lost workspace", built)
+	if built := h.specs.last(t); built.Session != "" || built.SessionFile != "" {
+		t.Errorf("the relaunch was built for %+v, want a claim with no session", built)
 	}
 }

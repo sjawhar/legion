@@ -67,22 +67,28 @@ func TestStartUnderSQLStorageResumesOnlyASessionTheTableHolds(t *testing.T) {
 	g.stop(7)
 }
 
-// A generation told SQL storage with no URL file is refused before it starts, naming the variable:
-// the launcher cannot look where Oh My Pi would.
-func TestStartUnderSQLStorageRefusesAResumeWithNoURLFile(t *testing.T) {
+// A generation with no URL file is refused before it starts, naming the variable: the launcher
+// cannot look where Oh My Pi would.
+func TestStartRefusesAResumeWithNoURLFile(t *testing.T) {
 	g := newRig(t)
 	command := g.childStart(3, filepath.Join(t.TempDir(), "marker"), nil)
-	command.Env = append(command.Env, ompsessions.StorageVariable+"="+ompsessions.SQLStorage)
 	command.ResumeFile = "/sessions/absent.jsonl"
-	if got := g.start(command); got.OK || !strings.Contains(got.Error, "OMP_SESSION_STORAGE is sql and OMP_SESSION_SQL_DSN_FILE names no file") {
+	if got := g.start(command); got.OK || !strings.Contains(got.Error, "OMP_SESSION_SQL_DSN_FILE names no file") {
 		t.Fatalf("start = %#v, want the refusal naming OMP_SESSION_SQL_DSN_FILE", got)
 	}
 }
 
-// Under SQL storage a session's last write is the table's mtime_ms, which Oh My Pi moves on every
-// write and `legion sessions import` sets to the copied file's: a resumed generation whose workspace
-// provisioning recorded creating after that is told so, and one whose workspace is older is not.
-func TestAResumeUnderSQLStorageIsToldWhetherItsWorkspaceWasRecreatedSinceTheTableWroteItsSession(t *testing.T) {
+// A session's last write is the table's mtime_ms, which Oh My Pi moves on every write and
+// `legion sessions import` sets to the copied file's. A resumed generation is told whether its
+// workspace (LEGION_WORKSPACE) was recreated since that write, which the Legion plugin tells the
+// agent on its first turn: "true" once provisioning's creation record is later, "false" when it is
+// earlier or there is none. A fresh generation resumes nothing and is told "false", and so is one
+// with no workspace at all and every generation whatever the container's own environment says, so
+// no other value reaches the child. A record that is empty or not an instant, which an init
+// container killed mid-write can leave, only decides the notice: the resume starts, told "false",
+// and the launcher logs the record.
+func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceTheTableWroteItsSession(t *testing.T) {
+	t.Setenv(WorkspaceRecreatedVariable, "true")
 	_, dsnFile := testpg.DSNFile(t, "legion_launcher_recreated_test")
 	g := newRig(t)
 	sessionFile := filepath.Join(t.TempDir(), "sessions", "2026-10-08T12-00-00-000Z_0002.jsonl")
@@ -96,18 +102,40 @@ func TestAResumeUnderSQLStorageIsToldWhetherItsWorkspaceWasRecreatedSinceTheTabl
 		t.Fatal(err)
 	}
 	dir := newWorkspace(t)
-	env := []string{"LEGION_WORKSPACE=" + dir, ompsessions.StorageVariable + "=" + ompsessions.SQLStorage, ompsessions.DSNFileVariable + "=" + dsnFile}
+	table := []string{ompsessions.DSNFileVariable + "=" + dsnFile}
+	env := append([]string{"LEGION_WORKSPACE=" + dir}, table...)
+	if got := g.toldRecreated(1, env, sessionFile); got != "false" {
+		t.Errorf("a resume in a workspace with no creation record was told %q, want false", got)
+	}
 	if err := workspace.RecordCreated(dir, written.Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if got := g.toldRecreated(1, env, sessionFile); got != "false" {
+	if got := g.toldRecreated(2, env, sessionFile); got != "false" {
 		t.Errorf("a resume in a workspace older than the table's last write was told %q, want false", got)
 	}
 	if err := workspace.RecordCreated(dir, written.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if got := g.toldRecreated(2, env, sessionFile); got != "true" {
+	if got := g.toldRecreated(3, env, sessionFile); got != "true" {
 		t.Errorf("a resume in a workspace recreated after the table's last write was told %q, want true", got)
+	}
+	if got := g.toldRecreated(4, env, ""); got != "false" {
+		t.Errorf("a fresh generation was told %q, want false", got)
+	}
+	if got := g.toldRecreated(5, table, sessionFile); got != "false" {
+		t.Errorf("a resume with no workspace was told %q, want false", got)
+	}
+	for i, record := range []string{"soon\n", ""} {
+		if err := os.WriteFile(filepath.Join(dir, ".jj", "legion-created"), []byte(record), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.toldRecreated(uint64(6+i), env, sessionFile); got != "false" {
+			t.Errorf("a resume in a workspace whose creation record is %q was told %q, want false", record, got)
+		}
+	}
+	if logged := g.stderr.String(); !strings.Contains(logged, filepath.Join(dir, ".jj", "legion-created")) ||
+		!strings.Contains(logged, "the workspace is taken as not recreated") {
+		t.Errorf("the launcher logged %q, want the unreadable creation record named", logged)
 	}
 }
 

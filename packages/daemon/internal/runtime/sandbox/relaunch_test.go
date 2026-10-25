@@ -866,8 +866,8 @@ func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
 	}
 }
 
-// A step of an issue pod's provisioning that fails — the retained-sessions read, the
-// provisioning-token mint (a GitHub outage), the provisioning Secret's write, a role's GitHub
+// A step of an issue pod's provisioning that fails — the provisioning-token mint (a GitHub
+// outage), the provisioning Secret's write, a role's GitHub
 // credential mint for its Secret — fails that launch with its error and nothing more: the launch
 // returns it, never panics, gives the pod's launch turn back, and the pod's next launch, once the
 // failure passes, launches.
@@ -878,13 +878,6 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 		fail func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec)
 		want string
 	}{
-		"the retained-sessions read": {
-			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
-				store := &sessionsFailingStore{fakeStore: newFakeStore(), failed: failed, err: failure}
-				return withOptions(func(o *Options) { o.Store = store }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
-			},
-			want: "read its issue's retained sessions",
-		},
 		"the provisioning-token mint": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
 				tokens := &outageTokens{failed: failed}
@@ -954,20 +947,6 @@ func failedLaunch(t *testing.T, g *rig, spec runtime.SpawnSpec) error {
 	defer cancel()
 	_, err := g.r.Spawn(launching, spec)
 	return err
-}
-
-// sessionsFailingStore is a fakeStore whose next retained-sessions read fails, once.
-type sessionsFailingStore struct {
-	*fakeStore
-	failed *atomic.Bool
-	err    error
-}
-
-func (s *sessionsFailingStore) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
-	if s.failed.CompareAndSwap(false, true) {
-		return false, s.err
-	}
-	return s.fakeStore.IssueHasSessions(ctx, project, issue)
 }
 
 // outageTokens refuses its next installation token, once, as a GitHub outage would.
@@ -1217,18 +1196,14 @@ func TestAnAPIServerThrottleOnTheAddressRecordSpendsNoLaunchBudget(t *testing.T)
 
 // A Resume whose next spec prepare rejects must stop the old role child too. Machine has already
 // let its locator go, so the malformed spec must not leave the child either watched or running as
-// the Machine retries to Failed. Each is a different prepare refusal that happens before relaunch
-// otherwise forgets the role: the recorded session path, a prompt file and one argv string.
+// the Machine retries to Failed. The refusal is one prepare makes before relaunch otherwise
+// forgets the role: a role prompt file that is not on disk.
 func TestAPrepareRefusalOnResumeNeverLeavesASupervisedRoleChildRunning(t *testing.T) {
 	for name, tc := range map[string]struct {
 		sessionFile string
 		mutate      func(*runtime.SpawnSpec)
 		want        string
 	}{
-		"an invalid stored session path": {
-			sessionFile: "/sessions/not-under-the-pod.jsonl",
-			want:        "is not under",
-		},
 		"a missing prompt file": {
 			sessionFile: resumeSession,
 			mutate: func(spec *runtime.SpawnSpec) {

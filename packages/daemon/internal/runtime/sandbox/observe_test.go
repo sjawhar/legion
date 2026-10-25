@@ -147,14 +147,14 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 	exited := &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 143, Signal: "terminated"}}
 	pending := corev1.PodStatus{Phase: corev1.PodPending}
 	for _, tc := range []struct {
-		row           string
-		objects       []k8sruntime.Object
-		launcher      *shimwire.LauncherState
-		want          runtime.ObservationKind
-		detail        []string
-		absent        []string
-		workspaceLost bool
-		displaced     bool
+		row        string
+		objects    []k8sruntime.Object
+		launcher   *shimwire.LauncherState
+		want       runtime.ObservationKind
+		detail     []string
+		absent     []string
+		initFailed bool
+		displaced  bool
 	}{
 		{row: "2 sandbox absent", want: runtime.Gone, detail: []string{"sandbox legion/" + name + " is absent"}},
 		{
@@ -205,29 +205,30 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: role container tester terminated (Error, exit code 137)", "last lines of tester:\nfake logs"},
 		},
 		{
-			row:           "5 workspace-init lost the workspace",
-			objects:       withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 3, "Error"))),
-			want:          runtime.Gone,
-			workspaceLost: true,
-			detail:        []string{"the issue's volume was lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
+			row:        "5 workspace-init failed",
+			objects:    withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 1, "Error"))),
+			want:       runtime.Gone,
+			initFailed: true,
+			detail:     []string{"pod " + name, "init container workspace-init terminated (Error, exit code 1)", "last lines of workspace-init:"},
 		},
 		{
 			row: "5 workspace-fetch failed, its repository's cache failing",
 			objects: append(withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(fetchContainer, 1, "Error")), func(p *corev1.Pod) {
 				p.Spec.InitContainers = []corev1.Container{{Name: fetchContainer, Command: []string{"/opt/legion/bin/legion", "workspace-init", "fetch", "--repo", "acme/widgets", "--feed", FeedDir}}}
 			}), cacheObject(t, cacheRepo, "uid-cache", modeRunning, ""), crashLooping(cachePod(cacheRepo, "uid-cache-pod", "uid-cache", testImage, corev1.PodRunning))),
-			want: runtime.Gone,
+			want:       runtime.Gone,
+			initFailed: true,
 			detail: []string{
 				"init container workspace-fetch terminated (Error, exit code 1)",
 				"; the repository cache of acme/widgets, which a fresh feed comes from alone, is failing: container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
 			},
 		},
 		{
-			row:           "5 a lost workspace is never the daemon's replacement, though its pod is named and deleting",
-			objects:       displacing(withPod(modeSuspended, nil, recorded, sandboxUID, failed(terminated(initContainer, 3, "Error")), deleting), recorded),
-			want:          runtime.Gone,
-			workspaceLost: true,
-			absent:        []string{"the daemon replaced"},
+			row:        "5 a failed init is never the daemon's replacement, though its pod is named and deleting",
+			objects:    displacing(withPod(modeSuspended, nil, recorded, sandboxUID, failed(terminated(initContainer, 1, "Error")), deleting), recorded),
+			want:       runtime.Gone,
+			initFailed: true,
+			absent:     []string{"the daemon replaced"},
 		},
 		{
 			row:     "5 the agent exited cleanly",
@@ -447,8 +448,8 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			if obs.Locator != loc {
 				t.Fatalf("observation carries %+v, want the recorded locator", obs.Locator)
 			}
-			if obs.WorkspaceLost != tc.workspaceLost {
-				t.Errorf("WorkspaceLost = %t, want %t (detail: %s)", obs.WorkspaceLost, tc.workspaceLost, obs.Detail)
+			if obs.InitFailed != tc.initFailed {
+				t.Errorf("InitFailed = %t, want %t (detail: %s)", obs.InitFailed, tc.initFailed, obs.Detail)
 			}
 			if obs.Displaced != tc.displaced {
 				t.Errorf("Displaced = %t, want %t (detail: %s)", obs.Displaced, tc.displaced, obs.Detail)

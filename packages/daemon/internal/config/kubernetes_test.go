@@ -41,6 +41,8 @@ runtime:
     namespace: legion
     image: ` + workerImage + `
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
 `
 
 // kubernetesWith is kubernetesFile with one line replaced; it panics when the line is not there,
@@ -52,11 +54,14 @@ func kubernetesWith(line, replacement string) string {
 	return strings.Replace(kubernetesFile, line, replacement, 1)
 }
 
+// sessionStoreRefusal is the one answer every session_store but postgres gets, an omitted key
+// included: a file session would die with the pod's disk.
+const sessionStoreRefusal = "runtime.kubernetes.session_store must be 'postgres': an issue pod's disk is deleted with the pod, so a session kept as a file on it ('pvc') dies with it and the next launch's resume fails on the missing file, retiring the claim after three failures"
+
 func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
 	path := writeConfigFile(t, kubernetesFile+`    issue_volume: 30Gi
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
-    session_store: pvc
     setup: [/bin/sh, -c, 'omp plugin marketplace add acme/agent-skills']
     repository_cache:
       volume: 50Gi
@@ -113,10 +118,13 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		Namespace:    "legion",
 		Image:        workerImage,
 		StorageClass: "gp2",
-		IssueVolume:  "30Gi",
-		Kubeconfig:   filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
-		Context:      "legion-daemon@example",
-		Setup:        []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
+		// `session_store: postgres` is the only store this runtime has, so the key its
+		// `session_dsn_secret` names settles on every load of the block.
+		SessionDSNSecret: "SESSION_DSN",
+		IssueVolume:      "30Gi",
+		Kubeconfig:       filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
+		Context:          "legion-daemon@example",
+		Setup:            []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
 		Scheduling: Scheduling{
 			NodeSelector: map[string]string{"karpenter.k8s.aws/instance-family": "m7i", "zone": "4"},
 			Tolerations: []Toleration{
@@ -253,7 +261,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
 		{"pod", block.Pod, PodConfig{}},
-		{"session_dsn_secret", block.SessionDSNSecret, ""},
+		{"session_dsn_secret", block.SessionDSNSecret, "SESSION_DSN"},
 		{"setup", block.Setup, []string(nil)},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
@@ -424,24 +432,16 @@ func TestARolesEphemeralStorageBoundSettlesFieldByField(t *testing.T) {
 	}
 }
 
-// `session_store: postgres` names the providers Secret's key that holds the session database's URL,
-// which every pod mounts for its Oh My Pi; `pvc`, the default, names none.
+// `session_store: postgres` is the one store, and `session_dsn_secret` names the providers Secret's
+// key that holds the session database's URL, which every pod mounts for its Oh My Pi.
 func TestLoadForValidationSettlesTheSessionStore(t *testing.T) {
-	for _, tc := range []struct {
-		name, body, want string
-	}{
-		{"postgres", kubernetesFile + "    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n", "SESSION_DSN"},
-		{"pvc", kubernetesFile + "    session_store: pvc\n", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
-			if err != nil {
-				t.Fatalf("LoadForValidation: %v", err)
-			}
-			if got := cfg.Runtime.Kubernetes.SessionDSNSecret; got != tc.want {
-				t.Errorf("SessionDSNSecret = %q, want %q", got, tc.want)
-			}
-		})
+	body := kubernetesWith("    session_dsn_secret: SESSION_DSN\n", "    session_dsn_secret: OMP_SESSIONS_URL\n")
+	cfg, err := LoadForValidation(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	if got := cfg.Runtime.Kubernetes.SessionDSNSecret; got != "OMP_SESSIONS_URL" {
+		t.Errorf("SessionDSNSecret = %q, want OMP_SESSIONS_URL", got)
 	}
 }
 
@@ -739,29 +739,34 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "unknown key runtime.kubernetes.role_profiles: a role's reservation is runtime.kubernetes.resources.<role>, its cpu and memory limits with optional lower cpu_request and memory_request, and a role absent there takes the daemon's default",
 		},
 		{
+			name: "session_store omitted",
+			body: kubernetesWith("    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n", ""),
+			want: sessionStoreRefusal,
+		},
+		{
+			name: "session_store pvc, whose file sessions die with the pod's disk",
+			body: kubernetesWith("    session_store: postgres\n", "    session_store: pvc\n"),
+			want: sessionStoreRefusal,
+		},
+		{
+			name: "session_store neither pvc nor postgres",
+			body: kubernetesWith("    session_store: postgres\n", "    session_store: s3\n"),
+			want: sessionStoreRefusal,
+		},
+		{
 			name: "session_store postgres without its key",
-			body: kubernetesFile + "    session_store: postgres\n",
-			want: "runtime.kubernetes.session_dsn_secret is required with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL",
+			body: kubernetesWith("    session_dsn_secret: SESSION_DSN\n", ""),
+			want: "runtime.kubernetes.session_dsn_secret is required when runtime is kubernetes: the key of the providers Secret that holds the session database's postgres:// URL",
 		},
 		{
 			name: "session_store postgres with an empty key",
-			body: kubernetesFile + "    session_store: postgres\n    session_dsn_secret: \"\"\n",
+			body: kubernetesWith("    session_dsn_secret: SESSION_DSN\n", "    session_dsn_secret: \"\"\n"),
 			want: "runtime.kubernetes.session_dsn_secret must not be empty",
 		},
 		{
 			name: "session_store postgres with a key no Secret can hold",
-			body: kubernetesFile + "    session_store: postgres\n    session_dsn_secret: sessions/dsn\n",
+			body: kubernetesWith("    session_dsn_secret: SESSION_DSN\n", "    session_dsn_secret: sessions/dsn\n"),
 			want: `runtime.kubernetes.session_dsn_secret "sessions/dsn" is not a Secret data key ([-._a-zA-Z0-9]+)`,
-		},
-		{
-			name: "session_store neither pvc nor postgres",
-			body: kubernetesFile + "    session_store: s3\n",
-			want: "runtime.kubernetes.session_store must be 'pvc' or 'postgres'",
-		},
-		{
-			name: "session_dsn_secret with the volume store",
-			body: kubernetesFile + "    session_dsn_secret: SESSION_DSN\n",
-			want: "runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it",
 		},
 		{
 			name: "daemon_url empty",
@@ -1270,8 +1275,9 @@ func TestLoadForValidationRefusesTheOperatorRouteWithItsAudienceUnfilled(t *test
 // with placeholder hosts for Dispatch, the Envoy listener, and NATS: the daemon on the devbox's
 // private address driving namespace legion through the restricted role's kubeconfig and context,
 // with the gate off, a linger of 0.3 hours, and pods routed to middleman by the harnesses'
-// operator pod, the fixture itself. No node selector and no requests: the pool's floor sizes the
-// node.
+// operator pod, the fixture itself. Its sessions are in the session database every
+// `runtime: kubernetes` deployment names (session_store, session_dsn_secret). No node selector and
+// no requests: the pool's floor sizes the node.
 func TestLoadForValidationAcceptsTheStage4bProofConfig(t *testing.T) {
 	path := writeConfigFile(t, `project: LEGSMOKE
 port: 13372
@@ -1307,6 +1313,8 @@ runtime:
     namespace: legion
     image: `+workerImage+`
     storage_class: gp2
+    session_store: postgres
+    session_dsn_secret: SESSION_DSN
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production
     context: legion-daemon@example
     pod:

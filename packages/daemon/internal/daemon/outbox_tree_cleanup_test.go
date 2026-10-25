@@ -234,8 +234,8 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 			if len(spawns) != 0 || len(resumes) != 1 || resumes[0].Spec.Tree != child.Key || resumes[0].Spec.ResumeSessionFile != "/legion/sessions/planner.jsonl" {
 				t.Fatalf("resumes = %+v, spawns = %+v; want the kept session resumed once in tree %s and no fresh spawn", resumes, spawns, child.Key)
 			}
-			if got.SessionFile != "/legion/sessions/planner.jsonl" || got.WorkspaceLost {
-				t.Fatalf("orphan's planner = %+v, want its session kept and its workspace not lost", got)
+			if got.SessionFile != "/legion/sessions/planner.jsonl" {
+				t.Fatalf("orphan's planner = %+v, want its session kept", got)
 			}
 		})
 	}

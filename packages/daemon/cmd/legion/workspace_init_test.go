@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"maps"
@@ -176,7 +175,7 @@ func (v *issueVolume) args(issue string) []string {
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
 // launches; no run in these tests inherits them from whoever runs the tests.
-var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_EXPECT_ISSUE_VOLUME", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_REPOSITORY_CACHE_URL", "LEGION_REPOSITORY_CACHE_TOKEN_FILE"}
+var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_REPOSITORY_CACHE_URL", "LEGION_REPOSITORY_CACHE_TOKEN_FILE"}
 
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *issueVolume) setenv(t *testing.T) {
@@ -468,9 +467,6 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	if info, err := os.Stat(filepath.Join(v.root, "sessions")); err != nil || !info.IsDir() {
 		t.Fatalf("sessions: %v (%v), want a directory", info, err)
 	}
-	if _, err := os.Stat(filepath.Join(workspace, ".legion", "LEGION-42", "workspace-recovered.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a recovery marker without LEGION_WORKSPACE_RECOVERED_FROM: %v", err)
-	}
 	if calls := v.codegraphCalls(t); calls != nil {
 		t.Fatalf("workspace-init called codegraph %q, want it to build no index on the pod's registration path", calls)
 	}
@@ -689,119 +685,6 @@ func TestWorkspaceInitRefusesASymlinkedGitDirectory(t *testing.T) {
 				t.Fatalf("jj ran %q after the refusal, want nothing run", ran)
 			}
 		})
-	}
-}
-
-// Shared init distinguishes loss of the issue's storage from one role's missing transcript.
-// A clone or a retained session proves the volume still holds data; only the role launcher
-// decides whether its own session exists.
-func TestWorkspaceInitDetectsLostVolumeWithoutRoleSessionDependency(t *testing.T) {
-	for _, content := range []string{"empty", "clone", "session"} {
-		t.Run(content, func(t *testing.T) {
-			v := newIssueVolume(t).withRemote(t, "main")
-			v.fetch(t)
-			t.Setenv("LEGION_EXPECT_ISSUE_VOLUME", "true")
-			switch content {
-			case "clone":
-				if err := os.MkdirAll(v.clone(), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			case "session":
-				dir := filepath.Join(v.root, "sessions")
-				if err := os.MkdirAll(dir, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(dir, "retained.jsonl"), []byte("{}\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			code, _, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
-			if content == "empty" {
-				if code != 3 {
-					t.Fatalf("expected missing issue storage to exit 3, got %d: %s", code, stderr)
-				}
-				if entries, err := os.ReadDir(v.root); err != nil || len(entries) != 0 {
-					t.Fatalf("lost storage touched the volume: %v (%v)", entries, err)
-				}
-				return
-			}
-			if code != 0 {
-				t.Fatalf("shared init blocked a role-independent %s: exit %d: %s", content, code, stderr)
-			}
-			if _, err := os.Stat(v.workspace("LEGION-42")); err != nil {
-				t.Fatalf("intact volume did not provision the issue workspace: %v", err)
-			}
-		})
-	}
-}
-
-// The command side of workspace recovery (decision 11): a relaunch after a lost volume names the
-// ref it recovers from, and the recreated workspace records it, with the commit it was recreated
-// at, in .legion/<issue>/workspace-recovered.json (cmdWorkspaceInit's LEGION_WORKSPACE_RECOVERED_FROM
-// branch, workspace-init.ts). The commit is read uncolored, so an operator's `ui.color = "always"`
-// never wraps it in escape codes.
-func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t, "main")
-	v.fetch(t)
-	t.Setenv("LEGION_WORKSPACE_RECOVERED_FROM", "legion/LEGION-42")
-	colored := filepath.Join(t.TempDir(), "color-always.toml")
-	if err := os.WriteFile(colored, []byte("[ui]\ncolor = \"always\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("JJ_CONFIG", colored)
-
-	before := time.Now().UTC().Truncate(time.Millisecond)
-	code, _, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
-	after := time.Now().UTC()
-	if code != 0 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
-	}
-	workspace := v.workspace("LEGION-42")
-	body, err := os.ReadFile(filepath.Join(workspace, ".legion", "LEGION-42", "workspace-recovered.json"))
-	if err != nil {
-		t.Fatalf("read the recovery marker: %v", err)
-	}
-	var marker map[string]string
-	if err := json.Unmarshal(body, &marker); err != nil || len(marker) != 4 {
-		t.Fatalf("the recovery marker is %s (%v), want exactly recoveredAt, fromRef, sha, reason", body, err)
-	}
-	if marker["fromRef"] != "legion/LEGION-42" || marker["reason"] != "volume-missing" {
-		t.Fatalf("the recovery marker is %s", body)
-	}
-	if sha := v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", workspace); marker["sha"] != sha {
-		t.Fatalf("the recovery marker names commit %q, want the recreated working copy's %q", marker["sha"], sha)
-	}
-	at, err := time.Parse("2006-01-02T15:04:05.000Z", marker["recoveredAt"])
-	if err != nil || at.Before(before) || at.After(after) {
-		t.Fatalf("recoveredAt %q (%v), want an ISO instant in milliseconds, UTC, during the run", marker["recoveredAt"], err)
-	}
-}
-
-// The recovery marker's jj log runs under the same checked runner as provisioning, so a jj that
-// outlives the budget is reported as timed out, naming the command, never as an exit status.
-func TestWorkspaceInitReportsATimedOutRecoveryMarkerCommand(t *testing.T) {
-	jj := filepath.Join(t.TempDir(), "jj")
-	if err := os.WriteFile(jj, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	git, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	run := workspace.NewRunner(100*time.Millisecond, map[string]string{"jj": jj, "git": git})
-	clone, dir := t.TempDir(), t.TempDir()
-	if err := os.MkdirAll(filepath.Join(clone, ".jj", "repo"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".jj"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".jj", "repo"), []byte(filepath.Join(clone, ".jj", "repo")), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	err = writeRecoveryMarker(context.Background(), run, workspace.Workspace{Dir: dir, Clone: clone}, "LEGION-42", "legion/LEGION-42")
-	if err == nil || !strings.Contains(err.Error(), "command timed out: jj log -r @ --no-graph -T commit_id") {
-		t.Fatalf("writeRecoveryMarker = %v, want the timed-out jj log named", err)
 	}
 }
 
