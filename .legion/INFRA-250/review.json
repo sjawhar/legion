@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-250",
+  "completed": "2026-10-25T11:07:47Z",
+  "round": 1,
+  "reviewedCodeHead": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head 7d38337be60f (newest pull_request run); compare 7d38337be60f...3de2323f636b touches only .legion/. lint, typecheck, test, pr-title completed/success there. pi-legion completed/failure, not required, and red on main itself (run 40181781309 at 4b01e0122f94, job pi-legion failure).",
+  "thermonuclear": "Both passes at 7d38337be60f: deep-review CHANGES (the e2e-local.sh ownership finding below; no rig, relay, reload, migrated-test or CI-wiring defect survived tracing), code-quality CHANGES (the same finding, plus the stale README and the false guard comment).",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/scripts/e2e-local.sh:111-129,99",
+      "description": "A second run in the same checkout deletes the first run's live out/e2e/nats-store, logs and evidence (lines 111-119) before its own natsd discovers the port is taken, and its EXIT trap removes the store again (line 99). Reproduced at 7d38337be60f in this pod: run 1 started, run 2 (other listener/session ports) exited 1 on bind, out/e2e/nats-store was gone, and run 1 then failed 'listener did not become healthy within 30 seconds' with its listener.log deleted. On main the docker container-name guard (line 113) refused before the rm at line 119, so this is a regression of the deleted collision guard. Fix: take exclusive ownership of out/e2e (e.g. flock on a lock file there, /usr/bin/flock is in the pod) before registering the destructive trap or touching any file, refuse otherwise, and add a same-checkout case to e2e-local.test.sh."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/README.md:67-76,86-89",
+      "description": "Still says the driver starts a throwaway nats:2.10-alpine container that Docker downloads, and tells the reader to set E2E_NATS_CONTAINER, which the script no longer reads. Documentation made obsolete by this cutover; update it with scripts/README.md."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/testnats/nats_test.go:541-542",
+      "description": "The comment says neither the untagged go list nor 'this walk' sees build-tagged files; dockerDriverFiles reads every .go file regardless of build constraints (lines 622-639). Say that only the import check is tag-bound."
+    }
+  ],
+  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present. Spot-checked A3 negative path independently via the same-checkout run above; A1/A2/A5 rest on the tester's independent re-run and CI at 7d38337be60f (envoy-go incl. natslive step, envoy-go-race, envoy-infra-go, envoy-smoke, dispatch-multiprocess, dispatch-memory, envoy-e2e-local all success).",
+  "threads": "No review threads, reviews or comments on the pull request before this round."
+}
