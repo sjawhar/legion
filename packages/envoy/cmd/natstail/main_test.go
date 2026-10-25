@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -13,22 +12,13 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 func TestTailPrintsEnvelopesOnTheSubject(t *testing.T) {
-	container, err := tcnats.Run(context.Background(), testnats.Image, testcontainers.WithCmd("-DV", "-js", "-m", "8222"))
-	testcontainers.CleanupContainer(t, container)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	url, err := container.ConnectionString(context.Background())
-	if err != nil {
-		t.Fatalf("get NATS connection string: %v", err)
-	}
-	// The deadline bounds the tail, not Docker: how long a container takes to start is the
-	// daemon's load, and every other package starts its NATS container without a deadline.
+	server, url := testnats.Start(t)
+	// The deadline bounds the tail, not the server's start: the server runs in this process and
+	// is accepting connections by the time Start returns, so the only thing left to outlive its
+	// deadline is the tail itself.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -43,7 +33,7 @@ func TestTailPrintsEnvelopesOnTheSubject(t *testing.T) {
 	go func() {
 		result <- tail(ctx, []string{url}, "notifications.dispatch.document.T.d.>", 2, &output)
 	}()
-	waitForNATSSubscription(t, ctx, container, "notifications.dispatch.document.T.d.>")
+	waitForNATSSubscription(t, ctx, server, "notifications.dispatch.document.T.d.>")
 	for _, envelope := range []contracts.Envelope{
 		{EventID: "artifact-1", Topic: "notifications.dispatch.document.T.d.artifact.version"},
 		{EventID: "artifact-2", Topic: "notifications.dispatch.document.T.d.artifact.version"},
@@ -73,17 +63,9 @@ func TestTailPrintsEnvelopesOnTheSubject(t *testing.T) {
 	}
 }
 
-func waitForNATSSubscription(t *testing.T, ctx context.Context, container *tcnats.NATSContainer, subject string) {
+func waitForNATSSubscription(t *testing.T, ctx context.Context, server *testnats.Server, subject string) {
 	t.Helper()
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("get NATS host: %v", err)
-	}
-	port, err := container.MappedPort(ctx, "8222/tcp")
-	if err != nil {
-		t.Fatalf("get NATS monitoring port: %v", err)
-	}
-	endpoint := "http://" + net.JoinHostPort(host, port.Port()) + "/subsz?subs=1"
+	endpoint := server.MonitorURL() + "/subsz?subs=1"
 	deadline := time.Now().Add(5 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {

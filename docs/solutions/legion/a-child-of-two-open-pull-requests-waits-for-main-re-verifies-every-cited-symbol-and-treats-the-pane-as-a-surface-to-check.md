@@ -94,6 +94,17 @@ rerun <run> --failed`, no commit — a push onto a red verdict would count as a 
 the flake and the evidence in the pull request's CI line, and **file it** (LEGION-174) so the
 pattern is visible the second time. A rerun with no record is how a flake becomes folklore.
 
+**Superseded 2026-10-23 (dispatch://INFRA-83):** only the clause that records the flake and the
+evidence in the pull request's CI line is gone: the body carries no `CI:` line
+(`skills/legion-worker/references/pr-body.md`), and no role records a check result for a later step
+to trust — the tester and the reviewer each read CI on GitHub at the head they are judging and
+record none of it (the reviewer's own four GitHub reads are in
+`skills/legion-worker/references/merge-gate.md`), where the re-run sits beside the first run at the
+same head. The whole sequence around that clause stands as written: read the job log, reproduce
+locally under CI's exact flags, confirm `main`'s same job was green, re-run only the failed job
+with no commit, and **file it** (LEGION-174). The issue is now the whole record, so a rerun nobody
+files is how a flake becomes folklore.
+
 ## Non-blocking review items land in the round, not in a follow-up
 
 The reviewer named six no-behaviour nits (a comment that overstated a cycle argument, a doc

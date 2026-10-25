@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -100,7 +101,7 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 	result := make(chan error, 1)
 	started := time.Now()
 	go func() {
-		conn, err := connectWithContext(ctx, "deadline-test", urls, nil, nil, nil, nil)
+		conn, err := connectWithContext(ctx, "deadline-test", urls, nil, nil, nil, nil, nil)
 		if conn != nil {
 			conn.Close()
 		}
@@ -125,13 +126,13 @@ func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 
 	// The property under test is that a connect context that is done by the time the server
 	// drops the connection does not poison automatic reconnect; cancel it explicitly instead of
-	// racing a short dial deadline against the freshly started container.
+	// racing a short dial deadline against the freshly started server.
 	connectCtx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 	defer cancel()
 	reconnected := make(chan struct{}, 1)
 	conn, err := connectWithContext(connectCtx, "reconnect-dialer-test", []string{uri}, nil, nil, func(*nats.Conn) {
 		reconnected <- struct{}{}
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("connect with deadline: %v", err)
 	}
@@ -416,14 +417,15 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 // JetStream refuses two overlapping subjects in one stream. When one deployment widens, narrows or
 // splits a subject another deployment still holds, each start (and a rollback's) must still
 // succeed, with the starting binary's shape of that subject in the stream.
+//
+// Each subtest takes its own testnats.URL, inside the subtest, so each runs in an account of its
+// own. Its reset deletes Stream: in a fresh account there is nothing to delete, but in one account
+// shared by both, the second subtest's reset would delete the stream the first left, emptying the
+// account, and its recreate of that name would race the background removal of the account's
+// streams directory that nats-server schedules on every stream delete and that succeeds once that
+// directory is empty. The deleted stream's own directory is not what a recreate races:
+// nats-server renames it aside and removes the renamed copy, which a recreate never meets.
 func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
-	uri := testnats.URL(t)
-	conn := testnats.Connect(t, uri)
-	t.Cleanup(conn.Close)
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
 	shaped := func(legion string) nats.StreamConfig {
 		cfg := *streamCfg
 		cfg.Subjects = nil
@@ -445,6 +447,13 @@ func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testi
 		{name: "narrow", deployed: wide, start: narrow},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			uri := testnats.URL(t)
+			conn := testnats.Connect(t, uri)
+			t.Cleanup(conn.Close)
+			js, err := conn.JetStream()
+			if err != nil {
+				t.Fatalf("open JetStream: %v", err)
+			}
 			if err := js.DeleteStream(Stream); err != nil && !errors.Is(err, nats.ErrStreamNotFound) {
 				t.Fatalf("reset stream: %v", err)
 			}
@@ -477,21 +486,34 @@ func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testi
 	}
 }
 
-// captureLogs routes the default slog logger into a buffer for the test and returns it.
-func captureLogs(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buffer bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buffer, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return &buffer
+// capturedLogs collects the default slog logger's JSON records for one test. Its writes and reads
+// share a lock because a bus client an earlier test closed can still be logging: nats.go's close
+// queues the disconnected and closed callbacks on the connection's async dispatcher and returns
+// without waiting for them (nats.go v1.50.0, nats.go:5892-5910), the bus's closed callback logs
+// through the default logger, and every test of the package shares one binary.
+type capturedLogs struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
 }
 
-// logRecords decodes every JSON record in buffer whose msg is message.
-func logRecords(t *testing.T, buffer *bytes.Buffer, message string) []map[string]any {
+func (l *capturedLogs) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buffer.Write(p)
+}
+
+// String is a snapshot of the records logged so far; nothing reads the buffer another way.
+func (l *capturedLogs) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buffer.String()
+}
+
+// records decodes every JSON record logged so far.
+func (l *capturedLogs) records(t *testing.T) []map[string]any {
 	t.Helper()
 	var records []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(l.String()), "\n") {
 		if line == "" {
 			continue
 		}
@@ -499,11 +521,32 @@ func logRecords(t *testing.T, buffer *bytes.Buffer, message string) []map[string
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			t.Fatalf("decode log line %q: %v", line, err)
 		}
+		records = append(records, record)
+	}
+	return records
+}
+
+// recordsWithMsg decodes every JSON record logged so far whose msg is message.
+func (l *capturedLogs) recordsWithMsg(t *testing.T, message string) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, record := range l.records(t) {
 		if record["msg"] == message {
 			records = append(records, record)
 		}
 	}
 	return records
+}
+
+// captureLogs points the default slog logger at a JSON handler writing into the returned logs
+// until the test ends. A test that calls it must not run in parallel: the default is the process's.
+func captureLogs(t *testing.T) *capturedLogs {
+	t.Helper()
+	logs := &capturedLogs{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
 }
 
 // Every subject that can capture a role lane leaves the stream, whichever role it names: the role
@@ -542,7 +585,7 @@ func TestEnsureStreamWithConfigNamesEverySubjectThatReplacedAnOverlappingOne(t *
 	if err := ensureStreamWithConfig(js, &own); err != nil {
 		t.Fatalf("ensure stream: %v", err)
 	}
-	records := logRecords(t, logs, "envoy nats stream subject replaced by an overlapping one")
+	records := logs.recordsWithMsg(t, "envoy nats stream subject replaced by an overlapping one")
 	if len(records) != 1 {
 		t.Fatalf("replacement records = %v, want one for notifications.legion.>", records)
 	}
@@ -567,7 +610,7 @@ func TestEnsureStreamWithConfigNamesTheDeployedSubjectsItKeepsWithoutCompilingTh
 			t.Fatalf("%s: ensure stream: %v", start, err)
 		}
 	}
-	records := logRecords(t, logs, "envoy nats stream keeps subjects this binary does not compile")
+	records := logs.recordsWithMsg(t, "envoy nats stream keeps subjects this binary does not compile")
 	if len(records) != 2 {
 		t.Fatalf("records = %v, want one per start", records)
 	}
@@ -593,7 +636,7 @@ func TestEnsureStreamWithConfigLogsNoReconciliationWhenTheUpdateFails(t *testing
 		"envoy nats stream subject replaced by an overlapping one",
 		"envoy nats stream keeps subjects this binary does not compile",
 	} {
-		if records := logRecords(t, logs, message); len(records) != 0 {
+		if records := logs.recordsWithMsg(t, message); len(records) != 0 {
 			t.Fatalf("%q logged %v although the update failed", message, records)
 		}
 	}

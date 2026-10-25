@@ -34,13 +34,13 @@ const liveSessionsSecretKey = "stage4a_sessions"
 // agent before its next turn, where the fresh generation's said it was not.
 func (r *liveRig) checkPostgresResume() error {
 	c := r.claim("sessions")
-	if r.sessionStore == "" {
-		r.sessionStore = liveSessionsSecretKey
+	if r.sessionStore.Kind != ompsessions.StorePostgres {
+		r.sessionStore = ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: liveSessionsSecretKey}
 		r.stopRuntime()
 		if err := r.startRuntime(); err != nil {
 			return err
 		}
-		note("runtime", "listener and runtime replaced with session_store postgres: providers Secret key %s at %s", liveSessionsSecretKey, ProvidersDir+"/"+sessionDSNFile)
+		note("runtime", "listener and runtime replaced with session_store postgres: providers Secret key %s at %s", liveSessionsSecretKey, providersDSNFile)
 	}
 	if c.state != stateNone {
 		return fmt.Errorf("%s was launched before this check, which needs its first pod created under session_store postgres", c.name)
@@ -61,15 +61,15 @@ func (r *liveRig) checkPostgresResume() error {
 	if got := agent[launcher.WorkspaceRecreatedVariable]; got != "false" {
 		return fmt.Errorf("the fresh agent has %s=%q, want false", launcher.WorkspaceRecreatedVariable, got)
 	}
-	if agent[ompsessions.StorageVariable] != ompsessions.SQLStorage || agent[ompsessions.DSNFileVariable] != ProvidersDir+"/"+sessionDSNFile {
+	if agent[ompsessions.StorageVariable] != ompsessions.SQLStorage || agent[ompsessions.DSNFileVariable] != providersDSNFile {
 		return fmt.Errorf("the agent has %s=%q and %s=%q, want %s and %s", ompsessions.StorageVariable, agent[ompsessions.StorageVariable],
-			ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], ompsessions.SQLStorage, ProvidersDir+"/"+sessionDSNFile)
+			ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], ompsessions.SQLStorage, providersDSNFile)
 	}
-	if value, held := agent[sessionDSNFile]; held {
-		return fmt.Errorf("the agent's environment holds %s (%d bytes): the session database's URL reached Oh My Pi's environment", sessionDSNFile, len(value))
+	if value, held := agent[ompsessions.DSNFileName]; held {
+		return fmt.Errorf("the agent's environment holds %s (%d bytes): the session database's URL reached Oh My Pi's environment", ompsessions.DSNFileName, len(value))
 	}
 	note("operator", "the agent's environment: %s=%s, %s=%s, no %s", ompsessions.StorageVariable, agent[ompsessions.StorageVariable],
-		ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], sessionDSNFile)
+		ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], ompsessions.DSNFileName)
 
 	session := ompSessionsDir + "/" + SandboxName(c.token) + "-postgres.jsonl"
 	if out, err := r.exec(c, "sh", "-c", `test -e "$1" || echo absent`, "absent", session); err != nil || out != "absent" {

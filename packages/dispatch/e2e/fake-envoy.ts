@@ -29,6 +29,14 @@ interface FakeInterest {
   updated_at?: number;
 }
 
+/** What this fixture's session store holds under an id, which is a separate question from
+ *  whether the listener's in-memory list currently names it. The real listener answers
+ *  `GET /v1/sessions` out of that list alone and `GET /v1/registry/<id>` by reading the session
+ *  bucket through, so the two disagree while the cache refills: `present` with the id dropped
+ *  from the live set is exactly that window, and only `absent` is a session that has really
+ *  ended. `unreadable` is the bucket read that did not answer at all. */
+type SessionRecord = "present" | "absent" | "unreadable";
+
 /** Every piece of fixture state this listener holds. `PUT /__fixture/reset` replaces it whole, so
  *  a field added here is reset with the rest without being listed anywhere else. A session reseed
  *  replaces it whole too, so a handler reads its request body before it touches `state`: a write
@@ -37,6 +45,9 @@ interface FakeInterest {
 interface FakeEnvoyState {
   readonly sessions: FakeSession[];
   readonly liveSessions: Set<string>;
+  /** What the session store holds per id; an id named by no entry here is `present`, the state
+   *  a seeded session starts in. */
+  readonly records: Map<string, SessionRecord>;
   readonly sendStatuses: Map<string, 200 | 404>;
   interests: FakeInterest[];
   readonly sentMessages: SentMessage[];
@@ -51,6 +62,7 @@ function emptyState(): FakeEnvoyState {
     interests: [],
     liveSessions: new Set(),
     publishedKeys: new Set(),
+    records: new Map(),
     sendStatuses: new Map(),
     sentMessages: [],
     sessions: [],
@@ -70,6 +82,13 @@ function asSeen(session: FakeSession, now: number): FakeSession {
   return { last_seen: now, ...session, host: session.host ?? session.machine_id };
 }
 
+/** Whether this listener names a session at all. The live set is the listener's in-memory cache,
+ *  which a test drops a session from to model that cache refilling; a session whose record is
+ *  `absent` has really ended, and then no answer may name it however the live set stands. */
+function isLive(sessionID: string): boolean {
+  return state.liveSessions.has(sessionID) && state.records.get(sessionID) !== "absent";
+}
+
 Bun.serve({
   hostname: "127.0.0.1",
   port: harnessPorts.fakeEnvoy.port,
@@ -79,7 +98,7 @@ Bun.serve({
       const now = Date.now();
       return Response.json(
         state.sessions
-          .filter((session) => state.liveSessions.has(session.session_id))
+          .filter((session) => isLive(session.session_id))
           .map((session) => asSeen(session, now))
       );
     }
@@ -98,13 +117,34 @@ Bun.serve({
         roles: holder.roles ?? [],
       });
     }
+    // The real listener's per-session read goes through to the session bucket rather than to the
+    // cache behind `GET /v1/sessions` (packages/envoy/cmd/listener/api.go, sessionEntryHandler),
+    // so a session the cache has dropped is still answered here - and answering it warms the
+    // cache, which is why a hit adds the id back to the live set: the send that follows the read
+    // then finds it, as it does against the real listener.
+    if (request.method === "GET" && url.pathname.startsWith("/v1/registry/")) {
+      const sessionID = decodeURIComponent(url.pathname.slice("/v1/registry/".length));
+      const record = state.records.get(sessionID) ?? "present";
+      if (record === "unreadable") {
+        return Response.json(
+          { error: "envoy: the message bus did not answer: nats: no responders available" },
+          { headers: { "Retry-After": "1" }, status: 503 }
+        );
+      }
+      const session = state.sessions.find((item) => item.session_id === sessionID);
+      if (record === "absent" || session === undefined) {
+        return Response.json({ error: `no live session ${sessionID}` }, { status: 404 });
+      }
+      state.liveSessions.add(sessionID);
+      return Response.json(asSeen(session, Date.now()));
+    }
     if (request.method === "POST" && url.pathname === "/v1/messages/send") {
       const message = (await request.json()) as SentMessage;
       state.sentMessages.push(message);
       const sendStatus = state.sendStatuses.get(message.target_session);
       if (
         sendStatus === 404 ||
-        !state.liveSessions.has(message.target_session) ||
+        !isLive(message.target_session) ||
         !state.sessions.some((session) => session.session_id === message.target_session)
       ) {
         return Response.json(
@@ -145,7 +185,11 @@ Bun.serve({
     }
     if (request.method === "PATCH" && url.pathname.startsWith("/__fixture/sessions/")) {
       const sessionID = decodeURIComponent(url.pathname.slice("/__fixture/sessions/".length));
-      const body = (await request.json()) as { live?: boolean; send_status?: 200 | 404 };
+      const body = (await request.json()) as {
+        live?: boolean;
+        record?: SessionRecord;
+        send_status?: 200 | 404;
+      };
       if (!state.sessions.some((session) => session.session_id === sessionID)) {
         return Response.json({ error: `unknown fixture session ${sessionID}` }, { status: 404 });
       }
@@ -159,8 +203,21 @@ Bun.serve({
         }
         state.sendStatuses.set(sessionID, body.send_status);
       }
+      if (body.record !== undefined) {
+        if (!["absent", "present", "unreadable"].includes(body.record)) {
+          return Response.json(
+            { error: "record must be present, absent or unreadable" },
+            { status: 400 }
+          );
+        }
+        state.records.set(sessionID, body.record);
+        // An ended session is gone from the cache as well as from the store, so a test that
+        // asks for the genuine absence gets both at once rather than having to say it twice.
+        if (body.record === "absent") state.liveSessions.delete(sessionID);
+      }
       return Response.json({
         live: state.liveSessions.has(sessionID),
+        record: state.records.get(sessionID) ?? "present",
         send_status: state.sendStatuses.get(sessionID) ?? 200,
         session_id: sessionID,
       });

@@ -8,9 +8,10 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/launcher"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
-const launcherUsage = "usage: legion launcher --connect tcp://host:port --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] --private-dir <dir> [--stop-grace <duration>]"
+const launcherUsage = "usage: legion launcher --connect tcp://host:port --token-file <path> --sandbox <name> --role <role> [--pod-uid <uid>] --private-dir <dir> [--stop-grace <duration>] [--session-instance <project:region:instance> --session-database <name> --session-user <login>]"
 
 // runLauncher is PID 1 in one role container of an issue pod. It has no workflow policy: it only
 // authenticates to the daemon and starts or stops its own worker-shim child on daemon commands.
@@ -23,6 +24,9 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	podUID := flags.String("pod-uid", os.Getenv("POD_UID"), "the current Kubernetes pod UID (POD_UID by default)")
 	privateDir := flags.String("private-dir", "", "the role container's own memory-backed directory for each generation's credentials")
 	stopGrace := flags.Duration("stop-grace", 0, "container shutdown grace (30s when unset)")
+	sessionInstance := flags.String("session-instance", "", "the Cloud SQL instance holding the session database: project:region:instance")
+	sessionDatabase := flags.String("session-database", "", "the session database in that instance")
+	sessionUser := flags.String("session-user", "", "the IAM login this pod signs in to the session database as")
 	if code, ok := parseFlags(flags, args); !ok {
 		return code
 	}
@@ -38,6 +42,7 @@ func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	if err := launcher.Run(ctx, launcher.Config{
 		Connect: *connect, Token: strings.TrimSpace(string(token)), Sandbox: *sandbox, Role: *role,
 		PodUID: *podUID, PrivateDir: *privateDir, StopGrace: *stopGrace, Stdout: stdout, Stderr: stderr,
+		SessionDatabase: ompsessions.Database{Instance: *sessionInstance, Name: *sessionDatabase, User: *sessionUser},
 	}); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(stderr, err)
 		return 1

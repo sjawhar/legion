@@ -731,8 +731,6 @@ Adds \`greet(name)\` and \`bun greet.ts <name>\`.
 
 ## Verification
 
-**CI:** \`Tests\` run 111 — jobs lint, typecheck, test all success at $C2.
-
 **Threads:** 0 resolved, 0 unresolved.
 
 **E2E (implementer):** the CLI — ran \`bun greet.ts Ada\`, observed \`Hello, Ada!\` exit 0, at head $C1.

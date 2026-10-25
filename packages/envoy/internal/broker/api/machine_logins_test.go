@@ -142,8 +142,8 @@ func TestAPersonRevokesTheirOwnMachineLogin(t *testing.T) {
 			t.Fatalf("revoke %s = %d %s, want %d %s", tc.name, status, body, tc.status, tc.code)
 		}
 	}
-	if status, body := ts.req(t, http.MethodPost, revokePath, nil, map[string]any{"approver": testApprover}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "UI_INVALID" {
-		t.Fatalf("revoke without the UI bearer = %d %s, want 401 UI_INVALID", status, body)
+	if status, body := ts.req(t, http.MethodPost, revokePath, nil, map[string]any{"approver": testApprover}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+		t.Fatalf("revoke with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
 	}
 	if status, body := ts.ui(t, http.MethodGet, "/v1/launcher-credentials", nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "APPROVER_REQUIRED" {
 		t.Fatalf("list naming no one = %d %s, want 400 APPROVER_REQUIRED", status, body)
@@ -454,19 +454,11 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 // anyone's.
 func TestAPersonsPendingMachineLoginWaitsInTheirsAlone(t *testing.T) {
 	ts := newTestServer(t)
-	status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-		map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", "")})
-	if status != http.StatusAccepted {
-		t.Fatalf("POST /v1/launcher-credentials = %d: %s", status, body)
-	}
-	code := decode[struct {
-		Code string `json:"code"`
-	}](t, body).Code
-	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	code := ts.openMachineLogin(t, newSigningKey(t), testApprover, "example-host-devbox")
+	_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
 	personal := decode[wireRecord](t, body).RecordID
-	if status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-		map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, "", "cluster.example", "legion-daemon")}); status != http.StatusBadRequest {
-		t.Fatalf("a service's device-code login = %d %s, want 400", status, body)
+	if status, body := ts.deviceLogin(t, newSigningKey(t), "", "cluster.example", "legion-daemon"); status != http.StatusBadRequest {
+		t.Fatalf("a service's device-code login = %d %v, want 400", status, body)
 	}
 	pendingOf := func(person string) []string {
 		t.Helper()

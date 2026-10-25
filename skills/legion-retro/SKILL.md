@@ -133,9 +133,9 @@ Before you push those commits, bring up to date the body content the repository 
 pull request's changed paths. A repository can require such content, a line naming a checklist
 for each class of changed path for instance, and have a required check read it from the PR body.
 When your commits add a `docs/solutions/` path the approved body never accounted for, or take away
-the `.legion/` paths it did, that check fails at your head; the merger reports a stale body rather
-than rewriting it, and READY refuses a head whose required check failed, so the tree stops at the
-merger.
+the `.legion/` paths it did, that check fails at your head; the merger reports a stale body
+rather than rewriting it, and GitHub will not merge a head whose required check failed, so the
+merge waits.
 
 1. Read what the deployment instructions in your system prompt, and the agent guide and pull
    request template of the repository you are working in, derive from the changed paths. When

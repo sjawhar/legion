@@ -16,13 +16,13 @@ import (
 
 // deviceAuthorization is POST /v1/oauth/device_authorization: a machine login's device
 // authorization request (RFC 8628), public. It spends its source address's launcher bucket before
-// the provider does any work, as the token login does (refuseAddress); then, as POST
-// /v1/launcher-credentials does, it verifies the request object to read the person its login_hint
-// names and spends that person's bucket (launcherLoginKey). A refused request is 429 with
-// Retry-After. Deps.DeviceLogin then opens the login in the provider's transaction, and its
-// refusals are OAuth errors (invalid_request) whose description names the broker's code: a request
-// object that does not verify, repeats a jti or names another key than dpop_jkt REQUEST_INVALID,
-// one naming a service SERVICE_LOGS_IN_WITH_TOKEN.
+// the provider does any work, as the token login does (refuseAddress); then it verifies the
+// request object to read the person its login_hint names and spends that person's bucket
+// (launcherLoginKey). A refused request is 429 with Retry-After. Deps.DeviceLogin then opens the
+// login in the provider's transaction, and its refusals are OAuth errors (invalid_request) whose
+// description names the broker's code: a request object that does not verify, repeats a jti or
+// names another key than dpop_jkt REQUEST_INVALID, one naming a service
+// SERVICE_LOGS_IN_WITH_TOKEN.
 func (s *server) deviceAuthorization(w http.ResponseWriter, r *http.Request) {
 	if !s.launcherLimiter.addressAllows(r) {
 		oauth.WriteRefusal(w, rateLimitedRefusal(s.launcherLimiter.perAddress.Every()))
@@ -56,9 +56,9 @@ func (s *server) spendDeviceLoginBucket(form url.Values) error {
 	return nil
 }
 
-// deviceLoginRefusal is the OAuth refusal a device login's error answers with the status and code
-// POST /v1/launcher-credentials answers it with. An error already a refusal, and one the broker
-// has no code for, pass through (the provider answers the second 500 server_error).
+// deviceLoginRefusal is the OAuth refusal a device login's error answers with: the broker's own
+// status and code for it. An error already a refusal, and one the broker has no code for, pass
+// through (the provider answers the second 500 server_error).
 func deviceLoginRefusal(err error) error {
 	var refusal *oauth.Refusal
 	switch {

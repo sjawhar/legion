@@ -9,7 +9,7 @@
 # provider a pod could reach without the gateway is disabled: Bedrock twice (a node's instance role
 # is its key), Google and the local servers Oh My Pi uses with no key, as
 # scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs, and OpenAI. enabledModels names
-# the five standard models one by one rather than by a pattern, so no new session starts on one of
+# the standard models one by one rather than by a pattern, so no new session starts on one of
 # the -legion aliases models.yml keeps until the gateway retires them. Records merge key by key
 # across settings layers, so every role Legion's prompts reach is named: the shipped review, oracle
 # and deep-worker agents' @review, @oracle and @deep (the planner's plan-reviewer and
@@ -19,7 +19,9 @@ enabledModels:
   - anthropic/claude-fable-5-1
   - anthropic/claude-opus-4-8
   - anthropic/claude-opus-5
+  - anthropic/claude-opus-5-5
   - anthropic/claude-sonnet-5
+  - anthropic/claude-sonnet-5-5
 disabledProviders:
   - amazon-bedrock
   - bedrock-mantle
@@ -28,6 +30,11 @@ disabledProviders:
   - llama.cpp
   - lm-studio
   - openai
+# claude-opus-5-5 and claude-sonnet-5-5 are in enabledModels and both models files, and no role runs
+# on them yet: they are served on Anthropic's own API and through a LiteLLM gateway keyed to it,
+# and not yet shown on the ServiceAccount-token gateway models.yml routes through, which answers an
+# id it does not serve with 404. Move a role once that gateway serves its model (README.md beside
+# this file, "Changing a role's model").
 modelRoles:
   default: anthropic/claude-fable-5-1:xhigh
   plan: anthropic/claude-fable-5-1:max

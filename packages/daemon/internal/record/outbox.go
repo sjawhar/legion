@@ -414,12 +414,21 @@ func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisa
 // row having seen Head armed for auto-merge or in the merge queue on GitHub, which its executor
 // records on the row (Store.ReplaceOutboxPayload): from then on the arm or entry disappearing
 // without a merge is a removal the row reads from GitHub rather than a cue to submit again
-// (ghautomerge.Submit). A queue of the same issue and head starts the row over unarmed
-// (readyMergeConflict).
+// (ghautomerge.Submit). Warned is the row having told the issue's architect once that GitHub has
+// not completed the merge it submitted (merge-waiting, the daemon's mergeWaitWarn), which keeps it
+// from telling again however much longer it waits, and Queued is the moment the workflow queued
+// this submission, which that wait is measured from. A queue of the same issue and head starts the
+// row over unarmed, unwarned and at a fresh Queued (readyMergeConflict): the upsert replaces the
+// payload, so a reopen resets the clock and the once-flag together and the two can never disagree,
+// as they would were the wait measured from the row's created_at, which the upsert leaves at the
+// original queueing. A row a daemon before Queued enqueued carries the zero time, and its executor
+// measures that one from created_at, which is what it was measured from then.
 type ReadyMerge struct {
-	Number int    `json:"number"`
-	Head   string `json:"head"`
-	Armed  bool   `json:"armed,omitempty"`
+	Number int       `json:"number"`
+	Head   string    `json:"head"`
+	Armed  bool      `json:"armed,omitempty"`
+	Warned bool      `json:"warned,omitempty"`
+	Queued time.Time `json:"queued,omitzero"`
 }
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
@@ -695,7 +704,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "merge-waiting", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

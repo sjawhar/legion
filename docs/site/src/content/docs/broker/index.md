@@ -74,7 +74,7 @@ container](/legion/broker/guides/run-an-agent-in-a-container/) shows a box's set
 
 | Piece | What it does | Where it runs |
 | --- | --- | --- |
-| Secrets Broker (`envoy-broker`) | Enrolls sessions, decides each request from the secret's owner and tier, records requests and decisions, and releases granted values. | A server, beside Postgres and the secret store. |
+| Secrets Broker (`envoy-broker`) | Enrolls sessions, decides each request from the secret's owner and tier, records requests and decisions, and releases granted values. | One or more identical stateless processes behind one address, beside Postgres and the secret store. |
 | `agent-secrets` | The command an agent runs to use a secret, the tool people and launchers use to log machines in and inspect sessions, the tool people list and revoke their machine logins and live grants with (`machine list`, `grant list`), and the tool people manage the secrets themselves with, under their own cloud sign-in. | Wherever agents run, and a person's own machine. |
 | `agent-secrets-helper` | A per-user daemon that holds each host agent session's key, enrolls it, and signs for it. | Each machine that runs agents directly. |
 | Dispatch | Shows people the requests they must decide and the grants they can revoke, and passes their decisions to the broker. | Dispatch's server and web app. |
@@ -101,6 +101,7 @@ pod. See [how Legion, Dispatch and the broker fit together](/legion/how-it-fits/
 - [Concepts](/legion/broker/concepts/): sessions, machine logins, owner and tier, grants, approvals
   and the audit record.
 - Guides: [manage a secret](/legion/broker/guides/manage-a-secret/),
+  [create a GitHub App for a development box](/legion/broker/guides/github-app-for-a-dev-box/),
   [approve a request](/legion/broker/guides/approve-a-request/),
   [log a machine in](/legion/broker/guides/log-a-machine-in/),
   [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/),
