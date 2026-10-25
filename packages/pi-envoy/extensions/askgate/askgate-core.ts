@@ -183,6 +183,10 @@ const RECOMMENDED_CEILING_MS = 120_000;
 // waits at most SHUTDOWN_WAIT_MS for their records.
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
+// What bounds the snapshots the gate keeps: a backgrounded call's snapshot stays until the session
+// shuts down, and a session the host kills leaves its own behind, so each gated call that takes a
+// snapshot first removes every snapshot directory older than this.
+const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
 const GATE_REASON_MAX_BYTES = 2 * 1024;
@@ -1285,6 +1289,43 @@ function removeSnapshots(snapshot: SnapshotSet): void {
   for (const captured of snapshot.files) fs.rmSync(captured.path, { force: true });
   fs.rmSync(snapshot.directory, { recursive: true, force: true });
 }
+
+/** A snapshot directory of this gate: `askgate-` and the six characters `mkdtemp` adds. */
+const SNAPSHOT_DIRECTORY = /^askgate-[A-Za-z0-9]{6}$/;
+
+/**
+ * Removes the gate's own snapshot directories under `root` that are older than
+ * SNAPSHOT_MAX_AGE_MS, at each call that takes one. A backgrounded call's snapshot is kept until
+ * the session shuts down, and a session the host kills leaves its own behind, so this is what
+ * bounds the files the gate owns. Each directory is 0700 and holds only the gate's own copies.
+ */
+function sweepSnapshots(root: string, now: number): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !SNAPSHOT_DIRECTORY.test(entry.name)) continue;
+    const directory = path.join(root, entry.name);
+    try {
+      if (now - fs.statSync(directory).mtimeMs <= SNAPSHOT_MAX_AGE_MS) continue;
+      fs.rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // Another session swept it first, or it is not this user's to remove.
+    }
+  }
+}
+
+/**
+ * Whether a `bash` result only reports a backgrounded job's start, so the command it names has not
+ * run yet: `async: true`, or `bash.autoBackground` past its threshold, returns
+ * `details.async.state === "running"` and the shell runs the command after that.
+ */
+function startedInBackground(details: unknown): boolean {
+  return isRecord(details) && isRecord(details.async) && details.async.state === "running";
+}
 function breakerKey(toolName: string, input: Input): string {
   let key = toolName;
   for (const k of BREAKER_KEYS) if (input[k] !== undefined) key += `\u0000${k}=${String(input[k])}`;
@@ -1730,11 +1771,19 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       snapshots.delete(toolCallId);
       removeSnapshots(snapshot);
     };
-    pi.on("tool_execution_end", (event: { toolCallId: string }) => {
+    // A snapshot goes only once the command that reads it has run. A result that reports a
+    // backgrounded job's start comes before the shell runs it (`startedInBackground`), and nothing
+    // later names that call's id, so its snapshot is kept until `session_shutdown`; a new gated
+    // call sweeps whatever is older than SNAPSHOT_MAX_AGE_MS.
+    pi.on("tool_execution_end", (event: { toolCallId: string; result?: unknown }) => {
       inflight.get(event.toolCallId)?.("abandoned");
+      if (isRecord(event.result) && startedInBackground(event.result.details)) return;
       releaseSnapshots(event.toolCallId);
     });
-    pi.on("tool_result", (event: { toolCallId: string }) => releaseSnapshots(event.toolCallId));
+    pi.on("tool_result", (event: { toolCallId: string; details?: unknown }) => {
+      if (startedInBackground(event.details)) return;
+      releaseSnapshots(event.toolCallId);
+    });
     pi.on("agent_end", (event: { messages?: readonly Message[]; willContinue?: boolean }) => {
       if (event.willContinue) return;
       if (event.messages?.findLast((m) => m.role === "assistant")?.stopReason !== "aborted") return;
@@ -2170,7 +2219,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             };
         }
 
-        const directory = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "askgate-"));
+        const root = path.resolve(os.tmpdir());
+        sweepSnapshots(root, deps.now());
+        const directory = fs.mkdtempSync(path.join(root, "askgate-"));
         fs.chmodSync(directory, 0o700);
         const snapshot: SnapshotSet = { directory, files: [] };
         let current = scoped.fileInputs[0];

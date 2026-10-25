@@ -2224,6 +2224,58 @@ console.log(JSON.stringify(args, null, 2));
       await g.event("tool_execution_end", { toolCallId: "ended", toolName: "bash" });
       expect(snapshotDirs()).toEqual([]);
     });
+    // `async: true`, and `bash.autoBackground` past its threshold, return the job's start result:
+    // the host fires tool_result and tool_execution_end before the shell runs the command. A
+    // snapshot released there leaves the command reading a path that is gone (census, contract 3).
+    test("a backgrounded call keeps its snapshot past tool_result, and the command then posts it", async () => {
+      const source = path.join(work, "background-question.md");
+      const posted = path.join(work, "background-posted.json");
+      const reviewed = "Should the release wait for the soak?\n";
+      fs.writeFileSync(source, reviewed);
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash(
+        "bg",
+        "dispatch ask --issue DSP-1 --question-file background-question.md",
+        { async: true }
+      );
+      const command = result?.input?.command as string;
+      expect(command).toContain("/askgate-");
+
+      const started = { async: { state: "running", jobId: "job-1", type: "bash" } };
+      await g.event("tool_result", { toolCallId: "bg", toolName: "bash", details: started });
+      await g.event("tool_execution_end", {
+        toolCallId: "bg",
+        toolName: "bash",
+        result: { content: [], details: started },
+      });
+
+      const run = Bun.spawnSync(["bash", "-c", command], {
+        cwd: work,
+        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
+      });
+      expect(run.exitCode).toBe(0);
+      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: reviewed });
+      await g.event("session_shutdown");
+      expect(snapshotDirs()).toEqual([]);
+    });
+    test("a snapshot a day old is removed at the next gated call", async () => {
+      const stale = fs.mkdtempSync(path.join(SUITE_TMP, "askgate-"));
+      fs.writeFileSync(path.join(stale, "0.md"), "left by a killed session\n");
+      const old = (Date.now() - 25 * 60 * 60 * 1000) / 1000;
+      fs.utimesSync(stale, old, old);
+      fs.writeFileSync(path.join(work, "sweep-question.md"), QUESTION);
+      const g = bind({ env: STUB, cwd: work });
+
+      const result = await g.bash(
+        "sweep",
+        "dispatch ask --issue DSP-1 --question-file sweep-question.md"
+      );
+
+      expect(result?.input?.command).toContain("/askgate-");
+      expect(fs.existsSync(stale)).toBe(false);
+      expect(snapshotDirs()).toHaveLength(1);
+    });
+
     test("(e) an upload of shot.png never reaches the model", async () => {
       const g = bind({ env: STUB, cwd: work });
       expect(
