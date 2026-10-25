@@ -1065,6 +1065,11 @@ describe("dispatchToolSpecs", () => {
   test.each([
     ["dispatch_issue", "assignee", "Set it only when a person said who owns the issue."],
     [
+      "dispatch_issue",
+      "assignee",
+      "else the project's default assignee when it still names a person who has signed in, else unassigned.",
+    ],
+    [
       "dispatch_read",
       "ref",
       "dispatch://PROJECT/artifact/<slug>[@vN], and its /ask/<id> and /comment/<id>; or the dashboard URL of one.",

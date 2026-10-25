@@ -34,7 +34,7 @@ which covers the `dist/` bundles alone. The delta is the second generated tree i
   diff means your install differs from the one the committed bundles were built with, and is a
   stop-and-report rather than something to fold into a prose commit.
 - Only pi-legion's partition is mirrored. A change to a pi-envoy skill (`dispatch`,
-  `dispatch-first`, `dispatch-brainstorming`, `envoy`) produces no `legion/` diff, and that absence
+  `dispatch-first`, `dispatch-writing-specs`, `envoy`, `asd-ste100`) produces no `legion/` diff, and that absence
   is not drift.
 - A skills-only diff is not CI-invisible: the `claude_plugin` filter of
   `.github/workflows/envoy-and-contracts.yaml` lists `skills/**` and `scripts/pi-plugin-prepack.sh`,

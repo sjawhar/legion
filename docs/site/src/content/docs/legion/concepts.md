@@ -337,11 +337,17 @@ The record lives on the pull request alone: Dispatch refuses a write on a closed
 Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its
 conversation and the issue's volume kept, and the daemon wakes the check — the pod comes back and
 the same agent takes the next look — when Dispatch's delivery timeline reports the pull request
-deployed (its `issue.deployed` event), or, for Legion's own repository, when a Legion daemon boots
-or Dispatch starts on a build that contains the merge. A look is bounded at two hours, and the
-whole check at `production_check_hours` (336, fourteen days, by default): the wake at that bound is
-the last look, and a `pending` there closes the check as not run, which the implementer writes on
-the pull request. `legion state` prints how many checks are open and the oldest of them.
+deployed (its `issue.deployed` event); when the project names the repository's deploy workflow
+(`projects.<KEY>.deploys` in `legion.yaml`: the repository, the workflow file and a step such as
+`Apply`), at each completed run of that workflow on the repository's default branch whose step
+succeeded after the pull request merged, once per such job; or, for Legion's own repository, when
+a Legion daemon boots or Dispatch starts on a build that contains the merge. A run of another
+workflow or branch, a run a pull request triggered, a step that was skipped or failed, and a step
+that finished before the merge wake nothing. A wake while a look is open is kept for the next look.
+A look is bounded at two hours, and the whole check at `production_check_hours` (336, fourteen
+days, by default): the wake at that bound is the last look, and a `pending` there closes the check
+as not run, which the implementer writes on the pull request. `legion state` prints how many checks
+are open and the oldest of them.
 
 A child's close releases its pod at once and its volume when the check closes; a root's close
 frees its admission slot once no other issue of its tree is still in the workflow, and the

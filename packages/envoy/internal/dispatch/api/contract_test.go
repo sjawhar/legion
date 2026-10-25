@@ -50,8 +50,10 @@ const (
 	contractApprover = "sami@example.com"
 	// contractOther is a second allowed Dispatch login, neither any record's approver nor any
 	// enrollment's operator.
-	contractOther   = "mallory@example.com"
-	contractUIToken = "contract-ui-token"
+	contractOther = "mallory@example.com"
+	// contractDispatchAccount is the ServiceAccount the broker's BROKER_API_ACCOUNTS names as the
+	// caller "dispatch": the identity Dispatch's own server presents on the broker's routes.
+	contractDispatchAccount = "system:serviceaccount:example-ns:example-dispatch"
 	// contractDaemonAccount is the ServiceAccount the rig's BROKER_SERVICE_LOGINS lets log in as
 	// legion-daemon, and contractTokenAudience the audience its tokens carry.
 	contractDaemonAccount = "system:serviceaccount:legion-system:legion-daemon-contract"
@@ -105,15 +107,23 @@ func newContractRig(t *testing.T) *contractRig {
 		Audience:   brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
-	provider := brokertest.NewOAuthProvider(t, brokerStore)
+	provider := brokertest.NewOAuthProvider(t, brokerStore, issuer)
 	mach := &machine.Service{
 		Store: brokerStore, Enroll: enr, Policy: cur,
 		Audience: brokerServer.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		OAuth: provider, Replay: enr.Replay,
 	}
+	// Dispatch calls the broker as its own listed caller: a projected ServiceAccount token of the
+	// same issuer the broker verifies a pod's with, minted to live well inside the hour a caller's
+	// token may.
+	dispatchClaims := issuer.Claims(contractDispatchAccount, contractTokenAudience)
+	dispatchClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
+	dispatchToken := issuer.Mint(t, issuerKey, dispatchClaims)
 	brokerapi.Register(brokerMux, brokerapi.Deps{
-		PublicURL: brokerServer.URL, UIToken: contractUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		PublicURL:     brokerServer.URL,
+		APIAccounts:   map[string]string{contractDispatchAccount: "dispatch"},
+		AccountTokens: enroll.K8sPodVerifier{Verifier: tokenVerifier},
+		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
@@ -128,7 +138,7 @@ func newContractRig(t *testing.T) *contractRig {
 	deps, err := NewDeps(DepsInput{
 		Store: dispatchDB, Identity: headerIdentity(dispatchDB),
 		ServerURL: "https://dispatch.example", Docs: documentService, Events: events.NewBroker(),
-		AgentSecretsURL: brokerServer.URL, AgentSecretsToken: contractUIToken,
+		AgentSecretsURL: brokerServer.URL, AgentSecretsTokenFile: accountTokenFile(t, dispatchToken),
 	})
 	if err != nil {
 		t.Fatalf("new dispatch API dependencies: %v", err)

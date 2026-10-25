@@ -34,7 +34,7 @@ dispatch search --query 'reviewer threads OR review comments'
 
 A person does not watch your chat. Reach them through an ask, an ask block or an approval request.
 
-- The moment a person blocks your work, open a `dispatch ask` for it. A blocker that is not an open ask does not exist for them. Before you say you wait on a person, run `dispatch open-asks`.
+- The moment a person blocks your work, open a `dispatch ask` for it. A blocker that is not an open ask does not exist for them. A Legion phase worker sends it to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.
 - Record every request you accept in Dispatch before you start it: an issue, or a line in your issue's record. Before you end a turn, read that record. Each item is done, in progress, or an open ask. Never drop one.
 
 ## Which skill to read

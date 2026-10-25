@@ -281,16 +281,20 @@ reviewing until you finish.
 - **Nothing waits in the session for a deploy.** A `pending` ends the look: the daemon suspends
   your claim with its session and the issue's volume kept, the pod goes, and the daemon wakes the
   check (the pod comes back and your session resumes with a new check task) on Dispatch's
-  `issue.deployed` event for the pull request, or, for `sjawhar/legion`, on a Legion daemon's boot
-  on a build containing the merge, on Dispatch's `server.started` naming such a build, or on the
-  build the daemon read from Dispatch at its boot. The woken look's task names the event
-  (`Dispatch's issue.deployed: run <id> completed <t>`, `the Legion daemon's boot on build <sha>`,
-  `Dispatch's start on build <sha>`, `Dispatch's build <sha>`), and its `Production:` line names
-  it too, so the pull request carries the cause. Never poll for the deploy, never wait on a reply,
-  and never ask anyone for approval to deploy. Open a `dispatch ask` to a person only when the
-  instructions name nobody for that deploy; it starts with the production gap and why it matters,
-  then names the required install or restart step, its risk, and outcome-named options, and the
-  look still ends `pending`.
+  `issue.deployed` event for the pull request; when the project's `legion.yaml` names the
+  repository's deploy workflow (`projects.<KEY>.deploys`), at each completed run of that workflow
+  on the default branch whose named step (such as `Apply`) succeeded after the merge, once per such
+  job; or, for `sjawhar/legion`, on a Legion daemon's boot on a build containing the merge, on
+  Dispatch's `server.started` naming such a build, or on the build the daemon read from Dispatch at
+  its boot. A wake while a look is open is kept, and a `pending` then starts the next look at once.
+  The woken look's task names the event (`Dispatch's issue.deployed: run <id> completed <t>`,
+  `the deploy workflow's run: <repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <t>`,
+  `the Legion daemon's boot on build <sha>`, `Dispatch's start on build <sha>`,
+  `Dispatch's build <sha>`), and its `Production:` line names it too, so the pull request carries
+  the cause. Never poll for the deploy, never wait on a reply, and never ask anyone for approval
+  to deploy. Open a `dispatch ask` to a person only when the instructions name nobody for that
+  deploy; it starts with the production gap and why it matters, then names the required install or
+  restart step, its risk, and outcome-named options, and the look still ends `pending`.
 - **The bounds.** A look is bounded at 2 hours: one that reports nothing ends as a `pending`
   would. The whole check is bounded by the project's `production_check_hours` (336, 14 days, by
   default) from the close, and the wake at that bound is the last look, told so in its task
