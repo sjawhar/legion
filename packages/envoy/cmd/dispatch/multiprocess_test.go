@@ -177,11 +177,21 @@ func (p *dispatchProcess) logged(parts ...string) bool {
 }
 
 // waitForLog waits up to within for a line holding all of parts, polling rather than sleeping a
-// fixed time, and fails the test with the process's whole output when none arrives.
+// fixed time, and fails the test with the process's whole output when none arrives, at once when
+// the process exits without it: a process that has exited writes no more lines.
 func (p *dispatchProcess) waitForLog(t *testing.T, within time.Duration, parts ...string) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for !p.logged(parts...) {
+		select {
+		case <-p.Exited:
+			// Exited closes only once the output is whole, so this read is final.
+			if p.logged(parts...) {
+				return
+			}
+			t.Fatalf("the process exited without a line holding %v:\n%s", parts, p.Output.String())
+		default:
+		}
 		if time.Now().After(deadline) {
 			t.Fatalf("no line holding %v within %v:\n%s", parts, within, p.Output.String())
 		}
