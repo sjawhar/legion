@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,7 +66,7 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.Port > 0 {
-		return DeliveryResult{}, d.prompt(entry.Port, entry.MachineID, interest.SessionID, text)
+		return DeliveryResult{}, d.prompt(*entry, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
@@ -149,7 +151,7 @@ func foreignSession(item contracts.Envelope) string {
 	return ""
 }
 
-func (d Deliverer) prompt(port int, machineID string, sessionID string, text string) error {
+func (d Deliverer) prompt(entry SessionEntry, sessionID string, text string) error {
 	type promptBody struct {
 		Parts []map[string]string `json:"parts"`
 	}
@@ -160,7 +162,8 @@ func (d Deliverer) prompt(port int, machineID string, sessionID string, text str
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://%s:%d/session/%s/prompt_async", d.hostFor(machineID), port, sessionID), bytes.NewReader(body))
+	url := "http://" + net.JoinHostPort(d.hostFor(entry), strconv.Itoa(entry.Port)) + "/session/" + sessionID + "/prompt_async"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -181,16 +184,37 @@ func (d Deliverer) prompt(port int, machineID string, sessionID string, text str
 // resume was removed — cold-starting host processes from inside a container
 // runs as root and is a security risk. Messages stay in JetStream for retry.
 
-func (d Deliverer) hostFor(machineID string) string {
-	// Local session — use the host bridge (localhost or docker internal)
-	if machineID == "" || machineID == d.MachineID {
-		if d.HostBridge != "" {
-			return d.HostBridge
-		}
+// hostFor is the address rule every delivery follows. A session this listener owns goes
+// through HostBridge when one is configured: the listener may run in a container that reaches
+// its own machine's sessions only through that bridge, whatever host name the session reported.
+// Otherwise the session's recorded Host is where its process runs, which MachineID is not when
+// sessions register through a listener on another machine. A session with no recorded Host (its
+// plugin predates the field) falls back to host.docker.internal on this machine and to the
+// owning listener's MachineID, resolved as a host name, on another.
+func (d Deliverer) hostFor(entry SessionEntry) string {
+	own := entry.MachineID == "" || entry.MachineID == d.MachineID
+	if own && d.HostBridge != "" {
+		return d.HostBridge
+	}
+	if entry.Host != "" {
+		return entry.Host
+	}
+	if own {
 		return "host.docker.internal"
 	}
-	// Remote session — use the machine's hostname (resolved via Tailscale MagicDNS)
-	return machineID
+	return entry.MachineID
+}
+
+var hostName = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_.-]{0,251}[A-Za-z0-9_])?$`)
+
+// ValidHost reports whether host can stand as a session's recorded Host in a delivery URL: an
+// IP literal (IPv6 unbracketed) or a host name of letters, digits, '_', '.' and '-' that starts
+// and ends with a letter, digit or '_' and is at most 253 characters. It refuses anything that
+// could change the URL's authority or path - a port, '/', '@', '?', '#', '%', brackets,
+// whitespace, control characters. It returns false for the empty string; a caller that accepts
+// "no host recorded" checks for empty before calling it.
+func ValidHost(host string) bool {
+	return net.ParseIP(host) != nil || hostName.MatchString(host)
 }
 
 func (d Deliverer) timeout() time.Duration {

@@ -577,85 +577,119 @@ func TestDeliver_NilSessionsReturnsError(t *testing.T) {
 	}
 }
 
-func TestDeliver_CrossMachineUsesRemoteHost(t *testing.T) {
-	var deliveryCount atomic.Int32
-	var capturedHost string
+// TestDeliver_SessionAddress pins the address rule: the URL a delivery requests for a session
+// registered with each combination of owning listener, recorded host and host bridge.
+func TestDeliver_SessionAddress(t *testing.T) {
+	sessions, deliverer := newKVDeliverer(t)
+	deliverer.MachineID = "local-machine"
 
-	// Set up a test server that will receive the remote delivery
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		deliveryCount.Add(1)
-		capturedHost = r.Host
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer remote.Close()
-
-	remotePort := mockPort(remote.URL)
-	// Use localhost as the "remote" machine hostname
-	remoteHost := "localhost"
-
-	client := session.SetupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
-	if err != nil {
-		t.Fatalf("failed to open session registry: %v", err)
+	tests := []struct {
+		name   string
+		bridge string
+		entry  session.SessionEntry
+		want   string
+	}{
+		{
+			name:   "own machine with a bridge goes through the bridge, not the recorded host",
+			bridge: "127.0.0.1",
+			entry:  session.SessionEntry{MachineID: "local-machine", Host: "example-host"},
+			want:   "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:   "a session with no owning listener counts as this machine's",
+			bridge: "127.0.0.1",
+			entry:  session.SessionEntry{Host: "example-host"},
+			want:   "http://127.0.0.1:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:  "own machine without a bridge goes to the recorded host",
+			entry: session.SessionEntry{MachineID: "local-machine", Host: "example-host"},
+			want:  "http://example-host:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:  "own machine without a bridge or a recorded host goes to the docker host",
+			entry: session.SessionEntry{MachineID: "local-machine"},
+			want:  "http://host.docker.internal:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:   "another machine's session goes to its recorded host",
+			bridge: "127.0.0.1",
+			entry:  session.SessionEntry{MachineID: "remote-machine", Host: "example-host-b"},
+			want:   "http://example-host-b:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:   "another machine's session without a recorded host goes to its machine id",
+			bridge: "127.0.0.1",
+			entry:  session.SessionEntry{MachineID: "remote-machine"},
+			want:   "http://remote-machine:4096/session/ses_target/prompt_async",
+		},
+		{
+			name:  "an IPv6 recorded host is bracketed",
+			entry: session.SessionEntry{MachineID: "remote-machine", Host: "fd00::1"},
+			want:  "http://[fd00::1]:4096/session/ses_target/prompt_async",
+		},
 	}
-	// Register session on remote machine with localhost hostname
-	sessions.Put("ses_target", session.SessionEntry{Port: remotePort, MachineID: remoteHost, Dir: "/test"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests []string
+			deliverer.HostBridge = tt.bridge
+			deliverer.HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests = append(requests, req.URL.String())
+				return &http.Response{
+					StatusCode: http.StatusNoContent,
+					Body:       http.NoBody,
+					Header:     make(http.Header),
+				}, nil
+			})}
+			entry := tt.entry
+			entry.Port = 4096
+			entry.Dir = "/test"
+			if err := sessions.Put("ses_target", entry); err != nil {
+				t.Fatalf("failed to register session: %v", err)
+			}
 
-	// Deliverer is on local machine
-	deliverer := session.Deliverer{
-		MachineID:    "local-machine",
-		HostBridge:   "127.0.0.1",
-		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
-	}
-	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
-	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"}
-
-	err = deliverer.Deliver(item, interest)
-	if err != nil {
-		t.Fatalf("expected successful remote delivery, got: %v", err)
-	}
-	if count := deliveryCount.Load(); count != 1 {
-		t.Fatalf("expected 1 delivery to remote host, got %d", count)
-	}
-	// Verify the request went to the remote machine hostname (localhost)
-	if !strings.Contains(capturedHost, remoteHost) {
-		t.Fatalf("expected request to remote host %s, got %s", remoteHost, capturedHost)
+			err := deliverer.Deliver(
+				newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
+				store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"},
+			)
+			if err != nil {
+				t.Fatalf("Deliver() = %v, want nil", err)
+			}
+			if len(requests) != 1 || requests[0] != tt.want {
+				t.Fatalf("requested %q, want exactly [%q]", requests, tt.want)
+			}
+		})
 	}
 }
 
-func TestTsnetAwareDelivery(t *testing.T) {
-	var deliveryCount atomic.Int32
-	var requestURL string
-	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		deliveryCount.Add(1)
-		requestURL = req.URL.String()
-		return &http.Response{
-			StatusCode: http.StatusNoContent,
-			Body:       http.NoBody,
-			Header:     make(http.Header),
-		}, nil
-	})}
-
-	sessions, deliverer := newKVDeliverer(t)
-	if err := sessions.Put("ses_target", session.SessionEntry{Port: 443, MachineID: "remote-machine", Dir: "/test"}); err != nil {
-		t.Fatalf("failed to register remote session: %v", err)
+func TestValidHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"example-host", true},
+		{"a_b.internal.example", true},
+		{"10.0.0.5", true},
+		{"fd00::1", true},
+		{strings.Repeat("a", 253), true},
+		{"", false},
+		{"a b", false},
+		{"a:80", false},
+		{"a/b", false},
+		{"a@b", false},
+		{"[::1]", false},
+		{"a?b", false},
+		{"a#b", false},
+		{"a%b", false},
+		{"a\nb", false},
+		{"a\n", false},
+		{"-a", false},
+		{strings.Repeat("a", 254), false},
 	}
-	deliverer.MachineID = "local-machine"
-	deliverer.HTTPClient = client
-
-	err := deliverer.Deliver(
-		newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
-		store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"},
-	)
-	if err != nil {
-		t.Fatalf("expected injected HTTP client to deliver remote prompt, got %v", err)
-	}
-	if count := deliveryCount.Load(); count != 1 {
-		t.Fatalf("expected injected client to be used once, got %d calls", count)
-	}
-	if requestURL != "http://remote-machine:443/session/ses_target/prompt_async" {
-		t.Fatalf("expected remote delivery URL, got %s", requestURL)
+	for _, tt := range tests {
+		if got := session.ValidHost(tt.host); got != tt.want {
+			t.Errorf("ValidHost(%q) = %v, want %v", tt.host, got, tt.want)
+		}
 	}
 }
 

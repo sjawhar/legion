@@ -1,11 +1,11 @@
 package session_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	session "github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -144,34 +144,26 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 	}
 }
 
+// unreachableClient fails every request, as a session machine the listener cannot reach does,
+// and records each URL it was asked for in attempts.
+func unreachableClient(attempts *[]string) *http.Client {
+	return &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		*attempts = append(*attempts, req.URL.String())
+		return nil, errors.New("connection refused")
+	})}
+}
+
 // TestHandleAgentMessage_WrongMachineKVAcks tests that when the KV session
-// registry says a session is on another machine, the handler attempts remote
-// delivery. Since the remote machine is unreachable, delivery fails and the
-// handler ACKs (doesn't NAK) because another listener may own this session.
+// registry says a session is on another machine, the handler attempts delivery
+// at the session's recorded host. Since that host is unreachable, delivery fails
+// and the handler ACKs (doesn't NAK) because another listener may own this session.
 func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
-	var deliveryCount atomic.Int32
-
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		deliveryCount.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer mock.Close()
-
-	port := mockPort(mock.URL)
-
-	client := session.SetupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
-	if err != nil {
-		t.Fatalf("failed to open session registry: %v", err)
-	}
-	// KV says session is on unreachable machine-B
-	sessions.Put("ses_target", session.SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
-
-	deliverer := session.Deliverer{
-		MachineID:    "machine-A",
-		HostBridge:   "127.0.0.1",
-		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
+	var attempts []string
+	sessions, deliverer := newKVDeliverer(t)
+	deliverer.MachineID = "machine-A"
+	deliverer.HTTPClient = unreachableClient(&attempts)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: 4096, MachineID: "machine-B", Host: "example-host-b", Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
 	}
 
 	// No interest — handler falls to registry lookup path
@@ -180,7 +172,7 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 		"ses_target", "machine-A", nil, &deliverer,
 	)
 
-	// Remote delivery fails (machine-B unreachable), but handler ACKs
+	// Remote delivery fails (example-host-b unreachable), but handler ACKs
 	// because another listener may own this session.
 	if result.ShouldNAK {
 		t.Fatal("expected ACK (not NAK) when remote delivery fails")
@@ -188,39 +180,23 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	if result.Delivered {
 		t.Fatal("expected no delivery (session on different machine)")
 	}
-	if count := deliveryCount.Load(); count != 0 {
-		t.Fatalf("expected 0 deliveries, got %d", count)
+	want := "http://example-host-b:4096/session/ses_target/prompt_async"
+	if len(attempts) != 1 || attempts[0] != want {
+		t.Fatalf("attempted %q, want exactly [%q]", attempts, want)
 	}
 }
 
 // TestHandleAgentMessage_InterestPathWrongMachineKVAcks tests that when
 // the interest path matches this machine, but the KV session registry says the
-// session moved to another machine, the handler attempts remote delivery.
-// Since the remote machine is unreachable, delivery fails and NAKs for retry.
+// session moved to another machine, the handler attempts delivery at the
+// session's recorded host. Since that host is unreachable, delivery fails and NAKs for retry.
 func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
-	var deliveryCount atomic.Int32
-
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		deliveryCount.Add(1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer mock.Close()
-
-	port := mockPort(mock.URL)
-
-	client := session.SetupNATS(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1), session.WithSessionTTL(10*time.Second))
-	if err != nil {
-		t.Fatalf("failed to open session registry: %v", err)
-	}
-	// KV says session moved to unreachable machine-B
-	sessions.Put("ses_target", session.SessionEntry{Port: port, MachineID: "machine-B", Dir: "/test"})
-
-	deliverer := session.Deliverer{
-		MachineID:    "machine-A",
-		HostBridge:   "127.0.0.1",
-		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
+	var attempts []string
+	sessions, deliverer := newKVDeliverer(t)
+	deliverer.MachineID = "machine-A"
+	deliverer.HTTPClient = unreachableClient(&attempts)
+	if err := sessions.Put("ses_target", session.SessionEntry{Port: 4096, MachineID: "machine-B", Host: "example-host-b", Dir: "/test"}); err != nil {
+		t.Fatalf("failed to register session: %v", err)
 	}
 
 	// Interest says machine-A (stale interest), but KV says machine-B
@@ -235,15 +211,16 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 		"ses_target", "machine-A", interest, &deliverer,
 	)
 
-	// Interest path matches, but KV says session moved to unreachable machine-B.
-	// Handler attempts remote delivery, which fails, so NAK for retry.
+	// Interest path matches, but KV says session moved to machine-B.
+	// Handler attempts delivery at its recorded host, which fails, so NAK for retry.
 	if !result.ShouldNAK {
 		t.Fatalf("expected NAK when remote delivery fails, got NAK=%v, Delivered=%v", result.ShouldNAK, result.Delivered)
 	}
 	if result.Delivered {
 		t.Fatal("expected no delivery (KV says session moved to machine-B)")
 	}
-	if count := deliveryCount.Load(); count != 0 {
-		t.Fatalf("expected 0 deliveries, got %d", count)
+	want := "http://example-host-b:4096/session/ses_target/prompt_async"
+	if len(attempts) != 1 || attempts[0] != want {
+		t.Fatalf("attempted %q, want exactly [%q]", attempts, want)
 	}
 }

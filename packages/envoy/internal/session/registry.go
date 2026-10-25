@@ -29,12 +29,15 @@ type SessionEntry struct {
 	Driving        bool `json:"driving,omitempty"`
 	SelfSubscribed bool `json:"self_subscribed,omitempty"`
 	// Host is the machine the client-reported `machineID()` (envoy-client's
-	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs. It is
-	// never the routing key: MachineID is the listener that owns this entry's delivery (the
-	// registering listener's own ENVOY_MACHINE_ID, store.Registry.Match, hostFor), and stays
-	// that way whether every session registers through one shared listener or each machine runs
-	// its own. Host is empty for a session whose plugin predates this field (subscribeBody had
-	// no "host"); HostOrMachine falls back to MachineID so every caller sees a populated value.
+	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs, and the
+	// address delivery reaches the session at (Deliverer.hostFor), except that a configured
+	// HostBridge wins for a session this listener owns. Which listener fans a topic out to the
+	// session is MachineID's to say, not Host's: MachineID is the registering listener's own
+	// ENVOY_MACHINE_ID (store.Registry.Match), whether every session registers through one shared
+	// listener or each machine runs its own. Host is empty for a session whose plugin predates
+	// this field (subscribeBody had no "host"); delivery then falls back to host.docker.internal
+	// on this machine or MachineID on another, and HostOrMachine falls back to MachineID so every
+	// display caller sees a populated value.
 	Host string `json:"host,omitempty"`
 }
 
