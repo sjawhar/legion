@@ -4,6 +4,19 @@
 
 ### Changed
 
+- **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
+  one per repository, and prints each source's answer in turn: `Synced P architecture from
+  repo@branch: commit C (time).`, or `Sync failed for P (repo@branch): error` followed by `The
+  previous model of repo stays up (commit C).` or `No model has ever imported from repo.`; its
+  `details` are `{project, sources: [{repo, branch, commit, error}]}`. `--repo <owner/name>`
+  imports that one source alone, and a credential or branch problem there is still an error exit
+  (`409 SOURCE_ACCESS`); without it, every source is attempted and such a problem is that
+  source's failed line. `DispatchClient` gains `listArchitectureSources(project)`,
+  `syncArchitectureSources(project)` and `syncArchitectureSource(project, repo)`, on the routes
+  under `/api/v1/projects/{key}/architecture-sources`, and loses `getArchitectureSource`; the
+  issue create's architecture guidance reads the list and takes `[]` as no model. This client
+  needs a Dispatch of the same release: an older server answers the new routes `404`, which the
+  guidance reports as "Could not check whether project … has an architecture model" (INFRA-391).
 - A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
   expires a session record 300 s after its last write, and three refresh attempts plus one whole
   listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between

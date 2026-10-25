@@ -10,6 +10,14 @@
   or `rank -> after KEY`. The bundled tool descriptions carry the two arguments, and the plugin's
   own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
   `legion/` were regenerated (INFRA-188).
+- The `dispatch` command (`dist/dispatch.js`) imports every architecture source of a project, one
+  per repository: `dispatch architecture-sync --project <KEY>` prints a line for each source, and
+  `--repo <owner/name>` imports that one alone. It needs a Dispatch of the same release, which
+  serves the per-repository source routes. The `dispatch` skill says an issue's component ids may
+  come from any of its project's source repositories, and the plugin's own copy of the
+  `legion-architect` skill says a component file goes in the branch of the source repository that
+  holds it, with an id no other source of the project uses, since `dist/` and `legion/` were
+  regenerated (INFRA-391).
 
 ### Changed
 

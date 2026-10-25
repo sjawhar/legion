@@ -210,8 +210,9 @@ Sign in, then open **Settings**:
   and under no parent that names one, goes to that person; a project with no default leaves such
   an issue unassigned. Only a person sets it, here — no agent command or flag does — and the
   picker's **Unassigned** clears it.
-- **Architecture sources**: point a project at a repository branch holding its architecture
-  model. Saving checks that the GitHub App can read it.
+- **Architecture sources**: add each repository branch holding part of a project's architecture
+  model. A project can have several, one per repository, and its model is all of their components
+  together. Saving checks that the GitHub App can read the repository.
 - **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
   workflows, the job whose success is a production deploy, and whose merged pull requests count.
   Three job names are optional and feed the [Pipeline](/legion/dispatch/delivery/#pipeline) page:
@@ -317,6 +318,21 @@ never happening: the one that adds each issue's repository (migration `0113`) ho
 32 links below its root in its API alone, and an issue an older server puts deeper fails to load
 until you clear the parent of an ancestor that still loads. That release was deployed with the
 running server stopped first, and no server older than it has run against the database since.
+
+The release that lets a project import its components from several repositories (migration
+`0117`) is deployed the same way: stop every server of the earlier version, or scale it to zero,
+before the new version starts, and never start a version older than it again. An older server
+cannot work with the new database: saving an architecture source fails with a server error, an
+import that changes a project's components fails, and an import of an empty architecture folder
+deletes the components of every source of the project. Its census refuses while any component
+belongs to a project with no architecture source, which only a change made directly in the
+database leaves behind; delete those rows on the version still running, then take the census
+again:
+
+```sql
+delete from components c
+where not exists (select 1 from architecture_sources s where s.project_key = c.project_key);
+```
 
 ## The HTTP API
 
