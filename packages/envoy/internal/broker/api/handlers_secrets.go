@@ -63,6 +63,11 @@ type rereadResponse struct {
 	// refused the secret, the one its policy-refused log line names (such as owner-tag-missing or
 	// no-current-value).
 	Reason string `json:"reason,omitempty"`
+	// The kind the broker serves the secret as, while it serves it: github-app or google-login, or
+	// absent for a stored secret, whose grants release its stored value. A person who retags a
+	// secret to a kind reads it here before storing the key the kind mints from: a stale store read
+	// can still serve the secret as stored.
+	Kind string `json:"kind,omitempty"`
 }
 
 // rereadSecret is POST /v1/secrets/{name}/reread: public and rate-limited per source address and
@@ -122,7 +127,11 @@ func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		s.deps.NotifyReread(ctx, name)
 	}
-	writeJSON(w, http.StatusOK, rereadResponse{Name: name, Served: lk.Served, Reason: lk.Reason})
+	resp := rereadResponse{Name: name, Served: lk.Served, Reason: lk.Reason}
+	if lk.Served {
+		resp.Kind = lk.Secret.Kind()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // notifyRereadTimeout bounds the fan-out one reread sends: a single Postgres NOTIFY on the shared

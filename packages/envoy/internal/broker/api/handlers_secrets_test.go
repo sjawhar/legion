@@ -38,6 +38,7 @@ type wireReread struct {
 	Name   string `json:"name"`
 	Served bool   `json:"served"`
 	Reason string `json:"reason"`
+	Kind   string `json:"kind"`
 }
 
 func TestSettingsAnswersTheNamespaceAndKey(t *testing.T) {
@@ -114,6 +115,30 @@ func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {
 	tooLong := "A" + strings.Repeat("B", 512-len(policytest.Prefix))
 	if status, body = ts.req(t, http.MethodPost, "/v1/secrets/"+tooLong+"/reread", nil, nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "SECRET_NAME_INVALID" {
 		t.Fatalf("over-long name: %d %s, want 400 SECRET_NAME_INVALID", status, body)
+	}
+}
+
+// TestARereadNamesTheKindItServes: a reread's answer names the kind the broker serves the secret
+// as, and none for a stored secret, so a person who retags a secret to a kind can tell a reread
+// that read the new tags from one that read them stale. It carries nothing else of the tags.
+func TestARereadNamesTheKindItServes(t *testing.T) {
+	ts := newTestServer(t)
+	ts.Secrets.Put(policytest.Secret("PLAIN_KEY", testApprover, policy.TierAgent, "v1"))
+	_, body := ts.req(t, http.MethodPost, "/v1/secrets/PLAIN_KEY/reread", nil, nil)
+	if r := decode[wireReread](t, body); !r.Served || r.Kind != "" || strings.Contains(string(body), `"kind"`) {
+		t.Fatalf("reread of a stored secret = %s, want served with no kind", body)
+	}
+	for _, kind := range policy.Kinds {
+		ts.Secrets.Put(policytest.KindSecret("PLAIN_KEY", testApprover, policy.TierAgent, kind, "v1"))
+		_, body = ts.req(t, http.MethodPost, "/v1/secrets/PLAIN_KEY/reread", nil, nil)
+		if r := decode[wireReread](t, body); !r.Served || r.Kind != kind {
+			t.Fatalf("reread once the kind is %s = %s, want served as %s", kind, body, kind)
+		}
+		for _, private := range []string{testApprover, policy.TierAgent, "github-owners", "owner"} {
+			if strings.Contains(string(body), private) {
+				t.Fatalf("reread answer %s carries %q; it names only the kind", body, private)
+			}
+		}
 	}
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"maps"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -30,12 +29,6 @@ type Current struct {
 	// has passed.
 	recent map[string]time.Time
 	now    func() time.Time
-	// minted holds StillMinted's verdict for each name for MintedRecheck, and mintedLook the one
-	// read in flight for a name, so releases of a minted grant, at once or in a loop, cost at most
-	// one store read (two Secret Manager metadata calls) per name in that window.
-	mintedMu   sync.Mutex
-	minted     map[string]mintedVerdict
-	mintedLook map[string]chan struct{}
 }
 
 // NewCurrent loads the policy once, failing when that load fails, and then reloads it every
@@ -44,7 +37,7 @@ type Current struct {
 // ctx is live logs LoadFailedMessage; one that fails once ctx has ended, the broker shutting down,
 // is no failed load and logs nothing, since the deployment's alarm counts that line.
 func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Current, error) {
-	c := &Current{loader: loader, mu: make(chan struct{}, 1), recent: map[string]time.Time{}, now: time.Now, minted: map[string]mintedVerdict{}, mintedLook: map[string]chan struct{}{}}
+	c := &Current{loader: loader, mu: make(chan struct{}, 1), recent: map[string]time.Time{}, now: time.Now}
 	if err := c.Refresh(ctx); err != nil {
 		return nil, err
 	}
@@ -169,65 +162,6 @@ func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 func (c *Current) CheckName(name string) error {
 	_, _, err := c.loader.secretName(name)
 	return err
-}
-
-// MintedRecheck is how long StillMinted holds a name's verdict: the 30 seconds the GCP store holds
-// a value read's (secrets.GCP.Read), so a deleted or retagged minted secret stops minting within
-// it, and the shared metadata quota pays at most one read per name in it. The held verdict is per
-// process, so two broker pods pay two of those reads per name in that window. It is held per
-// process rather than shared because it is a load question rather than an authority question:
-// each pod's verdict is its own read of the store's truth, and holding it longer or shorter
-// changes only how much of the quota the fleet spends, never who may have a secret.
-const MintedRecheck = 30 * time.Second
-
-// mintedVerdict is one StillMinted read: what the store served the name from, empty when it served
-// nothing, and when it read it.
-type mintedVerdict struct {
-	source string
-	at     time.Time
-}
-
-// StillMinted reads name alone from the store, as LoadOne does, without touching the live set,
-// and reports whether it is still served as the minted secret source names, holding each read for
-// MintedRecheck: a release of a minted secret reads no value from the store, so this read is what
-// stops a deleted or retagged one minting before the next reload. A failed store call is an error
-// and is not held.
-func (c *Current) StillMinted(ctx context.Context, name, source string) (bool, error) {
-	for {
-		now := c.now()
-		c.mintedMu.Lock()
-		if v, ok := c.minted[name]; ok && now.Sub(v.at) < MintedRecheck {
-			c.mintedMu.Unlock()
-			return v.source == source, nil
-		}
-		if wait, busy := c.mintedLook[name]; busy {
-			c.mintedMu.Unlock()
-			select {
-			case <-wait:
-				continue
-			case <-ctx.Done():
-				return false, ctx.Err()
-			}
-		}
-		done := make(chan struct{})
-		c.mintedLook[name] = done
-		c.mintedMu.Unlock()
-		lk, err := c.loader.LoadOne(ctx, name)
-		c.mintedMu.Lock()
-		delete(c.mintedLook, name)
-		close(done)
-		if err != nil {
-			c.mintedMu.Unlock()
-			return false, err
-		}
-		v := mintedVerdict{at: now}
-		if lk.Served {
-			v.source = lk.Secret.Source
-		}
-		c.minted[name] = v
-		c.mintedMu.Unlock()
-		return v.source == source, nil
-	}
 }
 
 // merge sets name in secrets as lk found it: the served secret, or no entry.

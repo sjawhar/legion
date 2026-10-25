@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -898,6 +899,72 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	werr := decode[wireError](t, body)
 	if werr.Code != "UNKNOWN_SECRET" {
 		t.Fatalf("code = %q, want UNKNOWN_SECRET", werr.Code)
+	}
+}
+
+func TestCreateRequestWithMaxGrantNeedsLifetime(t *testing.T) {
+	ts := newTestServer(t)
+	limited := policytest.KindSecret("LIMITED_KEY", testApprover, policy.TierAgent, policy.KindGoogleLogin, "value")
+	limited.Tags[policy.TagMaxGrant] = "1h"
+	ts.Secrets.Put(limited)
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LIMITED_KEY/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("reread LIMITED_KEY = %d %s", status, body)
+	}
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need limited login", "LIMITED_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": nil})
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/requests = %d, want 400: %s", status, body)
+	}
+	reply := decode[wireError](t, body)
+	if reply.Code != "GRANT_REQUIRES_LIFETIME" || !strings.Contains(reply.Error, "LIMITED_KEY") || !strings.Contains(reply.Error, "1h") {
+		t.Fatalf("POST /v1/requests = %+v, want GRANT_REQUIRES_LIFETIME naming LIMITED_KEY and 1h", reply)
+	}
+}
+
+// TestAFailedMintIs502MintFailed: a kind secret whose minter fails, such as a Google login that
+// needs a new sign-in, answers the session 502 MINT_FAILED with the minter's words, so it can tell
+// its person what to fix, rather than an opaque 500; and the broker logs it at ERROR for its
+// operator, naming the secret and the error's class, never the stored value.
+func TestAFailedMintIs502MintFailed(t *testing.T) {
+	logged := policytest.CaptureLog(t)
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.Machine.Minters = map[string]requests.Minter{
+			policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
+				return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (invalid_rapt)", secrets.ErrMintRefused)
+			},
+		}
+	})
+	ts.Secrets.Put(policytest.KindSecret("LAPSED_LOGIN", testApprover, policy.TierAgent, policy.KindGoogleLogin, "stored-login"))
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LAPSED_LOGIN/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("reread LAPSED_LOGIN = %d %s", status, body)
+	}
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
+	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "read login", "LAPSED_LOGIN"), "session_id": nil})
+	created := decode[wireCreateRequestResponse](t, body)
+	if created.GrantID == nil {
+		t.Fatalf("POST /v1/requests = %s, want an automatic grant", body)
+	}
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*created.GrantID+"/values", nil)
+	reply := decode[wireError](t, body)
+	if status != http.StatusBadGateway || reply.Code != "MINT_FAILED" || !strings.Contains(reply.Error, "invalid_rapt") || strings.Contains(reply.Error, "stored-login") {
+		t.Fatalf("POST values = %d %+v, want 502 MINT_FAILED naming invalid_rapt and not the stored value", status, reply)
+	}
+	line := ""
+	for l := range strings.Lines(logged.String()) {
+		if strings.Contains(l, requests.MintFailedMessage) {
+			line = l
+		}
+	}
+	for _, want := range []string{"ERROR " + requests.MintFailedMessage, "name=LAPSED_LOGIN", "kind=google-login", "class=refused", "invalid_rapt"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("mint failure log line %q does not hold %q (log: %q)", line, want, logged.String())
+		}
+	}
+	if strings.Contains(logged.String(), "stored-login") {
+		t.Fatalf("the broker's log holds the stored value: %q", logged.String())
 	}
 }
 

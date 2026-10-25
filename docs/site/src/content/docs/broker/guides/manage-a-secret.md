@@ -1,13 +1,13 @@
 ---
 title: Manage a secret
-description: Create an agent secret, change its value, owner or tier, and delete or restore it with agent-secrets secret, under your own cloud sign-in, and see the broker serve each change at once.
+description: Create an agent secret, change its value or tags, and delete or restore it with agent-secrets secret under your own cloud sign-in.
 sidebar:
   order: 9
 ---
 
 An agent secret is a secret in the broker's own store - AWS Secrets Manager or GCP Secret
 Manager, whichever the broker's deployment uses - under the broker's namespace, encrypted with
-its key and tagged with its owner and tier
+its key, and tagged with owner, tier, optional kind and optional max grant
 ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
 `agent-secrets secret` manages them. It reads and writes the store itself, under your own cloud
 sign-in, so that cloud's own IAM decides what you may do; the broker never writes a secret. After
@@ -66,6 +66,13 @@ CLOUDSDK_CORE_ACCOUNT=ada@example.com agent-secrets secret create DEMO_DEPLOY_TO
 CLI never replaces them with your gcloud login: a write under a machine's credentials named there
 is refused.
 
+When you have made your writes, remove that sign-in from the machine, so nothing else that runs as
+your user there can use it:
+
+```sh
+gcloud auth revoke '<your email>'
+```
+
 ## Create a secret
 
 ```console
@@ -90,6 +97,15 @@ machine's Application Default Credentials are its own identity, and so does ever
   labels, so they never collide with a label someone else applies.
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
+- **`--kind`** is optional. Use `github-app` for a GitHub App key and `google-login` for an
+  authorized-user Google login. Use `none`, or omit the flag, for a stored secret. A kind also
+  writes `mint-service-account: kind-secret`, which makes an earlier broker refuse the secret
+  rather than serve its stored key.
+- **`--github-owners`** is required with `--kind github-app`, and refused with any other kind. It
+  lists the GitHub accounts the broker mints installation tokens for, separated by spaces, so the
+  shell quotes it: `--github-owners "acme-org ada"`. A comma is refused before anything is written.
+- **`--max-grant`** is optional. It is the longest `--ttl` a request for this secret may use.
+  It must be a duration of at least one second.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
   Ctrl-W and the terminal's kill-line character edit it. An unhandled control byte, including
   Ctrl-S, Ctrl-Q, and Ctrl-C, Ctrl-\\ or Ctrl-Z inside a bracketed paste, refuses the value. The
@@ -99,7 +115,7 @@ machine's Application Default Credentials are its own identity, and so does ever
   invalid UTF-8 are refused (exit 2) and write nothing.
 
 The CLI checks your sign-in before it asks for the value, so a refused sign-in never has you type a
-secret for nothing. The secret is created on the broker's key with both tags, and the broker serves
+secret for nothing. The secret is created on the broker's key with its tags, and the broker serves
 it from the next request. Secrets Manager refuses a name that is already taken, including one
 scheduled for deletion: [restore](#delete-and-restore) that one instead.
 
@@ -215,10 +231,10 @@ form makes.
 
 ```console
 $ agent-secrets secret list
-NAME               OWNER            TIER   VALUE  DELETED  EARLIEST_PURGE
-DEMO_DEPLOY_TOKEN  ada@example.com  agent  yes    -        -
-DEMO_EMPTY_KEY     ada@example.com  agent  no     -        -
-DEMO_SHARED_KEY    shared           human  yes    -        -
+NAME               OWNER            TIER   KIND          MAX_GRANT  VALUE  DELETED  EARLIEST_PURGE
+DEMO_DEPLOY_TOKEN  ada@example.com  agent  -             -          yes    -        -
+DEMO_GITHUB_APP    ada@example.com  agent  github-app    -          yes    -        -
+DEMO_LOGIN         ada@example.com  human  google-login  1h         yes    -        -
 ```
 
 `VALUE` says whether a version of the secret carries `AWSCURRENT`, the label Secrets Manager reads
@@ -232,6 +248,8 @@ name: DEMO_DEPLOY_TOKEN
 secret_name: example/agent-secrets/demo-deploy-token
 owner: ada@example.com
 tier: agent
+kind: -
+max_grant: -
 created: 2026-10-06T20:31:08Z
 last_changed: 2026-10-06T20:31:08Z
 version: 8ae2ea20-8e93-4f1a-b3d1-2e5396ecef72 AWSCURRENT
@@ -253,7 +271,7 @@ input, which is how a value of more than one line goes in. The broker never keep
 reads it from Secrets Manager each time a session reads a grant, so the next read of a live grant
 gets the new one.
 
-## Change its owner or tier
+## Change its owner, tier, kind or max grant
 
 ```console
 $ agent-secrets secret retag DEMO_DEPLOY_TOKEN --tier human
@@ -261,22 +279,48 @@ retagged DEMO_DEPLOY_TOKEN (owner=ada@example.com, tier=human)
 broker: serving DEMO_DEPLOY_TOKEN
 ```
 
-Name `--owner`, `--tier` or both. `retag` reads the tags the secret holds and sends both in one
-request, the unchanged one as it is: on AWS, so an IAM condition on the request's tags (one that
-lets a person tag only their own secret, say) sees both. GCP has no such condition (an IAM
-condition cannot test an annotation's value the way it can an AWS tag), so GCP's access is
-coarser: anyone granted `secretmanager.secrets.update` on the namespace can retag any secret
-under it, shared ones included, and anyone granted `secretmanager.versions.add` (the permission
-`set` needs) can replace any secret's value under it the same way. For a secret missing a tag,
-name that one too.
+Name `--owner`, `--tier`, `--kind`, `--github-owners`, `--max-grant` or a combination. A retag that
+sets tags reads the owner and tier tags the secret holds and sends both in one request. On AWS,
+this lets an IAM condition inspect both tags. Every other tag or annotation stays as it is. For a
+secret missing an owner or tier tag, name that tag too.
+
+`--kind none` removes the kind tag and the `mint-service-account` tag written with it,
+`--github-owners none` removes the GitHub owners and `--max-grant none` removes the max grant. A
+removal is a retag of its own: it changes no other tag, so the cloud refusing it leaves the secret
+as it was. A retag that names `none` beside another change is refused before it writes anything.
+So is a retag that would leave a `github-app` secret without `--github-owners`, as the broker would
+then refuse to serve it, and one that names `--github-owners` on a secret of another kind.
+Run the removal and the other change as two retags:
+
+```console
+$ agent-secrets secret retag DEMO_LOGIN --max-grant none
+retagged DEMO_LOGIN (removed max-grant)
+broker: serving DEMO_LOGIN
+```
+
+To make a stored secret a kind, retag it first, and only once the retag exits 0, showing
+`broker: serving NAME (kind <kind>)`, store the App key or the Google login with `secret set`. A
+reread can read the tags stale (Secret Manager's metadata can lag a write by hours), and while the
+broker still serves the secret as stored, a grant of it releases its stored value raw. So a retag
+whose reread answers another kind than the one it wrote exits 1: the broker still sees the old
+tags; run the retag again, and store no value until it exits 0. A release that finds the secret
+retagged while it reads the store releases nothing and ends that grant.
+
+A retag checks the tags it read. On GCP it writes against that read, so a retag another person
+wrote in between refuses it, with `another write changed the secret after this retag read it`,
+and nothing is written. AWS has no such check, so retag secrets there one writer at a time: a retag
+reads the tags back after its write, and when another writer's change left a kind without the
+GitHub owners it needs, it puts back the tags it read, which undoes that writer's change too, and
+exits 1 naming the race.
 
 You can retag your own secret, to `--owner shared` too. Once a secret is shared, its owner and
 tier are an administrator's to change: on AWS, by the IAM condition above; on GCP, because a
 deployment that wants this protection grants `secretmanager.secrets.update` on a shared secret
-only to administrators. When the cloud refuses a retag of a shared secret, the CLI prints that
-refusal, then `a shared secret's owner and tier are an administrator's to change`, and exits 1. It
-prints the same line when the cloud refuses a retag to `--owner shared`; for your own secret, that
-refusal means your access does not include the retag
+only to administrators. When the cloud refuses a retag that sets the tags of a shared secret, the
+CLI prints that refusal, then `a shared secret's owner and tier are an administrator's to change`,
+and exits 1. It prints the same line when the cloud refuses a retag to `--owner shared`; for your
+own secret, that refusal means your access does not include the retag. A refused removal prints
+the cloud's refusal alone
 ([Troubleshooting](/legion/broker/guides/troubleshooting/#managing-a-secret)).
 
 New tags decide what sessions get from the next request, and reach some grants already given:
@@ -310,10 +354,10 @@ that moment is both), and the **earliest** it can be purged:
 
 ```console
 $ agent-secrets secret list
-NAME               OWNER            TIER   VALUE  DELETED               EARLIEST_PURGE
-DEMO_DEPLOY_TOKEN  ada@example.com  human  yes    2026-10-06T20:22:33Z  2026-10-13T20:22:33Z
-DEMO_EMPTY_KEY     ada@example.com  human  yes    -                     -
-DEMO_SHARED_KEY    shared           human  yes    -                     -
+NAME               OWNER            TIER   KIND  MAX_GRANT  VALUE  DELETED               EARLIEST_PURGE
+DEMO_DEPLOY_TOKEN  ada@example.com  human  -     -          yes    2026-10-06T20:22:33Z  2026-10-13T20:22:33Z
+DEMO_EMPTY_KEY     ada@example.com  human  -     -          yes    -                     -
+DEMO_SHARED_KEY    shared           human  -     -          yes    -                     -
 EARLIEST_PURGE is the deletion plus Secrets Manager's 7-day minimum recovery window: restore works at least until then; the window the delete chose may be longer.
 ```
 
@@ -339,7 +383,8 @@ and prints its answer on a line of its own:
 
 | Line | What it means |
 | --- | --- |
-| `broker: serving NAME` | The broker serves the secret as just written. |
+| `broker: serving NAME` | The broker serves the secret as just written, as a stored secret. |
+| `broker: serving NAME (kind <kind>)` | The broker serves the secret as that kind: it mints from the stored value and never returns it. |
 | `broker: NAME is deleted (restorable until <date>)` | After a delete: the broker no longer serves it. |
 | `broker: refusing NAME (reason=<reason>)` | The broker leaves the secret out: `absent` (it found no such secret, or one scheduled for deletion), or one of the refusals [Operating the broker](/legion/broker/operate/#health-and-logs) lists, such as `no-current-value`. |
 

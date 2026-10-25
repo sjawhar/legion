@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/config"
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 )
@@ -93,6 +94,14 @@ func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
 	m := newRequestMachine(cfg, nil, nil, nil, nil)
 	if want := map[string]string{"example-service": "system:serviceaccount:example:example-sa"}; !maps.Equal(m.ServiceAccounts, want) {
 		t.Fatalf("request Machine's ServiceAccounts = %v, want %v", m.ServiceAccounts, want)
+	}
+	for _, kind := range policy.Kinds {
+		if m.Minters[kind] == nil {
+			t.Errorf("request Machine has no minter for kind %q, which the policy serves", kind)
+		}
+	}
+	if len(m.Minters) != len(policy.Kinds) {
+		t.Errorf("request Machine has %d minters for %d kinds: %v", len(m.Minters), len(policy.Kinds), m.Minters)
 	}
 }
 
