@@ -117,7 +117,8 @@ func (r *liveRig) agentSecrets(c *liveClaim, args ...string) (stdout string, cod
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return "", -1, "", err
 	}
-	head, tail, _ := strings.Cut(out, "\n---exit ")
+	// exec trims the output, so with nothing on stdout it begins with the marker itself.
+	head, tail, _ := strings.Cut("\n"+out, "\n---exit ")
 	codeText, rest, _ := strings.Cut(tail, "---\n")
 	fmt.Sscanf(codeText, "%d", &code)
 	return strings.TrimSpace(head), code, strings.TrimSpace(rest), nil
@@ -237,12 +238,13 @@ func (r *liveRig) checkSecretsAutomaticGrant() error {
 func (r *liveRig) checkSecretsCrossPodNegative() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	for _, attempt := range [][]string{{"status", r.requests[root.token]}, {"revoke", r.grants[root.token]}} {
-		_, code, stderr, err := r.agentSecrets(worker, attempt...)
+		out, code, stderr, err := r.agentSecrets(worker, attempt...)
 		if err != nil {
 			return err
 		}
 		if code == 0 || !strings.Contains(stderr, "NOT_YOURS") {
-			return fmt.Errorf("the worker's agent-secrets %s %s: exit %d: %s; want NOT_YOURS", attempt[0], attempt[1], code, stderr)
+			return fmt.Errorf("the worker's agent-secrets %s %s (the root's; root enrollment %s, worker enrollment %s): exit %d, stdout %q, stderr %q; want NOT_YOURS",
+				attempt[0], attempt[1], r.enrollments[root.token].id, r.enrollments[worker.token].id, code, out, stderr)
 		}
 		note("runtime", "worker: agent-secrets %s <root's> → exit %d NOT_YOURS", attempt[0], code)
 	}
