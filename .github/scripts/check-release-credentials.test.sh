@@ -264,12 +264,14 @@ jobs:
     concurrency:
       group: release-envoy-listener
       cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
+      actions: write
     cache-mode: none
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -564,6 +566,14 @@ check "exits 1" "$(is "$status" 1)"
 check "names the scope at the permissions line" \
   "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    permissions:$'): job 'pi_envoy_build' runs dependency code (step './.github/actions/setup-bun' uses './.github/actions/setup-bun'), but holds 'id-token: write'")"
 
+echo "case: a build job holding actions: write"
+root=$(fixture build-actions-write)
+mutate "$root/$RELEASE" $'    permissions:\n      contents: read\n' $'    permissions:\n      contents: read\n      actions: write\n' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the scope at the permissions line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    permissions:$'): job 'pi_envoy_build' runs dependency code (step './.github/actions/setup-bun' uses './.github/actions/setup-bun'), but holds 'actions: write'")"
+
 echo "case: a build job naming the deploy key"
 root=$(fixture build-deploy-key)
 mutate "$root/$RELEASE" $'        run: bun install --frozen-lockfile\n' $'        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n        run: bun install --frozen-lockfile\n' 1
@@ -636,11 +646,26 @@ mutate "$root/$LISTENER" $'      cancel-in-progress: false\n' $'      cancel-in-
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the concurrency at its line" \
-  "$(contains "$out" "^::error::$LISTENER:$(line_of "$root/$LISTENER" '^    concurrency:$'): job 'release_publish' must run in concurrency group 'release-envoy-listener' with 'cancel-in-progress: false', the boolean (found concurrency: {\"group\": \"release-envoy-listener\", \"cancel-in-progress\": true})")"
+  "$(contains "$out" "^::error::$LISTENER:$(line_of "$root/$LISTENER" '^    concurrency:$'): job 'release_publish' must run in concurrency group 'release-envoy-listener' with 'cancel-in-progress: false', the boolean, and 'queue: max' (found concurrency: {\"group\": \"release-envoy-listener\", \"cancel-in-progress\": true, \"queue\": \"max\"})")"
+
+echo "case: release_publish without queue: max"
+root=$(fixture no-queue)
+mutate "$root/$LISTENER" $'      queue: max\n' ''
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the concurrency at its line" \
+  "$(contains "$out" "^::error::$LISTENER:$(line_of "$root/$LISTENER" '^    concurrency:$'): job 'release_publish' must run in concurrency group 'release-envoy-listener' with 'cancel-in-progress: false', the boolean, and 'queue: max' (found concurrency: {\"group\": \"release-envoy-listener\", \"cancel-in-progress\": false})")"
+
+echo "case: release_publish with queue: single"
+root=$(fixture queue-single)
+mutate "$root/$LISTENER" $'      queue: max\n' $'      queue: single\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names what it found" "$(contains "$out" "job 'release_publish' must run in concurrency group .*(found concurrency: {\"group\": \"release-envoy-listener\", \"cancel-in-progress\": false, \"queue\": \"single\"})")"
 
 echo "case: release_publish without concurrency"
 root=$(fixture no-concurrency)
-mutate "$root/$LISTENER" $'    concurrency:\n      group: release-envoy-listener\n      cancel-in-progress: false\n' ''
+mutate "$root/$LISTENER" $'    concurrency:\n      group: release-envoy-listener\n      cancel-in-progress: false\n      queue: max\n' ''
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the job at its line" \

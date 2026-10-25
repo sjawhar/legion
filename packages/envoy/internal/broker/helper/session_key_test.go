@@ -63,55 +63,15 @@ func TestEnrollSessionKeyEnrollsAndRevokesAnExternalKey(t *testing.T) {
 	}
 }
 
-// TestAnOlderCLIsBoxOpsStillEnrollAndRevoke: an agent-secrets CLI from before the session key
-// (agentbox's enroll and unenroll, run from whatever release the box host's PATH holds) asks
-// enroll-box and unenroll-box, with the "kind" field older CLIs also sent. This helper answers
-// both as the kind-free pair: the key enrolls as kind session, its proof is accepted, and
-// unenroll-box ends it.
-func TestAnOlderCLIsBoxOpsStillEnrollAndRevoke(t *testing.T) {
+// TestTheBoxOpsAreUnknown: enroll-box and unenroll-box, the ops an agent-secrets CLI before
+// legion-envoy 10 asked, are gone: the helper answers each as any op it does not know, BAD_REQUEST
+// `unknown op <op>`.
+func TestTheBoxOpsAreUnknown(t *testing.T) {
 	cr := newContractRig(t)
-	b := cr.srv.Broker
-	code, err := b.Login(context.Background(), cr.srv.Hostname)
-	if err != nil {
-		t.Fatalf("Broker.Login: %v", err)
-	}
-	cr.broker.DecideMachineLogin(t, code, true)
-	waitForIssued(t, b)
-
-	key, err := proof.NewKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	thumbprint, err := proof.Thumbprint(&key.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The line a CLI before this release writes: its Request named the op enroll-box and carried Kind.
-	enrolled := rawCall(t, cr.sock, fmt.Sprintf(`{"op":"enroll-box","runtime_id":"box-%s","thumbprint":%q,"kind":"box"}`, t.Name(), thumbprint))
-	if !enrolled.OK || enrolled.EnrollmentID == "" || enrolled.LeaseExpires == "" {
-		t.Fatalf("enroll-box from an older CLI: %+v", enrolled)
-	}
-	self := func() (int, []byte) {
-		url := cr.broker.URL + "/v1/enrollments/self"
-		p, err := proof.Sign(key, enrolled.EnrollmentID, http.MethodGet, url, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": p}, nil)
-	}
-	status, body := self()
-	if got := contractDecode[contractSelfResponse](t, body); status != http.StatusOK || got.Kind != "session" {
-		t.Fatalf("GET /v1/enrollments/self with the key enroll-box enrolled = %d %s, want kind session", status, body)
-	}
-	if un := rawCall(t, cr.sock, fmt.Sprintf(`{"op":"unenroll-box","enrollment_id":%q}`, enrolled.EnrollmentID)); !un.OK {
-		t.Fatalf("unenroll-box from an older CLI: %+v", un)
-	}
-	if status, body := self(); status != http.StatusUnauthorized {
-		t.Fatalf("GET /v1/enrollments/self after unenroll-box = %d %s, want 401", status, body)
-	}
-	for _, line := range []string{`{"op":"enroll-box","kind":"box"}`, `{"op":"unenroll-box"}`} {
-		if resp := rawCall(t, cr.sock, line); resp.OK || resp.Code != CodeBadRequest {
-			t.Fatalf("%s: %+v, want %s for a missing field", line, resp, CodeBadRequest)
+	for _, op := range []string{"enroll-box", "unenroll-box"} {
+		line := fmt.Sprintf(`{"op":%q,"runtime_id":"box-%s","thumbprint":"tp","enrollment_id":"e","kind":"box"}`, op, t.Name())
+		if resp := rawCall(t, cr.sock, line); resp.OK || resp.Code != CodeBadRequest || resp.Error != "unknown op "+op {
+			t.Fatalf("%s: %+v, want %s unknown op %s", op, resp, CodeBadRequest, op)
 		}
 	}
 }

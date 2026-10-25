@@ -3,6 +3,7 @@ package pgmigrate
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -69,6 +70,17 @@ func (refusingCatalogQuerier) Query(context.Context, string, ...any) (pgx.Rows, 
 
 func (refusingCatalogQuerier) QueryRow(context.Context, string, ...any) pgx.Row {
 	return nil
+}
+
+// A dropped table's own foreign keys go with it, and dropping each takes ACCESS EXCLUSIVE on the
+// table it references, so the census reads that table, reached from the dropped one. A table that
+// references the dropped one is not reached: drop table without cascade refuses while one does.
+func TestADroppedTableReachesTheTablesItsForeignKeysReference(t *testing.T) {
+	keys := []foreignKey{{from: "polls", to: "records", onDelete: "a"}, {from: "notes", to: "polls", onDelete: "a"}}
+	got := reachedByForeignKeys(map[string]rowWrite{"polls": dropsTable}, keys)
+	if want := map[string]string{"records": "polls"}; !maps.Equal(got, want) {
+		t.Errorf("reachedByForeignKeys(drop polls) = %v, want %v", got, want)
+	}
 }
 
 // An index a migration drops or alters is named, so CensusTables can resolve it to its table.

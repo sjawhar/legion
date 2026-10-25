@@ -163,7 +163,7 @@ func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
 	if d := r.call(t, Request{Op: "drain"}); !d.OK || len(d.Sessions) != 0 {
 		t.Fatalf("drain: %+v", d)
 	}
-	for _, op := range []string{"register", "enroll-session-key", "enroll-box"} {
+	for _, op := range []string{"register", "enroll-session-key"} {
 		resp := r.call(t, Request{Op: op, RuntimeID: "rt", Thumbprint: "tp"})
 		if resp.OK || resp.Code != CodeDraining || resp.Error != "the helper is restarting; retry" {
 			t.Fatalf("%s after drain: %+v", op, resp)

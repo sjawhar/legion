@@ -7,6 +7,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The `legion-controller` skill this plugin ships reorders a project's board with
+  `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
+  stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by
+  board rank alone, so board rank alone carries the weekly plan's order. The controller still sets
+  the coarse priority, as the signal people and filters read and as the order by which an agent
+  takes its own next issue, but it changes no admission; the reference used to have the controller
+  set priority and rank together so that "highest priority, then board rank" produced the plan's
+  order (INFRA-188).
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
@@ -65,6 +73,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
 
 ### Changed
+
+- The `legion-controller` skill and its `backlog-stewardship` reference name no person: a ruling is
+  a direct Dispatch message to this controller from a person rather than from one named individual,
+  and the duty list, the pass trigger and both definitions say so (dispatch://INFRA-227). The
+  daemon's `controller-root` role prompt and `packages/envoy/AGENTS.md` drop the same name, and the
+  root `AGENTS.md` now carries the standing rule that a skill, a role prompt and an `AGENTS.md`
+  name no person and write the role instead. The controller behaves as it did: a ruling still sets
+  off the full reconciliation pass and a weekly-plan record.
 
 - A phase worker whose turn ends with its Legion phase still open is now reminded at the end of
   **every** turn, for as long as that phase stays open (INFRA-220). It used to get one follow-up,

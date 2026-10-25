@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -144,6 +145,15 @@ func TagMap(tags []types.Tag) map[string]string {
 		m[aws.ToString(t.Key)] = aws.ToString(t.Value)
 	}
 	return m
+}
+
+// TagList is tags as Secrets Manager's tag list, in key order: the inverse of TagMap.
+func TagList(tags map[string]string) []types.Tag {
+	list := make([]types.Tag, 0, len(tags))
+	for _, key := range slices.Sorted(maps.Keys(tags)) {
+		list = append(list, types.Tag{Key: aws.String(key), Value: aws.String(tags[key])})
+	}
+	return list
 }
 
 // keyIdentifiers are the forms a secret's KmsKeyId may name the agent-secrets key in: its ARN, its
