@@ -1,0 +1,189 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-179",
+  "completed": "2026-10-25T02:34:15Z",
+  "plan": "dispatch://INFRA-179/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's own part of it — the pull request body and what counts as a proof (references/pr-body.md), review threads (references/review-threads.md), and conflicts and rewrites (references/conflicts-and-rewrites.md); this change touches the editor, so its proof is a browser run on a production-like surface, not a unit test",
+      "ce-simplify-code: the simplify pass over the new hook, budget and editor code before the phase completes, since this change adds a second byte budget and a second close-code path beside existing ones and must reuse their shape rather than start a third convention",
+      "dispatch-first and dispatch: every write to Dispatch this phase makes (a finding outside the issue is an ask, never a new issue)"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md defines what the tester drives (the application on a production-like surface, trying to break it) and what it may not re-run (lint, types and the unit suites are CI's work), which matters here because most of this change's evidence is a real-process Go drive and a real browser run",
+      "dispatch-first and dispatch: for any ask the tester opens about something outside this issue"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review round's order (read the code commit's checks on GitHub, push the handoff, review the head that push made, then complete) and references/review-threads.md for answering and resolving threads one by one",
+      "dispatch-first and dispatch: for any ask the reviewer opens"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1. The budget's refusal cannot reach a browser. The spec refuses the next browser before its socket is upgraded with a reason that names the bound, but a browser's WebSocket interface exposes neither the status nor the body of a refused handshake, so A2's third case (the person is shown that reason and tries again) is unprovable as written. websocket.go:172-174 already records the rule, which is why the schema refusal completes the upgrade only to close it.",
+        "answer": "The plan refuses by completing the upgrade and closing with a new transient close code, 4503 / DOC_BUSY, as refuseOutsideSchema does with 4409 (plan T7, T4). No room is created and no document is loaded, which is the memory property the spec's wording protects. Recorded as spec departure 1; A4's wording changes from 'before its socket is upgraded' to 'before any room is created'."
+      },
+      {
+        "finding": "F2. 'What it inserts' is undefined for a resync, and read literally A1's whole-state case contradicts A1's refusal case: a browser handing over a whole at-bound document would be refused and closed. The same ambiguity decides the editor's half — deleting the saved row does not remove the refused text from the browser's in-memory document, so the next sync resends it and earns the same refusal.",
+        "answer": "The plan states the measure as what the update adds beyond the room's own state, taken against the room's state vector (crdt.DiffUpdateV1, crdt/merge.go:289, already used at fold.go:160; or crdt.ContentIDsFromUpdateV1), and states that the editor drops the refused edit by deleting that frame's saved row and rebuilding the document from a fresh server read through ProofDocument's existing admit() path before reconnecting (plan T2, T5). Recorded as spec departure 2."
+      },
+      {
+        "finding": "F3. The element gate rests on a density claim the code contradicts: the spec opens the element half at 65,536 bytes of rendering 'since a rendering makes at most one element per byte', while pmdoc/elements.go:16-27 records up to 1,421 elements a kibibyte (about 1.4 a byte) and nodeGuard's comment allows about twice the weight. A browser could reach the element bound at roughly 46 KiB with nothing measuring it.",
+        "answer": "The gate opens at MaxDocumentElements / 4, 16 KiB of rendering, and a Go test measures the densest shapes the repository knows (cmd/dispatch/memory_shapes_test.go plus empty list items) and fails if any exceeds four elements a byte (plan T2). A1's element case is driven by the densest shape rather than by headings. Recorded as spec departures 3 and 8."
+      },
+      {
+        "finding": "F4. 'An API write needs no room' is true of the fork only: the publish half of an API write opens a room through srv.Apply (livewrite.go:303, coldFork's comment at :343-352), so a budget enforced inside Apply would refuse the write A4 requires to succeed.",
+        "answer": "The plan enforces the budget only at socket admission, never inside srv.Apply, and names the API write's publish beside the mark sweep and settlement's repair in the exemption list (plan T7). Recorded as spec departure 5."
+      },
+      {
+        "finding": "F5. Charging a room by its stored markdown size misses what the room actually holds: thirty-two suggestions of 900 KB leave the markdown as it was and took one cold websocket load to 296 MiB (cmd/dispatch/memory_test.go:651-657). The budget would be met while the pod died.",
+        "answer": "The admission reservation still comes from the stored size, but the room's charge, which replaces it when the room loads, is computed from what the room actually decoded, with a test pinning that ratio the way read_cache_weight_test.go:23 pins the read cache's (plan T7). Recorded as spec departure 4."
+      },
+      {
+        "finding": "F6. A room already admitted and still in use can grow from the median document (5 KiB) to the bound (1 MiB) with no lever: the budget acts at admission and by closing unused rooms, and unusedLocked requires no connected browser (roomstate.go:192-196). The only remaining backstop is maxLiveRooms = 1,000. A3's second drive has no pass condition if its browsers stay connected.",
+        "answer": "The plan does not add a lever: closing an in-use room was the option the architect weighed and rejected in dispatch://INFRA-179/ask/7cb661b3-b85a-4454-88cc-e7de5ee75271. A3's second drive is written as the spec describes it, with browsers leaving as their rooms grow, so the budget has unused rooms to close and a next browser to refuse. The residual gap is written into plan.md under 'What this plan does not close' and reported to the architect as its decision."
+      },
+      {
+        "finding": "F7. A1's benchmark clause is not machine-checkable: no go test -bench invocation exists anywhere in the repository, 'without the hook' would need a toggle the design does not provide, 'half a processor' is unnamed, and a median over three runs is read by a person.",
+        "answer": "The plan names the command: BenchmarkKeystrokeBesideReads at GOMAXPROCS=1, -benchtime 1x -count 6, run at the base build and at head and compared with benchstat on the p50-ms metric the benchmark already reports, the base build being the 'without' (plan T3). It is also scheduled first, before the dashboard and contracts work, because the spec makes a regression beyond a tenth send the design back. Recorded as spec departure 7."
+      },
+      {
+        "finding": "F8. A3's before picture is a by-hand run of a test that does not exist on main, and the drive's own process would hold fifty client documents of its own.",
+        "answer": "The plan names the procedure: a scratch clone of the base commit on the issue's disk (git clone of /legion/repos/github.com/sjawhar/legion, not a second jj workspace), the new drive carried onto it, run once, quoted; and it requires the drive to encode one client update once and reuse its bytes across sockets (plan T0, T10). Recorded as spec departure 7."
+      },
+      {
+        "finding": "F9. The spec places the budget's eviction (evictRoom, which flushes to Postgres before closing) on the socket admission goroutine, the path whose load already has a documented wedge against a writer holding a pooled connection (websocket.go:399-404). The reservation's lifecycle is also unstated on the early-return paths.",
+        "answer": "The plan runs the sweep on a goroutine of its own, as failRoomLocked already does (service.go:1965-1993); the admission that finds the budget full refuses at once and the sweep frees the bytes for the next attempt. The reservation is taken before anything loads the document and released on every return path of ServeHTTP with a deferred release, including the out-of-schema branch (plan T7)."
+      },
+      {
+        "finding": "F10. R5 cannot reuse refuseUndecodable as it stands: that function judges a post-write fork, and unmarkExpired mutates the live document inside one Yjs transaction, which cannot be rolled back, so a check part-way through would leave a half-unmarked document rather than the document as it was.",
+        "answer": "Each of the three writes asks the cheap question before it writes anything — the live document's state vector already sums past maxUpdateItems (persistence.go:851), the same sum refuseUndecodable makes first — and then withholds (settlement) or leaves the document alone and logs once (the mark sweep, the block-id backfill). A6 proves a document at the cap is left alone (plan T9). Recorded as spec departure 6."
+      },
+      {
+        "finding": "F11. The ygo pin bump falsifies ten citations that quote the fork by its own file and line numbers, which a tag that adds a file moves.",
+        "answer": "T1 carries one task to re-read and update every one of them: docs/service.go:565-566, docs/tree.go:282 and :303, docs/websocket.go:347-348, :379-380, :414, docs/rebuild_test.go:28, pmdoc/linear_test.go:252, packages/envoy/AGENTS.md:529 and :605, packages/envoy/CHANGELOG.md:1363-1364, plus the fork comment at go.mod:129-141 gaining reearth/ygo#304."
+      },
+      {
+        "finding": "F12. The browser tests have no way to reach the budget: e2e/run-server.sh unsets every DISPATCH_* variable, and filling a real 2 GiB budget from Playwright would need about eight one-megabyte documents open in real tabs under workers: 1.",
+        "answer": "The plan adds a test hook, POST /api/v1/artifacts/_test/room-budget, mounted like _test/outside-schema (routes_table.go:189-191) under DISPATCH_TEST_HOOKS=1, rather than a new operator setting, so the browser row shrinks the budget instead of filling it (plan T6)."
+      },
+      {
+        "finding": "F13. What the memory harness's own servers do about the new Go memory limit is unstated; every existing memory test asserts fixed thresholds of 256 MiB and 512 MiB above idle and would suddenly run under whatever limit the runner's control group exposes.",
+        "answer": "The harness pins AUTOMEMLIMIT=off for every server it starts except the two rows that assert a limit: A5's real-process row (AUTOMEMLIMIT=off, the boot line says no limit) and A3's drive (GOMEMLIMIT set to 3.6 GiB). The settings guard itself is unaffected, since it scans only this repository's own source (plan T8)."
+      },
+      {
+        "finding": "F14. Documents the change makes untrue beyond the five the spec lists: the /ws/doc/{room} row in cmd/dispatch/AGENTS.md:494, the editor's close-code paragraph in packages/dispatch/AGENTS.md:636-656 (which says the sixth refusal asks for a reload), the replica figures in packages/envoy/AGENTS.md:552-558 ('with nothing bounding how many rooms hold one'), and the library-owned variable list in settings.go:11-21.",
+        "answer": "T11 names each of them, with the five the spec already lists, as part of the change."
+      },
+      {
+        "finding": "F15. Three acceptance phrases have no decidable reading: 'the stored document is unchanged' has no stated read point, 'no more than 64 KiB past the bound plus the single update that crossed it' leaves the second quantity unbounded, and 'within one room of the budget's own arithmetic' is a hand-check.",
+        "answer": "T10 requires each drive to state its arithmetic and compute it from the same constants the server uses, to read the stored document through the harness's waitForSettled, and to bound the crossing update by the size the drive itself sends rather than by MaxMessageBytes."
+      },
+      {
+        "finding": "F16. Several of the spec's own line citations have drifted (refuseOutsideSchema is at websocket.go:176-196, not :224-236; the bare 503 is at :220-223; loadTree is called at :232; the replica type begins at tree.go:301).",
+        "answer": "The plan quotes the verified citations throughout rather than inheriting the drifted ones; it does not edit the spec, which is the architect's to change."
+      },
+      {
+        "finding": "F17. dispatch-production-check.sh does not exist in this repository, and this pod cannot run a cluster workload (create services answers no).",
+        "answer": "The script lives in the deployment repository, not this one; the planner confirmed it by fetching repos/theorem-labs/agent-infra/contents/legion/checks/dispatch-production-check.sh?ref=main, which reads the running build's commit from /healthz. plan.md names the exact command the implementer runs after the deploy. The Postgres and browser prerequisites this pod lacks are answered by T0's userspace Postgres recipe, proven by hand on 2026-10-25 (PostgreSQL 16.15 with vector 0.8.7), and by bunx playwright install chromium, which the planner ran here."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "When nothing can be closed, the browser asking for one more document is refused before its socket is upgraded, with a reason that names the bound in place of today's bare 503 (websocket.go:218-222); A4 asserts that refusal before the upgrade.",
+      "plan": "The refusal completes the upgrade and closes with a new transient close code, 4503 and reason DOC_BUSY, as refuseOutsideSchema does with 4409. No room is created and no document is loaded, which is the memory property the spec's wording protects.",
+      "evidence": "A browser's WebSocket interface exposes neither the status nor the body of a refused handshake, so a 503 reaches the dashboard only as an offline dot; the repository already records the rule at docs/websocket.go:172-174 ('a browser reads a close code, never the status of a refused upgrade') and solved the schema refusal that way at :176-196. A2's third case ('is shown that reason and tries again') is otherwise unprovable.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A4: 'refused before its socket is upgraded' becomes 'refused before any room is created or any document is loaded, by a close with code 4503 and reason DOC_BUSY'.",
+          "A2's third case is proven against that close code rather than against a refused handshake."
+        ]
+      }
+    },
+    {
+      "spec": "Once the measurement is at or over either half, the hook decodes that one update and admits it only when what it inserts is under 8 KiB.",
+      "plan": "What it inserts is measured as what the update adds beyond the room's own state, taken against the room's state vector (crdt.DiffUpdateV1 or crdt.ContentIDsFromUpdateV1); and the editor drops a refused edit by deleting that frame's saved row and rebuilding its document from a fresh server read before reconnecting.",
+      "evidence": "A browser's first message hands over the document's whole live state; measured literally it is the whole document, so every editor of an at-bound document would be closed, which A1 forbids in the same breath ('a browser handing over the whole live state ... is not closed'). On the client, pending-sync.ts:337-340 only keeps or clears saved rows and never touches the in-memory document, so without the rebuild the refused text is resent on the next sync and earns the same refusal, the loop A2 forbids.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's refusal cases are measured against net-new content, so the whole-state case and the refusal case no longer collide.",
+          "A2's first case gains the editor's rebuild from the server's state as part of what 'the refused edit is gone' means."
+        ]
+      }
+    },
+    {
+      "spec": "The element half is counted only once the rendering reaches 65,536 bytes, since a rendering makes at most one element per byte (pmdoc/elements.go:18-19).",
+      "plan": "The element half is counted once the rendering reaches MaxDocumentElements / 4, 16 KiB, and a Go test measures the densest shapes the repository knows and fails if any exceeds four elements a byte.",
+      "evidence": "pmdoc/elements.go:16-27 records densities 'up to 1,421 a kibibyte for a 147-byte test fixture of empty list items', about 1.4 elements a byte, and nodeGuard's comment at :31-37 says markdown can count about twice what it weighs. At one element a byte the gate would open only after a browser could already have passed the element bound.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's element case is driven by the densest shape measured, not by headings ('headings being the cheapest way there' is false: headings are one element a byte)."
+        ]
+      }
+    },
+    {
+      "spec": "A room is weighed at both copies from the moment it is admitted, its stored markdown size times that constant.",
+      "plan": "The admission reservation comes from the stored size, but the charge that replaces it when the room loads is computed from what the room actually decoded, with a test pinning that ratio against real heap.",
+      "evidence": "cmd/dispatch/memory_test.go:651-657 and growth.go:14-18: thirty-two suggestions of 900 KB, which leave the markdown as it was, took one cold websocket load of their document to 296 MiB, and a margin may hold a further mebibyte no rendering carries. Charging markdown alone would leave the budget met while the pod died, which is what R3 exists to prevent.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A3 gains a case for a room whose document carries a full margin: it is charged, and the budget refuses before peak resident memory passes 4 GiB."
+        ]
+      }
+    },
+    {
+      "spec": "The server's own work is never refused: an API write needs no room, since it falls back to a cold copy (forkLive to coldFork, livewrite.go:229-242).",
+      "plan": "The budget is enforced only at socket admission, never inside srv.Apply, and the exemption names the API write's publish beside the mark sweep and settlement's repair.",
+      "evidence": "coldFork's own comment at livewrite.go:343-352 says the room loads when the write is published, from the store; the publish's srv.Apply is at livewrite.go:303. Only the fork avoids a room, so a budget inside Apply would refuse the very write A4 requires to succeed.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The budget's enforcement point is the socket admission alone; no server write path is given a budget check to pass."
+      }
+    },
+    {
+      "spec": "All three check the cap before they write and leave the document as it is when the write would fail, each in the way its caller can survive.",
+      "plan": "Each of the three asks the cheap question before its transaction — the live document's state vector already sums past maxUpdateItems — rather than calling refuseUndecodable on a fork.",
+      "evidence": "refuseUndecodable (growth.go:337-351) judges a post-write fork; unmarkExpired (marks.go:836) mutates the live document inside one Yjs transaction, which cannot be rolled back, so a check part-way through leaves a half-unmarked document rather than the document as it was.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A6 proves that a write against a document already at the decode cap is not made and the document is left as it was; it does not prove that a write crossing the cap mid-transaction is stopped."
+        ]
+      }
+    },
+    {
+      "spec": "The keystroke benchmark the repository already has is run with and without the hook, three runs of each at half a processor, and the medians are quoted on the pull request; and A3's before picture is the same drive against a build of main, run once by hand.",
+      "plan": "The benchmark is run at the base build and at head at GOMAXPROCS=1 with -benchtime 1x -count 6 and compared with benchstat on the p50-ms metric, the base build being the 'without'; a second benchmark measures the hook's own per-update cost, since the existing one does not reach it. The before picture is the new drive carried onto a scratch clone of the base commit on the issue's disk and run there once.",
+      "evidence": "No go test -bench invocation exists anywhere in the repository and no workflow runs a benchmark; a 'without the hook' toggle would be dead code the clean-cutover rule forbids. BenchmarkKeystrokeBesideReads (live_read_bench_test.go:117-200) drives live.Transact and replica.observe on a bare &Service{}, so it measures the observer's published measurement, not the OnPeerUpdate call.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's benchmark clause becomes a named command with a decidable output (benchstat, p50-ms, ten per cent), plus the hook's own benchmark quoted beside it.",
+          "A3's before picture names the base commit, the carried file and the command."
+        ]
+      }
+    },
+    {
+      "spec": "A1: a run of small updates that together pass the element bound, headings being the cheapest way there, stops the same way and ends no more than 4,096 elements past it.",
+      "plan": "That case is driven by the densest shape the repository has measured, and each drive states the arithmetic it asserts and computes it from the same constants the server uses rather than from a number read by hand.",
+      "evidence": "pmdoc/elements.go:16-27 measures headings at about one element a byte against densities up to 1,421 a kibibyte; and A1's 'no more than 64 KiB past the bound plus the single update that crossed it' and A3's 'within one room of the budget's own arithmetic' have no decidable reading until the test computes them.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A1's element case names the densest shape; A1's and A3's tolerances are computed by the tests from the server's own constants."
+        ]
+      }
+    }
+  ]
+}
