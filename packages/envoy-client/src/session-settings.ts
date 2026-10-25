@@ -62,16 +62,15 @@ export interface SessionSettings {
  * not read is said too: an `envoy` section, a file that cannot be used while `DISPATCH_URL`
  * replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`). Last, for a session that
  * opens a NATS connection (`nats` not false), an Envoy that is on and takes no inbound messages is
- * said to, naming why (`inbound.off`: no NATS server, or the seed's refusal), and a usable
- * `ENVOY_PASS_DEADLINE_MS` the resolver raised to the heartbeat interval is said to have been
- * raised, naming both values (`envoySettings`).
+ * said to, naming why (`inbound.off`: no NATS server, or the seed's refusal), and a pass deadline
+ * the resolver raised to the heartbeat interval (`passDeadlineRaisedFrom`, `envoySettings`) is
+ * said to have been raised, naming both values.
  */
 function startNotice(
   config: EnvoyConfig,
   dispatch: DispatchConfigResolution,
   envoy: EnvoySettings,
-  nats: boolean,
-  env: EnvoyEnvironment
+  nats: boolean
 ): string | null {
   if (config.kind === "failed") return `${config.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config;
@@ -101,15 +100,10 @@ function startNotice(
       `Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`
     );
   }
-  if (envoy.enabled) {
-    // A value the resolver already falls back on (unusable) was never the operator's deadline, and
-    // one at or above the interval is used as given: only a usable value the floor raised is said.
-    const named = Number(env.ENVOY_PASS_DEADLINE_MS);
-    if (Number.isFinite(named) && named > 0 && named < envoy.heartbeatMs) {
-      parts.push(
-        `Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${named} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`
-      );
-    }
+  if (envoy.enabled && envoy.passDeadlineRaisedFrom !== undefined) {
+    parts.push(
+      `Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${envoy.passDeadlineRaisedFrom} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`
+    );
   }
   return parts.length === 0 ? null : parts.join("; ");
 }
@@ -133,7 +127,7 @@ export function sessionSettings(
   return {
     dispatch,
     envoy,
-    notice: startNotice(config, dispatch, envoy, options.nats !== false, env),
+    notice: startNotice(config, dispatch, envoy, options.nats !== false),
   };
 }
 

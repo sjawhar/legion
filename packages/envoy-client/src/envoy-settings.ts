@@ -39,6 +39,15 @@ const MIN_INTERVAL_MS = 25;
 // days, far past any configuration anyone means.
 const MAX_INTERVAL_MS = 2_147_483_647;
 
+/** The interval `raw` names, when it names a usable one: a finite number above zero. Unusable is
+ * undefined, which each caller replaces with its own fallback. The number is as written, before
+ * the bounds a resolved interval is held to, so a notice about an adjustment names the value the
+ * operator set. */
+function namedInterval(raw: string | undefined): number | undefined {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
 export type EnvoyEnvironment = EnvoyConfigEnvironment & {
   readonly ENVOY_URL?: string | undefined;
@@ -108,6 +117,12 @@ export interface EnabledEnvoySettings {
    * `ENVOY_PASS_DEADLINE_MS` below it is raised to it, so a caller that wants a short deadline
    * must shorten `ENVOY_HEARTBEAT_MS` with it. */
   readonly passDeadlineMs: number;
+  /** The deadline `ENVOY_PASS_DEADLINE_MS` named when that raise happened: a usable value shorter
+   * than `heartbeatMs`, which `passDeadlineMs` is that interval in place of. undefined when the
+   * variable named nothing usable (the fallback was never the operator's deadline) and when what
+   * it named is used as given. It reports the raise to the heartbeat alone: the bounds every
+   * resolved interval is held inside are applied in silence and are not reported here. */
+  readonly passDeadlineRaisedFrom: number | undefined;
 }
 
 /** No Envoy: a `notice` says why, or an `error` names what could not be read or used. */
@@ -253,21 +268,21 @@ export function envoySettings(
       inbound = { off: messageFor(error) };
     }
   }
-  const intervalMs = (raw: string | undefined, fallback: number): number => {
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed > 0
-      ? Math.min(Math.max(parsed, MIN_INTERVAL_MS), MAX_INTERVAL_MS)
-      : fallback;
-  };
-  const heartbeatMs = intervalMs(env.ENVOY_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs =
+    namedHeartbeatMs === undefined
+      ? DEFAULT_HEARTBEAT_MS
+      : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
   // The pass deadline is never shorter than the heartbeat: a shorter one abandons every pass
   // before the next tick, so the heartbeat's `healing` latch — and the registration backstop that
   // runs under it (`ensureHeartbeat`, packages/pi-envoy/extensions/envoy.ts) — would be false at
   // every tick, while a pass wedged before `registerSession` never registers at all. A caller that
   // wants a short deadline must shorten `ENVOY_HEARTBEAT_MS` with it. `MIN_INTERVAL_MS` has
-  // nothing left to do here: the result is at least `heartbeatMs`, which it already floors.
-  // `MAX_INTERVAL_MS` is applied again over the `max`: both arms are already under it, so this
-  // only keeps the ceiling true of the result by every route into it.
+  // nothing to do here: the result is at least `heartbeatMs`, which it is already floored by.
+  // `MAX_INTERVAL_MS` over the `max` is the whole ceiling: the other arm is already under it.
+  // The raise is reported as `passDeadlineRaisedFrom`, so the start notice reads the decision
+  // made here instead of making it again from the variable (`startNotice`, session-settings.ts).
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
@@ -275,9 +290,13 @@ export function envoySettings(
     inbound,
     heartbeatMs,
     passDeadlineMs: Math.min(
-      Math.max(intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS), heartbeatMs),
+      Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs),
       MAX_INTERVAL_MS
     ),
+    passDeadlineRaisedFrom:
+      namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs
+        ? namedPassDeadlineMs
+        : undefined,
   };
 }
 

@@ -19283,6 +19283,10 @@ var DEFAULT_HEARTBEAT_MS = 90000;
 var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
 var MAX_INTERVAL_MS = 2147483647;
+function namedInterval(raw) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 function natsSeedFromEnvironment(env) {
   const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
   if (file2 !== undefined) {
@@ -19369,18 +19373,17 @@ function envoySettings(env, config2, options = {}) {
       inbound = { off: messageFor(error48) };
     }
   }
-  const intervalMs = (raw, fallback) => {
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed > 0 ? Math.min(Math.max(parsed, MIN_INTERVAL_MS), MAX_INTERVAL_MS) : fallback;
-  };
-  const heartbeatMs = intervalMs(env.ENVOY_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
     token,
     inbound,
     heartbeatMs,
-    passDeadlineMs: Math.min(Math.max(intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS), heartbeatMs), MAX_INTERVAL_MS)
+    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
+    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
   };
 }
 function normalizeEnvoyUrl(value) {
@@ -19403,7 +19406,7 @@ function handedConfigFile(env) {
     return { path: null, error: messageFor(error48) };
   }
 }
-function startNotice(config2, dispatch, envoy, nats, env) {
+function startNotice(config2, dispatch, envoy, nats) {
   if (config2.kind === "failed")
     return `${config2.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config2;
@@ -19433,11 +19436,8 @@ function startNotice(config2, dispatch, envoy, nats, env) {
   if (envoy.enabled && nats && "off" in envoy.inbound) {
     parts.push(`Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`);
   }
-  if (envoy.enabled) {
-    const named = Number(env.ENVOY_PASS_DEADLINE_MS);
-    if (Number.isFinite(named) && named > 0 && named < envoy.heartbeatMs) {
-      parts.push(`Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${named} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`);
-    }
+  if (envoy.enabled && envoy.passDeadlineRaisedFrom !== undefined) {
+    parts.push(`Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${envoy.passDeadlineRaisedFrom} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`);
   }
   return parts.length === 0 ? null : parts.join("; ");
 }
@@ -19452,7 +19452,7 @@ function sessionSettings(file2, env, options) {
   return {
     dispatch,
     envoy,
-    notice: startNotice(config2, dispatch, envoy, options.nats !== false, env)
+    notice: startNotice(config2, dispatch, envoy, options.nats !== false)
   };
 }
 function sessionDispatchSettings(file2, env, options) {

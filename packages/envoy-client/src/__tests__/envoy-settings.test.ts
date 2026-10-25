@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { dispatchSettings } from "../dispatch-config";
 import { type EnvoyConfig, readEnvoyConfig } from "../envoy-config";
-import { envoySettings } from "../envoy-settings";
+import { type EnvoyEnvironment, envoySettings } from "../envoy-settings";
 
 /** The error a read failed with, or a test failure naming what it read instead. */
 function errorOf(config: EnvoyConfig): string {
@@ -50,6 +50,7 @@ describe("envoySettings", () => {
       },
       heartbeatMs: 90_000,
       passDeadlineMs: 90_000,
+      passDeadlineRaisedFrom: undefined,
     });
   });
 
@@ -76,6 +77,7 @@ describe("envoySettings", () => {
       },
       heartbeatMs: 25,
       passDeadlineMs: 30_000,
+      passDeadlineRaisedFrom: undefined,
     });
 
     const tokenFile = secretFile("  pointer-token\n");
@@ -139,6 +141,33 @@ describe("envoySettings", () => {
       heartbeatMs: 45_000,
       passDeadlineMs: 45_000,
     });
+  });
+
+  // The raise is the resolver's own decision, so the resolver is where it is recorded: the start
+  // notice reads this field rather than testing ENVOY_PASS_DEADLINE_MS a second time
+  // (`startNotice`, session-settings.ts), and the two cannot drift apart.
+  test("a raised ENVOY_PASS_DEADLINE_MS is reported, and nothing else is", () => {
+    const config = configFrom({ envoy: listener });
+    const raisedFrom = (env: EnvoyEnvironment): number | undefined => {
+      const settings = envoySettings(env, config);
+      if (!settings.enabled) throw new Error(`Envoy is off: ${settings.notice ?? settings.error}`);
+      return settings.passDeadlineRaisedFrom;
+    };
+    // Raised: the value the variable named, as written, not the deadline in force.
+    expect(raisedFrom({ ENVOY_PASS_DEADLINE_MS: "7500" })).toBe(7500);
+    expect(raisedFrom({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "1500" })).toBe(1500);
+    // Used as given, at the interval or above it: nothing was raised.
+    expect(
+      raisedFrom({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: "5000" })
+    ).toBeUndefined();
+    expect(raisedFrom({ ENVOY_PASS_DEADLINE_MS: "120000" })).toBeUndefined();
+    // Unusable, so the fallback applies: no deadline of the operator's was overridden.
+    for (const value of ["soon", "0", "-5000", ""]) {
+      expect(
+        raisedFrom({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: value })
+      ).toBeUndefined();
+    }
+    expect(raisedFrom({})).toBeUndefined();
   });
 
   // A delay past 2_147_483_647 ms overflows the host timer's 32-bit field and fires *at once*, so
@@ -208,6 +237,7 @@ describe("envoySettings", () => {
       inbound: { natsUrls: ["nats://nats.internal.example:4222"], natsSeed: undefined },
       heartbeatMs: 90_000,
       passDeadlineMs: 90_000,
+      passDeadlineRaisedFrom: undefined,
     });
   });
 
@@ -323,6 +353,7 @@ describe("envoySettings", () => {
         inbound: { off: "this session opens no NATS connection" },
         heartbeatMs: 90_000,
         passDeadlineMs: 90_000,
+        passDeadlineRaisedFrom: undefined,
       });
     }
     expect(existsSync(ran)).toBe(false);
@@ -460,6 +491,7 @@ describe("the NATS seed in envoy.json", () => {
       },
       heartbeatMs: 90_000,
       passDeadlineMs: 90_000,
+      passDeadlineRaisedFrom: undefined,
     });
     expect(existsSync(runs)).toBe(false);
     // A set holding one other server is other servers too, whether it replaces one of the file's
