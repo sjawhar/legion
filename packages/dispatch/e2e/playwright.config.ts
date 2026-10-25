@@ -121,8 +121,13 @@ export default defineConfig({
       testIgnore: plainHttpSpecs,
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
-    // The one-socket invariant also runs in WebKit; it is the engine iOS Safari uses for every
-    // subscription this row opens.
+    // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
+    // rule rests on each engine dispatching a closed select's `change` in the key's own task, deep
+    // links meet each engine's chunk cancellation and the margin hold's frame and scroll order,
+    // and IndexedDB-backed document recovery must run in the engines people use. So those specs
+    // also run in WebKit. So does the one-socket invariant (`live-socket`): a tab holds one live
+    // socket in every engine, and WebKit is the one iOS Safari uses for every subscription its
+    // row opens.
     {
       name: "webkit",
       testMatch:
@@ -143,12 +148,13 @@ export default defineConfig({
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
     // the issue picker's keyboard-step rule rests on the engine's select dispatch, offline
     // document recovery owns browser storage, and a click on a link inside the editor meets the
-    // engine's focus rule (Firefox focuses the editing host, not the link). Those specs, and the
-    // whole deep-links spec, run in Firefox too.
+    // engine's focus rule (Firefox focuses the editing host, not the link). Those specs, the whole
+    // deep-links spec, and the one-socket invariant (`live-socket`, which holds in every engine)
+    // run in Firefox too.
     {
       name: "firefox",
       testMatch:
-        /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits|picture-link-click)\.e2e\.ts/,
+        /(code-line-replace|deep-links|keyboard-agents-picker|live-socket|offline-edits|picture-link-click)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
 
