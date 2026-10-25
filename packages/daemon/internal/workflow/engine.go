@@ -813,9 +813,20 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if row.To == phase.AwaitingMerge {
 		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:
-		// the merge closes the issue at once, and no READY asks a human to merge it.
+		// the merge closes the issue at once (closeMerged), and no READY asks a human to merge it.
+		// The close is closeMerged's rather than a second transition's because a root's waits for the
+		// rest of its tree; nothing else of the two paths differs, since they part only inside a
+		// lingering tree, which no issue reaches awaiting_merge in.
 		if pr != nil && pr.State == record.PullRequestMerged {
-			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+			waiting, err := e.closeMerged(ctx, tx, issue, pr)
+			if err != nil || len(waiting) == 0 {
+				return err
+			}
+			// An issue that arrives here and waits must be told why its close waits: the notice its
+			// architect got at the merge could not say it, since the issue was elsewhere then. This is
+			// the other place a wait is newly entered, and the only other one that tells anyone.
+			return e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
+				Reason: waitingForTree(issue.Key, pr.Number, waiting)})
 		}
 		return e.ready(ctx, tx, issue, handoff, pr)
 	}

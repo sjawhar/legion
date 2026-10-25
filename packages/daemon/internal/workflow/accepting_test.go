@@ -279,8 +279,10 @@ func TestSignOffIsRefusedWhileAnIssueBeneathIsInWorkflow(t *testing.T) {
 		names []string
 	}{
 		{
-			name:  "a child still running",
-			seed:  func(t *testing.T, pool *pgxpool.Pool) { seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Implementing, "in_progress") },
+			name: "a child still running",
+			seed: func(t *testing.T, pool *pgxpool.Pool) {
+				seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Implementing, "in_progress")
+			},
 			names: []string{"LEGION-209"},
 		},
 		{

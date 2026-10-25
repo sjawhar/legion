@@ -168,11 +168,12 @@ func (e *Engine) openCheckIfMerged(ctx context.Context, tx pgx.Tx, issue record.
 	return e.openCheck(ctx, tx, issue, *pr, wake)
 }
 
-// closeAwaitingRoot closes root when its merge was waiting on its children: the boot's sweep leaves
-// a migrated root in awaiting_merge (or held from it) on a merged pull request while a child still
-// runs (booted), and the root closes, as its merge would have, once no child of its tree is in the
-// workflow — one still admitted, or in a phase short of done with a workflow status, keeps it
-// waiting. Any other root changes nothing here.
+// closeAwaitingRoot closes root when its merge was waiting on the rest of its tree: a merged root
+// stands in awaiting_merge (or held from it) while any other member of its tree is in the workflow
+// (closeMerged), and closes, as its merge would have, once the last of them leaves. Which members
+// still hold it is closeMerged's to judge, so this runs on every issue that leaves the workflow
+// and changes nothing for any other root. It tells nobody: the architect heard the wait when the
+// close entered it (merged), and this path is walked at every departure.
 func (e *Engine) closeAwaitingRoot(ctx context.Context, tx pgx.Tx, root record.Issue) error {
 	if !awaitsMerge(root) {
 		return nil
@@ -181,17 +182,12 @@ func (e *Engine) closeAwaitingRoot(ctx context.Context, tx pgx.Tx, root record.I
 	if err != nil || pr == nil || pr.State != record.PullRequestMerged {
 		return err
 	}
-	members, err := e.treeMembers(ctx, tx, root)
-	if err != nil {
+	waiting, err := e.closeMerged(ctx, tx, root, pr)
+	if err != nil || len(waiting) > 0 {
 		return err
 	}
-	for _, member := range members {
-		if member.Key != root.Key && InWorkflow(member) {
-			return nil
-		}
-	}
 	e.logOnCommit(ctx, "workflow: a merged root closes once its last child left the workflow", "issue", root.Key, "pullRequest", pr.Number)
-	return e.closeMerged(ctx, tx, root, pr)
+	return nil
 }
 
 // awaitsMerge says whether issue awaits its merge: in awaiting_merge, or held from it, the hold
