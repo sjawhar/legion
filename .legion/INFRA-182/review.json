@@ -2,36 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T06:57:00Z",
+  "completed": "2026-10-25T08:13:00Z",
   "decision": "changes_requested",
-  "round": 1,
-  "reviewedCodeHead": "c939145e2b0460a4067137f1ffb50fe9aa6a1606",
+  "round": 2,
+  "reviewedCodeHead": "dd2fb2b41ecf03ec2af96a23bf75b5fb65b3ef23",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
+  "important": 0,
+  "minor": 1,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/internal/bus/connect.go:105",
-      "description": "Security[secret]: the new reconnect WARN logs `strings.Join(urls, \",\")` verbatim. config.Load (internal/config/config.go:36-39) only trims NATS_URLS and LocalNATSURL (internal/bus/reach.go:57-72) accepts userinfo, while nats.go v1.50.0 connectProto (nats.go:2807-2817) authenticates with URL userinfo (a bare username is a token, user:password a password). So nats://user:pass@host or nats://token@host is written to the log on the first failed attempt, breaking R3's 'never the credential' and the comment at connect.go:93-94. Fix: one log-safe rendering that drops all userinfo (url.Redacted keeps a token-only username, so it is not enough), used here and by the ReconnectedCB line in the same callback (connect.go:112, nc.ConnectedUrl() returns URL.String() with userinfo, nats.go:2438); reach.go:48's refusal prints the raw URL the same way. Add a test case with a userinfo URL."
-    },
-    {
       "severity": "minor",
-      "file": "packages/envoy/cmd/listener/durable.go:313",
-      "description": "awaitDurableBound and durableProbe (durable.go:279) call ConsumerInfo with no nats.Context, so each request runs on the JetStream handle's 10 s MaxWait (internal/bus/nats.go:247, nats.go jsm.go:1781-1786) and monitorCtx cannot cut it: the 3 s rebind deadline stretches to about 13 s and shutdownListener's 10 s wait for the monitor (main.go:944-949) can run out, contrary to the comments at main.go:857-859 and durable.go:293-297. Pass nats.Context with a context derived from ctx and bounded by the remaining deadline."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/kvwatch/kvwatch.go:550",
-      "description": "The AfterFunc callback carries no identity of the stop that armed it and reportUnrepaired acts on whichever repairTimer is current. time.Timer.Stop does not wait for a callback already started, so a fired callback delayed past a successful Rewatch and a second stop reports the second stop as 'no repair within 1m0s' at once and consumes its timer. Capture the generation (or a per-arm token) and check it under mu."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/kvwatch/repair_test.go:116",
-      "description": "stopNoticeBudget's comment calls 60 s 'six times the measured notice' from three ~10 s samples; the tester measured 18.81 s twice on the same server version. State the multiple as of its own sample (about 3x the worst observed)."
+      "file": "packages/envoy/internal/bus/log_url_test.go:23",
+      "description": "captureDefaultSlog points the process's default slog at a JSON handler over a bare bytes.Buffer, and decodeRecords (:32) and the credential loop (:101) read it with no lock. Bus clients that earlier tests closed still write through the default: nats.go v1.50.0 close() queues DisconnectedErrCB and ClosedCB on its async dispatcher and returns without waiting (nats.go:5892-5910), and the bus's ClosedCB logs `envoy nats connection closed` (internal/bus/connect.go:126-127). The test's own comment at :79-80 expects such writers. A write that runs during a read is a data race, and envoy-go-race runs ./internal/bus/ under -race (.github/workflows/envoy-and-contracts.yaml:971), so the test can fail at random in a lane that every change under packages/envoy runs. Fix: a mutex-guarded writer with a guarded snapshot, as busLogs does in package bus_test (internal/bus/restart_test.go:186-201). TestAConsumerNotActiveReportIsAWarning (internal/bus/async_error_test.go:23-25), which the helper's comment names as its model, captures the log the same way and should use the same helper."
     }
   ],
-  "ci": "Code head c939145e2b04 (compare to 8a23908c: only .legion/ changed). Required lint, typecheck, test success; pr-title success (one cancelled, superseded). envoy-go and envoy-go-race, where this change's new tests run, still queued at 06:55Z; a request for changes does not wait on them.",
-  "contractCensus": "Not required: the diff adds exported symbols only (bus.Client.SubSubject, bus.WithReconnectErrClock, kvwatch.Timer/AfterFunc/WithAfterFunc); the changed signatures (options, connect, connectWithContext, rebuildListenerDependencies) are unexported; the new /healthz 503 is the spec's approved decision with its consumers named in the spec (ECS health check, GCP Service), not a refusal of a caller's input.",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 8a23908c: both CHANGES on the URL-userinfo log leak, the uncancellable ConsumerInfo and the unscoped repair timer; all three re-read and confirmed against nats.go v1.50.0 and Go's time package."
+  "roundOneFindings": "All four verified fixed and accepted, with a reply on each thread: PRRT_kwDORFy7ds6v_JF6 (2281e62aabbc, natsURLWithoutUserinfo at all three sites), PRRT_kwDORFy7ds6v_JF8 (4d392e33d148, each ConsumerInfo under nats.Context, plus 91f61c5c20bc's silent return when the shutdown cancels a rebuild), PRRT_kwDORFy7ds6v_JF- (8076e90e855c, the generation-bound callback), PRRT_kwDORFy7ds6v_JF_ (8076e90e855c, the comment). The implementer had already resolved all four.",
+  "ci": "Code head dd2fb2b41ecf (compare to d29ce4b7: only .legion/ changed), read 08:12Z: the required lint, typecheck, test and pr-title are success. envoy-go-race is in progress; envoy-go, envoy-smoke and envoy-e2e-local are queued. envoy-go and envoy-go-race at c939145e were cancelled, so this change's A1-A3 tests have not yet passed in CI at any head. Criterion A1 needs that run, so approval waits for it.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at d29ce4b7: both returned CHANGES on the unguarded log capture, and both verified all four round-1 fixes with no production finding. The deep review dropped one candidate: a slow failed Rewatch reporting a later generation's stop. The code defines a failed repair as reporting the outstanding stop when it fails, and that report is a real failure, not an invented minute."
 }
